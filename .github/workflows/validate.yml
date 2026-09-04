@@ -8,9 +8,15 @@ on:
 permissions:
   contents: read
 
+env:
+  EXPECTED_SKILLS: >-
+    cc-implement-issue cc-initial-review cc-resolve-comments cc-rereview
+    cc-orchestrator cc-orca-orchestrator cc-pr-review cc-code-review
+    cc-security-review cc-verify cc-run
+
 jobs:
   validate:
-    name: Skills, manifests, and Bash
+    name: Skills, manifests, and Bash installer
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -21,17 +27,77 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Validate six skills and package metadata
-        run: python3 scripts/validate-package.py
+      - name: Validate skills and package metadata
+        run: |
+          python3 scripts/validate-package.py
+          python3 -m unittest discover -s tests -v
+
+      - name: Set up Node.js for skills CLI discovery
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Discover every skill through the recommended CLI
+        run: |
+          set -euo pipefail
+          output="$(npx --yes skills@1.5.23 add . --list)"
+          printf '%s\n' "$output"
+          for skill in $EXPECTED_SKILLS; do
+            case "$output" in
+              *"$skill"*) ;;
+              *) echo "skills CLI did not discover: $skill" >&2; exit 1 ;;
+            esac
+          done
 
       - name: Validate JSON manifests
         run: |
           python3 -m json.tool .claude-plugin/plugin.json >/dev/null
           python3 -m json.tool .codex-plugin/plugin.json >/dev/null
-          python3 -m json.tool opencode.jsonc >/dev/null
 
       - name: Check Bash installer syntax
         run: bash -n scripts/install.sh
+
+      - name: Lint Bash installer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/install.sh
+
+      - name: Test project installation for all hosts
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/install-target"
+          rm -rf "$project"
+          mkdir -p "$project"
+
+          bash scripts/install.sh --agent all --scope project --project-dir "$project"
+
+          for destination in "$project/.claude/skills" "$project/.agents/skills" "$project/.opencode/skills"; do
+            [ -d "$destination" ] || { echo "Missing destination: $destination" >&2; exit 1; }
+            for skill in $EXPECTED_SKILLS; do
+              [ -f "$destination/$skill/SKILL.md" ] \
+                || { echo "Missing installed skill: $destination/$skill/SKILL.md" >&2; exit 1; }
+            done
+          done
+
+      - name: Refuse to overwrite without --force
+        run: |
+          set -uo pipefail
+          project="$RUNNER_TEMP/install-target"
+          if bash scripts/install.sh --agent claude --scope project --project-dir "$project" 2>/dev/null; then
+            echo "Installer overwrote an existing installation without --force" >&2
+            exit 1
+          fi
+          bash scripts/install.sh --agent claude --scope project --project-dir "$project" --force
+
+      - name: Reject a missing project directory
+        run: |
+          set -uo pipefail
+          if bash scripts/install.sh --agent claude --scope project \
+              --project-dir "$RUNNER_TEMP/does-not-exist" 2>/dev/null; then
+            echo "Installer accepted a nonexistent project directory" >&2
+            exit 1
+          fi
 
   powershell-installer:
     name: PowerShell installer
@@ -46,7 +112,9 @@ jobs:
           python-version: '3.x'
 
       - name: Validate package with Windows Python
-        run: py -3 scripts/validate-package.py
+        run: |
+          py -3 scripts/validate-package.py
+          py -3 -m unittest discover -s tests -v
 
       - name: Test project installation for all hosts
         shell: pwsh
@@ -59,14 +127,7 @@ jobs:
 
           & .\scripts\install.ps1 -Agent all -Scope project -ProjectDir $project
 
-          $skills = @(
-              'cc-implement-issue',
-              'cc-initial-review',
-              'cc-resolve-comments',
-              'cc-rereview',
-              'cc-orchestrator',
-              'cc-orca-orchestrator'
-          )
+          $skills = $env:EXPECTED_SKILLS -split '\s+' | Where-Object { $_ }
           $destinations = @(
               (Join-Path $project '.claude\skills'),
               (Join-Path $project '.agents\skills'),
@@ -83,4 +144,36 @@ jobs:
                       throw "Missing installed skill: $skillFile"
                   }
               }
+          }
+
+      - name: Refuse to overwrite without -Force
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
+          $overwrote = $true
+          try {
+              & .\scripts\install.ps1 -Agent claude -Scope project -ProjectDir $project
+          } catch {
+              $overwrote = $false
+          }
+          if ($overwrote) {
+              throw 'Installer overwrote an existing installation without -Force'
+          }
+          & .\scripts\install.ps1 -Agent claude -Scope project -ProjectDir $project -Force
+
+      - name: Reject a missing project directory
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-does-not-exist'
+          if (Test-Path -LiteralPath $project) {
+              Remove-Item -LiteralPath $project -Recurse -Force
+          }
+          $accepted = $true
+          try {
+              & .\scripts\install.ps1 -Agent claude -Scope project -ProjectDir $project
+          } catch {
+              $accepted = $false
+          }
+          if ($accepted) {
+              throw 'Installer accepted a nonexistent project directory'
           }

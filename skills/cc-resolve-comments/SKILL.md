@@ -11,11 +11,51 @@ authorizes targeted code changes, not unrelated rewrites.
 Do not declare the PR approved and do not choose or launch the next agent or
 skill.
 
+## Repository conventions
+
+Read the repository's own instructions when they exist — `AGENTS.md`,
+`CLAUDE.md`, `CONTRIBUTING.md`, or the documentation they point to — and prefer
+them over the defaults in this skill. None of them is required: when a file is
+absent, use the defaults here and say which convention you applied. Never
+report a missing instruction file as a blocker on its own.
+
+Do not ask again for actions the user explicitly requested or that this skill's
+documented workflow necessarily performs within that request. Normal workflow
+artefacts such as the working branch, commits, pull request, and temporary files
+are covered by that authorization.
+
+Ask before creating an unrequested persistent repository or external artefact,
+such as a configuration file, migration, durable directory, label, or additional
+branch. State what is missing, why it is needed, and what you would create; wait
+for the answer. Follow any stricter approval rule in the repository instructions.
+Never abandon the task merely because an optional artefact is absent.
+
+## Output language
+
+Write every published artefact — PR comments, thread replies, commit messages,
+and the final response — in one language, chosen in this order:
+
+1. an explicit request, such as `lang=es` in the invocation or "review in
+   English" in plain language;
+2. the language of the repository's own instructions (`AGENTS.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`) when one of them exists;
+3. the language of the issue, pull-request description, and existing review
+   comments;
+4. English, when nothing above resolves.
+
+Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
+`critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
+`blocks:yes|blocks:no`, every functional status, and every JSON key in
+`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
+values such as `summary`, `reason`, and `error` in the selected language. Preserve
+repository names, paths, references, commit SHAs, and command output verbatim.
+
 ## Execution mode
 
 Default to manual mode. Resolve the PR and all available context from the user
 request, repository, and GitHub; `/cc-resolve-comments PR 123` must not require
-orchestration metadata or an Orca installation.
+orchestration metadata or any particular orchestration host.
 
 Enter orchestrated mode only when an injected worker contract explicitly marks
 this execution as a supervised task. Keep feedback triage, changes, tests,
@@ -26,14 +66,13 @@ When orchestrated:
 - preserve the injected `taskId` and `dispatchId` and follow the worker contract;
 - use its coordinator question mechanism for blocking questions, never a local
   interactive prompt;
-- consult `orca skills get orchestration --full` only when the contract needs
-  to be known or validated and the command is available;
 - if this skill is the complete dispatch task, send exactly one `worker_done`
   after constructing the final result, with both IDs and a short summary;
 - use worker outcome `failed` only for functional status `FAILED`; use
   `succeeded` for `RESOLVED`, `PARTIALLY_RESOLVED`, and `BLOCKED`.
 
-Do not put Orca commands on the manual path or dispatch a rereview.
+Never put host-specific orchestration commands on the manual path, and do not
+dispatch a rereview.
 
 ### The `ORCHESTRATION_RESULT` block is opt-in
 
@@ -158,41 +197,48 @@ After applying a valid fix, run the narrowest related test and reproduce the
 original finding. Related comments may share one verification run, but retain
 individual traceability.
 
-Before invoking the project's verification workflow, preflight required
-configuration, database and services, known port ownership, migration state,
-and command permissions without changing state.
+Before invoking `cc-verify`, preflight required configuration, database and
+services, known port ownership, migration state, and command permissions
+without changing state.
 
-- If preflight fails, do not invoke the verification workflow and record the
-  concrete reason.
+- If preflight fails, do not invoke `cc-verify` and record the concrete
+  reason.
 - If verification reaches a stop condition, stop that subflow and obey its
   instructions.
 - Do not call a fix verified from code inspection alone.
 - Do not resolve a thread as verified until the original behavior no longer
   reproduces.
 
-When execution is unavailable, reply in the thread:
+When execution is unavailable, reply in the thread, in the language chosen by
+*Output language*, stating that the fix was applied but verification is pending
+because the environment is unavailable. Include the concrete reason and use
+wording natural to the selected language. For example, in English:
 
 ```text
-Fix aplicado. Verificación pendiente: entorno no disponible (<motivo>).
+Fix applied. Verification pending: environment unavailable (<reason>).
 ```
+
+Give the concrete reason. "Environment unavailable" with no cause is not a
+usable record for the next run.
 
 ## Mandatory post-change workflow
 
 After the fixes are locally coherent:
 
-1. Run the project's code-review workflow over the resulting accumulated diff.
-   If a host skill named `project-code-review` exists, it is a suitable
-   implementation of this pass.
+1. Run `cc-code-review` over the resulting accumulated diff, as a delegated
+   pass that returns its findings here rather than publishing its own
+   comment.
 2. Fix confirmed P0 and P1 findings that remain within the user's authorized
    scope, adding regression tests.
-3. Repeat sensitivity triage against changed files and PR labels using the
-   exact triggers in `AGENTS.md`.
-4. Run the project's security workflow when the fixes touch authentication,
-   authorization, input, public APIs, uploads or downloads, personal data,
-   privacy, jobs with private data, security configuration, dependencies, or
-   any sensitive label defined in `AGENTS.md`.
-5. Run the project's verification workflow over the fixes and related
-   regressions when its prerequisites are available.
+3. Repeat sensitivity triage against the changed files and PR labels, using
+   the repository's own triggers when it defines any and the defaults of
+   `cc-initial-review` when it does not.
+4. Run `cc-security-review` when the fixes touch authentication, authorization,
+   input, public APIs, uploads or downloads, personal data, privacy, jobs with
+   private data, security configuration, dependencies, or any area a PR label
+   marks as sensitive.
+5. Run `cc-verify` over the fixes and related regressions when its
+   prerequisites are available.
 6. If the branch was updated and CI exists, inspect `gh pr checks <n>` and
    report pending, failed, cancelled, skipped, and missing expected gates.
 
@@ -215,8 +261,8 @@ For each comment, record:
 - commit hash when one exists.
 
 Resolve a thread only when the feedback is addressed or explicitly superseded.
-If the code changed but execution is pending, say so; never label it
-`resuelto y verificado`.
+If the code changed but execution is pending, say so; never label it resolved
+and verified when only the first half happened.
 
 Finish with a PR summary that groups applied fixes, debated or rejected
 comments, verification results, CI state when available and residual risks —

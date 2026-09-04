@@ -1,7 +1,7 @@
 {
   "name": "code-cycle-toolkit",
-  "version": "0.1.0",
-  "description": "Portable Code Cycle skills for implementing GitHub issues and reviewing pull requests.",
+  "version": "0.2.0",
+  "description": "Portable Code Cycle skills for implementing GitHub issues, reviewing pull requests, and verifying the result.",
   "author": {
     "name": "Code Cycle Toolkit contributors"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Code Cycle Toolkit",
     "shortDescription": "Issue-to-PR implementation and review workflows",
-    "longDescription": "A portable collection of skills for implementing GitHub issues, reviewing pull requests, resolving findings, rereviewing changes, and coordinating the full cycle. Orca orchestration is optional.",
+    "longDescription": "A portable collection of skills for implementing GitHub issues, reviewing pull requests, resolving findings, rereviewing changes, and coordinating the full cycle. It bundles the review, security, verification, and run passes those workflows delegate to. Orca orchestration is optional.",
     "developerName": "Code Cycle Toolkit contributors",
     "category": "Developer Tools",
     "capabilities": ["Read", "Review", "Write"],

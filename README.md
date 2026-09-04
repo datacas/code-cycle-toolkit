@@ -2,7 +2,7 @@
 
 Code Cycle Toolkit is a portable collection of Agent Skills for taking a GitHub issue through implementation, pull-request review, targeted resolution, and rereview.
 
-It is designed to work with Codex, Claude Code, and OpenCode on Linux, macOS, Windows, WSL, Git Bash, and similar environments. The reusable instructions live in `skills/`; the host-specific manifests and installers are only compatibility layers.
+It works with Codex, Claude Code, and OpenCode on Linux, macOS, Windows, WSL, Git Bash, and similar environments. The reusable instructions live in `skills/`; the host-specific manifests and installers are only compatibility layers.
 
 `cc` means **Code Cycle**.
 
@@ -25,10 +25,15 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 - It does not provide GitHub credentials or bypass repository permissions.
 - It does not invent missing tests, project policies, or verification commands.
 - It does not silently treat unavailable tools, skipped checks, or unverified behavior as success.
+- It does not require the target repository to adopt any file, label, or convention.
 - The generic orchestrator does not assume that the host has workers, subagents, worktrees, or a particular delegation API.
 - `cc-orca-orchestrator` is not generic: it requires the Orca supervised worker API.
 
 ## Skills
+
+Eleven skills in two layers. The **cycle skills** own the GitHub workflow: the pull request, the finding identifiers, the published comments, and the merge boundary. The **supporting skills** provide focused review, security, verification, and runtime capabilities. Cycle skills delegate to supporting skills; delegated review and verification passes never publish on their own.
+
+### Cycle skills
 
 | Skill | Use it for | Changes product code? |
 |---|---|---:|
@@ -39,7 +44,44 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 | `cc-orchestrator` | Coordinate the complete cycle with native host delegation or a sequential fallback. | Only through delegated stages |
 | `cc-orca-orchestrator` | Coordinate the cycle through Orca Runs, Tasks, and Workers. | Only through delegated stages |
 
+### Supporting skills
+
+| Skill | Use it for | Invoked by |
+|---|---|---|
+| `cc-pr-review` | Full pull-request review criteria: scope, correctness, regressions, architecture, tests, operations. | `cc-initial-review`, `cc-rereview`, or directly |
+| `cc-code-review` | Diff-focused review of a change set, without the pull-request framing. | `cc-resolve-comments`, or directly |
+| `cc-security-review` | Security audit scoped to the change and its trust boundaries. | Sensitivity triage, or directly |
+| `cc-verify` | Execution-backed verification: static checks, tests, real application validation. | Any cycle skill, or directly |
+| `cc-run` | Detect how the project starts, bring services up in order, confirm they respond. | `cc-verify`, or directly |
+
+Each supporting skill is also useful on its own — `cc-code-review` on a working tree, `cc-verify` after a fix, `cc-run` to bring an unfamiliar project up.
+
 Review skills do not approve or merge code. The orchestrators stop at a validated `READY_FOR_MANUAL_MERGE` state.
+
+## Working assumptions
+
+The toolkit brings its own defaults and adapts to the target repository rather than requiring it to adapt.
+
+**Repository conventions are optional.** Every skill reads `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, and the documentation they point to *when they exist*, and prefers them over its own defaults. When a repository defines none, the skill uses its built-in defaults and says which convention it applied. A missing instruction file is never reported as a blocker.
+
+**Authorization follows the requested workflow.** A skill does not ask again before creating normal artefacts that the user requested or that its documented workflow necessarily produces, such as a working branch, commits, a pull request, or temporary files. It asks before creating an unrequested persistent repository or external artefact, such as a configuration file, migration, durable directory, label, or additional branch.
+
+**Labels and CI gates are matched by meaning.** Sensitivity triage recognises labels such as `type:security` or `area:auth` as common spellings, not as a required taxonomy, and CI reporting names whatever checks the repository actually defines. When the repository states its own triage triggers, those replace the defaults.
+
+**Stacks are detected, not assumed.** Package managers come from lockfiles, test commands from what the project defines, frameworks from what the repository contains.
+
+## Output language
+
+Skills write published text — pull-request comments, thread replies, commit messages, and their final response — in one language, resolved in this order:
+
+1. an explicit request: `lang=es` in the invocation, or plain language such as "review in English";
+2. the language of the repository's own instructions, when it has any;
+3. the language of the issue, the pull-request description, and existing review comments;
+4. English, when nothing above resolves.
+
+So a Spanish repository gets Spanish reviews without configuration, and an explicit `lang=` always wins.
+
+Machine-readable tokens never translate, in any language: the `REV-xxx` identifier, the severities `critical|high|medium|low`, the finding statuses `open|resolved|not_applicable`, `blocks:yes|blocks:no`, functional statuses, JSON keys, and enum-like values inside `ORCHESTRATION_RESULT`. Free-text values such as `summary`, `reason`, and `error` use the selected language. That keeps the structured result parseable without forcing human-readable prose into English.
 
 ## Requirements
 
@@ -48,7 +90,6 @@ The host must provide a way to load Agent Skills. The workflows also normally re
 - Git;
 - GitHub CLI (`gh`) authenticated for the target repository;
 - access to the target repository and its pull requests;
-- the target repository's trusted instructions, such as `AGENTS.md`, `CLAUDE.md`, or contribution documentation;
 - the target repository's own test and verification dependencies.
 
 For `cc-orca-orchestrator`, install and authenticate Orca separately. The package does not include Orca.
@@ -57,12 +98,7 @@ The toolkit contains no credentials, tokens, private repository configuration, o
 
 ## Install from GitHub
 
-For the recommended `npx skills` method, no clone is needed. Run it from the repository where you want to install the skills. Clone the toolkit only when you want to use the direct Bash or PowerShell installers:
-
-```bash
-git clone https://github.com/datacas/code-cycle-toolkit.git
-cd code-cycle-toolkit
-```
+For the recommended `npx skills` method, no clone is needed. Run it from the repository where you want to install the skills.
 
 ### Recommended installation: `npx skills`
 
@@ -76,10 +112,10 @@ npx skills add datacas/code-cycle-toolkit
 When no `--global` flag is provided, the default scope is the current project. In an interactive terminal, `skills` can ask which skills and agents to use. To install the complete toolkit without prompts:
 
 ```bash
-# All six skills, all agents supported by the CLI, project scope
+# All eleven skills, all agents supported by the CLI, project scope
 npx skills add datacas/code-cycle-toolkit --all --copy
 
-# All six skills, all supported agents, global scope
+# All eleven skills, all supported agents, global scope
 npx skills add datacas/code-cycle-toolkit --all --global --copy
 ```
 
@@ -96,14 +132,21 @@ npx skills add datacas/code-cycle-toolkit \
 
 # Several skills for several agents
 npx skills add datacas/code-cycle-toolkit \
-  --skill cc-rereview cc-initial-review \
+  --skill cc-rereview cc-initial-review cc-pr-review \
   --agent claude-code codex \
   --copy
 ```
 
+A cycle skill delegates to the supporting review and verification skills, so install `cc-pr-review`, `cc-code-review`, `cc-security-review`, and `cc-verify` alongside it. Without them the cycle skills still run, but they report the affected pass as degraded rather than passed.
+
 Omit `--global` for project scope, or add it for global installation. Use `npx skills list` to inspect installed project skills and `npx skills list --global` for global skills.
 
-The included Bash and PowerShell installers remain available when explicit destinations or only the three native host layouts in this repository are required. They copy files and do not use symlinks, so they also work on Windows without developer-mode or administrator privileges.
+The included Bash and PowerShell installers remain available when explicit destinations or only the three native host layouts in this repository are required. They copy files and do not use symlinks, so they also work on Windows without developer-mode or administrator privileges. Clone the toolkit before using them:
+
+```bash
+git clone https://github.com/datacas/code-cycle-toolkit.git
+cd code-cycle-toolkit
+```
 
 ### Direct installers: global installation
 
@@ -267,6 +310,15 @@ Use cc-resolve-comments on pull request 456 in owner/repository. Resolve valid f
 Use cc-rereview on pull request 456 in owner/repository after the latest fixes. Verify previous findings, inspect the complete accumulated diff, check CI, and publish the updated review.
 ```
 
+### Run a single pass
+
+```text
+Use cc-code-review on the current working tree against main.
+Use cc-security-review on the changes in this branch.
+Use cc-verify to check that the fix in src/example.ext actually works.
+Use cc-run to bring this project up and tell me the URLs.
+```
+
 ### Run the generic complete cycle
 
 ```text
@@ -281,12 +333,20 @@ The generic orchestrator uses native workers or subagents only when the host exp
 Use cc-orca-orchestrator for issue 123 in owner/repository with implementer=codex reviewer=claude max_iterations=6.
 ```
 
-Use this only in an environment with Orca. It creates and manages Orca Runs, Tasks, workers, result files, and the shared pull-request branch. It never merges.
+Use this only in an environment with Orca. It creates and manages Orca Runs, Tasks, workers, result files, and the shared pull-request branch. It asks before creating the results directory, and it never merges.
+
+### Force a language
+
+```text
+Use cc-initial-review on pull request 456 with lang=en.
+```
 
 ## Result and review conventions
 
 - Review findings use stable IDs such as `REV-001`.
-- `ORCHESTRATION_RESULT` is emitted only when requested or required by a delegated host contract.
+- Every published finding carries the header `#### [REV-004] · medium · open · blocks:yes — Short title`, whose four leading tokens stay in English in every language. This is what makes a published comment recoverable by the next run.
+- `ORCHESTRATION_RESULT` is opt-in: it is emitted only when requested, when a delegated host contract requires it, or when the status is `BLOCKED`/`FAILED` and no comment could serve as the record.
+- Both orchestrators return the same result envelope, so one consumer parses either.
 - GitHub remains authoritative for pull-request state, comments, threads, commits, and CI.
 - A missing or unverified check is reported as such; it is never silently promoted to success.
 - `READY_FOR_MANUAL_MERGE` means a human still owns the merge decision.
@@ -305,7 +365,11 @@ On Windows, use:
 py -3 .\scripts\validate-package.py
 ```
 
-The validator checks all six skills, portable frontmatter, names, both plugin manifests, OpenCode configuration, legacy names, obvious private-data patterns, and metadata sidecars.
+The validator checks all eleven skills, portable frontmatter, names and description limits, that the sections duplicated across skills have not drifted apart, known fixed-language output mistakes and literal-output directives, manifest name and version agreement, JSONC parsing, README coverage, and possible private data. Its negative-path tests exercise these failure modes:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
 
 The repository also supports native manifest validation:
 
@@ -315,12 +379,16 @@ claude plugin validate .
 
 Codex plugin-aware environments can use the `.codex-plugin/plugin.json` manifest; the included package validator verifies its JSON shape.
 
-## Public-release checklist
+## Contributing
 
-- Replace `<owner>` examples only in release documentation when the public repository URL is known.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the skill-authoring rules, including how the deliberately duplicated sections are kept in sync. Security reports go through [SECURITY.md](SECURITY.md). Released changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+## Release checklist
+
 - Confirm that no repository-specific names, local paths, credentials, or customer data are present.
-- Choose and add an open-source license before publishing.
-- Run the package validator and native Claude validation.
+- Run the package validator and `claude plugin validate .`.
+- Confirm both plugin manifests carry the version being released.
+- Add the release to `CHANGELOG.md`.
 - Test Bash installation on Linux, macOS, and WSL.
 - Test PowerShell installation on Windows.
 - Test global and repository-level installation for each host.

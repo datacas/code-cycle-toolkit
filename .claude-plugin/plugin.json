@@ -1,7 +1,7 @@
 {
   "name": "code-cycle-toolkit",
-  "description": "Portable Code Cycle skills for implementing GitHub issues and reviewing pull requests.",
-  "version": "0.1.0",
+  "description": "Portable Code Cycle skills for implementing GitHub issues, reviewing pull requests, and verifying the result.",
+  "version": "0.2.0",
   "author": {
     "name": "Code Cycle Toolkit contributors"
   },

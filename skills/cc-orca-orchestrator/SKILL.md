@@ -13,6 +13,46 @@ Every judgement about a finding, a fix, a verdict, or a verification belongs to
 the delegated skills. This skill only reads their structured results and
 decides which Task runs next.
 
+## Repository conventions
+
+Read the repository's own instructions when they exist — `AGENTS.md`,
+`CLAUDE.md`, `CONTRIBUTING.md`, or the documentation they point to — and prefer
+them over the defaults in this skill. None of them is required: when a file is
+absent, use the defaults here and say which convention you applied. Never
+report a missing instruction file as a blocker on its own.
+
+Do not ask again for actions the user explicitly requested or that this skill's
+documented workflow necessarily performs within that request. Normal workflow
+artefacts such as the working branch, commits, pull request, and temporary files
+are covered by that authorization.
+
+Ask before creating an unrequested persistent repository or external artefact,
+such as a configuration file, migration, durable directory, label, or additional
+branch. State what is missing, why it is needed, and what you would create; wait
+for the answer. Follow any stricter approval rule in the repository instructions.
+Never abandon the task merely because an optional artefact is absent.
+
+## Output language
+
+Write every published artefact — PR comments, thread replies, commit messages,
+and the final response — in one language, chosen in this order:
+
+1. an explicit request, such as `lang=es` in the invocation or "review in
+   English" in plain language;
+2. the language of the repository's own instructions (`AGENTS.md`, `CLAUDE.md`,
+   `CONTRIBUTING.md`) when one of them exists;
+3. the language of the issue, pull-request description, and existing review
+   comments;
+4. English, when nothing above resolves.
+
+Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
+`critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
+`blocks:yes|blocks:no`, every functional status, and every JSON key in
+`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
+values such as `summary`, `reason`, and `error` in the selected language. Preserve
+repository names, paths, references, commit SHAs, and command output verbatim.
+
 ## Responsibilities
 
 Do:
@@ -54,9 +94,9 @@ Parse the invocation, for example:
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `merge` | `manual` | Fixed. Automatic merge is not implemented. |
 
-`repo` exists because this workspace hosts more than one repository, so an
-issue number alone is ambiguous. Resolve it from the explicit argument, then
-from the active worktree's repository. If both fail, or if the issue does not
+`repo` exists because an issue number alone is ambiguous whenever the
+environment holds more than one repository. Resolve it from the explicit
+argument, then from the active worktree's repository. If both fail, or if the issue does not
 exist in the resolved repository, stop with `BLOCKED` before creating a Run;
 guessing the repository would dispatch real work against the wrong codebase.
 
@@ -141,10 +181,15 @@ its comment gives every finding the `[REV-xxx] · severity · status · blocks:y
 header, so a spec that forgets to ask for the block still leaves recoverable
 state.
 
-Every Task spec must also demand a result file. Choose one run-scoped results
+Every Task spec must also demand a result file. It needs one run-scoped results
 directory outside every repository working tree, so a report is never staged,
-committed, or swept into the PR diff, and pass one exact absolute path per
-Task:
+committed, or swept into the PR diff. **Ask the user before creating it**: name
+the exact absolute path you propose, say it will hold one JSON result per Task
+and that it lives outside the repository for that reason, and wait for the
+answer. Do not fall back to a directory inside the working tree, and do not
+start the run without one.
+
+Once it is approved, pass one exact absolute path per Task:
 
 ```text
 <results_dir>/<run_id>/<task_id>.json
@@ -161,8 +206,8 @@ path as --report-path when you send worker_done.
 
 The implementation Task uses `cc-implement-issue`, so its result file carries
 at least `{"skill":"cc-implement-issue","status":"...","pr_number":...,
-"head_sha":"...","summary":"..."}`. Create the directory before starting
-the worker.
+"head_sha":"...","summary":"..."}`. Create the approved directory before
+starting the first worker.
 
 ### Waiting
 
