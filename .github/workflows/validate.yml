@@ -1,0 +1,86 @@
+name: Validate package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Skills, manifests, and Bash
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Validate six skills and package metadata
+        run: python3 scripts/validate-package.py
+
+      - name: Validate JSON manifests
+        run: |
+          python3 -m json.tool .claude-plugin/plugin.json >/dev/null
+          python3 -m json.tool .codex-plugin/plugin.json >/dev/null
+          python3 -m json.tool opencode.jsonc >/dev/null
+
+      - name: Check Bash installer syntax
+        run: bash -n scripts/install.sh
+
+  powershell-installer:
+    name: PowerShell installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Validate package with Windows Python
+        run: py -3 scripts/validate-package.py
+
+      - name: Test project installation for all hosts
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
+          if (Test-Path -LiteralPath $project) {
+              Remove-Item -LiteralPath $project -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $project -Force | Out-Null
+
+          & .\scripts\install.ps1 -Agent all -Scope project -ProjectDir $project
+
+          $skills = @(
+              'cc-implement-issue',
+              'cc-initial-review',
+              'cc-resolve-comments',
+              'cc-rereview',
+              'cc-orchestrator',
+              'cc-orca-orchestrator'
+          )
+          $destinations = @(
+              (Join-Path $project '.claude\skills'),
+              (Join-Path $project '.agents\skills'),
+              (Join-Path $project '.opencode\skills')
+          )
+
+          foreach ($destination in $destinations) {
+              if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
+                  throw "Missing installation destination: $destination"
+              }
+              foreach ($skill in $skills) {
+                  $skillFile = Join-Path (Join-Path $destination $skill) 'SKILL.md'
+                  if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
+                      throw "Missing installed skill: $skillFile"
+                  }
+              }
+          }
