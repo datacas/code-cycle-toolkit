@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
-PACKAGE_ROOT="$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
+PACKAGE_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 USER_HOME="${HOME:-}"
 
 if [ -z "$USER_HOME" ]; then
@@ -76,7 +76,7 @@ case "$SCOPE" in
   global) BASE_DIR="$USER_HOME" ;;
   project)
     [ -d "$PROJECT_DIR" ] || { printf 'Project directory does not exist: %s\n' "$PROJECT_DIR" >&2; exit 2; }
-    PROJECT_DIR="$(CDPATH= cd "$PROJECT_DIR" && pwd -P)"
+    PROJECT_DIR="$(CDPATH='' cd "$PROJECT_DIR" && pwd -P)"
     [ "$PROJECT_DIR" != '/' ] || { printf '%s\n' 'Refusing to use / as a project directory.' >&2; exit 2; }
     BASE_DIR="$PROJECT_DIR"
     ;;
