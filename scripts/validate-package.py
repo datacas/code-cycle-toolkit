@@ -26,7 +26,7 @@ PRIVATE_PATTERNS = [
     re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*[^\s`<>{}]+"),
 ]
 PUBLIC_REPOSITORY_REFERENCE = re.compile(
-    r"https://github\.com/[^/\s`<>{}]+/code-cycle-toolkit(?:\.git)?",
+    r"(?:https://github\.com/)?[^/\s`<>{}]+/code-cycle-toolkit(?:\.git)?",
     re.IGNORECASE,
 )
 

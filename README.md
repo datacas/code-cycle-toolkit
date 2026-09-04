@@ -57,16 +57,55 @@ The toolkit contains no credentials, tokens, private repository configuration, o
 
 ## Install from GitHub
 
-Clone or download the repository first:
+For the recommended `npx skills` method, no clone is needed. Run it from the repository where you want to install the skills. Clone the toolkit only when you want to use the direct Bash or PowerShell installers:
 
 ```bash
 git clone https://github.com/datacas/code-cycle-toolkit.git
 cd code-cycle-toolkit
 ```
 
-The included installers copy the same six skills into the selected host directories. They do not use symlinks, so they also work on Windows without developer-mode or administrator privileges.
+### Recommended installation: `npx skills`
 
-### Global installation
+If you have Node.js and `npx`, this is the simplest installation method. It works from the target repository and lets you choose the skills, agents, and scope.
+
+```bash
+# Interactive: choose the skills, agents, and project/global scope
+npx skills add datacas/code-cycle-toolkit
+```
+
+When no `--global` flag is provided, the default scope is the current project. In an interactive terminal, `skills` can ask which skills and agents to use. To install the complete toolkit without prompts:
+
+```bash
+# All six skills, all agents supported by the CLI, project scope
+npx skills add datacas/code-cycle-toolkit --all --copy
+
+# All six skills, all supported agents, global scope
+npx skills add datacas/code-cycle-toolkit --all --global --copy
+```
+
+`--all` means all skills and all agents known by the `skills` CLI. `--copy` copies the files instead of creating links, which is convenient on Windows and when the project should remain self-contained.
+
+To install only selected skills for one or more agents:
+
+```bash
+# One skill for one agent
+npx skills add datacas/code-cycle-toolkit \
+  --skill cc-rereview \
+  --agent codex \
+  --copy
+
+# Several skills for several agents
+npx skills add datacas/code-cycle-toolkit \
+  --skill cc-rereview cc-initial-review \
+  --agent claude-code codex \
+  --copy
+```
+
+Omit `--global` for project scope, or add it for global installation. Use `npx skills list` to inspect installed project skills and `npx skills list --global` for global skills.
+
+The included Bash and PowerShell installers remain available when explicit destinations or only the three native host layouts in this repository are required. They copy files and do not use symlinks, so they also work on Windows without developer-mode or administrator privileges.
+
+### Direct installers: global installation
 
 Global skills are available to the selected user across repositories.
 
