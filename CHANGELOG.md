@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A provider contract that separates issue providers (GitHub Issues, Plane, and
+  Jira) from code hosts (GitHub and Bitbucket), including explicit provider
+  resolution, capability boundaries, native identifiers, and safe work-item
+  linking.
+- A `cc-provider-bootstrap` skill that fills missing provider configuration,
+  validates read-only access at startup, and caches non-secret health metadata
+  for later runs.
+
+### Changed
+
+- Cycle and review skills now use provider-neutral work-item and change-request
+  terminology. GitHub-specific commands are documented as adapter examples,
+  not universal requirements.
+- Structured results now carry `issue_provider`, `issue_id`, `code_host`,
+  `change_request_id`, and `change_request_url`; `issue_number` and `pr_number`
+  remain compatibility aliases for existing GitHub-oriented consumers.
+- `cc-implement-issue` and both orchestrators now run the provider bootstrap
+  before implementation and pass its validated context through the cycle.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

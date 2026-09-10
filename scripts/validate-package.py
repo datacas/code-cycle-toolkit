@@ -21,6 +21,7 @@ CYCLE_SKILLS = {
     "cc-orca-orchestrator",
 }
 SUPPORT_SKILLS = {
+    "cc-provider-bootstrap",
     "cc-pr-review",
     "cc-code-review",
     "cc-security-review",
@@ -37,7 +38,7 @@ REVIEW_CYCLE_SKILLS = ("cc-initial-review", "cc-rereview", "cc-resolve-comments"
 SHARED_REVIEW_SECTIONS = (
     "### The `ORCHESTRATION_RESULT` block is opt-in",
     "### Where the block goes",
-    "### The PR comment is the machine-readable record",
+    "### The change-request comment is the machine-readable record",
 )
 
 # Every skill repeats these two sections verbatim, for the same reason.
