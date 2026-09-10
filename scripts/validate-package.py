@@ -29,6 +29,9 @@ SUPPORT_SKILLS = {
     "cc-run",
 }
 REQUIRED_SKILLS = CYCLE_SKILLS | SUPPORT_SKILLS
+CLAUDE_CODEX_REFERENCE = Path(
+    "skills/cc-orchestrator/references/codex-plugin-cc.md"
+)
 
 # The three review-cycle skills carry byte-identical copies of the sections that
 # define the state-recovery contract. Skills are installed as independent
@@ -254,6 +257,19 @@ def validate_package(root: Path) -> list[str]:
         )
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
 
+        adapter_reference = root / CLAUDE_CODEX_REFERENCE
+        orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"
+        if not adapter_reference.is_file():
+            errors.append(f"missing orchestrator reference: {CLAUDE_CODEX_REFERENCE}")
+        elif orchestrator_path.is_file():
+            orchestrator_text = orchestrator_path.read_text(encoding="utf-8")
+            relative_link = "references/codex-plugin-cc.md"
+            if relative_link not in orchestrator_text:
+                errors.append(
+                    "cc-orchestrator does not route Claude-to-Codex mode to "
+                    f"{relative_link}"
+                )
+
     versions: dict[str, str] = {}
     for manifest in (root / ".claude-plugin/plugin.json", root / ".codex-plugin/plugin.json"):
         if not manifest.is_file():
@@ -288,6 +304,12 @@ def validate_package(root: Path) -> list[str]:
         undocumented = sorted(skill for skill in REQUIRED_SKILLS if f"`{skill}`" not in readme_text)
         if undocumented:
             errors.append(f"skills missing from README.md: {', '.join(undocumented)}")
+        adapter_doc_link = CLAUDE_CODEX_REFERENCE.as_posix()
+        if adapter_doc_link not in readme_text:
+            errors.append(
+                "README.md does not link the Claude-to-Codex adapter contract: "
+                f"{adapter_doc_link}"
+            )
 
     for path in root.rglob("*"):
         if not path.is_file():
