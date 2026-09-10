@@ -5,6 +5,10 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.2.0] - 2026-09-10
+
 ### Added
 
 - An optional `cc-orchestrator` adapter contract for alternating Claude and
@@ -19,25 +23,6 @@ All notable changes to this project are documented here. This project follows
 - A `cc-provider-bootstrap` skill that fills missing provider configuration,
   validates read-only access at startup, and caches non-secret health metadata
   for later runs.
-
-### Changed
-
-- `cc-orchestrator` now resolves `auto`, `single_agent`, or `claude_codex`
-  execution before implementation, validates Codex stage results and branch
-  immutability, and never changes reviewers silently after a mixed run starts.
-- Cycle and review skills now use provider-neutral work-item and change-request
-  terminology. GitHub-specific commands are documented as adapter examples,
-  not universal requirements.
-- Structured results now carry `issue_provider`, `issue_id`, `code_host`,
-  `change_request_id`, and `change_request_url`; `issue_number` and `pr_number`
-  remain compatibility aliases for existing GitHub-oriented consumers.
-- `cc-implement-issue` and both orchestrators now run the provider bootstrap
-  before implementation and pass its validated context through the cycle.
-
-## [0.2.0] - 2026-09-04
-
-### Added
-
 - Five supporting skills now ship with the toolkit instead of being assumed to
   exist on the host: `cc-pr-review`, `cc-code-review`, `cc-security-review`,
   `cc-verify`, and `cc-run`. Each runs standalone; review and verification
@@ -53,6 +38,17 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- `cc-orchestrator` now resolves `auto`, `single_agent`, or `claude_codex`
+  execution before implementation, validates Codex stage results and branch
+  immutability, and never changes reviewers silently after a mixed run starts.
+- Cycle and review skills now use provider-neutral work-item and change-request
+  terminology. GitHub-specific commands are documented as adapter examples,
+  not universal requirements.
+- Structured results now carry `issue_provider`, `issue_id`, `code_host`,
+  `change_request_id`, and `change_request_url`; `issue_number` and `pr_number`
+  remain compatibility aliases for existing GitHub-oriented consumers.
+- `cc-implement-issue` and both orchestrators now run the provider bootstrap
+  before implementation and pass its validated context through the cycle.
 - Sensitivity triage no longer requires an `AGENTS.md` with a specific trigger
   list, and matches labels by meaning rather than by an exact taxonomy.
 - CI reporting names the checks a repository actually defines instead of a
@@ -61,10 +57,11 @@ All notable changes to this project are documented here. This project follows
   their manual path; they follow whatever worker contract is injected.
 - `cc-orca-orchestrator` asks before creating its run-scoped results directory.
 - `cc-orchestrator` returns the same result envelope as `cc-orca-orchestrator`.
-- The package validator now checks eleven skills, verifies that the deliberately
+- The package validator now checks twelve skills, verifies that the deliberately
   duplicated sections have not drifted, rejects known fixed-language output and
-  literal-output directives, requires both manifests to agree on version, parses
-  `opencode.jsonc` as JSONC, and requires every skill to appear in the README.
+  literal-output directives, requires both manifests to agree on version,
+  parses `opencode.jsonc` as JSONC, and requires every skill to appear in the
+  README.
 - CI exercises the Bash installer for real, lints it with shellcheck, tests the
   overwrite and missing-directory paths on both platforms, and checks discovery
   of all skills through the pinned `skills` CLI.
