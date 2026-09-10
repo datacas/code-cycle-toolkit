@@ -1,11 +1,11 @@
 ---
 name: cc-orchestrator
-description: Use this skill to run the complete Code Cycle from a GitHub issue through implementation, pull-request review, targeted resolution, and rereview, using the host's available delegation mechanism or a sequential fallback without merging.
+description: Use this skill to run the complete Code Cycle from a GitHub, Plane, or Jira work item through implementation, pull-request review, targeted resolution, and rereview on GitHub or Bitbucket, using the host's available delegation mechanism or a sequential fallback without merging.
 ---
 
 # Code Cycle Orchestrator
 
-Coordinate the complete lifecycle of one issue. This skill owns sequencing,
+Coordinate the complete lifecycle of one work item. This skill owns sequencing,
 state handoff, iteration limits, and exit conditions. It does not own review
 criteria, implementation decisions, or security judgements; those belong to the
 delegated skills.
@@ -28,6 +28,18 @@ such as a configuration file, migration, durable directory, label, or additional
 branch. State what is missing, why it is needed, and what you would create; wait
 for the answer. Follow any stricter approval rule in the repository instructions.
 Never abandon the task merely because an optional artefact is absent.
+
+## Provider context
+
+Resolve `issue_provider=github|plane|jira` and `code_host=github|bitbucket`
+independently before dispatching any stage. Accept explicit `issue_id`,
+`repository`, and provider values first, then the repository's optional
+`.code-cycle.yml`, then an unambiguous code-host `origin`. A GitHub issue
+number may be inferred only for a GitHub code host; never guess Jira or Plane
+identifiers. If the pair is incomplete or ambiguous, stop with `BLOCKED`
+before starting implementation. Pass the resolved provider context unchanged
+to every delegated stage. See `docs/provider-contract.md` for the canonical
+fields and capability rules.
 
 ## Output language
 
@@ -54,15 +66,18 @@ repository names, paths, references, commit SHAs, and command output verbatim.
 
 Do:
 
-- resolve the issue and repository before starting work;
-- run `cc-implement-issue`, `cc-initial-review`, `cc-resolve-comments`, and
+- resolve the issue provider, work item, code host, and repository before
+  starting work;
+- run `cc-provider-bootstrap`, then `cc-implement-issue`, `cc-initial-review`,
+  `cc-resolve-comments`, and
   `cc-rereview` in the defined order, letting each of them delegate to the
   review passes it owns — `cc-pr-review`, `cc-code-review`,
   `cc-security-review`, `cc-verify` — rather than invoking those passes here;
 - pass the current structured state to the next stage;
 - preserve stable `REV-xxx` finding IDs across review iterations;
 - enforce the iteration limit and no-progress guard;
-- validate the final state against GitHub before reporting it.
+- validate the final state against the configured code host and work-item
+  provider before reporting it.
 
 Do not:
 
@@ -77,8 +92,10 @@ Accept:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `issue_number` | required | Issue to implement and review. |
-| `repo` | resolved | GitHub repository selector. |
+| `issue_id` | required | Work-item identifier; `issue_number` is a GitHub compatibility alias. |
+| `issue_provider` | resolved | `github`, `plane`, or `jira`. |
+| `code_host` | resolved | `github` or `bitbucket`. |
+| `repo` | resolved | Repository selector on the configured code host. |
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `merge` | `manual` | Fixed; automatic merge is not supported. |
 
@@ -105,11 +122,13 @@ branch concurrently.
 
 ## Workflow
 
-1. Resolve `issue_number` and `repo`. If either is ambiguous, stop with
-   `BLOCKED` before creating work.
-2. Run `cc-implement-issue` and request its structured result. Require the PR
-   number, branch, and current head SHA before continuing.
-3. Run `cc-initial-review` on that PR and request its structured result.
+1. Run `cc-provider-bootstrap` with the explicit inputs and request its
+   `PROVIDER_BOOTSTRAP_RESULT`. If it returns `BLOCKED` or `FAILED`, stop before
+   creating work; otherwise pass its resolved context unchanged to every stage.
+2. Run `cc-implement-issue` and request its structured result. Require the
+   change-request ID, branch, and current head SHA before continuing.
+3. Run `cc-initial-review` on that change request and request its structured
+   result.
 4. If the review returns `APPROVED`, validate the final exit conditions. If it
    returns `CHANGES_REQUESTED`, begin an iteration with
    `cc-resolve-comments`. Stop on `BLOCKED` or `FAILED`.
@@ -120,14 +139,15 @@ branch concurrently.
 7. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
    the same head SHA and open finding set repeat without progress.
 8. Before reporting readiness, confirm that the reviewed SHA equals the current
-   PR head, required checks have passed, no blocking finding is open, and the
-   PR remains unmerged.
+   change-request head, required checks have passed, no blocking finding is
+   open, and the change request remains unmerged.
 
 ## Stage statuses
 
 Branch only on the delegated skill's structured result:
 
 - `cc-implement-issue`: `IMPLEMENTED`, `BLOCKED`, `FAILED`;
+- `cc-provider-bootstrap`: `READY`, `BLOCKED`, `FAILED`;
 - `cc-initial-review` and `cc-rereview`: `APPROVED`, `CHANGES_REQUESTED`,
   `BLOCKED`, `FAILED`;
 - `cc-resolve-comments`: `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`,
@@ -143,10 +163,12 @@ with `HUMAN_INTERVENTION` and list the unresolved findings.
 
 ## State handoff
 
-Pass the complete previous `ORCHESTRATION_RESULT` to every resolution and
-rereview stage. The stage must preserve existing finding IDs and SHAs, validate
-them against GitHub, and return its own result. The published PR comment and
-GitHub state remain authoritative when structured state conflicts with them.
+Pass the provider bootstrap result and the complete previous
+`ORCHESTRATION_RESULT` to every stage. Each stage must preserve existing finding
+IDs and SHAs, validate them against the configured code host, and return its own
+result. The published
+change-request comment and provider state remain authoritative when structured
+state conflicts with them.
 
 Keep one run-scoped copy of each result outside the repository when the host
 supports result files. Ask the user before creating the directory that holds
@@ -164,8 +186,13 @@ ORCHESTRATION_RESULT
 {
   "skill": "cc-orchestrator",
   "status": "READY_FOR_MANUAL_MERGE",
+  "issue_provider": "github",
+  "issue_id": "123",
   "issue_number": 123,
+  "code_host": "github",
   "pr_number": 456,
+  "change_request_id": "456",
+  "change_request_url": "https://github.com/owner/repository/pull/456",
   "repo": "owner/repository",
   "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
   "reviewed_head_sha": "89abcdef0123456789abcdef0123456789abcdef",
@@ -173,14 +200,16 @@ ORCHESTRATION_RESULT
   "max_iterations": 6,
   "blocking_findings": [],
   "merge": "manual",
-  "summary": "Issue implemented, reviewed, corrected, and reapproved on the current HEAD. Merge is manual.",
+  "summary": "Work item implemented, reviewed, corrected, and reapproved on the current HEAD. Merge is manual.",
   "blocking": false
 }
 END_ORCHESTRATION_RESULT
 ```
 
 This is the same envelope `cc-orca-orchestrator` returns, minus the fields that
-only a supervised run has, so one consumer parses both.
+only a supervised run has, so one consumer parses both. New consumers should
+use `issue_id`, `change_request_id`, `issue_provider`, and `code_host`; the
+numeric `issue_number` and `pr_number` fields are compatibility aliases.
 
 Use `READY_FOR_MANUAL_MERGE` only after all exit conditions hold. Use
 `HUMAN_INTERVENTION` for a budget or decision boundary, `BLOCKED` for an

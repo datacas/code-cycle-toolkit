@@ -1,11 +1,11 @@
 ---
 name: cc-pr-review
-description: Use this skill to perform the review criteria pass over a pull request, comparing the accumulated diff against its base branch and judging scope, correctness, regressions, data changes, architecture, tests, and operational risk. It produces findings and a verdict without modifying code, and can run standalone or as the review pass of a larger cycle.
+description: Use this skill to perform the review criteria pass over a GitHub or Bitbucket change request, comparing the accumulated diff against its base branch and judging scope, correctness, regressions, data changes, architecture, tests, and operational risk. It produces findings and a verdict without modifying code, and can run standalone or as the review pass of a larger cycle.
 ---
 
 # PR Review
 
-A complete technical review of one pull request. The goal is not to find
+A complete technical review of one change request. The goal is not to find
 something to criticise: it is to determine whether the change is correct,
 coherent, and safe to merge.
 
@@ -54,7 +54,9 @@ repository names, paths, references, commit SHAs, and command output verbatim.
 ## Execution mode
 
 Run standalone when the user invokes this skill directly. Then publishing the
-review on the pull request is part of the job.
+review on the change request is part of the job. Resolve `code_host` explicitly
+or from `.code-cycle.yml`/an unambiguous `origin`; `gh` is only the GitHub
+adapter. When delegated, inherit the provider context from the calling skill.
 
 Run as a delegated pass when `cc-initial-review` or `cc-rereview` invokes this
 skill for its review criteria. Then **do not publish anything**: return the
@@ -65,7 +67,7 @@ into one comment. Publishing here would duplicate that comment.
 
 ### Get the right diff
 
-A pull request has several commits. Always review the accumulated diff against
+A change request has several commits. Always review the accumulated diff against
 the base branch:
 
 ```bash
@@ -78,8 +80,8 @@ view that hides earlier commits in the same pull request.
 
 ### Reconstruct the intent
 
-1. Read the pull-request title and description.
-2. Identify the issue or ticket it resolves.
+1. Read the change-request title and description.
+2. Identify the linked work item or ticket it resolves.
 3. Read the commits in order to follow the progression.
 4. Check that the declared scope matches the files actually modified.
 5. A modified file that does not fit the declared scope is an immediate
@@ -256,11 +258,12 @@ Exactly one of these four, without hedging:
 Skip this whole section when running as a delegated pass.
 
 When running standalone, the review does not end in the chat: record it as a
-comment on the pull request itself. This applies to first reviews and to
+comment on the change request itself. This applies to first reviews and to
 reviews after changes.
 
 1. Compose the comment using the output format above.
-2. Write the body to a file and publish it with `--body-file`, which avoids
+2. Write the body to a file and publish it with the configured code-host
+   tooling using its body-file equivalent, which avoids
    quoting and backtick problems in the shell:
 
    ```bash
