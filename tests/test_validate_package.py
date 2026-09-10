@@ -136,6 +136,38 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "skills not declared in the validator: cc-extra")
 
+    def test_rejects_missing_claude_codex_adapter_reference(self) -> None:
+        package = self.copy_package()
+        reference = (
+            package
+            / "skills"
+            / "cc-orchestrator"
+            / "references"
+            / "codex-plugin-cc.md"
+        )
+        reference.unlink()
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "missing orchestrator reference")
+
+    def test_rejects_unrouted_claude_codex_adapter_reference(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orchestrator" / "SKILL.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "references/codex-plugin-cc.md",
+                "references/missing-adapter.md",
+            ),
+            encoding="utf-8",
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "cc-orchestrator does not route Claude-to-Codex mode"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

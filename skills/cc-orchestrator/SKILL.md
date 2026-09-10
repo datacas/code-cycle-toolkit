@@ -1,6 +1,6 @@
 ---
 name: cc-orchestrator
-description: Use this skill to run the complete Code Cycle from a GitHub, Plane, or Jira work item through implementation, pull-request review, targeted resolution, and rereview on GitHub or Bitbucket, using the host's available delegation mechanism or a sequential fallback without merging.
+description: Use this skill to run the complete Code Cycle from a GitHub, Plane, or Jira work item through implementation, pull-request review, targeted resolution, and rereview on GitHub or Bitbucket, using known host delegation such as optional Claude-to-Codex review handoffs or a sequential fallback without merging.
 ---
 
 # Code Cycle Orchestrator
@@ -74,6 +74,8 @@ Do:
   review passes it owns — `cc-pr-review`, `cc-code-review`,
   `cc-security-review`, `cc-verify` — rather than invoking those passes here;
 - pass the current structured state to the next stage;
+- resolve one execution mode before implementation and keep the selected stage
+  executors stable for the run;
 - preserve stable `REV-xxx` finding IDs across review iterations;
 - enforce the iteration limit and no-progress guard;
 - validate the final state against the configured code host and work-item
@@ -84,6 +86,7 @@ Do not:
 - implement code or make review judgements yourself;
 - reclassify, dismiss, or resolve a finding;
 - invent host commands or assume a worker API exists;
+- install, authenticate, update, or vendor an optional delegation plugin;
 - merge the pull request or ask another agent to merge it.
 
 ## Inputs
@@ -96,6 +99,7 @@ Accept:
 | `issue_provider` | resolved | `github`, `plane`, or `jira`. |
 | `code_host` | resolved | `github` or `bitbucket`. |
 | `repo` | resolved | Repository selector on the configured code host. |
+| `orchestration_mode` | `auto` | `auto`, `single_agent`, or `claude_codex`. |
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `merge` | `manual` | Fixed; automatic merge is not supported. |
 
@@ -120,25 +124,53 @@ All stages that touch the same pull request must use the same branch or an
 explicitly coordinated worktree. Never let parallel workers edit the same
 branch concurrently.
 
+## Execution modes
+
+Resolve `orchestration_mode` from an explicit invocation value, then
+`code_cycle.orchestration.mode` in `.code-cycle.yml`, then `auto`. Reject any
+other value.
+
+- `single_agent`: execute every stage sequentially in the current agent.
+- `claude_codex`: when the current host is Claude Code and exposes a known,
+  task-capable `codex-plugin-cc` interface, keep implementation and resolution
+  in Claude and delegate initial review and rereview to Codex.
+- `auto`: use a known host adapter only after its capabilities and the user's
+  saved preference resolve it; otherwise use `single_agent`.
+
+Do not identify a plugin from guessed installation directories, process names,
+or the mere presence of a `codex` binary. Use only capabilities the current
+host declares and can invoke with a durable result. The plugin remains an
+optional external dependency and its absence never blocks `auto` mode.
+
+When running in Claude Code and the optional adapter may apply, read
+[references/codex-plugin-cc.md](references/codex-plugin-cc.md) before selecting
+the mode or dispatching a review. That reference defines discovery, the
+first-run notice, stage ownership, result validation, and failure behavior. Do
+not read it for Codex, OpenCode, Orca, or an explicit `single_agent` run.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its
    `PROVIDER_BOOTSTRAP_RESULT`. If it returns `BLOCKED` or `FAILED`, stop before
    creating work; otherwise pass its resolved context unchanged to every stage.
-2. Run `cc-implement-issue` and request its structured result. Require the
+2. Resolve the execution mode once. Record the selected stage executors and do
+   not change them silently after implementation starts.
+3. Run `cc-implement-issue` and request its structured result. Require the
    change-request ID, branch, and current head SHA before continuing.
-3. Run `cc-initial-review` on that change request and request its structured
+4. Run `cc-initial-review` on that change request with the selected review
+   executor and request its structured
    result.
-4. If the review returns `APPROVED`, validate the final exit conditions. If it
+5. If the review returns `APPROVED`, validate the final exit conditions. If it
    returns `CHANGES_REQUESTED`, begin an iteration with
    `cc-resolve-comments`. Stop on `BLOCKED` or `FAILED`.
-5. For each iteration, pass the previous structured result to
-   `cc-resolve-comments`, then pass its result to `cc-rereview`.
-6. Continue only when the statuses and external conditions allow it. Record
+6. For each iteration, pass the previous structured result to
+   `cc-resolve-comments`, then pass its result to `cc-rereview` using the
+   selected rereview executor.
+7. Continue only when the statuses and external conditions allow it. Record
    the current head SHA and open finding IDs after every iteration.
-7. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
+8. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
    the same head SHA and open finding set repeat without progress.
-8. Before reporting readiness, confirm that the reviewed SHA equals the current
+9. Before reporting readiness, confirm that the reviewed SHA equals the current
    change-request head, required checks have passed, no blocking finding is
    open, and the change request remains unmerged.
 

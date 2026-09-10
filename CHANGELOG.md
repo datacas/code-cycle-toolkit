@@ -7,6 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- An optional `cc-orchestrator` adapter contract for alternating Claude and
+  Codex: Claude implements and resolves findings while Codex performs initial
+  review and rereview through an externally installed `codex-plugin-cc`.
+- First-run discovery and preference rules for the optional Claude-to-Codex
+  mode, including a non-secret acknowledgement and project configuration.
 - A provider contract that separates issue providers (GitHub Issues, Plane, and
   Jira) from code hosts (GitHub and Bitbucket), including explicit provider
   resolution, capability boundaries, native identifiers, and safe work-item
@@ -17,6 +22,9 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- `cc-orchestrator` now resolves `auto`, `single_agent`, or `claude_codex`
+  execution before implementation, validates Codex stage results and branch
+  immutability, and never changes reviewers silently after a mixed run starts.
 - Cycle and review skills now use provider-neutral work-item and change-request
   terminology. GitHub-specific commands are documented as adapter examples,
   not universal requirements.

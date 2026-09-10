@@ -16,6 +16,8 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 - Resolves valid review comments with targeted changes and evidence-backed verification.
 - Rereviews the accumulated pull request after changes.
 - Coordinates the complete issue-to-merge-readiness cycle.
+- In Claude Code, can optionally keep implementation and comment resolution in
+  Claude while delegating initial review and rereview to Codex.
 - Publishes consolidated pull-request comments when the workflow requires them.
 - Preserves a manual merge boundary: the toolkit never merges a pull request.
 
@@ -23,6 +25,7 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
 - It is not a GitHub, Bitbucket, Plane, or Jira replacement, CI service, deployment system, or issue tracker.
 - It does not provide provider credentials, API clients, or bypass repository permissions.
+- It does not bundle, install, authenticate, or update `codex-plugin-cc`.
 - It does not invent missing tests, project policies, or verification commands.
 - It does not silently treat unavailable tools, skipped checks, or unverified behavior as success.
 - It does not require the target repository to adopt any file, label, or convention.
@@ -95,6 +98,10 @@ The host must provide a way to load Agent Skills. The workflows also normally re
 - the target repository's own test and verification dependencies.
 
 For `cc-orca-orchestrator`, install and authenticate Orca separately. The package does not include Orca.
+
+The optional Claude-to-Codex orchestration mode requires the external
+`codex-plugin-cc` plugin and a working local Codex installation. Neither is a
+dependency of the ordinary single-agent workflow.
 
 The toolkit contains no credentials, tokens, private repository configuration, or customer data. Keep credentials in the provider's CLI, connector, or selected agent host, never in a skill file or `.code-cycle.yml`.
 
@@ -290,6 +297,66 @@ claude --plugin-dir .
 
 After loading it, invoke a skill explicitly with a command such as `/cc-rereview`, or describe the task in natural language and let Claude select the skill.
 
+#### Optional Claude + Codex orchestration
+
+`cc-orchestrator` can use the external
+[`codex-plugin-cc`](https://github.com/openai/codex-plugin-cc) integration to
+divide the cycle by responsibility:
+
+```text
+Claude: provider bootstrap and implementation
+Codex: initial review
+Claude: resolve comments
+Codex: rereview
+Claude: final validation and manual-merge handoff
+```
+
+Code Cycle Toolkit does not include or install that plugin. Install and prepare
+it separately in Claude Code, following its official instructions:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+Install Code Cycle Toolkit for both Claude Code and Codex so delegated Codex
+sessions can load the same review skills:
+
+```bash
+npx skills add datacas/code-cycle-toolkit --all --copy
+```
+
+Select the mode explicitly:
+
+```text
+Use cc-orchestrator for issue 123 with orchestration_mode=claude_codex.
+```
+
+Or save the non-secret project preference after confirmation:
+
+```yaml
+code_cycle:
+  orchestration:
+    mode: claude_codex
+```
+
+Supported values are `auto`, `single_agent`, and `claude_codex`. In Claude Code,
+the first applicable run briefly explains the optional integration. If the
+plugin is ready but the project has no saved preference, the orchestrator asks
+once whether to use the mixed mode and offers to update `.code-cycle.yml`. The
+notice acknowledgement is stored outside the repository only with permission.
+The plugin's absence never blocks `auto`; an explicitly configured
+`claude_codex` mode does block before implementation when Codex cannot be used.
+
+Codex performs the complete `cc-initial-review` and `cc-rereview` stages and may
+publish their required review comments, but it must not modify product code or
+the working tree. Claude validates the returned structured result and confirms
+that the branch is unchanged before continuing. See the
+[adapter contract](skills/cc-orchestrator/references/codex-plugin-cc.md) for the
+full discovery, handoff, and failure rules.
+
 ### Codex
 
 Use the included installer for global or repository-level installation. Codex can also install individual skill directories from a public GitHub repository when only one workflow is wanted. The `.codex-plugin/plugin.json` manifest is included for Codex plugin-aware environments.
@@ -357,6 +424,12 @@ Use cc-orchestrator for issue 123 in owner/repository with max_iterations=6. Imp
 ```
 
 The generic orchestrator uses native workers or subagents only when the host exposes a known mechanism. Otherwise it runs the stages sequentially in the current session.
+
+To require the optional Claude-to-Codex split when running in Claude Code:
+
+```text
+Use cc-orchestrator for issue 123 with orchestration_mode=claude_codex. Claude implements and resolves comments; Codex reviews and rereviews. Stop at READY_FOR_MANUAL_MERGE.
+```
 
 ### Run the Orca-supervised cycle
 
