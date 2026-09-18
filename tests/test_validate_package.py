@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -55,12 +56,23 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "has drifted between skills")
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "On NTFS a colon opens an alternate data stream instead of creating a file, "
+        "so this sidecar cannot exist as a listable entry on Windows. It appears as "
+        "a real file only once the tree reaches a filesystem without ADS, which is "
+        "where the validator has to catch it.",
+    )
     def test_rejects_a_windows_zone_identifier_sidecar(self) -> None:
         package = self.copy_package()
         # The real shape seen in WSL: a colon, so neither the suffix filter nor
         # a `.Zone.Identifier` ending catches it.
         sidecar = package / "docs" / "guide.md:Zone.Identifier"
         sidecar.write_text("[ZoneTransfer]\nZoneId=3\n", encoding="utf-8")
+        self.assertTrue(
+            sidecar.is_file(),
+            "the sidecar was not created as a listable file; the test premise is gone",
+        )
 
         errors = VALIDATOR.validate_package(package)
 
