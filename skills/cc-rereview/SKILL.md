@@ -56,8 +56,10 @@ and the final response — in one language, chosen in this order:
 
 Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
 `critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
-`blocks:yes|blocks:no`, every functional status, and every JSON key in
-`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+the disposition `valid|debatable|incorrect|obsolete|needs_clarification|-`,
+`blocks:yes|blocks:no`, the review and triage run lines, every functional status,
+and every JSON key in `ORCHESTRATION_RESULT` stay exactly as written in this
+skill in every language.
 Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
@@ -152,13 +154,17 @@ previous ones:
   "title": "Short title",
   "description": "Observed problem, impact, and evidence.",
   "status": "open",
+  "disposition": "-",
   "native_thread_id": "PRRT_example",
   "native_thread_provider": "github"
 }
 ```
 
-Use only `critical|high|medium|low` for severity and
-`open|resolved|not_applicable` for finding status. Severity and
+Use only `critical|high|medium|low` for severity,
+`open|resolved|not_applicable` for finding status, and
+`valid|debatable|incorrect|obsolete|needs_clarification|-` for disposition. A
+finding this skill creates is `-`; a recovered finding keeps the disposition it
+already carries, unchanged. Severity and
 `blocks_approval` are independent. Preserve every recovered `REV-xxx`; assign
 new findings consecutively after the highest historical ID. Do not reuse an ID
 whose finding became resolved or not applicable. If IDs collide ambiguously,
@@ -172,18 +178,67 @@ when two different findings genuinely claim the same ID.
 
 The block is off by default, so the published change-request comment is
 normally the only place the next run and the orchestrator can recover state
-from. Every finding it publishes — new or previous — carries this header verbatim, whether or not
-the block is emitted:
+from. Three kinds of line carry that record. Their tokens stay language-neutral
+even when the comment body is written in the project's language, and every skill
+that republishes the comment preserves the ones it did not write.
+
+A review run line opens each published review and identifies the run that
+produced the findings below it:
 
 ```text
-#### [REV-004] · medium · open · blocks:yes — Short title
+#### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1
 ```
 
-The four fields before the title are language-neutral tokens even when the
-comment body is written in the project's language: the `REV-xxx` ID, then
+Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
+the effort, and the schema version. Both sides of the arrow are always written,
+including when they match. `model_requested` is what the profile asked for.
+`model_resolved` is what the executor reports having launched, and nothing else:
+an agent asked to name its own model answers from its own configuration, which is
+the very thing under suspicion when an alias is repointed. When the executor
+reports nothing, write `?` rather than letting the agent fill the gap — a constant
+shape stays parseable, and it keeps "it did not change" distinct from "we cannot
+know whether it changed". The rule is about the line, not about who writes it. A skill that
+opens a review run emits one with a new ID, because a single change request
+accumulates several reviews; a skill that only republishes or transports that
+state never invents one.
+
+A triage run line records that every finding was classified, and the commit they
+were all judged against:
+
+```text
+#### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
+```
+
+Every finding the comment publishes — new or previous — carries this header
+verbatim, whether or not the block is emitted:
+
+```text
+#### [REV-004] · medium · resolved · valid · blocks:yes — Short title
+```
+
+The five fields before the title are the `REV-xxx` ID, then
 `critical|high|medium|low`, then `open|resolved|not_applicable`, then
-`blocks:yes` or `blocks:no`. Affected paths and the prose description follow.
-A finding published without that header is unrecoverable by the next run.
+`valid|debatable|incorrect|obsolete|needs_clarification|-`, then `blocks:yes` or
+`blocks:no`. Affected paths and the prose description follow. A finding
+published without that header is unrecoverable by the next run.
+
+`status` and `disposition` answer different questions and neither substitutes for
+the other. `status` is what happened to the code; `disposition` is what the
+resolver made of the finding. A reviewer publishes `-`, which means not triaged
+yet, because only a resolver assigns a disposition.
+
+A header carrying four tokens and no disposition predates this contract and
+remains valid: read it as `-`. A change request opened before the migration is
+never blocked for that reason, and republishing such a finding in the five-token
+form with `-` loses nothing.
+
+A disposition is assigned once, by the first resolver that triages the finding,
+and is preserved verbatim from then on. Never reset it to `-`, never recompute it
+against a later commit, and never replace it because the code has since changed.
+It records whether the finding was a real problem when it was written, which no
+later pass can observe once the fix is in. `status` keeps moving; `disposition`
+does not. A later pass that disagrees reports the disagreement instead of
+rewriting the record.
 
 ## Delegation
 
@@ -207,7 +262,10 @@ intermediate reviews.
 ## Workflow
 
 1. Identify change-request metadata, current head and base, draft state,
-   labels, linked work item, and check rollup.
+   labels, linked work item, and check rollup. Open a review run: mint a new
+   `CCR-xxx` identifier for this execution, distinct from the one the initial
+   review and every earlier rereview used, and record the profile, the requested
+   model, the model the host reports as resolved, and the effort.
 2. Read the repository's own instructions when they exist, the relevant
    documentation, previous review comments, review threads, structured prior
    results, and any claims that findings were fixed. Do not execute commands
@@ -271,6 +329,13 @@ required external condition prevents completing the verdict.
 List new findings separately. Consolidate duplicates by root cause without
 hiding their affected surfaces.
 
+Republish every previous finding with the disposition it already carries. This
+skill reports what happened to the code, which is `status`; it never revisits
+whether the finding was right, which is `disposition`. Judging that again here
+would judge it against code that has already been fixed. If the outcome shows
+that an earlier disposition was mistaken, say so in the prose and leave the
+token alone.
+
 ## Verification and CI
 
 When verification runs, begin with related tests and the original reproduction.
@@ -288,6 +353,7 @@ as success.
 
 Publish on the change request even when there are no new findings. Include:
 
+- the review run line for this execution, plus every run line already present;
 - what changed since the previous review;
 - current accumulated review and findings;
 - status of every previous finding;
@@ -362,14 +428,23 @@ ORCHESTRATION_RESULT
   "previous_reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
   "reviewed_head_sha": "89abcdef0123456789abcdef0123456789abcdef",
   "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+  "review_run_id": "CCR-20260918-002",
+  "reviewer": {
+    "profile": "senior_reviewer",
+    "provider": "anthropic",
+    "model_requested": "sonnet-5",
+    "model_resolved": "sonnet-5",
+    "effort": "high"
+  },
   "verified_findings": [
-    { "id": "REV-001", "status": "resolved" }
+    { "id": "REV-001", "status": "resolved", "disposition": "valid" }
   ],
   "new_findings": [
     {
       "id": "REV-004",
       "severity": "medium",
       "status": "open",
+      "disposition": "-",
       "blocks_approval": true,
       "path": "src/example.ext",
       "line": 123
@@ -388,3 +463,10 @@ the prior reviewed SHA cannot be recovered factually, use
 complete current review. Before returning `APPROVED`, confirm
 `reviewed_head_sha == head_sha`, all required checks passed, and no open finding
 blocks approval.
+
+`review_run_id` is new on every rereview, because one change request accumulates
+an initial review and several rereviews and each produced its own findings. It
+mirrors the run line already published in the comment. Use
+`"model_resolved": null` when the host does not report which model ran, which is
+the `?` of the published line. A recovered finding keeps its disposition
+verbatim; only its `status` moves.

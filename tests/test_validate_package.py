@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -54,6 +55,67 @@ class ValidatePackageTests(unittest.TestCase):
         errors = VALIDATOR.validate_package(package)
 
         self.assert_error_contains(errors, "has drifted between skills")
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "On NTFS a colon opens an alternate data stream instead of creating a file, "
+        "so this sidecar cannot exist as a listable entry on Windows. It appears as "
+        "a real file only once the tree reaches a filesystem without ADS, which is "
+        "where the validator has to catch it.",
+    )
+    def test_rejects_a_windows_zone_identifier_sidecar(self) -> None:
+        package = self.copy_package()
+        # The real shape seen in WSL: a colon, so neither the suffix filter nor
+        # a `.Zone.Identifier` ending catches it.
+        sidecar = package / "docs" / "guide.md:Zone.Identifier"
+        sidecar.write_text("[ZoneTransfer]\nZoneId=3\n", encoding="utf-8")
+        self.assertTrue(
+            sidecar.is_file(),
+            "the sidecar was not created as a listable file; the test premise is gone",
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "remove metadata sidecar before publishing")
+
+    def test_rejects_a_dot_separated_zone_identifier_sidecar(self) -> None:
+        package = self.copy_package()
+        (package / "docs" / "guide.md.Zone.Identifier").write_text(
+            "[ZoneTransfer]\nZoneId=3\n", encoding="utf-8"
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "remove metadata sidecar before publishing")
+
+    def test_rejects_a_documented_header_the_parser_cannot_read(self) -> None:
+        package = self.copy_package()
+        for skill in ("cc-initial-review", "cc-rereview", "cc-resolve-comments"):
+            path = package / "skills" / skill / "SKILL.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "· resolved · valid · blocks:yes",
+                    "· resolved · probably · blocks:yes",
+                ),
+                encoding="utf-8",
+            )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "contract example does not parse")
+
+    def test_rejects_dropping_a_documented_line_kind(self) -> None:
+        package = self.copy_package()
+        for skill in ("cc-initial-review", "cc-rereview", "cc-resolve-comments"):
+            path = package / "skills" / skill / "SKILL.md"
+            text = path.read_text(encoding="utf-8")
+            start = text.index("A triage run line records")
+            end = text.index("Every finding the comment publishes", start)
+            path.write_text(text[:start] + text[end:], encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "no longer documents the triage line kind")
 
     def test_rejects_known_fixed_language_output(self) -> None:
         package = self.copy_package()

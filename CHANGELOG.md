@@ -5,7 +5,89 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- Finding headers carry a disposition token: `#### [REV-004] · medium · resolved · valid · blocks:yes — Short title`.
+  It records what the first resolver made of the finding, independently of what
+  happened to the code.
+- A review run line opens every published review, identifying the run, profile,
+  requested and resolved model, effort, and schema version.
+- A triage run line records the commit every finding was judged against, so a
+  frozen triage is verifiable rather than merely asserted.
+- `scripts/review_contract.py`, the reference parser for the published record,
+  and `scripts/calibration_store.py`, the out-of-repository attribution store for
+  an experimental paired review.
+- Optional `calibration.profiles` in `.code-cycle.yml`, and `paired_review` in
+  `cc-orca-orchestrator`, for dispatching two reviewers over one commit. Off by
+  default. Reviewer isolation is a precondition: a pair is dispatched only with a
+  worktree each or strictly sequentially, and the isolation mode and observed head
+  SHAs are recorded so a contaminated pair can be excluded later.
+- `Campaign.set_protocol()`, `select_samples()` and `selection_log()`: the
+  eligible universe, the exclusions and the selection rule are frozen before any
+  sample is drawn, and every candidate's decision is recorded — not only the
+  chosen ones — so why a change request entered the sample stays checkable.
+  Selection ranks by a campaign-scoped hash of the identity, which cannot follow
+  from how interesting a change looks. The protocol refuses to be redefined.
+- `Campaign.write_pair_manifest()`: a self-contained record of a finished pair,
+  written only after it closes, so an experiment does not depend forever on one
+  global store file. It carries the revealed attribution, the resolver, the
+  triage mode, and the root-cause groups with `shared_valid` and
+  `disposition_agreement` per group.
+- `triage_mode` on a triage: `blind_pure` when the resolver only classifies,
+  `resolution` when it also implements the fix. Separate populations; their
+  acceptance rates are never averaged together.
+- `purpose` on a pair: `mechanism_validation` or `calibration`. A pair that
+  proves the mechanism works is not automatically a sample for choosing a model,
+  and `pairs_supporting()` filters by it so the exclusion does not depend on
+  whoever writes the analysis remembering.
+- `Campaign.capabilities()` and `pairs_supporting()`: which metrics a given pair
+  can support, separately from whether it was collected cleanly. A pair nobody
+  triaged feeds coverage and overlap but not acceptance.
+- `Campaign.record_triage()`: the resolver's identity and the commit it judged,
+  recorded beside the reviewers'. The resolver decides whether each reviewer was
+  right, so it belongs in the instrument's record.
+- `target_relation` on a pair: whether the reviewers were judging their own
+  toolkit or an external project.
+- `Campaign.mint_presentation_ids()` and `reveal_presentation()`: opaque
+  per-finding identifiers for blind root-cause matching, so neither the labels
+  nor the count per reviewer can attribute a finding before the matching closes.
+- `docs/instrumentation.md`.
+
+### Changed
+
+- `cc-resolve-comments` classifies every finding against one commit and records
+  the dispositions before it edits any code, instead of triaging and fixing one
+  finding at a time.
+- A disposition is assigned once and preserved verbatim afterwards; `cc-rereview`
+  republishes it unchanged.
+- `ORCHESTRATION_RESULT` mirrors the run identity and `finding_outcomes` when it
+  is enabled. `resolved_findings` and `unresolved_findings` are unchanged.
+- The package validator checks the documented contract against its parser.
+- The validator now catches a Windows `Zone.Identifier` sidecar written with a
+  colon, the form that actually reaches WSL trees; the previous check only
+  matched a dot and let it through.
+
+### Fixed
+
+- A pair is now identified by change request and commit, not change request
+  alone. A second campaign on the same change request at a new commit used to
+  collide with the first, so a crashed dispatch left no row at all behind a row
+  still marked usable.
+- `model_resolved` comes from the executor's dispatch receipt. Workers were
+  asked to report their own model and got it wrong in both arms of the first
+  campaign, which is the drift the field exists to detect.
+- `record_pair()` accepted a pair as usable when only one reviewer had been
+  observed, or when the single observation named a run that was never
+  dispatched. It now requires the observed set to match the expected review runs
+  exactly, and records which run is missing or unexpected. Found by the first
+  real paired campaign: both calibration reviewers reported the one-sided case
+  independently, and the unattributable-observation case surfaced while verifying
+  their reports.
+
+### Compatibility
+
+- Finding headers with four tokens and no disposition stay valid and read as
+  not triaged. No open change request needs migrating.
 
 ## [0.2.0] - 2026-09-10
 

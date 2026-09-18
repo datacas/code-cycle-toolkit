@@ -8,6 +8,10 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import review_contract  # noqa: E402
+
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ALLOWED_FRONTMATTER = {"name", "description", "license", "compatibility", "metadata"}
@@ -62,6 +66,13 @@ PUBLIC_REPOSITORY_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 SCANNED_SUFFIXES = {".md", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".sh", ".ps1", ".py"}
+
+# Windows alternate data streams surface in WSL and on copied trees as a sibling
+# file, usually `<name>.md:Zone.Identifier`. The colon means it carries neither a
+# recognised suffix nor a `.Zone.Identifier` ending, so it slipped past both the
+# suffix filter and the earlier exact-suffix check. Match the marker wherever it
+# appears in the name.
+ZONE_IDENTIFIER_RE = re.compile(r"(?i)[.:]Zone\.Identifier$")
 
 # Known fixed-language output from earlier versions. Static validation cannot
 # identify every natural language, but it can prevent these regressions.
@@ -164,6 +175,52 @@ def extract_section(text: str, heading: str) -> str | None:
         cursor = nxt + 1
 
 
+RECORD_SECTION = "### The change-request comment is the machine-readable record"
+FENCE_RE = re.compile(r"```text\n(.*?)\n```", re.DOTALL)
+
+
+def check_record_contract(root: Path, errors: list[str]) -> None:
+    """Keep the published contract and its reference parser from drifting apart.
+
+    The shared section states the comment contract in prose; `review_contract`
+    is what reads it back. Every example the section prints must parse, or the
+    skills are promising a shape nothing can recover.
+    """
+    path = root / "skills" / "cc-initial-review" / "SKILL.md"
+    if not path.is_file():
+        return
+    section = extract_section(path.read_text(encoding="utf-8"), RECORD_SECTION)
+    if section is None:
+        errors.append(f"missing shared section {RECORD_SECTION!r}")
+        return
+
+    examples = [block.strip() for block in FENCE_RE.findall(section)]
+    if not examples:
+        errors.append(f"{RECORD_SECTION!r} prints no contract example to check")
+        return
+
+    seen: set[str] = set()
+    for example in examples:
+        try:
+            run = review_contract.parse_run_line(example)
+            finding = review_contract.parse_finding_header(example)
+        except review_contract.ContractError as exc:
+            errors.append(f"contract example does not parse: {example!r}: {exc}")
+            continue
+        if run is not None:
+            seen.add(run.kind)
+        elif finding is not None:
+            seen.add("finding")
+        else:
+            errors.append(f"contract example matches no known line kind: {example!r}")
+
+    for kind in ("review", "triage", "finding"):
+        if kind not in seen:
+            errors.append(
+                f"{RECORD_SECTION!r} no longer documents the {kind} line kind"
+            )
+
+
 def validate_manifest(path: Path, expected_name: str) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -256,6 +313,7 @@ def validate_package(root: Path) -> list[str]:
             root, sorted(REQUIRED_SKILLS - LANGUAGE_EXEMPT), SHARED_PUBLISHING_SECTIONS, errors
         )
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
+        check_record_contract(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE
         orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"
@@ -314,7 +372,7 @@ def validate_package(root: Path) -> list[str]:
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        if path.name.endswith(".Zone.Identifier"):
+        if ZONE_IDENTIFIER_RE.search(path.name):
             errors.append(f"remove metadata sidecar before publishing: {path.relative_to(root)}")
             continue
         if path.suffix.lower() not in SCANNED_SUFFIXES:

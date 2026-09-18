@@ -66,8 +66,10 @@ and the final response — in one language, chosen in this order:
 
 Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
 `critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
-`blocks:yes|blocks:no`, every functional status, and every JSON key in
-`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+the disposition `valid|debatable|incorrect|obsolete|needs_clarification|-`,
+`blocks:yes|blocks:no`, the review and triage run lines, every functional status,
+and every JSON key in `ORCHESTRATION_RESULT` stay exactly as written in this
+skill in every language.
 Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
