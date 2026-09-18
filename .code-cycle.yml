@@ -1,0 +1,20 @@
+code_cycle:
+  issue_provider: github
+  code_host: github
+  repository:
+    selector: datacas/code-cycle-toolkit
+    default_branch: main
+  # Experimental candidates for a reviewer comparison that has not run yet.
+  # Neither is the default reviewer and nothing presumes which is better; the
+  # calibration decides that. This is the only place an alias maps to a
+  # provider and model, so a candidate can be swapped without editing a skill.
+  calibration:
+    profiles:
+      reviewer_a:
+        provider: anthropic
+        model: sonnet-5
+        effort: high
+      reviewer_b:
+        provider: openai
+        model: terra
+        effort: high
