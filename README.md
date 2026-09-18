@@ -72,6 +72,8 @@ The toolkit brings its own defaults and adapts to the target repository rather t
 
 **Labels and CI gates are matched by meaning.** Sensitivity triage recognises labels such as `type:security` or `area:auth` as common spellings, not as a required taxonomy, and CI reporting names whatever checks the repository actually defines. When the repository states its own triage triggers, those replace the defaults.
 
+**The security audit runs on a union**, `deterministic_rule OR reviewer_requests_security`. A rule in `security_review.always_when` of `.code-cycle.yml` matches changed paths, filenames and labels; a review may add an audit and may never remove one the rule activated. Skipping it therefore requires both halves to fail at once, and the rule costs nothing to run. A repository that declares no rule keeps the defaults, so a missing configuration is never the unsafe case. `scripts/security_gate.py` is the reference implementation.
+
 **Stacks are detected, not assumed.** Package managers come from lockfiles, test commands from what the project defines, frameworks from what the repository contains.
 
 ## Output language

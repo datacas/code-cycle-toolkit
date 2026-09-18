@@ -89,6 +89,32 @@ code_cycle:
     recheck_on_failure: true
 ```
 
+An optional `security_review` key declares when the security audit always runs,
+regardless of what any model concludes:
+
+```yaml
+code_cycle:
+  security_review:
+    always_when:
+      paths:
+        - "auth/**"
+        - "middleware/**"
+        - "migrations/**"
+        - "routes/**"
+      files:
+        - "package-lock.json"
+        - "requirements.txt"
+        - "Dockerfile"
+        - "*.env.example"
+      labels: ["security", "auth", "data"]
+```
+
+A repository that declares this replaces the defaults entirely; one that declares
+nothing keeps them. Never write an empty block to mean "no rule": absence keeps
+the gate on precisely so that a missing configuration cannot be the unsafe case.
+The list belongs to the repository — review it per project and add whatever
+touches a trust boundary there.
+
 An optional `calibration` key names the experimental reviewer profiles a paired
 review can dispatch. It is the single place an alias maps to a provider, model,
 and effort, so a candidate can be swapped without editing any review skill:
