@@ -53,6 +53,16 @@ USABLE_ISOLATION_MODES = ("isolated", "sequential")
 # relation is recorded rather than corrected for.
 TARGET_RELATIONS = ("self_toolkit", "external_project")
 
+# How the dispositions were produced. A resolver that only classifies and a
+# resolver that has to implement the fix are not judging under the same
+# conditions, so their acceptance rates are separate populations and are never
+# averaged together.
+TRIAGE_MODES = ("blind_pure", "resolution")
+
+# Why the pair was collected. A pair that proves the mechanism works is not
+# automatically a pair that belongs in the sample used to choose a model.
+PAIR_PURPOSES = ("mechanism_validation", "calibration")
+
 _CAMPAIGN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -257,6 +267,7 @@ class Campaign:
         *,
         head_sha: str,
         target_relation: str = "external_project",
+        purpose: str = "calibration",
     ) -> str:
         """Register a paired dispatch before the reviewers run.
 
@@ -273,11 +284,16 @@ class Campaign:
             raise CalibrationError(
                 f"target_relation must be one of {sorted(TARGET_RELATIONS)}: {target_relation!r}"
             )
+        if purpose not in PAIR_PURPOSES:
+            raise CalibrationError(
+                f"purpose must be one of {sorted(PAIR_PURPOSES)}: {purpose!r}"
+            )
         pairs[key] = {
             "state": "dispatched",
             "pair_key": key,
             "change_request_id": change_request_id,
             "target_relation": target_relation,
+            "purpose": purpose,
             "isolation": None,
             "head_sha": head_sha,
             "observed_head_shas": {},
@@ -358,6 +374,7 @@ class Campaign:
             "pair_key": key,
             "change_request_id": change_request_id,
             "target_relation": opened.get("target_relation", "external_project"),
+            "purpose": opened.get("purpose", "calibration"),
             "isolation": isolation,
             "head_sha": head_sha,
             "expected_review_run_ids": sorted(expected),
@@ -376,6 +393,7 @@ class Campaign:
         head_sha: str,
         run: RunLine,
         dispositions: dict[str, str],
+        triage_mode: str,
     ) -> None:
         """Register the resolver that triaged a pair, and what it decided.
 
@@ -386,15 +404,38 @@ class Campaign:
         """
         if run.kind != "triage":
             raise CalibrationError(f"a triage run is required, got {run.id!r}")
+        if triage_mode not in TRIAGE_MODES:
+            raise CalibrationError(
+                f"triage_mode must be one of {sorted(TRIAGE_MODES)}: {triage_mode!r}"
+            )
         if run.triaged_sha != head_sha:
             raise CalibrationError(
                 f"triage anchored to {run.triaged_sha}, not to the pair's head {head_sha}"
             )
-        unknown = sorted(set(dispositions) - set(self._data.get("published", {})))
+        # A blind triage is keyed by the opaque presentation ids the resolver saw,
+        # never by the public ones — that is what kept it blind. Translate back
+        # here so everything downstream compares in one id space.
+        presentation = self._data.get("presentation", {})
+        published = self._data.get("published", {})
+        candidate_to_published = {v: k for k, v in published.items()}
+        normalised: dict[str, str] = {}
+        unknown = []
+        for key, value in dispositions.items():
+            if key in published:
+                normalised[key] = value
+            elif key in presentation:
+                target = candidate_to_published.get(presentation[key])
+                if target is None:
+                    unknown.append(key)
+                else:
+                    normalised[target] = value
+            else:
+                unknown.append(key)
         if unknown:
             raise CalibrationError(
-                "dispositions for findings this pair never published: " + ", ".join(unknown)
+                "dispositions for findings this pair never published: " + ", ".join(sorted(unknown))
             )
+        dispositions = normalised
         key = self.pair_key(change_request_id, head_sha)
         pair = self._data.get("pairs", {}).get(key)
         if pair is None:
@@ -407,9 +448,104 @@ class Campaign:
             "model_resolved": run.model.resolved,
             "effort": run.effort,
             "triaged_sha": run.triaged_sha,
+            "triage_mode": triage_mode,
             "dispositions": dict(dispositions),
         }
         self._save()
+
+    def write_pair_manifest(
+        self,
+        pair_key: str,
+        destination: Path | str,
+        *,
+        root_cause_groups: list[list[str]] | None = None,
+    ) -> Path:
+        """Write a self-contained record of a finished pair, attribution revealed.
+
+        Call it only after the pair is closed and the human matching is done.
+        Until then the map from finding to reviewer is the one thing that must
+        stay hidden, and writing it early would defeat the blinding.
+
+        Afterwards the opposite matters: the experiment should not depend
+        forever on one global store file surviving. This manifest carries
+        everything needed to reconstruct the pair on its own — who reviewed,
+        what they found, what the resolver decided, under which triage mode, and
+        which findings were judged to share a root cause.
+        """
+        pair = self._data.get("pairs", {}).get(pair_key)
+        if pair is None:
+            raise CalibrationError(f"unknown pair: {pair_key!r}")
+        if pair.get("state") != "complete":
+            raise CalibrationError(
+                f"{pair_key} is not closed yet; the manifest reveals attribution"
+            )
+
+        revealed = self.reveal_presentation()
+        triage = pair.get("triage") or {}
+        published = self._data.get("published", {})
+        candidate_to_published = {v: k for k, v in published.items()}
+
+        findings = []
+        for display_id, info in sorted(revealed.items()):
+            candidate = info["candidate_id"]
+            findings.append({
+                "display_id": display_id,
+                "candidate_id": candidate,
+                "published_id": candidate_to_published.get(candidate),
+                "review_run_id": info["review_run_id"],
+                "arm": info["arm"],
+                "disposition": triage.get("dispositions", {}).get(
+                    candidate_to_published.get(candidate, display_id)
+                ),
+            })
+
+        groups = [sorted(g) for g in (root_cause_groups or [])]
+        grouped = {f for g in groups for f in g}
+        by_display = {f["display_id"]: f for f in findings}
+
+        # A shared finding only counts as shared_valid when the resolver accepted
+        # it from every reviewer. Both arms seeing the same defect while
+        # disagreeing on its impact is a different, and more interesting, result
+        # than agreement — so the disagreement is recorded rather than averaged.
+        group_rows = []
+        for index, members in enumerate(groups, 1):
+            dispositions = [by_display[m]["disposition"] for m in members if m in by_display]
+            group_rows.append({
+                "id": f"RC-{index:03d}",
+                "members": members,
+                "arms": sorted({by_display[m]["arm"] for m in members if m in by_display}),
+                "dispositions": {m: by_display[m]["disposition"] for m in members if m in by_display},
+                "shared_valid": bool(dispositions) and all(d == "valid" for d in dispositions),
+                "disposition_agreement": len(set(dispositions)) == 1 if dispositions else None,
+            })
+        manifest = {
+            "schema_version": self.schema_version,
+            "campaign_id": self.campaign_id,
+            "pair_key": pair_key,
+            "change_request_id": pair.get("change_request_id"),
+            "head_sha": pair.get("head_sha"),
+            "target_relation": pair.get("target_relation"),
+            "purpose": pair.get("purpose"),
+            "isolation": pair.get("isolation"),
+            "usable": pair.get("usable"),
+            "excluded_because": pair.get("excluded_because"),
+            "capabilities": self.capabilities(pair_key),
+            "triage_mode": triage.get("triage_mode"),
+            "resolver": {k: triage.get(k) for k in
+                         ("run_id", "profile", "provider", "model_requested",
+                          "model_resolved", "effort", "triaged_sha")} if triage else None,
+            "reviewers": self.runs(),
+            "findings": findings,
+            "root_cause_groups": group_rows,
+            "shared_valid_count": sum(1 for g in group_rows if g["shared_valid"]),
+            "shared": sorted(grouped),
+            "unique": sorted(f["display_id"] for f in findings
+                             if f["display_id"] not in grouped),
+        }
+        out = Path(destination)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return out
 
     def capabilities(self, pair_key: str) -> dict[str, str | None]:
         """Say which metrics a pair can actually support, and why not otherwise.

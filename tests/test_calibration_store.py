@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -233,6 +234,7 @@ class SampleCapabilityTests(unittest.TestCase):
             head_sha=self.HEAD,
             run=self.triage_run(),
             dispositions={"REV-001": "valid", "REV-002": "incorrect"},
+            triage_mode="blind_pure",
         )
 
         self.assertIsNone(self.campaign.capabilities(self.key)["acceptance"])
@@ -244,6 +246,7 @@ class SampleCapabilityTests(unittest.TestCase):
             head_sha=self.HEAD,
             run=self.triage_run(),
             dispositions={"REV-001": "valid"},
+            triage_mode="blind_pure",
         )
 
         reason = self.campaign.capabilities(self.key)["acceptance"]
@@ -256,6 +259,7 @@ class SampleCapabilityTests(unittest.TestCase):
             head_sha=self.HEAD,
             run=self.triage_run(),
             dispositions={"REV-001": "valid", "REV-002": "-"},
+            triage_mode="blind_pure",
         )
 
         self.assertIn("left untriaged", self.campaign.capabilities(self.key)["acceptance"])
@@ -266,6 +270,7 @@ class SampleCapabilityTests(unittest.TestCase):
             head_sha=self.HEAD,
             run=self.triage_run(),
             dispositions={"REV-001": "valid", "REV-002": "incorrect"},
+            triage_mode="blind_pure",
         )
 
         triage = self.campaign.pairs()[self.key]["triage"]
@@ -279,20 +284,21 @@ class SampleCapabilityTests(unittest.TestCase):
         with self.assertRaises(store.CalibrationError):
             self.campaign.record_triage(
                 "4", head_sha=self.HEAD, run=self.triage_run(other),
-                dispositions={"REV-001": "valid"},
+                dispositions={"REV-001": "valid"}, triage_mode="blind_pure",
             )
 
     def test_a_review_run_cannot_pose_as_the_resolver(self) -> None:
         with self.assertRaises(store.CalibrationError):
             self.campaign.record_triage(
-                "4", head_sha=self.HEAD, run=RUN_A, dispositions={"REV-001": "valid"}
+                "4", head_sha=self.HEAD, run=RUN_A,
+                dispositions={"REV-001": "valid"}, triage_mode="blind_pure",
             )
 
     def test_dispositions_for_unpublished_findings_are_refused(self) -> None:
         with self.assertRaises(store.CalibrationError):
             self.campaign.record_triage(
                 "4", head_sha=self.HEAD, run=self.triage_run(),
-                dispositions={"REV-999": "valid"},
+                dispositions={"REV-999": "valid"}, triage_mode="blind_pure",
             )
 
     def test_an_unusable_pair_supports_nothing(self) -> None:
@@ -314,6 +320,111 @@ class SampleCapabilityTests(unittest.TestCase):
     def test_an_unknown_target_relation_is_rejected(self) -> None:
         with self.assertRaises(store.CalibrationError):
             self.campaign.open_pair("9", head_sha=self.HEAD, target_relation="whatever")
+
+
+class PairManifestTests(unittest.TestCase):
+    HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.dir = Path(temporary.name)
+        self.campaign = store.Campaign("CAL-2026-Q4", store_dir=self.dir)
+        self.campaign.record_run(RUN_A, arm="reviewer_a")
+        self.campaign.record_run(RUN_B, arm="reviewer_b")
+        self.campaign.record_candidate("CAL-A001", RUN_A.id)
+        self.campaign.record_candidate("CAL-B001", RUN_B.id)
+        self.key = self.campaign.open_pair(
+            "174", head_sha=self.HEAD, target_relation="external_project",
+            purpose="mechanism_validation",
+        )
+        self.minted = {m["candidate_id"]: m["display_id"] for m in
+                       self.campaign.mint_presentation_ids(["CAL-A001", "CAL-B001"])}
+        self.campaign.bind_published_id("CAL-A001", "REV-001")
+        self.campaign.bind_published_id("CAL-B001", "REV-002")
+
+    def close(self) -> None:
+        self.campaign.record_pair(
+            "174", isolation="isolated", head_sha=self.HEAD,
+            observed_head_shas={RUN_A.id: self.HEAD, RUN_B.id: self.HEAD},
+            expected_review_run_ids=[RUN_A.id, RUN_B.id],
+        )
+        self.campaign.record_triage(
+            "174", head_sha=self.HEAD,
+            run=contract.RunLine(
+                id="CCT-1", profile="senior_reviewer",
+                model=contract.ModelSpec("anthropic", "claude-opus-5", "claude-opus-5"),
+                effort="high", triaged_sha=self.HEAD),
+            dispositions={d: "valid" for d in self.minted.values()},
+            triage_mode="blind_pure",
+        )
+
+    def test_it_refuses_to_reveal_before_the_pair_is_closed(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.write_pair_manifest(self.key, self.dir / "pair_result.json")
+
+    def test_it_is_self_contained_once_closed(self) -> None:
+        self.close()
+
+        out = self.campaign.write_pair_manifest(self.key, self.dir / "pair_result.json")
+        m = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual(self.HEAD, m["head_sha"])
+        self.assertEqual("external_project", m["target_relation"])
+        self.assertEqual("mechanism_validation", m["purpose"])
+        self.assertEqual("blind_pure", m["triage_mode"])
+        self.assertEqual("claude-opus-5", m["resolver"]["model_resolved"])
+        self.assertTrue(m["usable"])
+        arms = sorted(f["arm"] for f in m["findings"])
+        self.assertEqual(["reviewer_a", "reviewer_b"], arms)
+        for f in m["findings"]:
+            self.assertEqual("valid", f["disposition"])
+            self.assertIsNotNone(f["published_id"])
+
+    def test_root_cause_groups_split_shared_from_unique(self) -> None:
+        self.close()
+        both = sorted(self.minted.values())
+
+        out = self.campaign.write_pair_manifest(
+            self.key, self.dir / "pair_result.json", root_cause_groups=[both])
+        m = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual(1, len(m["root_cause_groups"]))
+        group = m["root_cause_groups"][0]
+        self.assertEqual("RC-001", group["id"])
+        self.assertEqual(both, group["members"])
+        self.assertEqual(["reviewer_a", "reviewer_b"], group["arms"])
+        self.assertTrue(group["shared_valid"])
+        self.assertTrue(group["disposition_agreement"])
+        self.assertEqual(both, m["shared"])
+        self.assertEqual([], m["unique"])
+
+    def test_without_groups_every_finding_is_unique(self) -> None:
+        self.close()
+
+        out = self.campaign.write_pair_manifest(self.key, self.dir / "pair_result.json")
+        m = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual([], m["shared"])
+        self.assertEqual(2, len(m["unique"]))
+
+    def test_an_unknown_triage_mode_is_rejected(self) -> None:
+        self.campaign.record_pair(
+            "174", isolation="isolated", head_sha=self.HEAD,
+            observed_head_shas={RUN_A.id: self.HEAD, RUN_B.id: self.HEAD},
+            expected_review_run_ids=[RUN_A.id, RUN_B.id],
+        )
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.record_triage(
+                "174", head_sha=self.HEAD,
+                run=contract.RunLine(id="CCT-1", profile="p",
+                    model=contract.ModelSpec("a", "b", "b"), effort="high",
+                    triaged_sha=self.HEAD),
+                dispositions={}, triage_mode="whatever")
+
+    def test_an_unknown_purpose_is_rejected(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.open_pair("9", head_sha=self.HEAD, purpose="someday")
 
 
 class PairIsolationTests(unittest.TestCase):

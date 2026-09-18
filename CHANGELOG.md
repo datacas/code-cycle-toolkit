@@ -22,6 +22,16 @@ All notable changes to this project are documented here. This project follows
   default. Reviewer isolation is a precondition: a pair is dispatched only with a
   worktree each or strictly sequentially, and the isolation mode and observed head
   SHAs are recorded so a contaminated pair can be excluded later.
+- `Campaign.write_pair_manifest()`: a self-contained record of a finished pair,
+  written only after it closes, so an experiment does not depend forever on one
+  global store file. It carries the revealed attribution, the resolver, the
+  triage mode, and the root-cause groups with `shared_valid` and
+  `disposition_agreement` per group.
+- `triage_mode` on a triage: `blind_pure` when the resolver only classifies,
+  `resolution` when it also implements the fix. Separate populations; their
+  acceptance rates are never averaged together.
+- `purpose` on a pair: `mechanism_validation` or `calibration`. A pair that
+  proves the mechanism works is not automatically a sample for choosing a model.
 - `Campaign.capabilities()` and `pairs_supporting()`: which metrics a given pair
   can support, separately from whether it was collected cleanly. A pair nobody
   triaged feeds coverage and overlap but not acceptance.
