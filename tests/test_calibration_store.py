@@ -322,6 +322,85 @@ class SampleCapabilityTests(unittest.TestCase):
             self.campaign.open_pair("9", head_sha=self.HEAD, target_relation="whatever")
 
 
+class SelectionProtocolTests(unittest.TestCase):
+    PROTOCOL = {
+        "purpose": "calibration",
+        "eligible_repos": ["org/one", "org/two"],
+        "exclusions": ["bot", "docs_only", "trivial"],
+        "selection_rule": "rank by sha256(campaign_id + ':' + identity), take quota per repo",
+        "target_samples": 16,
+        "quota": {"org/one": 8, "org/two": 8},
+    }
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.dir = Path(temporary.name)
+        self.campaign = store.Campaign("CAL-2027-Q1", store_dir=self.dir)
+        self.candidates = {
+            "org/one": [f"org/one#{i}" for i in range(1, 31)],
+            "org/two": [f"org/two#{i}" for i in range(1, 21)],
+        }
+
+    def test_selection_requires_a_frozen_protocol(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+    def test_the_protocol_cannot_be_redefined(self) -> None:
+        self.campaign.set_protocol(self.PROTOCOL)
+        self.campaign.set_protocol(dict(self.PROTOCOL))  # identical is fine
+
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.set_protocol({**self.PROTOCOL, "target_samples": 40})
+
+    def test_selection_is_deterministic_and_survives_a_resume(self) -> None:
+        self.campaign.set_protocol(self.PROTOCOL)
+        first = self.campaign.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        resumed = store.Campaign("CAL-2027-Q1", store_dir=self.dir)
+        second = resumed.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        self.assertEqual(first, second)
+
+    def test_each_repository_gets_its_own_quota(self) -> None:
+        self.campaign.set_protocol(self.PROTOCOL)
+
+        chosen = self.campaign.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        self.assertEqual(8, len(chosen["org/one"]))
+        self.assertEqual(8, len(chosen["org/two"]))
+        self.assertTrue(set(chosen["org/one"]).issubset(self.candidates["org/one"]))
+
+    def test_a_different_campaign_selects_a_different_sample(self) -> None:
+        self.campaign.set_protocol(self.PROTOCOL)
+        mine = self.campaign.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        other = store.Campaign("CAL-2027-Q2", store_dir=self.dir)
+        other.set_protocol(self.PROTOCOL)
+        theirs = other.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        self.assertNotEqual(mine["org/one"], theirs["org/one"])
+
+    def test_every_candidate_decision_is_recorded_not_only_the_chosen(self) -> None:
+        self.campaign.set_protocol(self.PROTOCOL)
+        self.campaign.select_samples(self.candidates, self.PROTOCOL["quota"])
+
+        log = self.campaign.selection_log()
+
+        self.assertEqual(50, len(log))
+        self.assertEqual(16, sum(1 for v in log.values() if v["selected"]))
+        rejected = next(v for v in log.values() if not v["selected"])
+        self.assertIn("rank", rejected)
+        self.assertIn("score", rejected)
+
+    def test_the_score_ignores_anything_readable_about_the_change(self) -> None:
+        a = self.campaign.selection_score("org/one#7")
+        b = self.campaign.selection_score("org/one#7")
+
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, self.campaign.selection_score("org/one#8"))
+
+
 class PairManifestTests(unittest.TestCase):
     HEAD = "0123456789abcdef0123456789abcdef01234567"
 

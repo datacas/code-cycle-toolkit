@@ -21,6 +21,7 @@ skill contract. The campaign ends; the contract does not.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -247,6 +248,71 @@ class Campaign:
             )
         published[finding_id] = candidate_id
         self._save()
+
+    def set_protocol(self, protocol: dict) -> None:
+        """Freeze how this campaign chooses its samples, before it chooses any.
+
+        Recorded rather than applied and forgotten: three months from now the
+        question will be why a given change request entered the sample or did
+        not, and the honest answer has to be checkable rather than remembered.
+
+        Once set it is not changed. Redefining eligibility or the rule partway
+        through is the same as choosing samples by hand, only harder to notice.
+        """
+        existing = self._data.get("protocol")
+        if existing is not None and existing != protocol:
+            raise CalibrationError(
+                "this campaign already has a protocol; a campaign that redefines "
+                "its own selection rule is choosing its samples by hand"
+            )
+        self._data["protocol"] = protocol
+        self._save()
+
+    @property
+    def protocol(self) -> dict | None:
+        return self._data.get("protocol")
+
+    def selection_score(self, identity: str) -> str:
+        """Deterministic, campaign-scoped, and independent of anything readable.
+
+        The score depends only on the campaign id and the change request's
+        identity, so it cannot follow from how interesting the change looks —
+        which is exactly the bias manual picking introduces.
+        """
+        return hashlib.sha256(f"{self.campaign_id}:{identity}".encode()).hexdigest()
+
+    def select_samples(
+        self, candidates: dict[str, list[str]], quota: dict[str, int]
+    ) -> dict[str, list[str]]:
+        """Rank each repository's eligible candidates by score and take its quota.
+
+        Ranking rather than a modulo threshold because the target is a sample
+        size, not a sampling fraction: a threshold either overshoots or leaves
+        the campaign short, and adjusting it afterwards to get the right count
+        would reintroduce the choice it exists to remove.
+
+        Every decision is recorded, including the ones that were not selected.
+        """
+        if self.protocol is None:
+            raise CalibrationError("freeze the protocol before selecting samples")
+        chosen: dict[str, list[str]] = {}
+        decisions = self._data.setdefault("selection", {})
+        for repo, identities in candidates.items():
+            ranked = sorted(identities, key=self.selection_score)
+            take = ranked[: quota.get(repo, 0)]
+            chosen[repo] = take
+            for rank, identity in enumerate(ranked, 1):
+                decisions[identity] = {
+                    "repo": repo,
+                    "score": self.selection_score(identity)[:16],
+                    "rank": rank,
+                    "selected": identity in take,
+                }
+        self._save()
+        return chosen
+
+    def selection_log(self) -> dict[str, dict]:
+        return json.loads(json.dumps(self._data.get("selection", {})))
 
     @staticmethod
     def pair_key(change_request_id: str, head_sha: str) -> str:

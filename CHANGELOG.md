@@ -22,6 +22,12 @@ All notable changes to this project are documented here. This project follows
   default. Reviewer isolation is a precondition: a pair is dispatched only with a
   worktree each or strictly sequentially, and the isolation mode and observed head
   SHAs are recorded so a contaminated pair can be excluded later.
+- `Campaign.set_protocol()`, `select_samples()` and `selection_log()`: the
+  eligible universe, the exclusions and the selection rule are frozen before any
+  sample is drawn, and every candidate's decision is recorded — not only the
+  chosen ones — so why a change request entered the sample stays checkable.
+  Selection ranks by a campaign-scoped hash of the identity, which cannot follow
+  from how interesting a change looks. The protocol refuses to be redefined.
 - `Campaign.write_pair_manifest()`: a self-contained record of a finished pair,
   written only after it closes, so an experiment does not depend forever on one
   global store file. It carries the revealed attribution, the resolver, the
