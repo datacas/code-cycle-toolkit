@@ -44,8 +44,10 @@ and the final response — in one language, chosen in this order:
 
 Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
 `critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
-`blocks:yes|blocks:no`, every functional status, and every JSON key in
-`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+the disposition `valid|debatable|incorrect|obsolete|needs_clarification|-`,
+`blocks:yes|blocks:no`, the review and triage run lines, every functional status,
+and every JSON key in `ORCHESTRATION_RESULT` stay exactly as written in this
+skill in every language.
 Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
@@ -86,6 +88,30 @@ code_cycle:
     cache_ttl: 7d
     recheck_on_failure: true
 ```
+
+An optional `calibration` key names the experimental reviewer profiles a paired
+review can dispatch. It is the single place an alias maps to a provider, model,
+and effort, so a candidate can be swapped without editing any review skill:
+
+```yaml
+code_cycle:
+  calibration:
+    profiles:
+      reviewer_a:
+        provider: anthropic
+        model: sonnet-5
+        effort: high
+      reviewer_b:
+        provider: openai
+        model: terra
+        effort: high
+```
+
+These two aliases are experimental candidates for a reviewer comparison, not a
+recommendation and not a general profile system. Neither is the default reviewer,
+and nothing in the toolkit presumes which one is better. The keys map one to one
+onto the tokens of a review run line. Read them when a run asks for a paired
+review; a normal cycle ignores them, and their absence is not an error.
 
 Preserve unrelated keys when updating the file. Never write access tokens,
 passwords, private keys, client secrets, or connector credentials. Provider

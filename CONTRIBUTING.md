@@ -36,7 +36,8 @@ clearly examples and the instruction requires natural wording in the selected
 language. The opt-in trigger list may quote phrases a user could type.
 
 **Machine-readable tokens stay in English.** `REV-xxx`, the severities, finding
-statuses, `blocks:yes|blocks:no`, functional statuses, JSON keys, and enum-like
+statuses, the dispositions `valid|debatable|incorrect|obsolete|needs_clarification|-`,
+`blocks:yes|blocks:no`, the review and triage run lines, functional statuses, JSON keys, and enum-like
 values are part of the parsing contract. Free-text JSON values such as
 `summary`, `reason`, and `error` follow the selected output language.
 

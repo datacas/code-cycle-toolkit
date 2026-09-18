@@ -58,8 +58,10 @@ and the final response — in one language, chosen in this order:
 
 Machine-readable tokens never translate. The `REV-xxx` identifier, the severity
 `critical|high|medium|low`, the finding status `open|resolved|not_applicable`,
-`blocks:yes|blocks:no`, every functional status, and every JSON key in
-`ORCHESTRATION_RESULT` stay exactly as written in this skill in every language.
+the disposition `valid|debatable|incorrect|obsolete|needs_clarification|-`,
+`blocks:yes|blocks:no`, the review and triage run lines, every functional status,
+and every JSON key in `ORCHESTRATION_RESULT` stay exactly as written in this
+skill in every language.
 Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-text
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
@@ -108,6 +110,8 @@ Parse the invocation, for example:
 | `reviewer` | `claude` | Agent that reviews and rereviews. |
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `merge` | `manual` | Fixed. Automatic merge is not implemented. |
+| `paired_review` | `false` | Dispatch two reviewers over one commit for calibration. See *Paired review*. |
+| `campaign` | none | Campaign identifier, required when `paired_review=true`. |
 
 `repo` and the provider fields exist because a work-item identifier alone is
 ambiguous whenever the environment holds more than one repository or service.
@@ -204,9 +208,12 @@ When enabled, the worker emits the block once inside the change-request
 comment, then returns only the comment URL; recovery source 3 below reads it from that
 comment body. A worker that ends `BLOCKED` or `FAILED`, or that could not
 publish, emits it in its response instead. Either way, a worker that publishes
-its comment gives every finding the `[REV-xxx] · severity · status · blocks:yes|no`
-header, so a spec that forgets to ask for the block still leaves recoverable
-state.
+its comment gives every finding the
+`[REV-xxx] · severity · status · disposition · blocks:yes|no` header and opens it
+with a `[CCR-xxx]` run line, so a spec that forgets to ask for the block still
+leaves recoverable state. A finding header carrying four tokens and no
+disposition comes from a change request older than that contract and stays
+valid; read it as `-` rather than treating the worker as failed.
 
 Every Task spec must also demand a result file. It needs one run-scoped results
 directory outside every repository working tree, so a report is never staged,
@@ -298,6 +305,84 @@ Never infer `APPROVED`, `CHANGES_REQUESTED`, `RESOLVED`, `PARTIALLY_RESOLVED`,
 `BLOCKED`, or `FAILED` from free terminal text, from a `worker_done` subject or
 body, or from the Orca `--outcome` alone. Those are signals about the worker;
 the functional status comes only from the structured result.
+
+## Paired review
+
+Off unless the invocation asks for it with `paired_review=true` and names the
+campaign. A normal cycle never dispatches two reviewers, and nothing below
+changes the default flow.
+
+It exists to compare two reviewers on identical input: both read the same commit,
+neither sees the other, and their findings are merged before anyone triages them.
+Resolve `reviewer_a` and `reviewer_b` from `.code-cycle.yml`; stop with `BLOCKED`
+when the campaign names a profile that file does not define, rather than
+substituting a model.
+
+Dispatch one review Task per profile, both pinned to the same base and head SHA
+and given the same work item and provider context. Each opens its own review run
+and emits its own `CCR-xxx` line. Ask each for candidate identifiers from the
+campaign's opaque namespace — `CAL-001`, `CAL-002` — instead of public
+`REV-xxx` IDs, so the two reviewers never compete for the same ID space before
+their lists are merged. Keep the candidate-to-run map in the campaign store
+outside every repository; it is what lets an interrupted campaign resume, and it
+is the one fact the published comment cannot yet carry.
+
+Then merge both lists, shuffle them, assign public `REV-xxx` IDs, and hand that
+single list to one resolution Task. The resolver triages without knowing who
+wrote what. That is the point: the disposition must measure the finding, not its
+author.
+
+Publish the attribution block only after the blind triage, the frozen
+dispositions, and the human matching of root causes are all done. Matching with
+the authors visible biases less than judging validity with them visible, but it
+still biases. Do not ask a worker to decide whether two findings are the same
+root cause; that judgement is the user's, and automating it would put an
+unverified gate inside the measuring instrument.
+
+### Isolation is an invariant, not a preference
+
+Two reviewers that share a worktree while either runs execution-backed
+validation contaminate each other, and a contaminated pair is worse than a
+missing one: it enters the sample looking like evidence. So this is a
+precondition checked before dispatch, not advice.
+
+Resolve the isolation mode first, and dispatch only one of these two:
+
+```text
+isolated                              sequential
+HEAD abc123                           HEAD abc123
+ ├── worktree-a → reviewer_a           reviewer_a → done → head SHA confirmed
+ └── worktree-b → reviewer_b           reviewer_b → done → head SHA confirmed
+ (concurrent)                          (never concurrent)
+```
+
+Prefer `isolated`: give each reviewer its own worktree at the same head SHA when
+the installed Orca contract provides one. Otherwise use `sequential`, and start
+the second reviewer only after the first has finished and its head SHA has been
+confirmed unchanged.
+
+Stop with `BLOCKED` rather than dispatching when neither mode can be established.
+Two reviewers concurrently in one worktree is not a degraded mode of this skill;
+it is a state it refuses to enter.
+
+### Non-mutation is checked, not assumed
+
+Nothing here can force a worker to leave the tree untouched. The review skills
+neither commit nor push, so the invariant is verified instead: record the head
+SHA before each reviewer and confirm it is unchanged afterwards.
+
+If it moved, that pair is not comparable. Discard it, record why, and say so;
+never report it as a paired result. In `sequential` mode this check is also the
+gate that releases the second reviewer.
+
+Record the isolation mode and both head SHAs in the campaign store alongside the
+attribution. A later analysis has to be able to tell an isolated pair from a
+sequential one, and to exclude a pair whose head moved — a pair that cannot be
+told apart afterwards cannot be excluded either.
+
+The campaign store, the candidate namespace, and the attribution block are
+calibration scaffolding with an end date. They are not part of the permanent
+contract the review skills share.
 
 ## Decisions
 

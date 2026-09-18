@@ -85,7 +85,7 @@ Skills write published text — pull-request comments, thread replies, commit me
 
 So a Spanish repository gets Spanish reviews without configuration, and an explicit `lang=` always wins.
 
-Machine-readable tokens never translate, in any language: the `REV-xxx` identifier, the severities `critical|high|medium|low`, the finding statuses `open|resolved|not_applicable`, `blocks:yes|blocks:no`, functional statuses, JSON keys, and enum-like values inside `ORCHESTRATION_RESULT`. Free-text values such as `summary`, `reason`, and `error` use the selected language. That keeps the structured result parseable without forcing human-readable prose into English.
+Machine-readable tokens never translate, in any language: the `REV-xxx` identifier, the severities `critical|high|medium|low`, the finding statuses `open|resolved|not_applicable`, the dispositions `valid|debatable|incorrect|obsolete|needs_clarification|-`, `blocks:yes|blocks:no`, the review and triage run lines, functional statuses, JSON keys, and enum-like values inside `ORCHESTRATION_RESULT`. Free-text values such as `summary`, `reason`, and `error` use the selected language. That keeps the structured result parseable without forcing human-readable prose into English.
 
 ## Requirements
 
@@ -448,7 +448,9 @@ Use cc-initial-review on pull request 456 with lang=en.
 ## Result and review conventions
 
 - Review findings use stable IDs such as `REV-001`.
-- Every published finding carries the header `#### [REV-004] · medium · open · blocks:yes — Short title`, whose four leading tokens stay in English in every language. This is what makes a published comment recoverable by the next run.
+- Every published finding carries the header `#### [REV-004] · medium · resolved · valid · blocks:yes — Short title`, whose five leading tokens stay in English in every language. This is what makes a published comment recoverable by the next run.
+- The fourth token is the disposition: what the first resolver made of the finding, frozen from then on. A reviewer publishes `-`, meaning not triaged yet. A header with four tokens and no disposition predates this contract, reads as `-`, and is never a reason to block an open change request.
+- Each published review opens with a run line such as `#### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1`, and a resolver adds a `[CCT-xxx]` line carrying the commit every finding was judged against. See [docs/instrumentation.md](docs/instrumentation.md).
 - `ORCHESTRATION_RESULT` is opt-in: it is emitted only when requested, when a delegated host contract requires it, or when the status is `BLOCKED`/`FAILED` and no comment could serve as the record.
 - Both orchestrators return the same result envelope, so one consumer parses either.
 - The configured code host remains authoritative for change-request state, comments, threads, commits, and CI; the configured issue provider remains authoritative for work-item state.
@@ -461,6 +463,7 @@ Run the package validator before publishing or creating a release:
 
 ```bash
 python3 scripts/validate-package.py
+python3 -m unittest discover -s tests
 ```
 
 On Windows, use:

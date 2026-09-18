@@ -5,7 +5,43 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- Finding headers carry a disposition token: `#### [REV-004] · medium · resolved · valid · blocks:yes — Short title`.
+  It records what the first resolver made of the finding, independently of what
+  happened to the code.
+- A review run line opens every published review, identifying the run, profile,
+  requested and resolved model, effort, and schema version.
+- A triage run line records the commit every finding was judged against, so a
+  frozen triage is verifiable rather than merely asserted.
+- `scripts/review_contract.py`, the reference parser for the published record,
+  and `scripts/calibration_store.py`, the out-of-repository attribution store for
+  an experimental paired review.
+- Optional `calibration.profiles` in `.code-cycle.yml`, and `paired_review` in
+  `cc-orca-orchestrator`, for dispatching two reviewers over one commit. Off by
+  default. Reviewer isolation is a precondition: a pair is dispatched only with a
+  worktree each or strictly sequentially, and the isolation mode and observed head
+  SHAs are recorded so a contaminated pair can be excluded later.
+- `docs/instrumentation.md`.
+
+### Changed
+
+- `cc-resolve-comments` classifies every finding against one commit and records
+  the dispositions before it edits any code, instead of triaging and fixing one
+  finding at a time.
+- A disposition is assigned once and preserved verbatim afterwards; `cc-rereview`
+  republishes it unchanged.
+- `ORCHESTRATION_RESULT` mirrors the run identity and `finding_outcomes` when it
+  is enabled. `resolved_findings` and `unresolved_findings` are unchanged.
+- The package validator checks the documented contract against its parser.
+- The validator now catches a Windows `Zone.Identifier` sidecar written with a
+  colon, the form that actually reaches WSL trees; the previous check only
+  matched a dot and let it through.
+
+### Compatibility
+
+- Finding headers with four tokens and no disposition stay valid and read as
+  not triaged. No open change request needs migrating.
 
 ## [0.2.0] - 2026-09-10
 
