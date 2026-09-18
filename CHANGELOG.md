@@ -38,6 +38,16 @@ All notable changes to this project are documented here. This project follows
   colon, the form that actually reaches WSL trees; the previous check only
   matched a dot and let it through.
 
+### Fixed
+
+- `record_pair()` accepted a pair as usable when only one reviewer had been
+  observed, or when the single observation named a run that was never
+  dispatched. It now requires the observed set to match the expected review runs
+  exactly, and records which run is missing or unexpected. Found by the first
+  real paired campaign: both calibration reviewers reported the one-sided case
+  independently, and the unattributable-observation case surfaced while verifying
+  their reports.
+
 ### Compatibility
 
 - Finding headers with four tokens and no disposition stay valid and read as

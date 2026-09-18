@@ -172,6 +172,11 @@ Non-mutation is verified rather than assumed. Nothing can force a worker to leav
 the tree untouched, so the head SHA is recorded before each reviewer and
 confirmed afterwards; a pair whose head moved is not comparable.
 
+A pair counts only when the set of observed reviewer runs matches the expected
+set exactly. Checking that *some* observation exists is not enough: a one-sided
+review, or an observation from a run nobody dispatched, would otherwise sit in
+the sample next to complete pairs and be indistinguishable from them.
+
 Both facts are stored with the attribution. `usable_pairs()` is the single
 definition of a valid sample, and the only thing a later analysis reads to build
 one: `pairs()` exists for diagnosis, not as a gate. Keeping one definition in one

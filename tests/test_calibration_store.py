@@ -135,11 +135,22 @@ class PairIsolationTests(unittest.TestCase):
         self.head = "0123456789abcdef0123456789abcdef01234567"
         self.moved = "89abcdef0123456789abcdef0123456789abcdef"
 
-    def record(self, isolation: str, observed: dict[str, str] | None = None) -> bool:
+    def record(
+        self,
+        isolation: str,
+        observed: dict[str, str] | None = None,
+        expected: list[str] | None = None,
+    ) -> bool:
         if observed is None:
             observed = {RUN_A.id: self.head, RUN_B.id: self.head}
+        if expected is None:
+            expected = [RUN_A.id, RUN_B.id]
         return self.campaign.record_pair(
-            "123", isolation=isolation, head_sha=self.head, observed_head_shas=observed
+            "123",
+            isolation=isolation,
+            head_sha=self.head,
+            observed_head_shas=observed,
+            expected_review_run_ids=expected,
         )
 
     def test_separate_worktrees_are_usable(self) -> None:
@@ -162,6 +173,42 @@ class PairIsolationTests(unittest.TestCase):
 
         self.assertFalse(usable)
         self.assertEqual([RUN_B.id], self.campaign.pairs()["123"]["head_drifted_for"])
+
+    def test_a_one_sided_review_is_not_a_pair(self) -> None:
+        """Both reviewers found this independently on the first real campaign."""
+        usable = self.record("isolated", observed={RUN_A.id: self.head})
+
+        self.assertFalse(usable)
+        self.assertEqual([], self.campaign.usable_pairs())
+        self.assertIn("no head SHA was observed after", self.campaign.excluded_pairs()["123"])
+        self.assertIn(RUN_B.id, self.campaign.excluded_pairs()["123"])
+
+    def test_an_unattributable_observation_does_not_stand_in_for_a_reviewer(self) -> None:
+        """Found while verifying the reported defect; no reviewer reported this one.
+
+        One entry in the mapping used to be enough, even when it named a run that
+        was never dispatched.
+        """
+        usable = self.record("isolated", observed={"CCR-NEVER-DISPATCHED": self.head})
+
+        self.assertFalse(usable)
+        reason = self.campaign.excluded_pairs()["123"]
+        self.assertIn("did not expect", reason)
+        self.assertIn("no head SHA was observed after", reason)
+
+    def test_an_expected_run_that_was_never_registered_is_refused(self) -> None:
+        usable = self.record(
+            "isolated",
+            observed={RUN_A.id: self.head, "CCR-GHOST": self.head},
+            expected=[RUN_A.id, "CCR-GHOST"],
+        )
+
+        self.assertFalse(usable)
+        self.assertIn("not registered", self.campaign.excluded_pairs()["123"])
+
+    def test_a_pair_must_expect_at_least_one_run(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.record("isolated", expected=[])
 
     def test_an_unknown_isolation_mode_is_rejected(self) -> None:
         with self.assertRaises(store.CalibrationError):

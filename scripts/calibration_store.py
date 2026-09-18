@@ -212,6 +212,7 @@ class Campaign:
         isolation: str,
         head_sha: str,
         observed_head_shas: dict[str, str],
+        expected_review_run_ids: list[str] | set[str] | tuple[str, ...],
     ) -> bool:
         """Record how one paired change request was dispatched, and whether it counts.
 
@@ -219,32 +220,57 @@ class Campaign:
         its own worktree, or one strictly after the other. Two reviewers sharing a
         worktree concurrently is not a degraded pair, it is not a pair at all.
 
-        The head SHA observed after each reviewer must still be the one they were
-        given. A reviewer that moved the branch reviewed something its counterpart
-        did not.
+        The observed set must match the expected set exactly. Checking merely that
+        some observation exists is not enough: a pair where one reviewer never
+        reported is a one-sided review, and counting it would put a sample with a
+        missing arm next to complete ones, indistinguishable. An unknown run id
+        fails for the same reason — an observation nobody can attribute proves
+        nothing about the reviewers that were supposed to run.
 
-        Both facts are stored rather than merely enforced: an analysis that cannot
+        Each observed SHA must still be the one the reviewers were given. A
+        reviewer that moved the branch reviewed something its counterpart did not.
+
+        Every reason is stored rather than merely enforced: an analysis that cannot
         tell a contaminated pair from a clean one cannot drop it either.
         """
         if isolation not in ISOLATION_MODES:
             raise CalibrationError(
                 f"isolation must be one of {sorted(ISOLATION_MODES)}: {isolation!r}"
             )
+        expected = set(expected_review_run_ids)
+        if not expected:
+            raise CalibrationError("a pair must expect at least one review run")
+
+        observed = set(observed_head_shas)
+        known = set(self._data["runs"])
+        reasons = []
+
+        if isolation not in USABLE_ISOLATION_MODES:
+            reasons.append(f"reviewers were not isolated ({isolation})")
+
+        unregistered = sorted(expected - known)
+        if unregistered:
+            reasons.append("expected runs are not registered: " + ", ".join(unregistered))
+
+        missing = sorted(expected - observed)
+        if missing:
+            reasons.append("no head SHA was observed after " + ", ".join(missing))
+
+        unexpected = sorted(observed - expected)
+        if unexpected:
+            reasons.append("observations from runs this pair did not expect: " + ", ".join(unexpected))
+
         drifted = sorted(
             run_id for run_id, seen in observed_head_shas.items() if seen != head_sha
         )
-        reasons = []
-        if isolation not in USABLE_ISOLATION_MODES:
-            reasons.append(f"reviewers were not isolated ({isolation})")
         if drifted:
             reasons.append("head moved during " + ", ".join(drifted))
-        if not observed_head_shas:
-            reasons.append("no head SHA was observed after the reviewers")
 
         self._data.setdefault("pairs", {})[change_request_id] = {
             "state": "complete",
             "isolation": isolation,
             "head_sha": head_sha,
+            "expected_review_run_ids": sorted(expected),
             "observed_head_shas": dict(observed_head_shas),
             "head_drifted_for": drifted,
             "usable": not reasons,
