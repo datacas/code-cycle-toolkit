@@ -332,6 +332,20 @@ their lists are merged. Keep the candidate-to-run map in the campaign store
 outside every repository; it is what lets an interrupted campaign resume, and it
 is the one fact the published comment cannot yet carry.
 
+Take `model_resolved` from the dispatch receipt, never from the worker. An agent
+asked which model it is answers from its own configuration, and that answer has
+been observed to disagree with what was actually launched — which is exactly the
+drift the field exists to expose. Record what the executor reports; when it
+reports nothing, record `?`. A worker's self-report is diagnostic, never
+authoritative.
+
+Give the human who matches root causes an opaque identifier per finding, minted
+here at merge time — `F-7K2P`, `F-Q91M` — and never the reviewers' own numbering.
+Labelling the two lists, even as X and Y, leaks the count per reviewer, and a
+count is enough to attribute them. Present the findings in one shuffled list with
+no grouping and no totals per arm; the map from opaque id back to run stays in the
+campaign store until the matching is closed.
+
 A calibration reviewer does not publish a comment. This is the single exception
 to the publishing rule above, and it is not a convenience: a reviewer that
 publishes is visible to the other, and one that is visible is not a second

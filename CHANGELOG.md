@@ -22,6 +22,9 @@ All notable changes to this project are documented here. This project follows
   default. Reviewer isolation is a precondition: a pair is dispatched only with a
   worktree each or strictly sequentially, and the isolation mode and observed head
   SHAs are recorded so a contaminated pair can be excluded later.
+- `Campaign.mint_presentation_ids()` and `reveal_presentation()`: opaque
+  per-finding identifiers for blind root-cause matching, so neither the labels
+  nor the count per reviewer can attribute a finding before the matching closes.
 - `docs/instrumentation.md`.
 
 ### Changed
@@ -40,6 +43,13 @@ All notable changes to this project are documented here. This project follows
 
 ### Fixed
 
+- A pair is now identified by change request and commit, not change request
+  alone. A second campaign on the same change request at a new commit used to
+  collide with the first, so a crashed dispatch left no row at all behind a row
+  still marked usable.
+- `model_resolved` comes from the executor's dispatch receipt. Workers were
+  asked to report their own model and got it wrong in both arms of the first
+  campaign, which is the drift the field exists to detect.
 - `record_pair()` accepted a pair as usable when only one reviewer had been
   observed, or when the single observation named a run that was never
   dispatched. It now requires the observed set to match the expected review runs

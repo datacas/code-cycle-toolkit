@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -169,6 +170,55 @@ class Campaign:
             arm=self._data["runs"][review_run_id]["arm"],
         )
 
+    def mint_presentation_ids(self, candidate_ids: list[str] | tuple[str, ...]) -> list[dict]:
+        """Give each finding an opaque id and return them in shuffled order.
+
+        The human who matches root causes must not be able to tell which reviewer
+        wrote what. Two labelled lists fail at this even when the labels are
+        meaningless, because the count per label attributes them: four findings
+        under one label and one under the other identifies both arms to anyone
+        who knows how many each produced.
+
+        So there are no labels and no groups. One shuffled list of opaque ids,
+        minted here rather than by the reviewers, and the map back to each run
+        stays in this store until the matching is closed.
+        """
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no look-alike characters
+        presentation = self._data.setdefault("presentation", {})
+        rows = []
+        for candidate_id in candidate_ids:
+            if candidate_id not in self._data["candidates"]:
+                raise CalibrationError(f"unknown candidate: {candidate_id!r}")
+            existing = next(
+                (k for k, v in presentation.items() if v == candidate_id), None
+            )
+            if existing is None:
+                while True:
+                    existing = "F-" + "".join(
+                        secrets.choice(alphabet) for _ in range(4)
+                    )
+                    if existing not in presentation:
+                        break
+                presentation[existing] = candidate_id
+            rows.append({"display_id": existing, "candidate_id": candidate_id})
+        secrets.SystemRandom().shuffle(rows)
+        self._save()
+        return rows
+
+    def reveal_presentation(self) -> dict[str, dict[str, str]]:
+        """Resolve opaque ids back to reviewer runs. Call only after matching."""
+        out = {}
+        for display_id, candidate_id in sorted(
+            self._data.get("presentation", {}).items()
+        ):
+            run_id = self._data["candidates"][candidate_id]
+            out[display_id] = {
+                "candidate_id": candidate_id,
+                "review_run_id": run_id,
+                "arm": self._data["runs"][run_id]["arm"],
+            }
+        return out
+
     def bind_published_id(self, candidate_id: str, finding_id: str) -> None:
         """Record the public `REV-xxx` a candidate received once merged."""
         if candidate_id not in self._data["candidates"]:
@@ -183,7 +233,20 @@ class Campaign:
         published[finding_id] = candidate_id
         self._save()
 
-    def open_pair(self, change_request_id: str, *, head_sha: str) -> None:
+    @staticmethod
+    def pair_key(change_request_id: str, head_sha: str) -> str:
+        """Identify a pair by the change request *and* the commit it reviewed.
+
+        Keying by change request alone loses a campaign: a second pair on the
+        same change request at a new commit would collide with the first, and
+        because an existing row is never overwritten, a later dispatch that
+        crashed would leave no row at all — behind a row still marked usable
+        from the previous commit. That is precisely the guarantee `open_pair`
+        exists to provide, so the commit belongs in the identity.
+        """
+        return f"{change_request_id}@{head_sha[:7]}"
+
+    def open_pair(self, change_request_id: str, *, head_sha: str) -> str:
         """Register a paired dispatch before the reviewers run.
 
         A pair starts excluded and earns its way in. Recording only on success
@@ -191,11 +254,14 @@ class Campaign:
         and an absent row reads as "never attempted", which is a different
         claim from "attempted and unusable".
         """
+        key = self.pair_key(change_request_id, head_sha)
         pairs = self._data.setdefault("pairs", {})
-        if change_request_id in pairs:
-            return
-        pairs[change_request_id] = {
+        if key in pairs:
+            return key
+        pairs[key] = {
             "state": "dispatched",
+            "pair_key": key,
+            "change_request_id": change_request_id,
             "isolation": None,
             "head_sha": head_sha,
             "observed_head_shas": {},
@@ -204,6 +270,7 @@ class Campaign:
             "excluded_because": "dispatch did not complete",
         }
         self._save()
+        return key
 
     def record_pair(
         self,
@@ -266,8 +333,11 @@ class Campaign:
         if drifted:
             reasons.append("head moved during " + ", ".join(drifted))
 
-        self._data.setdefault("pairs", {})[change_request_id] = {
+        key = self.pair_key(change_request_id, head_sha)
+        self._data.setdefault("pairs", {})[key] = {
             "state": "complete",
+            "pair_key": key,
+            "change_request_id": change_request_id,
             "isolation": isolation,
             "head_sha": head_sha,
             "expected_review_run_ids": sorted(expected),

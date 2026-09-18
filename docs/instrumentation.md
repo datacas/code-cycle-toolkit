@@ -85,6 +85,12 @@ mixes two anchors.
 when they match, and writes `?` for the resolved side when the host does not
 report which model ran.
 
+`model_resolved` comes from the executor's dispatch receipt, never from the agent.
+An agent asked which model it is answers from its own configuration — the very
+thing under suspicion when an alias is repointed — and has been observed to
+disagree with what was actually launched. When the executor reports nothing, the
+value is `?`; the agent does not get to fill that gap.
+
 A constant shape is easier to parse than an optional arrow, and it separates two
 different facts: `sonnet-5→sonnet-5` states that nothing drifted, while
 `sonnet-5→?` states that we cannot know. Aliases are updated behind the scenes,
@@ -171,6 +177,17 @@ missing one: it enters the sample looking like evidence.
 Non-mutation is verified rather than assumed. Nothing can force a worker to leave
 the tree untouched, so the head SHA is recorded before each reviewer and
 confirmed afterwards; a pair whose head moved is not comparable.
+
+A pair is identified by change request *and* commit. Keying by change request
+alone would let a second campaign at a new commit collide with the first: an
+existing row is never overwritten, so a later dispatch that crashed would leave
+no row at all, hidden behind a row still marked usable from the previous commit.
+
+Findings reach the person matching root causes as one shuffled list of opaque
+ids minted by the orchestrator — `F-7K2P` — with no labels, no groups and no
+totals per reviewer. Labelled lists leak even when the labels are meaningless,
+because the count per label attributes them. The map back to each run stays in
+the campaign store until the matching is closed.
 
 A pair counts only when the set of observed reviewer runs matches the expected
 set exactly. Checking that *some* observation exists is not enough: a one-sided

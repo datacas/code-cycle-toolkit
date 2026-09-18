@@ -188,10 +188,13 @@ produced the findings below it:
 
 Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
 the effort, and the schema version. Both sides of the arrow are always written,
-including when they match. When the host does not report which model actually
-ran, write `?` as the resolved model rather than guessing: a constant shape stays
-parseable, and it keeps "it did not change" distinct from "we cannot know whether
-it changed". The rule is about the line, not about who writes it. A skill that
+including when they match. `model_requested` is what the profile asked for.
+`model_resolved` is what the executor reports having launched, and nothing else:
+an agent asked to name its own model answers from its own configuration, which is
+the very thing under suspicion when an alias is repointed. When the executor
+reports nothing, write `?` rather than letting the agent fill the gap — a constant
+shape stays parseable, and it keeps "it did not change" distinct from "we cannot
+know whether it changed". The rule is about the line, not about who writes it. A skill that
 opens a review run emits one with a new ID, because a single change request
 accumulates several reviews; a skill that only republishes or transports that
 state never invents one.

@@ -125,6 +125,64 @@ class CampaignStoreTests(unittest.TestCase):
         self.assertNotIn("token", raw)
 
 
+class PresentationIdTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.campaign = store.Campaign("CAL-2026-Q3", store_dir=Path(temporary.name))
+        self.campaign.record_run(RUN_A, arm="reviewer_a")
+        self.campaign.record_run(RUN_B, arm="reviewer_b")
+        # Four from one arm and one from the other: the shape that leaked before.
+        self.a = ["CAL-A001", "CAL-A002", "CAL-A003", "CAL-A004"]
+        self.b = ["CAL-B001"]
+        for c in self.a:
+            self.campaign.record_candidate(c, RUN_A.id)
+        for c in self.b:
+            self.campaign.record_candidate(c, RUN_B.id)
+
+    def test_ids_carry_no_arm_and_no_ordering(self) -> None:
+        rows = self.campaign.mint_presentation_ids(self.a + self.b)
+
+        ids = [r["display_id"] for r in rows]
+        self.assertEqual(5, len(ids))
+        self.assertEqual(len(ids), len(set(ids)))
+        for display in ids:
+            self.assertRegex(display, r"^F-[A-Z2-9]{4}$")
+        # nothing in the row itself says which reviewer produced it
+        self.assertEqual({"display_id", "candidate_id"}, set(rows[0]))
+
+    def test_minting_is_stable_across_calls(self) -> None:
+        first = {r["candidate_id"]: r["display_id"] for r in
+                 self.campaign.mint_presentation_ids(self.a + self.b)}
+        second = {r["candidate_id"]: r["display_id"] for r in
+                  self.campaign.mint_presentation_ids(self.a + self.b)}
+
+        self.assertEqual(first, second)
+
+    def test_the_map_survives_a_resume(self) -> None:
+        minted = {r["candidate_id"]: r["display_id"] for r in
+                  self.campaign.mint_presentation_ids(self.a + self.b)}
+
+        resumed = store.Campaign("CAL-2026-Q3", store_dir=self.campaign.store_dir)
+        revealed = resumed.reveal_presentation()
+
+        self.assertEqual(5, len(revealed))
+        for candidate, display in minted.items():
+            self.assertEqual(candidate, revealed[display]["candidate_id"])
+
+    def test_reveal_maps_back_to_the_producing_arm(self) -> None:
+        self.campaign.mint_presentation_ids(self.a + self.b)
+
+        revealed = self.campaign.reveal_presentation()
+        arms = sorted(v["arm"] for v in revealed.values())
+
+        self.assertEqual(["reviewer_a"] * 4 + ["reviewer_b"], arms)
+
+    def test_an_unknown_candidate_cannot_be_presented(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.mint_presentation_ids(["CAL-NOPE"])
+
+
 class PairIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -134,6 +192,7 @@ class PairIsolationTests(unittest.TestCase):
         self.campaign.record_run(RUN_B, arm="reviewer_b")
         self.head = "0123456789abcdef0123456789abcdef01234567"
         self.moved = "89abcdef0123456789abcdef0123456789abcdef"
+        self.key = store.Campaign.pair_key("123", self.head)
 
     def record(
         self,
@@ -155,7 +214,7 @@ class PairIsolationTests(unittest.TestCase):
 
     def test_separate_worktrees_are_usable(self) -> None:
         self.assertTrue(self.record("isolated"))
-        self.assertEqual(["123"], self.campaign.usable_pairs())
+        self.assertEqual([self.key], self.campaign.usable_pairs())
 
     def test_sequential_dispatch_is_usable(self) -> None:
         self.assertTrue(self.record("sequential"))
@@ -164,7 +223,7 @@ class PairIsolationTests(unittest.TestCase):
         self.assertFalse(self.record("shared_concurrent"))
 
         self.assertEqual([], self.campaign.usable_pairs())
-        self.assertIn("123", self.campaign.pairs())
+        self.assertIn(self.key, self.campaign.pairs())
 
     def test_a_reviewer_that_moved_the_head_voids_the_pair(self) -> None:
         usable = self.record(
@@ -172,7 +231,7 @@ class PairIsolationTests(unittest.TestCase):
         )
 
         self.assertFalse(usable)
-        self.assertEqual([RUN_B.id], self.campaign.pairs()["123"]["head_drifted_for"])
+        self.assertEqual([RUN_B.id], self.campaign.pairs()[self.key]["head_drifted_for"])
 
     def test_a_one_sided_review_is_not_a_pair(self) -> None:
         """Both reviewers found this independently on the first real campaign."""
@@ -180,8 +239,8 @@ class PairIsolationTests(unittest.TestCase):
 
         self.assertFalse(usable)
         self.assertEqual([], self.campaign.usable_pairs())
-        self.assertIn("no head SHA was observed after", self.campaign.excluded_pairs()["123"])
-        self.assertIn(RUN_B.id, self.campaign.excluded_pairs()["123"])
+        self.assertIn("no head SHA was observed after", self.campaign.excluded_pairs()[self.key])
+        self.assertIn(RUN_B.id, self.campaign.excluded_pairs()[self.key])
 
     def test_an_unattributable_observation_does_not_stand_in_for_a_reviewer(self) -> None:
         """Found while verifying the reported defect; no reviewer reported this one.
@@ -192,7 +251,7 @@ class PairIsolationTests(unittest.TestCase):
         usable = self.record("isolated", observed={"CCR-NEVER-DISPATCHED": self.head})
 
         self.assertFalse(usable)
-        reason = self.campaign.excluded_pairs()["123"]
+        reason = self.campaign.excluded_pairs()[self.key]
         self.assertIn("did not expect", reason)
         self.assertIn("no head SHA was observed after", reason)
 
@@ -204,11 +263,28 @@ class PairIsolationTests(unittest.TestCase):
         )
 
         self.assertFalse(usable)
-        self.assertIn("not registered", self.campaign.excluded_pairs()["123"])
+        self.assertIn("not registered", self.campaign.excluded_pairs()[self.key])
 
     def test_a_pair_must_expect_at_least_one_run(self) -> None:
         with self.assertRaises(store.CalibrationError):
             self.record("isolated", expected=[])
+
+    def test_a_second_campaign_on_the_same_change_request_is_its_own_pair(self) -> None:
+        """Keying by change request alone would hide the second attempt.
+
+        A later campaign at a new commit that crashes before `record_pair` must
+        leave its own excluded row, not sit silently behind the usable row of
+        the previous commit.
+        """
+        self.assertTrue(self.record("isolated"))
+
+        second = store.Campaign.pair_key("123", self.moved)
+        self.campaign.open_pair("123", head_sha=self.moved)
+
+        self.assertNotEqual(self.key, second)
+        self.assertEqual([self.key], self.campaign.usable_pairs())
+        self.assertIn(second, self.campaign.excluded_pairs())
+        self.assertIn("did not complete", self.campaign.excluded_pairs()[second])
 
     def test_an_unknown_isolation_mode_is_rejected(self) -> None:
         with self.assertRaises(store.CalibrationError):
@@ -218,14 +294,14 @@ class PairIsolationTests(unittest.TestCase):
         self.campaign.open_pair("123", head_sha=self.head)
 
         self.assertEqual([], self.campaign.usable_pairs())
-        self.assertIn("123", self.campaign.excluded_pairs())
-        self.assertIn("did not complete", self.campaign.excluded_pairs()["123"])
+        self.assertIn(self.key, self.campaign.excluded_pairs())
+        self.assertIn("did not complete", self.campaign.excluded_pairs()[self.key])
 
     def test_opening_then_completing_a_pair_makes_it_usable(self) -> None:
         self.campaign.open_pair("123", head_sha=self.head)
 
         self.assertTrue(self.record("isolated"))
-        self.assertEqual(["123"], self.campaign.usable_pairs())
+        self.assertEqual([self.key], self.campaign.usable_pairs())
         self.assertEqual({}, self.campaign.excluded_pairs())
 
     def test_reopening_never_discards_a_recorded_verdict(self) -> None:
@@ -233,12 +309,12 @@ class PairIsolationTests(unittest.TestCase):
 
         self.campaign.open_pair("123", head_sha=self.head)
 
-        self.assertEqual(["123"], self.campaign.usable_pairs())
+        self.assertEqual([self.key], self.campaign.usable_pairs())
 
     def test_every_exclusion_states_its_reason(self) -> None:
         self.record("shared_concurrent", observed={RUN_A.id: self.moved})
 
-        reason = self.campaign.excluded_pairs()["123"]
+        reason = self.campaign.excluded_pairs()[self.key]
 
         self.assertIn("not isolated", reason)
         self.assertIn("head moved", reason)
@@ -249,7 +325,7 @@ class PairIsolationTests(unittest.TestCase):
         resumed = store.Campaign("CAL-2026-Q3", store_dir=self.campaign.store_dir)
 
         self.assertEqual([], resumed.usable_pairs())
-        self.assertEqual("shared_concurrent", resumed.pairs()["123"]["isolation"])
+        self.assertEqual("shared_concurrent", resumed.pairs()[self.key]["isolation"])
 
 
 class AttributionBlockTests(unittest.TestCase):
