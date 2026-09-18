@@ -31,7 +31,9 @@ All notable changes to this project are documented here. This project follows
   `resolution` when it also implements the fix. Separate populations; their
   acceptance rates are never averaged together.
 - `purpose` on a pair: `mechanism_validation` or `calibration`. A pair that
-  proves the mechanism works is not automatically a sample for choosing a model.
+  proves the mechanism works is not automatically a sample for choosing a model,
+  and `pairs_supporting()` filters by it so the exclusion does not depend on
+  whoever writes the analysis remembering.
 - `Campaign.capabilities()` and `pairs_supporting()`: which metrics a given pair
   can support, separately from whether it was collected cleanly. A pair nobody
   triaged feeds coverage and overlap but not acceptance.

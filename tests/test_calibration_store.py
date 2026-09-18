@@ -422,6 +422,18 @@ class PairManifestTests(unittest.TestCase):
                     triaged_sha=self.HEAD),
                 dispositions={}, triage_mode="whatever")
 
+    def test_a_mechanism_validation_pair_is_excluded_from_calibration(self) -> None:
+        self.close()
+
+        self.assertEqual([], self.campaign.pairs_supporting("acceptance"))
+        self.assertEqual(
+            [self.key],
+            self.campaign.pairs_supporting("acceptance", purpose="mechanism_validation"),
+        )
+        self.assertEqual(
+            [self.key], self.campaign.pairs_supporting("acceptance", purpose=None)
+        )
+
     def test_an_unknown_purpose_is_rejected(self) -> None:
         with self.assertRaises(store.CalibrationError):
             self.campaign.open_pair("9", head_sha=self.HEAD, purpose="someday")

@@ -581,10 +581,21 @@ class Campaign:
                 out["acceptance"] = None
         return out
 
-    def pairs_supporting(self, metric: str) -> list[str]:
-        """Pairs a given metric may legitimately be computed from."""
+    def pairs_supporting(
+        self, metric: str, *, purpose: str = "calibration"
+    ) -> list[str]:
+        """Pairs a given metric may legitimately be computed from.
+
+        Filtered by purpose as well as by capability. A pair collected to prove
+        the mechanism works is excluded here rather than left for whoever writes
+        the analysis to remember — which is the failure `purpose` exists to
+        prevent. Pass `purpose=None` to ignore the distinction deliberately.
+        """
+        pairs = self._data.get("pairs", {})
         return sorted(
-            key for key in self.usable_pairs() if self.capabilities(key).get(metric) is None
+            key for key in self.usable_pairs()
+            if self.capabilities(key).get(metric) is None
+            and (purpose is None or pairs[key].get("purpose", "calibration") == purpose)
         )
 
     def usable_pairs(self) -> list[str]:
