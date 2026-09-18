@@ -151,6 +151,10 @@ branch. Use `--worktree current` when the active worktree is the target
 repository; otherwise create the worker's worktree explicitly once and keep
 every later Task there.
 
+Calibration reviewers are the exception, and for the opposite reason: they write
+nothing, so they do not need the shared branch, and they must not disturb each
+other. See *Paired review*.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs. If it returns
@@ -196,7 +200,8 @@ so workers do not repeat startup discovery.
 
 `worker-start --inject` supplies the worker contract that puts those skills in
 orchestrated mode. Never tell a worker to skip publishing its change-request
-comment.
+comment. The one exception is a calibration reviewer, for the reason given in
+*Paired review*: two reviewers that publish cannot stay blind to each other.
 
 In those skills the `ORCHESTRATION_RESULT` block is opt-in, off by default, and
 orchestration no longer enables it on its own: the two axes are independent.
@@ -326,6 +331,15 @@ campaign's opaque namespace — `CAL-001`, `CAL-002` — instead of public
 their lists are merged. Keep the candidate-to-run map in the campaign store
 outside every repository; it is what lets an interrupted campaign resume, and it
 is the one fact the published comment cannot yet carry.
+
+A calibration reviewer does not publish a comment. This is the single exception
+to the publishing rule above, and it is not a convenience: a reviewer that
+publishes is visible to the other, and one that is visible is not a second
+opinion. Each writes its findings to its result file instead, and the coordinator
+publishes once, after merging.
+
+That also makes the result file mandatory for these Tasks rather than merely
+useful, so ask each reviewer for the structured block explicitly.
 
 Then merge both lists, shuffle them, assign public `REV-xxx` IDs, and hand that
 single list to one resolution Task. The resolver triages without knowing who
