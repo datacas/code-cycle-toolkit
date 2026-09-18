@@ -183,6 +183,139 @@ class PresentationIdTests(unittest.TestCase):
             self.campaign.mint_presentation_ids(["CAL-NOPE"])
 
 
+class SampleCapabilityTests(unittest.TestCase):
+    """A clean pair is not automatically a pair every metric can use."""
+
+    HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.campaign = store.Campaign("CAL-2026-Q3", store_dir=Path(temporary.name))
+        self.campaign.record_run(RUN_A, arm="reviewer_a")
+        self.campaign.record_run(RUN_B, arm="reviewer_b")
+        self.campaign.record_candidate("CAL-A001", RUN_A.id)
+        self.campaign.record_candidate("CAL-B001", RUN_B.id)
+        self.key = self.campaign.open_pair(
+            "4", head_sha=self.HEAD, target_relation="self_toolkit"
+        )
+        self.campaign.bind_published_id("CAL-A001", "REV-001")
+        self.campaign.bind_published_id("CAL-B001", "REV-002")
+        self.campaign.record_pair(
+            "4",
+            isolation="isolated",
+            head_sha=self.HEAD,
+            observed_head_shas={RUN_A.id: self.HEAD, RUN_B.id: self.HEAD},
+            expected_review_run_ids=[RUN_A.id, RUN_B.id],
+        )
+
+    def triage_run(self, sha: str | None = None) -> contract.RunLine:
+        return contract.RunLine(
+            id="CCT-20260918-001",
+            profile="cheap_coder",
+            model=contract.ModelSpec("openai", "gpt-5.6-luna", "gpt-5.6-luna"),
+            effort="high",
+            triaged_sha=sha or self.HEAD,
+        )
+
+    def test_an_untriaged_pair_supports_coverage_but_not_acceptance(self) -> None:
+        caps = self.campaign.capabilities(self.key)
+
+        self.assertIsNone(caps["coverage"])
+        self.assertIsNone(caps["overlap"])
+        self.assertIn("no resolver triaged", caps["acceptance"])
+        self.assertEqual([self.key], self.campaign.pairs_supporting("coverage"))
+        self.assertEqual([], self.campaign.pairs_supporting("acceptance"))
+
+    def test_a_fully_triaged_pair_supports_acceptance(self) -> None:
+        self.campaign.record_triage(
+            "4",
+            head_sha=self.HEAD,
+            run=self.triage_run(),
+            dispositions={"REV-001": "valid", "REV-002": "incorrect"},
+        )
+
+        self.assertIsNone(self.campaign.capabilities(self.key)["acceptance"])
+        self.assertEqual([self.key], self.campaign.pairs_supporting("acceptance"))
+
+    def test_a_partially_triaged_pair_does_not_support_acceptance(self) -> None:
+        self.campaign.record_triage(
+            "4",
+            head_sha=self.HEAD,
+            run=self.triage_run(),
+            dispositions={"REV-001": "valid"},
+        )
+
+        reason = self.campaign.capabilities(self.key)["acceptance"]
+        self.assertIn("never triaged", reason)
+        self.assertIn("REV-002", reason)
+
+    def test_a_finding_left_as_untriaged_does_not_count(self) -> None:
+        self.campaign.record_triage(
+            "4",
+            head_sha=self.HEAD,
+            run=self.triage_run(),
+            dispositions={"REV-001": "valid", "REV-002": "-"},
+        )
+
+        self.assertIn("left untriaged", self.campaign.capabilities(self.key)["acceptance"])
+
+    def test_the_resolver_identity_is_recorded_beside_the_reviewers(self) -> None:
+        self.campaign.record_triage(
+            "4",
+            head_sha=self.HEAD,
+            run=self.triage_run(),
+            dispositions={"REV-001": "valid", "REV-002": "incorrect"},
+        )
+
+        triage = self.campaign.pairs()[self.key]["triage"]
+        self.assertEqual("cheap_coder", triage["profile"])
+        self.assertEqual("gpt-5.6-luna", triage["model_resolved"])
+        self.assertEqual(self.HEAD, triage["triaged_sha"])
+
+    def test_triage_anchored_to_another_commit_is_refused(self) -> None:
+        other = "89abcdef0123456789abcdef0123456789abcdef"
+
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.record_triage(
+                "4", head_sha=self.HEAD, run=self.triage_run(other),
+                dispositions={"REV-001": "valid"},
+            )
+
+    def test_a_review_run_cannot_pose_as_the_resolver(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.record_triage(
+                "4", head_sha=self.HEAD, run=RUN_A, dispositions={"REV-001": "valid"}
+            )
+
+    def test_dispositions_for_unpublished_findings_are_refused(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.record_triage(
+                "4", head_sha=self.HEAD, run=self.triage_run(),
+                dispositions={"REV-999": "valid"},
+            )
+
+    def test_an_unusable_pair_supports_nothing(self) -> None:
+        other = "89abcdef0123456789abcdef0123456789abcdef"
+        key = self.campaign.open_pair("5", head_sha=other)
+        self.campaign.record_pair(
+            "5", isolation="shared_concurrent", head_sha=other,
+            observed_head_shas={RUN_A.id: other, RUN_B.id: other},
+            expected_review_run_ids=[RUN_A.id, RUN_B.id],
+        )
+
+        caps = self.campaign.capabilities(key)
+
+        self.assertTrue(all(v is not None for v in caps.values()))
+
+    def test_the_target_relation_is_recorded(self) -> None:
+        self.assertEqual("self_toolkit", self.campaign.pairs()[self.key]["target_relation"])
+
+    def test_an_unknown_target_relation_is_rejected(self) -> None:
+        with self.assertRaises(store.CalibrationError):
+            self.campaign.open_pair("9", head_sha=self.HEAD, target_relation="whatever")
+
+
 class PairIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()

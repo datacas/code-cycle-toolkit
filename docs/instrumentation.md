@@ -194,6 +194,22 @@ set exactly. Checking that *some* observation exists is not enough: a one-sided
 review, or an observation from a run nobody dispatched, would otherwise sit in
 the sample next to complete pairs and be indistinguishable from them.
 
+A clean pair is not automatically a pair every metric can use. `usable_pairs()`
+answers one question — was this collected cleanly — and `capabilities()` answers
+a different one: which metrics this pair can actually support, with the reason
+when it cannot. A pair whose findings no resolver triaged supports coverage and
+overlap but not acceptance, and `pairs_supporting("acceptance")` leaves it out
+rather than letting the sample claim information it never produced.
+
+`target_relation` records whose code was under review. A toolkit reviewing itself
+cannot separate "this reviewer is better" from "this reviewer wrote that code".
+The relation is recorded, not corrected for.
+
+The resolver is part of the instrument too: `record_triage()` stores its profile,
+provider, requested and resolved model, effort, and the commit it judged, beside
+the reviewers' own runs. It decides whether each reviewer was right, so keeping
+it fixed across campaigns is what makes the reviewers comparable at all.
+
 Both facts are stored with the attribution. `usable_pairs()` is the single
 definition of a valid sample, and the only thing a later analysis reads to build
 one: `pairs()` exists for diagnosis, not as a gate. Keeping one definition in one

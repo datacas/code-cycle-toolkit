@@ -22,6 +22,14 @@ All notable changes to this project are documented here. This project follows
   default. Reviewer isolation is a precondition: a pair is dispatched only with a
   worktree each or strictly sequentially, and the isolation mode and observed head
   SHAs are recorded so a contaminated pair can be excluded later.
+- `Campaign.capabilities()` and `pairs_supporting()`: which metrics a given pair
+  can support, separately from whether it was collected cleanly. A pair nobody
+  triaged feeds coverage and overlap but not acceptance.
+- `Campaign.record_triage()`: the resolver's identity and the commit it judged,
+  recorded beside the reviewers'. The resolver decides whether each reviewer was
+  right, so it belongs in the instrument's record.
+- `target_relation` on a pair: whether the reviewers were judging their own
+  toolkit or an external project.
 - `Campaign.mint_presentation_ids()` and `reveal_presentation()`: opaque
   per-finding identifiers for blind root-cause matching, so neither the labels
   nor the count per reviewer can attribute a finding before the matching closes.

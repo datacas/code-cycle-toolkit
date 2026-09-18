@@ -48,6 +48,11 @@ APP_DIRNAME = "code-cycle-toolkit"
 ISOLATION_MODES = ("isolated", "sequential", "shared_concurrent")
 USABLE_ISOLATION_MODES = ("isolated", "sequential")
 
+# Whose code the reviewers were judging. A toolkit reviewing itself cannot
+# separate "this reviewer is better" from "this reviewer wrote that code", so the
+# relation is recorded rather than corrected for.
+TARGET_RELATIONS = ("self_toolkit", "external_project")
+
 _CAMPAIGN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -246,7 +251,13 @@ class Campaign:
         """
         return f"{change_request_id}@{head_sha[:7]}"
 
-    def open_pair(self, change_request_id: str, *, head_sha: str) -> str:
+    def open_pair(
+        self,
+        change_request_id: str,
+        *,
+        head_sha: str,
+        target_relation: str = "external_project",
+    ) -> str:
         """Register a paired dispatch before the reviewers run.
 
         A pair starts excluded and earns its way in. Recording only on success
@@ -258,10 +269,15 @@ class Campaign:
         pairs = self._data.setdefault("pairs", {})
         if key in pairs:
             return key
+        if target_relation not in TARGET_RELATIONS:
+            raise CalibrationError(
+                f"target_relation must be one of {sorted(TARGET_RELATIONS)}: {target_relation!r}"
+            )
         pairs[key] = {
             "state": "dispatched",
             "pair_key": key,
             "change_request_id": change_request_id,
+            "target_relation": target_relation,
             "isolation": None,
             "head_sha": head_sha,
             "observed_head_shas": {},
@@ -334,10 +350,14 @@ class Campaign:
             reasons.append("head moved during " + ", ".join(drifted))
 
         key = self.pair_key(change_request_id, head_sha)
-        self._data.setdefault("pairs", {})[key] = {
+        pairs = self._data.setdefault("pairs", {})
+        # Keep what open_pair recorded before the reviewers ran.
+        opened = pairs.get(key, {})
+        pairs[key] = {
             "state": "complete",
             "pair_key": key,
             "change_request_id": change_request_id,
+            "target_relation": opened.get("target_relation", "external_project"),
             "isolation": isolation,
             "head_sha": head_sha,
             "expected_review_run_ids": sorted(expected),
@@ -348,6 +368,88 @@ class Campaign:
         }
         self._save()
         return not reasons
+
+    def record_triage(
+        self,
+        change_request_id: str,
+        *,
+        head_sha: str,
+        run: RunLine,
+        dispositions: dict[str, str],
+    ) -> None:
+        """Register the resolver that triaged a pair, and what it decided.
+
+        The resolver is part of the instrument, not a neutral observer: it is the
+        one deciding whether each reviewer was right, so its identity belongs in
+        the record beside the reviewers'. Keep it fixed across campaigns — moving
+        the scorer and the candidates at the same time makes neither measurable.
+        """
+        if run.kind != "triage":
+            raise CalibrationError(f"a triage run is required, got {run.id!r}")
+        if run.triaged_sha != head_sha:
+            raise CalibrationError(
+                f"triage anchored to {run.triaged_sha}, not to the pair's head {head_sha}"
+            )
+        unknown = sorted(set(dispositions) - set(self._data.get("published", {})))
+        if unknown:
+            raise CalibrationError(
+                "dispositions for findings this pair never published: " + ", ".join(unknown)
+            )
+        key = self.pair_key(change_request_id, head_sha)
+        pair = self._data.get("pairs", {}).get(key)
+        if pair is None:
+            raise CalibrationError(f"unknown pair: {key!r}")
+        pair["triage"] = {
+            "run_id": run.id,
+            "profile": run.profile,
+            "provider": run.model.provider,
+            "model_requested": run.model.requested,
+            "model_resolved": run.model.resolved,
+            "effort": run.effort,
+            "triaged_sha": run.triaged_sha,
+            "dispositions": dict(dispositions),
+        }
+        self._save()
+
+    def capabilities(self, pair_key: str) -> dict[str, str | None]:
+        """Say which metrics a pair can actually support, and why not otherwise.
+
+        `usable_pairs()` answers one question: was this pair collected cleanly.
+        That is not the same as "this pair can feed any metric". A clean pair
+        whose findings were never triaged supports coverage and overlap but not
+        acceptance, and treating the two as one concept would let a sample claim
+        information it never produced.
+        """
+        pair = self._data.get("pairs", {}).get(pair_key)
+        if pair is None:
+            raise CalibrationError(f"unknown pair: {pair_key!r}")
+        if not pair.get("usable"):
+            blocked = pair.get("excluded_because") or "pair is not usable"
+            return {k: blocked for k in ("coverage", "overlap", "acceptance")}
+
+        out: dict[str, str | None] = {"coverage": None, "overlap": None}
+        triage = pair.get("triage")
+        published = self._data.get("published", {})
+        if not triage:
+            out["acceptance"] = "no resolver triaged this pair; dispositions are '-'"
+        else:
+            missing = sorted(set(published) - set(triage["dispositions"]))
+            untriaged = sorted(
+                f for f, d in triage["dispositions"].items() if d == "-"
+            )
+            if missing:
+                out["acceptance"] = "findings never triaged: " + ", ".join(missing)
+            elif untriaged:
+                out["acceptance"] = "findings left untriaged: " + ", ".join(untriaged)
+            else:
+                out["acceptance"] = None
+        return out
+
+    def pairs_supporting(self, metric: str) -> list[str]:
+        """Pairs a given metric may legitimately be computed from."""
+        return sorted(
+            key for key in self.usable_pairs() if self.capabilities(key).get(metric) is None
+        )
 
     def usable_pairs(self) -> list[str]:
         """The only definition of a valid sample. Read nothing else to build one.
