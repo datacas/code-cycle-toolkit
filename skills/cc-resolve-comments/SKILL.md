@@ -316,7 +316,10 @@ After the fixes are locally coherent:
    comment.
 2. Fix confirmed P0 and P1 findings that remain within the user's authorized
    scope, adding regression tests.
-3. Repeat sensitivity triage against the changed files and PR labels, using
+3. Repeat sensitivity triage against the changed files and PR labels,
+   evaluating the deterministic rule in `security_review.always_when` first and
+   adding your own judgement on top. You may add a security audit and may never
+   remove one the rule activated. Use
    the repository's own triggers when it defines any and the defaults of
    `cc-initial-review` when it does not.
 4. Run `cc-security-review` when the fixes touch authentication, authorization,

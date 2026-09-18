@@ -277,7 +277,10 @@ intermediate reviews.
 5. Apply the project's current change-request review workflow to the current
    change request
    state.
-6. Repeat sensitivity triage against the current files and labels, using the
+6. Repeat sensitivity triage against the current files and labels, evaluating
+   the deterministic rule in `security_review.always_when` first and adding your
+   own judgement on top. You may add a security audit and may never remove one
+   the rule activated. Use the
    repository's own triggers when it defines any and the defaults of
    `cc-initial-review` when it does not.
 7. Run `cc-security-review` when triage activates it; otherwise record

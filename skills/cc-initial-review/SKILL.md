@@ -280,7 +280,8 @@ intermediate reviews.
    current review workflow.
 5. Consolidate findings by root cause. Do not lower severity merely because
    another pass did not report the same finding.
-6. Perform sensitivity triage against both the changed files and PR labels.
+6. Perform sensitivity triage: evaluate the deterministic rule against the
+   changed paths, filenames and labels, then add your own judgement on top.
 7. Validate actionable findings by execution when the verification preflight
    succeeds.
 8. Inspect the current CI state.
@@ -303,7 +304,29 @@ continue to a resolution task.
 
 ## Sensitivity triage
 
-Treat the change request as sensitive when it touches
+The audit runs on a union, and the deterministic half comes first:
+
+```text
+security_required = deterministic_rule OR reviewer_requests_security
+```
+
+Evaluate the rule in `security_review.always_when` of `.code-cycle.yml` against
+the changed paths, the changed filenames, and the change-request labels. When a
+repository declares no rule, use the defaults below — an absent configuration
+must never be the case that silently disables the gate.
+
+**You may add a security audit. You may never remove one the rule activated.**
+That asymmetry is the whole mechanism. This skill coordinates and does not
+redefine review criteria, so it is the wrong place to decide that the most
+expensive check in the cycle can be skipped: that judgement has no verifier, and
+a false negative here happens before any careful model sees the change. With the
+union, skipping requires the rule and the reviewer to fail at the same time, and
+the rule costs nothing to run.
+
+State which half fired. When the rule activated the audit, name the paths, files
+or labels that matched; when only your own reading did, say so.
+
+Beyond the rule, treat the change request as sensitive when it touches
 authentication, sessions, tokens, authorization, roles, policies, user input,
 validation, public APIs, uploads or downloads, personal data, privacy, exports,
 retention, jobs with private data, CORS, cookies, headers, observability,
@@ -324,9 +347,10 @@ surfaces of whatever stack the repository uses, plus environment templates,
 lockfiles, package manifests, and CI workflows when the diff touches them. Do
 not classify by filename alone.
 
-If no trigger applies, record explicitly, in the language chosen by *Output
-language*, that triage found no sensitive change and the security audit was
-therefore skipped. Use wording natural to that language. For example, in
+If neither the rule nor your own reading applies, record explicitly, in the
+language chosen by *Output language*, that triage found no sensitive change and
+the security audit was therefore skipped. A rule match is not overridable by
+this record: when the rule fired, the audit ran, and the comment says so. Use wording natural to that language. For example, in
 English:
 
 ```text

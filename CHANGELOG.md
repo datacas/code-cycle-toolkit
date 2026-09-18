@@ -89,6 +89,26 @@ All notable changes to this project are documented here. This project follows
 - Finding headers with four tokens and no disposition stay valid and read as
   not triaged. No open change request needs migrating.
 
+## [Unreleased]
+
+### Added
+
+- A deterministic security gate: `security_required = deterministic_rule OR
+  reviewer_requests_security`. A rule in `security_review.always_when` of
+  `.code-cycle.yml` matches changed paths, filenames and labels, and
+  `scripts/security_gate.py` is its reference implementation. A repository that
+  declares no rule keeps the defaults, so a missing configuration cannot be the
+  case that silently disables the audit.
+
+### Changed
+
+- Sensitivity triage in `cc-initial-review`, `cc-rereview` and
+  `cc-resolve-comments` evaluates that rule first and adds the model's judgement
+  on top. A review may add a security audit and may never remove one the rule
+  activated: the coordinator was the cheapest component in the cycle deciding
+  whether its most expensive check ran, on a semantic judgement nothing verified.
+  Skipping now requires the rule and the reviewer to fail at the same time.
+
 ## [0.2.0] - 2026-09-10
 
 ### Added
