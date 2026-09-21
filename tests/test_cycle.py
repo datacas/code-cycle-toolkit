@@ -25,8 +25,10 @@ class ScriptedAdapter(ex.Adapter):
         self._availability = availability
         self._outcomes = list(outcomes or [])
         self.dispatched = []
+        self.probes = 0
 
     def probe(self):
+        self.probes += 1
         return ex.ProbeResult(self.name, self._availability, "scripted",
                               provable_ceiling=self.provable_ceiling)
 
@@ -258,6 +260,36 @@ class RerouteRecordingTests(CycleTestCase):
         self.assertEqual(1, len(self.store.rows("owner/repo")))
         self.assertFalse(outcome.rerouted)
         self.assertEqual([], claude.dispatched)
+
+
+class ProbeTests(CycleTestCase):
+    """One probe map for the whole cycle, or the decisions stop being comparable."""
+
+    def test_the_probes_it_was_given_are_the_ones_every_stage_uses(self) -> None:
+        codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
+        registry = ex.Registry([codex, claude])
+        probes = registry.probe_all()
+        before = (codex.probes, claude.probes)
+
+        recorder = cy.CycleRecorder(
+            self.store, "owner/repo", "API-055", router.TaskSignals(),
+            availability=registry.availability(ex.ReadinessPolicy.ATTEMPT, probes),
+            registry=registry, probes=probes,
+        )
+        recorder.stage("implement", "work")
+        recorder.stage("review", "review")
+
+        self.assertEqual(before, (codex.probes, claude.probes))
+
+    def test_without_them_a_dispatch_has_to_find_out_for_itself(self) -> None:
+        """Stated so the difference is visible: this is the behaviour the
+        orchestration contract tells a run not to rely on."""
+        codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude])
+
+        recorder.stage("implement", "work")
+
+        self.assertGreater(codex.probes, 0)
 
 
 class BlockedRoutingTests(CycleTestCase):

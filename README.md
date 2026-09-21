@@ -307,6 +307,21 @@ toolkit's files and not the target project's. A symlink on any path the
 installer writes to is refused rather than followed: installing into a
 repository is not authority to modify a file elsewhere on the disk.
 
+Running one work item through a recorded cycle is `run_cycle.py`, in that same
+directory:
+
+```bash
+python3 ~/.code-cycle/runtime/run_cycle.py \
+  --repo owner/name --task API-7 --difficulty 2 --verifiability auto
+```
+
+It probes the executors once, labels the work before routing anything, and runs
+`implement → review → (resolve → rereview)*` with every stage going through the
+recorder, so no dispatch can happen without leaving a row. It reads each
+review's verdict from the structured result it asks the executor to emit, and
+stops when that block is absent rather than guessing from an exit code. It
+decides nothing else: no cost model, no learning, no rule that changes itself.
+
 Pass `--no-runtime` on Bash or `-NoRuntime` on PowerShell to install the skills
 alone. An installation without the runtime records nothing: `first_pass_rate()`
 stays unmeasured, and the orchestrator is told to say so rather than report a

@@ -68,6 +68,20 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- `scripts/run_cycle.py`, the production wiring: probe once, label the work,
+  then `implement → review → (resolve → rereview)*` with every stage through
+  `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and
+  reads each review's verdict from the structured result it asks the executor to
+  emit rather than inferring one from an exit code, stopping when that block is
+  absent. Until it existed the recorder had no caller outside its tests, so the
+  guarantee that a dispatch cannot skip its row applied to nothing.
+- `CycleRecorder` takes the probe map and passes it to every dispatch. Without
+  it each dispatch probed again on its own, so an availability could change
+  between two stages with nothing recording that it had.
+- `tests/test_installed_cycle.py` runs the entrypoint from an installed layout
+  with fake agent binaries on `PATH` and reads the rows back out of SQLite,
+  including the abandoned attempt and the fallback decision after an exhausted
+  window.
 - Both installers carry the runtime, not the skills alone: `.code-cycle/runtime`
   under the home directory or the project root, one copy per scope rather than
   one per host. `scripts/runtime.manifest` is the single list both read, so they

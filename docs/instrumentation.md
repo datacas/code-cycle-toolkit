@@ -472,6 +472,37 @@ module from the installed tree and requiring a non-zero exit. A runtime that
 ships a module whose import is not shipped now fails at installation rather than
 on the first real call.
 
+## Running a cycle
+
+`run_cycle.py` is the wiring, and only the wiring: probe once, label the work,
+then `implement → review → (resolve → rereview)*`, every stage through
+`recorder.stage()`. There is no path in it that routes and dispatches by itself,
+because that is the hole the recorder closes and a driver is the easiest place
+to reopen it.
+
+It reads a review's verdict from the structured result it explicitly asks the
+executor for — a documented opt-in in every review skill — and never from an
+exit code or from prose. When the block is absent the cycle stops and records
+that the verdict is unknown. A guess would be indistinguishable from data
+forever after, and this instrument exists to be believed later.
+
+Orca is the exception it names out loud: its dispatch returns a started worker
+and a `dispatchId`, not a finished stage, so a cycle routed to Orca stops after
+the dispatch rather than treating absent output as failure.
+
+The probe map is taken once and handed to the recorder. Without it each dispatch
+probes again on its own, so an availability could change between two stages with
+nothing recording that it had — and the decisions on either side stop being
+comparable, which is the one thing this is all for.
+
+`tests/test_installed_cycle.py` is the acceptance criterion: install into a
+temporary home, put fake agent binaries on `PATH`, start the entrypoint as a
+person would, then open the database and read what the run left. It covers the
+healthy cycle, a second round after `CHANGES_REQUESTED`, a review that reports
+no verdict, and the case the fallback exists for — Codex reporting an exhausted
+window, the recorder rerouting once, and all three facts surviving in SQLite:
+the abandoned attempt, the decision to fall back, and what the fallback did.
+
 ## Not implemented
 
 Named because they are easy to assume from the contract above: no model

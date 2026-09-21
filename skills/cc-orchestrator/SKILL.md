@@ -228,6 +228,20 @@ writes the row as one operation. Do not route and dispatch separately and then
 remember to record: a recording step that depends on being remembered is one
 that will be missing from exactly the runs that mattered.
 
+`run_cycle.py` in that same directory is that sequence already written — probe
+once, label, then `implement → review → (resolve → rereview)*` with every stage
+going through the recorder:
+
+```text
+python3 <runtime>/run_cycle.py --repo owner/name --task API-7 \
+  --difficulty 2 --verifiability auto
+```
+
+It reads a review's verdict from the structured result it asks the executor to
+emit, and stops when that block is absent rather than inferring a verdict from a
+successful exit. Use it, or do exactly what it does; an orchestration that routes
+and dispatches by hand is one the guarantee above no longer covers.
+
 ```text
 recorder = CycleRecorder(telemetry, repo, task, signals, availability=...)
 recorder.stage("implement", spec)          routes, dispatches, records
@@ -256,7 +270,9 @@ need, and the one most easily left out.
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its
    `PROVIDER_BOOTSTRAP_RESULT`. If it returns `BLOCKED` or `FAILED`, stop before
    creating work; otherwise pass its resolved context unchanged to every stage.
-2. Probe every executor once and keep the availability map for the whole run.
+2. Probe every executor once and keep both the probe map and the availability
+   map for the whole run — pass the probes to the recorder, or each dispatch
+   quietly probes again on its own.
    Record what each probe demonstrated and on what evidence, and record the
    readiness policy in force. Do not re-probe silently between stages: an
    availability that changes without being recorded makes every later decision
