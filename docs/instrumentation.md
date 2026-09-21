@@ -229,11 +229,58 @@ Matching two findings to the same root cause is a human judgement. It is not
 automated here, deliberately: automating it would place an unverified gate inside
 the measuring instrument.
 
+## Routing v1
+
+`scripts/router.py` resolves a role to a concrete target. It is deliberately
+conservative: two calibration campaigns produced one usable finding about models
+— an inexpensive implementer never passed review on the first attempt on five
+real work items, at either effort level — and nothing separated the two efforts
+beyond that. The router does not pretend to a precision that evidence does not
+support.
+
+**Availability gates the choice.** An executor that is merely installed is not
+dispatchable: a binary on PATH proves no session, no repository access and no
+quota. The router is *told* each executor's state rather than discovering it,
+because nothing documented reports remaining quota and inferring it from a failed
+dispatch mistakes one exhausted window for evidence about a model.
+
+**Production may fall back, a calibration may not.** Substituting an arm when
+quota runs out answers a different question with the same sample, so
+`RoutingMode.CALIBRATION` blocks and waits.
+
+**Cost is estimated over the cycle, not the first pass.** Five of five real
+implementations needed changes, so the estimate carries at least one resolution
+plus its review until a repository measures its own first-pass rate. A profile
+that is cheaper to run once is not automatically cheaper to finish with.
+
+Only two rules escalate, both from signals declared before routing: difficulty 3
+implementation work goes to `deep_coder`, and a security-sensitive change is
+reviewed by `senior_reviewer`. Labelling after the fact would mean measuring the
+routing rather than the models.
+
+Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
+place a role maps to a model.
+
+**It decides; it does not dispatch.** `route()` returns a target —
+`codex:openai/gpt-5.6-luna high` — and stops there. Nothing yet turns that
+target into a running worker on an arbitrary host: `cc-orchestrator` still
+resolves executors through its existing modes, and the generic
+Claude↔Codex↔Orca adapter layer does not exist. Treat a routing decision as a
+recommendation the orchestrator has to honour by hand until that integration
+lands.
+
 ## Not implemented
 
-Named because they are easy to assume from the contract above: no router, no
-model selection from statistics, no SQLite, no scoring, no adaptive learning, no
-escaped-defect tracking, no general profile system, no executor abstraction, and
-no automatic matching of findings. Analysis of what this records is done today by
+Named because they are easy to assume from the contract above: no model
+selection from statistics, no SQLite, no scoring, no adaptive learning, no
+escaped-defect tracking, and no automatic matching of findings.
+
+Two boundaries are worth stating precisely, because router v1 sits on one side
+of each. **Profile resolution exists**: seven roles resolve to concrete targets
+through configuration, and a skill names a role rather than a model. **Generic
+executor dispatch does not**: nothing converts a resolved target into a running
+worker on an arbitrary host, so `cc-orchestrator` keeps its current execution
+modes and a routing decision is advice it has to act on, not a mechanism that
+acts for it. Closing that gap is integration work, not another experiment. Analysis of what this records is done today by
 reading published comments — `gh api` plus `scripts/review_contract.py` — not by
 a persistence layer.

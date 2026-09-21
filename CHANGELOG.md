@@ -52,6 +52,22 @@ All notable changes to this project are documented here. This project follows
   per-finding identifiers for blind root-cause matching, so neither the labels
   nor the count per reviewer can attribute a finding before the matching closes.
 - `docs/instrumentation.md`.
+- A deterministic security gate: `security_required = deterministic_rule OR
+  reviewer_requests_security`. A rule in `security_review.always_when` of
+  `.code-cycle.yml` matches changed paths, filenames and labels, and
+  `scripts/security_gate.py` is its reference implementation. A repository that
+  declares no rule keeps the defaults, so a missing configuration cannot be the
+  case that silently disables the audit.
+
+- `scripts/router.py`: router v1. Executor availability gates the choice before
+  any model is considered; production may use a profile's fallback and a
+  calibration may not; cost is estimated over the whole cycle because every real
+  implementation measured so far needed a correction round. Two escalation rules
+  only, both from signals declared before routing. It decides and does not
+  dispatch: turning a resolved target into a running worker on an arbitrary host
+  is integration work that does not exist yet.
+- `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
+  an executor, provider, model and effort.
 
 ### Changed
 
@@ -66,6 +82,12 @@ All notable changes to this project are documented here. This project follows
 - The validator now catches a Windows `Zone.Identifier` sidecar written with a
   colon, the form that actually reaches WSL trees; the previous check only
   matched a dot and let it through.
+- Sensitivity triage in `cc-initial-review`, `cc-rereview` and
+  `cc-resolve-comments` evaluates that rule first and adds the model's judgement
+  on top. A review may add a security audit and may never remove one the rule
+  activated: the coordinator was the cheapest component in the cycle deciding
+  whether its most expensive check ran, on a semantic judgement nothing verified.
+  Skipping now requires the rule and the reviewer to fail at the same time.
 
 ### Fixed
 
@@ -88,26 +110,6 @@ All notable changes to this project are documented here. This project follows
 
 - Finding headers with four tokens and no disposition stay valid and read as
   not triaged. No open change request needs migrating.
-
-## [Unreleased]
-
-### Added
-
-- A deterministic security gate: `security_required = deterministic_rule OR
-  reviewer_requests_security`. A rule in `security_review.always_when` of
-  `.code-cycle.yml` matches changed paths, filenames and labels, and
-  `scripts/security_gate.py` is its reference implementation. A repository that
-  declares no rule keeps the defaults, so a missing configuration cannot be the
-  case that silently disables the audit.
-
-### Changed
-
-- Sensitivity triage in `cc-initial-review`, `cc-rereview` and
-  `cc-resolve-comments` evaluates that rule first and adds the model's judgement
-  on top. A review may add a security audit and may never remove one the rule
-  activated: the coordinator was the cheapest component in the cycle deciding
-  whether its most expensive check ran, on a semantic judgement nothing verified.
-  Skipping now requires the rule and the reviewer to fail at the same time.
 
 ## [0.2.0] - 2026-09-10
 
