@@ -215,9 +215,32 @@ implementation measured so far needed a correction round, so the estimate
 carries at least one resolution plus its review until a repository measures its
 own first-pass rate.
 
-`scripts/telemetry.py` is how a repository measures it. Record every stage —
-the routing decision, the dispatch result, the review status — and read
-`first_pass_rate(repo_id)` back into the cost estimate. Until that rate is
+`scripts/cycle.py` is the reference implementation of recording a run, and it
+ships with the toolkit source rather than with an installed skill: an
+installation that has the skills alone has no `CycleRecorder` to call, and
+records nothing until a host wires one in. Say so rather than reporting a
+measured rate that no run produced.
+
+What it fixes is worth copying wherever the wiring happens. `CycleRecorder.stage()`
+routes, dispatches and writes the row as one operation. Do not route and dispatch
+separately and then remember to record: a recording step that depends on being
+remembered is one that will be missing from exactly the runs that mattered.
+
+```text
+recorder = CycleRecorder(telemetry, repo, task, signals, availability=...)
+recorder.stage("implement", spec)          routes, dispatches, records
+recorder.record_verdict("review", status)  the functional outcome
+recorder.next_iteration()
+recorder.close(final_status)
+```
+
+The recorder owns the single production reroute. When a dispatch discovers an
+exhausted window it updates availability and routes once more, and **both**
+decisions are written: a fallback whose first attempt left no trace makes
+fallbacks look free. Friction a person must clear does not trigger a reroute,
+and a calibration never reroutes at all.
+
+`first_pass_rate(repo_id)` reads back into the cost estimate. Until it is
 measured it reports unknown rather than a number, and the conservative constant
 stands: a rate hardened from three observations into a routing decision would be
 worse than the constant it replaced.

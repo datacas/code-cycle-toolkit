@@ -244,11 +244,14 @@ def profile_for(role: str, signals: TaskSignals) -> tuple[str, tuple[str, ...]]:
     reasons = []
     if role == "security":
         return "security", ("a security audit always uses the security profile",)
-    if role == "implement":
+    if role in ("implement", "resolve"):
+        # Resolving findings is implementation work: it edits code and is judged
+        # by tests, so it routes where implementation routes rather than to a
+        # reviewer profile.
         if signals.difficulty >= 3:
             return "deep_coder", ("declared difficulty 3 escalates to the deeper coder",)
         return "cheap_coder", ("difficulty below 3 starts on the cheap coder",)
-    if role == "review":
+    if role in ("review", "rereview"):
         if signals.security_sensitive:
             reasons.append("security-sensitive change reviewed by the senior profile")
             return "senior_reviewer", tuple(reasons)
