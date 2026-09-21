@@ -168,24 +168,61 @@ CREDENTIAL_PREFIXES = (
     "-----BEGIN",
 )
 
-#: Model names this toolkit knows. A closed set is a guarantee a grammar cannot
-#: give; a repository that uses another model registers it here or in its
-#: profiles rather than having telemetry accept any string.
 def _known_models() -> frozenset:
-    try:
-        from router import DEFAULT_PROFILES, parse_target
-    except Exception:  # pragma: no cover - router is a sibling module
-        return frozenset()
-    models = set()
-    for spec in DEFAULT_PROFILES.values():
-        for key in ("primary", "fallback"):
-            value = spec.get(key)
-            if isinstance(value, str):
-                models.add(parse_target(value).model)
-    return frozenset(models)
+    """Model names this toolkit knows, read from the router's profiles.
+
+    A closed set is the guarantee a grammar cannot give, so it has to actually
+    be available. Both supported import shapes are tried — `telemetry` with
+    `scripts/` on the path, and `scripts.telemetry` as a package module — and if
+    neither yields the router this raises rather than returning an empty set.
+
+    Returning empty used to be the fallback, and `_checked` read empty as
+    permission to skip the check. That is the failure this project already named
+    once, in the security gate: an absent configuration must not silently
+    disable the thing it configures, because it makes the harmless-looking case
+    the unsafe one. Here it made a guarantee depend on import topology.
+    """
+    errors = []
+    for loader in (_router_flat, _router_packaged):
+        try:
+            profiles, parse_target = loader()
+        except Exception as exc:  # pragma: no cover - depends on import shape
+            errors.append(f"{loader.__name__}: {exc}")
+            continue
+        models = set()
+        for spec in profiles.values():
+            for key in ("primary", "fallback"):
+                value = spec.get(key)
+                if isinstance(value, str):
+                    models.add(parse_target(value).model)
+        if models:
+            return frozenset(models)
+        errors.append(f"{loader.__name__}: no models in profiles")
+    raise TelemetryError(
+        "the known-model set could not be built, so a model name cannot be "
+        "checked against it: " + "; ".join(errors)
+    )
 
 
-KNOWN_MODELS = _known_models()
+def _router_flat():
+    from router import DEFAULT_PROFILES, parse_target
+    return DEFAULT_PROFILES, parse_target
+
+
+def _router_packaged():
+    from scripts.router import DEFAULT_PROFILES, parse_target  # noqa: F401
+    return DEFAULT_PROFILES, parse_target
+
+
+def known_models() -> frozenset:
+    """Cached accessor. Raises when the set cannot be built; never empty."""
+    global _KNOWN_MODELS_CACHE
+    if _KNOWN_MODELS_CACHE is None:
+        _KNOWN_MODELS_CACHE = _known_models()
+    return _KNOWN_MODELS_CACHE
+
+
+_KNOWN_MODELS_CACHE: frozenset | None = None
 
 #: Kept for callers that still read it.
 MAX_PAYLOAD_VALUE_LENGTH = 120
@@ -343,8 +380,11 @@ def _checked(key: str, value):
                     f"{key!r} starts with {prefix!r}, a published credential "
                     "prefix. Telemetry stores references, never secrets."
                 )
-        if key in ("model_requested", "model_resolved") and KNOWN_MODELS:
-            if value not in KNOWN_MODELS:
+        if key in ("model_requested", "model_resolved"):
+            # No `and known_models()` guard: an unavailable set raises rather
+            # than waving the value through. A check that switches itself off
+            # when it cannot run is not a check.
+            if value not in known_models():
                 raise TelemetryError(
                     f"{key!r} must name a model this toolkit knows, not {value!r}. "
                     "A closed set is the only real guarantee here: a model name "

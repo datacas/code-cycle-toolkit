@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -231,8 +232,43 @@ class IdentifierBoundaryTests(TelemetryTestCase):
                                     model_requested="some-unknown-model")
 
     def test_the_known_models_come_from_the_router_profiles(self) -> None:
-        self.assertIn("gpt-5.6-luna", tm.KNOWN_MODELS)
-        self.assertIn("claude-opus-5", tm.KNOWN_MODELS)
+        self.assertIn("gpt-5.6-luna", tm.known_models())
+        self.assertIn("claude-opus-5", tm.known_models())
+
+    def test_the_model_check_survives_a_package_qualified_import(self) -> None:
+        """A guarantee that depends on import topology is not a guarantee."""
+        import importlib, subprocess, sys
+
+        script = (
+            "import sys, tempfile; sys.path.insert(0, %r)\n"
+            "from pathlib import Path\n"
+            "from scripts.telemetry import Telemetry, TelemetryError\n"
+            "with tempfile.TemporaryDirectory() as d:\n"
+            "    t = Telemetry(Path(d)/'t.sqlite')\n"
+            "    try:\n"
+            "        t.record_stage('repo','task','implement', model_requested='some-unknown-model')\n"
+            "        print('ACCEPTED')\n"
+            "    except TelemetryError:\n"
+            "        print('REFUSED')\n"
+        ) % str(ROOT)
+
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, cwd=str(ROOT))
+
+        self.assertEqual("REFUSED", out.stdout.strip(), out.stderr)
+
+    def test_an_unavailable_model_set_refuses_rather_than_waves_through(self) -> None:
+        """A check that switches itself off when it cannot run is not a check."""
+        original = tm._KNOWN_MODELS_CACHE
+        broken = [lambda: (_ for _ in ()).throw(RuntimeError("no router"))]
+        self.addCleanup(setattr, tm, "_KNOWN_MODELS_CACHE", original)
+        tm._KNOWN_MODELS_CACHE = None
+
+        with unittest.mock.patch.object(tm, "_router_flat", broken[0]), \
+             unittest.mock.patch.object(tm, "_router_packaged", broken[0]):
+            with self.assertRaises(tm.TelemetryError):
+                self.store.record_stage("repo", "task", "implement",
+                                        model_requested="gpt-5.6-luna")
 
     def test_a_reference_grammar_rejects_what_a_selector_never_contains(self) -> None:
         for value in ("has space", "tab\there", "new\nline", "quote'inside", "<angle>"):

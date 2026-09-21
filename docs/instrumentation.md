@@ -393,7 +393,10 @@ credential**.
 What holds:
 
 - model names are checked against the models this toolkit knows, a closed set,
-  which is a real guarantee rather than a shape test;
+  which is a real guarantee rather than a shape test. That set is built from the
+  router's profiles under either import shape, and when it cannot be built the
+  check raises instead of passing the value through: a check that switches
+  itself off when it cannot run is not a check;
 - repository and work-item references must match the selector grammar and must
   not begin with a published credential prefix — `sk-`, `ghp_`, `AKIA`, `xox`
   and the rest — which rejects the paste that actually happens by accident.

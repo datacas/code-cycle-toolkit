@@ -78,8 +78,9 @@ All notable changes to this project are documented here. This project follows
   included: counts are integers, amounts numbers, flags booleans, tokens a
   closed vocabulary, identifiers bounded references matching a selector grammar,
   and containers are refused outright. Model names are checked against the
-  models the toolkit knows, and published credential prefixes are rejected in
-  any reference; no grammar can separate a model name from a credential, so the
+  models the toolkit knows — built under either import shape, and raising rather
+  than passing values through when it cannot be built — and published credential
+  prefixes are rejected in any reference; no grammar can separate a model name from a credential, so the
   closed set is the guarantee and the residual is documented rather than
   claimed away.
 - `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
