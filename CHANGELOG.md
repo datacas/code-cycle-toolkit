@@ -103,6 +103,11 @@ All notable changes to this project are documented here. This project follows
 - A stage's structured result distinguishes readable, present-but-unreadable and
   absent, instead of collapsing all three into `None`, and a status outside the
   store's vocabulary is treated as no status rather than raising on the way in.
+- A stopped cycle prints the reason the agent gave in its own structured block,
+  from `error`, `summary`, `blocking_reason` or `reason`. It is displayed only:
+  never stored, since telemetry holds references and counts, and never acted on,
+  since it is the agent's claim rather than a verified fact — a canary claimed
+  GitHub was unreachable while `gh` worked from the same sandbox minutes later.
 - A dispatch that returned is no longer read as a stage that worked: a role whose
   own report is not a completion stops the cycle, with the dispatch row still
   recording `succeeded` and the reported status recorded beside it. The canary

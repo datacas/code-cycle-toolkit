@@ -268,6 +268,98 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertEqual(rc.APPROVED_END, report.status)
 
 
+class ReportedReasonTests(RunCycleTestCase):
+    """Why a stage stopped, in the agent's own words and nowhere else.
+
+    A canary spent three extra dispatches working out a reason the agent had
+    already given, because the driver printed the status and dropped the prose.
+    """
+
+    def test_the_reason_the_agent_gave_reaches_the_operator(self) -> None:
+        said = "GitHub authentication is invalid and the API is unreachable"
+        codex = Talker("codex", block("BLOCKED", summary=said))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual(said, report.reason)
+        self.assertIn(said, report.explain())
+
+    def test_an_error_field_is_preferred_over_a_summary(self) -> None:
+        """`error` is what a blocked skill fills in; `summary` may describe the
+        run rather than the failure."""
+        codex = Talker("codex", block("BLOCKED", summary="ran the bootstrap",
+                                      error="no credential for the code host"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual("no credential for the code host", report.reason)
+
+    def test_a_cycle_that_finished_still_says_how(self) -> None:
+        """Not only the failures: the last stage's own account travels with
+        every ending."""
+        codex = Talker("codex", block("IMPLEMENTED", summary="one file changed"))
+        reviewer = Talker("claude", block("APPROVED", summary="no findings"))
+
+        report = self.run_cycle(codex, reviewer)
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual("no findings", report.reason)
+
+    def test_a_block_without_one_behaves_as_before(self) -> None:
+        report = self.run_cycle(Talker("codex", block("BLOCKED")), Talker("claude"))
+
+        self.assertIsNone(report.reason)
+        self.assertNotIn("reason:", report.explain())
+
+    def test_an_unreadable_block_has_no_reason_to_give(self) -> None:
+        unreadable = 'ORCHESTRATION_RESULT\n"BLOCKED"\nEND_ORCHESTRATION_RESULT'
+
+        report = self.run_cycle(Talker("codex", unreadable), Talker("claude"))
+
+        self.assertIsNone(report.reason)
+
+    def test_a_multi_line_reason_stays_on_one_line(self) -> None:
+        """It is printed in a report whose shape a person reads at a glance."""
+        codex = Talker("codex", block("BLOCKED", error="first line\n\nsecond   line\t"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual("first line second line", report.reason)
+        self.assertEqual(1, report.explain().count("reason:"))
+
+    def test_a_reason_that_is_not_text_is_not_a_reason(self) -> None:
+        for value in (3, ["a"], {"why": "x"}, "", "   "):
+            with self.subTest(value=value):
+                self.setUp()
+                codex = Talker("codex", block("BLOCKED", error=value))
+
+                report = self.run_cycle(codex, Talker("claude"))
+
+                self.assertIsNone(report.reason)
+
+    def test_the_prose_never_reaches_the_store(self) -> None:
+        """The one thing this must not do. The store holds references and
+        counts; a reason is the agent's prose about a run."""
+        said = "the credential for owner/api expired at 09:00"
+        self.run_cycle(Talker("codex", block("BLOCKED", summary=said)), Talker("claude"))
+
+        written = " ".join(
+            str(value) for row in self.rows() for value in row.values())
+
+        self.assertNotIn(said, written)
+        self.assertNotIn("credential", written)
+        self.assertIn("BLOCKED", written)
+
+    def test_the_reason_decides_nothing(self) -> None:
+        """A stage that completed still completes, whatever it says beside it."""
+        codex = Talker("codex", block("IMPLEMENTED", error="something went wrong"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual(["implement", "review"], [s.role for s in report.stages])
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+
 class Sequence(Talker):
     """Answers a different thing each time it is asked."""
 
