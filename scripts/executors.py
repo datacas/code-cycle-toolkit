@@ -510,12 +510,24 @@ class OrcaAdapter(Adapter):
         except Exception as exc:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
 
-        if not payload.get("ok"):
+        if not payload.get("ok") or completed.returncode != 0:
+            # The CLI exits 0 only for `ready`; a failed or outcome_unknown
+            # launch exits non-zero and still returns a JSON body. Reading the
+            # body and ignoring the status reports a partial launch as a
+            # success, and the body is exactly where the recovery information
+            # lives.
             error = payload.get("error") or {}
+            result = payload.get("result") or {}
+            detail = (error.get("message") or error.get("code")
+                      or result.get("lastError")
+                      or f"worker-start exited {completed.returncode}")
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
-                detail=str(error.get("message") or error.get("code") or "worker-start failed")[:400],
-                artifacts={"argv": argv},
+                detail=str(detail)[:400],
+                artifacts={"argv": argv, "returncode": completed.returncode,
+                           "stage": result.get("stage"),
+                           "failedStage": result.get("failedStage"),
+                           "residualResources": result.get("residualResources")},
             )
         result = payload.get("result") or {}
         effective = (result.get("launch") or {}).get("effective") or {}
@@ -548,6 +560,12 @@ class OrcaAdapter(Adapter):
             payload = json.loads(out.stdout)
         except Exception as exc:
             return ProbeResult(self.name, Availability.INSTALLED, "status unreadable", str(exc))
+        if out.returncode != 0:
+            # Readiness is the one thing this adapter can actually prove, so it
+            # does not get proven by a command that failed.
+            return ProbeResult(self.name, Availability.INSTALLED,
+                               f"status exited {out.returncode}",
+                               (out.stderr or out.stdout or "").strip()[:200])
         runtime = (payload.get("result") or {}).get("runtime") or {}
         if runtime.get("state") == "ready" and runtime.get("reachable"):
             return ProbeResult(self.name, Availability.READY,

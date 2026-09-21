@@ -598,6 +598,70 @@ class OrcaContractTests(unittest.TestCase):
                     ex.OrcaDispatchContext(**args)
 
 
+class OrcaExitStatusTests(unittest.TestCase):
+    """The CLI exits 0 only for ready; the body alone is not the answer."""
+
+    TARGET = router.parse_target("orca:openai/gpt-5.6-luna high")
+    CONTEXT = None
+
+    def setUp(self) -> None:
+        self.CONTEXT = ex.OrcaDispatchContext(coordinator="t", run_id="r", task_id="k")
+        self.ready_receipt = json.dumps({"ok": True, "result": {
+            "state": "ready", "stage": "dispatch_input",
+            "launch": {"effective": {"model": "gpt-5.6-luna"}}}})
+        self.ready_status = json.dumps({"result": {"runtime": {"state": "ready", "reachable": True}}})
+
+    def dispatch(self, returncode):
+        return ex.OrcaAdapter().dispatch(
+            self.TARGET, "p", context=self.CONTEXT,
+            runner=lambda *a, **k: completed(self.ready_receipt, returncode=returncode),
+        )
+
+    def test_a_non_zero_exit_is_not_a_successful_launch(self) -> None:
+        result = self.dispatch(1)
+
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertEqual(1, result.artifacts["returncode"])
+
+    def test_a_zero_exit_with_a_ready_receipt_still_succeeds(self) -> None:
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, self.dispatch(0).outcome)
+
+    def test_the_failed_launch_keeps_its_recovery_information(self) -> None:
+        body = json.dumps({"ok": True, "result": {
+            "state": "failed", "failedStage": "dispatch_input",
+            "lastError": "terminal_handle_stale",
+            "residualResources": [{"kind": "worktree"}]}})
+
+        result = ex.OrcaAdapter().dispatch(
+            self.TARGET, "p", context=self.CONTEXT,
+            runner=lambda *a, **k: completed(body, returncode=1),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertIn("terminal_handle_stale", result.detail)
+        self.assertEqual("dispatch_input", result.artifacts["failedStage"])
+        self.assertEqual([{"kind": "worktree"}], result.artifacts["residualResources"])
+
+    def test_a_failed_status_call_does_not_prove_readiness(self) -> None:
+        """Readiness is the one thing this adapter can prove, so a failed
+        command does not get to prove it."""
+        result = ex.OrcaAdapter().probe(
+            runner=lambda *a, **k: completed(self.ready_status, returncode=1, stderr="runtime gone"),
+            which=present,
+        )
+
+        self.assertEqual(ex.Availability.INSTALLED, result.availability)
+        self.assertIn("exited 1", result.proof)
+        self.assertIn("runtime gone", result.detail)
+
+    def test_a_clean_status_call_still_proves_it(self) -> None:
+        result = ex.OrcaAdapter().probe(
+            runner=lambda *a, **k: completed(self.ready_status), which=present
+        )
+
+        self.assertEqual(ex.Availability.READY, result.availability)
+
+
 class LearnedAvailabilityTests(unittest.TestCase):
     """A native probe cannot see quota, so only a dispatch ever learns it."""
 

@@ -79,6 +79,10 @@ All notable changes to this project are documented here. This project follows
   answered blind. Friction is classified from a failed exit, never from a
   successful run's own output. A dispatch that reports a different model than
   the one requested is a `contract_violation` rather than a success.
+- The Orca adapter checks the process exit status alongside the JSON body, in
+  both dispatch and probe. The CLI exits `0` only for `ready`, so a failed
+  launch that still returns a valid-looking receipt is a failure, and its stage
+  and residual resources are kept for recovery.
 - `OrcaDispatchContext`: the coordinator terminal, Run and Task an Orca
   dispatch consumes and never creates, with the Task ID kept separate from the
   prompt every other adapter takes. The Orca agent follows the target's

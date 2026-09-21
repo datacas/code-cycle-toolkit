@@ -316,6 +316,13 @@ Orca is the only backend that reports the model it actually launched, in its
 receipt's `launch.effective`. Elsewhere the value is either self-reported by the
 agent — observed to be wrong in both arms of a campaign — or unavailable.
 
+Its exit status is part of the receipt: the CLI exits `0` only for `ready`, and
+a failed or uncertain launch exits non-zero while still returning a JSON body
+carrying the stage, residual resources and recovery commands. Reading the body
+and ignoring the status reports a partial launch as a success, and the same
+applies to the status call — readiness is the one thing this backend can prove,
+so a command that failed does not get to prove it.
+
 Its dispatch takes an explicit `OrcaDispatchContext`: a coordinator terminal, a
 Run and a Task that already exist, plus an optional agent override. The adapter
 refuses to create any of them, because a dispatcher that quietly spawns
