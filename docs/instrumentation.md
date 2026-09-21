@@ -261,11 +261,26 @@ routing rather than the models.
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
 
+**It decides; it does not dispatch.** `route()` returns a target —
+`codex:openai/gpt-5.6-luna high` — and stops there. Nothing yet turns that
+target into a running worker on an arbitrary host: `cc-orchestrator` still
+resolves executors through its existing modes, and the generic
+Claude↔Codex↔Orca adapter layer does not exist. Treat a routing decision as a
+recommendation the orchestrator has to honour by hand until that integration
+lands.
+
 ## Not implemented
 
 Named because they are easy to assume from the contract above: no model
 selection from statistics, no SQLite, no scoring, no adaptive learning, no
-escaped-defect tracking, no general profile system, no executor abstraction, and
-no automatic matching of findings. Analysis of what this records is done today by
+escaped-defect tracking, and no automatic matching of findings.
+
+Two boundaries are worth stating precisely, because router v1 sits on one side
+of each. **Profile resolution exists**: seven roles resolve to concrete targets
+through configuration, and a skill names a role rather than a model. **Generic
+executor dispatch does not**: nothing converts a resolved target into a running
+worker on an arbitrary host, so `cc-orchestrator` keeps its current execution
+modes and a routing decision is advice it has to act on, not a mechanism that
+acts for it. Closing that gap is integration work, not another experiment. Analysis of what this records is done today by
 reading published comments — `gh api` plus `scripts/review_contract.py` — not by
 a persistence layer.

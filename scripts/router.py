@@ -27,7 +27,7 @@ carries at least one resolution pass unless a repository has measured otherwise.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 SCHEMA_VERSION = 1
@@ -304,6 +304,7 @@ def route(
     name, reasons = profile_for(role, signals)
     profile = profiles[name]
 
+    primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)
     for index, target in enumerate(profile.targets()):
         state = availability.get(target.executor, Availability.UNKNOWN)
         if state.dispatchable:
@@ -311,14 +312,18 @@ def route(
                 return RoutingDecision(name, target, mode, reasons=reasons)
             if mode is RoutingMode.CALIBRATION:
                 break
+            # Describe the primary with the primary's own state. Reusing the
+            # fallback's state here reported a healthy primary while routing
+            # around it, and a routing decision is only auditable if its reasons
+            # are true.
             return RoutingDecision(
                 name,
                 target,
                 mode,
                 used_fallback=True,
                 reasons=reasons
-                + (f"primary executor {profile.primary.executor} is {state.value}"
-                   f" -> fell back to {target.executor}",),
+                + (f"primary executor {profile.primary.executor} is"
+                   f" {primary_state.value} -> fell back to {target.executor}",),
             )
         reasons = reasons + (f"{target.executor} is {state.value}",)
 

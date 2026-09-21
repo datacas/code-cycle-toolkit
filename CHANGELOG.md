@@ -63,7 +63,9 @@ All notable changes to this project are documented here. This project follows
   any model is considered; production may use a profile's fallback and a
   calibration may not; cost is estimated over the whole cycle because every real
   implementation measured so far needed a correction round. Two escalation rules
-  only, both from signals declared before routing.
+  only, both from signals declared before routing. It decides and does not
+  dispatch: turning a resolved target into a running worker on an arbitrary host
+  is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
 

@@ -75,6 +75,30 @@ class FallbackPolicyTests(unittest.TestCase):
         self.assertIsNone(d.target)
         self.assertIn("blocks and waits", d.explain())
 
+    def test_the_fallback_reason_describes_the_primary_truthfully(self) -> None:
+        """A routing decision is only auditable if its reasons are true.
+
+        The message used to report the fallback's state as the primary's, so a
+        run routed around an exhausted Codex while claiming Codex was ready.
+        """
+        d = router.route("implement", signals(), NO_CODEX)
+        text = d.explain()
+
+        self.assertIn("primary executor codex is quota_exhausted", text)
+        self.assertNotIn("primary executor codex is ready", text)
+        self.assertIn("fell back to claude", text)
+
+    def test_every_reported_state_matches_the_executor_it_names(self) -> None:
+        availability = {
+            "codex": router.Availability.AUTHENTICATED,
+            "claude": router.Availability.READY,
+        }
+
+        d = router.route("implement", signals(), availability)
+
+        self.assertIn("codex is authenticated", d.explain())
+        self.assertNotIn("codex is ready", d.explain())
+
     def test_a_profile_without_a_fallback_blocks_rather_than_improvising(self) -> None:
         d = router.route("review", signals(), {"claude": router.Availability.QUOTA_EXHAUSTED})
 

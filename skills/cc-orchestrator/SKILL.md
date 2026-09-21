@@ -157,6 +157,13 @@ Name a profile, never a model. `cheap_coder`, `deep_coder`, `reviewer`,
 `code_cycle.profiles` in `.code-cycle.yml`; `scripts/router.py` is the reference
 implementation of how.
 
+The router decides and does not dispatch. It returns a target such as
+`codex:openai/gpt-5.6-luna high`; turning that into a running worker on an
+arbitrary host is not built yet, so keep using this skill's existing execution
+modes and treat the decision as guidance you honour deliberately. Say in the
+result which profile and target were chosen, whether a fallback was used, and
+whether the execution mode could actually honour it.
+
 Resolve executor availability **before** choosing anything. An executor that is
 merely installed is not dispatchable: a binary on PATH proves no session, no
 repository access and no quota. One whose quota is exhausted is not a candidate
