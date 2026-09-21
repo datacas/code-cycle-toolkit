@@ -85,6 +85,11 @@ CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 #: How much of an agent's prose is worth a line of somebody's screen.
 REASON_LIMIT = 500
 
+#: The roles whose job is to change the tree. Everything else reads it, and is
+#: dispatched with the smaller permission — a reviewer that can edit the change
+#: it is judging is a reviewer nobody can trust afterwards.
+WRITING_ROLES = frozenset({"implement", "resolve"})
+
 #: What each role's own report has to say for the cycle to keep going. Anything
 #: else — `BLOCKED`, `FAILED`, a status this driver does not know — is a stage
 #: that did not complete, whatever its exit code was. `PARTIALLY_RESOLVED`
@@ -368,7 +373,7 @@ def run_cycle(
 
     def run(role: str, instruction: str = "") -> tuple[StageOutcome, Reported]:
         outcome = recorder.stage(role, compose(role, repo_id, task_id, instruction),
-                                 **dispatch_kwargs)
+                                 writes=role in WRITING_ROLES, **dispatch_kwargs)
         report.stages.append(outcome)
         return outcome, read_structured_result(outcome.result)
 

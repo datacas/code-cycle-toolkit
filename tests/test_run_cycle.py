@@ -268,6 +268,47 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertEqual(rc.APPROVED_END, report.status)
 
 
+class RolePermissionTests(RunCycleTestCase):
+    """The driver decides what a stage may touch, from what the stage is."""
+
+    class Watching(Talker):
+        def __init__(self, name, body=None):
+            super().__init__(name, body)
+            self.permissions = []
+
+        def dispatch(self, target, task, **kw):
+            self.permissions.append(kw.get("writes"))
+            return super().dispatch(target, task, **kw)
+
+    def test_the_implementer_may_write_and_the_reviewer_may_not(self) -> None:
+        codex = self.Watching("codex")
+        claude = self.Watching("claude")
+
+        self.run_cycle(codex, claude)
+
+        self.assertEqual([True], codex.permissions)
+        self.assertEqual([False], claude.permissions)
+
+    def test_a_resolution_may_write_and_its_rereview_may_not(self) -> None:
+        codex = self.Watching("codex")
+        claude = self.Watching("claude")
+        claude.body = None
+        reviewer = Sequence("claude", [block("CHANGES_REQUESTED"), APPROVED])
+        reviewer.permissions = []
+        original = reviewer.dispatch
+
+        def watching(target, task, **kw):
+            reviewer.permissions.append(kw.get("writes"))
+            return original(target, task, **kw)
+
+        reviewer.dispatch = watching
+
+        self.run_cycle(codex, reviewer)
+
+        self.assertEqual([True, True], codex.permissions)
+        self.assertEqual([False, False], reviewer.permissions)
+
+
 class ReportedReasonTests(RunCycleTestCase):
     """Why a stage stopped, in the agent's own words and nowhere else.
 

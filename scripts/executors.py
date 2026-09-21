@@ -264,7 +264,8 @@ class NativeAdapter(Adapter):
                            "quota is not observable without dispatching",
                            self.provable_ceiling)
 
-    def argv(self, target: Target, task: str, cwd: str | None = None) -> list[str]:  # pragma: no cover
+    def argv(self, target: Target, task: str, cwd: str | None = None,
+             writes: bool = False) -> list[str]:  # pragma: no cover
         raise NotImplementedError
 
     def agent_output(self, stdout: str) -> str:
@@ -313,15 +314,21 @@ class NativeAdapter(Adapter):
         return None
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
-                 timeout: int = 3600, runner=_run) -> DispatchResult:
+                 timeout: int = 3600, runner=_run,
+                 writes: bool = False) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
+
+        `writes` is what the stage is for, not what it might want: an
+        implementation edits the tree it was given, a review reads it. The
+        default is the smaller permission, so a caller that says nothing asks
+        for nothing.
 
         Non-interactive on purpose. An agent waiting on a trust dialog, a hook
         review or a login cannot be driven from here, and answering such a
         screen blind is not something this layer will do — it reports the
         missing capability and stops.
         """
-        argv = self.argv(target, task, cwd)
+        argv = self.argv(target, task, cwd, writes)
         try:
             completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
@@ -447,9 +454,17 @@ class CodexAdapter(NativeAdapter):
         "sign in": "authenticated_session",
     }
 
-    def argv(self, target: Target, task: str, cwd: str | None = None) -> list[str]:
+    def argv(self, target: Target, task: str, cwd: str | None = None,
+             writes: bool = False) -> list[str]:
+        # `codex exec` is read-only unless told otherwise, which is why four
+        # canary runs had an implementer that could not implement: it reported
+        # BLOCKED on "the read-only workspace" and nothing here had ever asked
+        # for anything else. `workspace-write` is the directory this dispatch
+        # was given and nothing beyond it; `danger-full-access` stays out of
+        # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
-                "-c", f"model_reasoning_effort={target.effort}", "--json"]
+                "-c", f"model_reasoning_effort={target.effort}", "--json",
+                "-s", "workspace-write" if writes else "read-only"]
         if cwd:
             argv += ["-C", cwd]
         return argv + [task]
@@ -499,16 +514,32 @@ class ClaudeAdapter(NativeAdapter):
         "log in": "authenticated_session",
     }
 
-    def argv(self, target: Target, task: str, cwd: str | None = None) -> list[str]:
+    def argv(self, target: Target, task: str, cwd: str | None = None,
+             writes: bool = False) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
+        #
+        # This CLI is permissive where Codex is restrictive: a dispatched Claude
+        # already edits files with no flag at all, observed on a live run. So
+        # `acceptEdits` declares what a writing stage is doing rather than
+        # granting it something new.
+        #
+        # There is no flag that confines a non-writing stage here, and this
+        # does not pretend otherwise. `--permission-mode plan` refuses the edit
+        # but turns the task into planning it, which is not a review; and
+        # disallowing Edit, Write and NotebookEdit does not stop a write, as a
+        # live probe confirmed — the file was created anyway. A reviewer is
+        # confined by the directory it is given, not by an argument.
         #
         # `cwd` is absent here on purpose: this CLI has no directory flag, so the
         # working directory is set on the process itself. A multi-repository
         # dispatcher that silently ran in the coordinator's directory would
         # implement the wrong repository without saying so.
-        return [self.binary, "-p", task, "--model", target.model,
+        argv = [self.binary, "-p", task, "--model", target.model,
                 "--effort", target.effort, "--output-format", "json"]
+        if writes:
+            argv += ["--permission-mode", "acceptEdits"]
+        return argv
 
     def agent_output(self, stdout: str) -> str:
         """Claude prints one JSON object whose `result` holds the reply.
@@ -590,7 +621,8 @@ class OrcaAdapter(Adapter):
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
-                 context: "OrcaDispatchContext | None" = None) -> DispatchResult:
+                 context: "OrcaDispatchContext | None" = None,
+                 writes: bool = False) -> DispatchResult:
         """Run the work as a supervised Orca worker.
 
         Orca is the one backend that reports which model it actually launched,

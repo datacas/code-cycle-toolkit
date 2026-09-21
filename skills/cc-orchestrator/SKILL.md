@@ -249,7 +249,13 @@ successful exit. A dispatch that returned is not a stage that worked: when a
 stage's own report is not a completion — `BLOCKED`, or a result that cannot be
 read — the cycle stops there and the dispatch row still says it succeeded,
 because it did. Both facts are true and the store keeps them in separate
-columns. The reason the agent gave is printed beside the status and stored
+columns. A stage is dispatched with the permission its role needs: implementation and
+resolution may write the tree they were given, a review reads it. Codex is
+read-only unless asked otherwise and Claude is not, so neither default can be
+relied on — the role decides. A Claude reviewer is confined by the directory it
+runs in, not by a flag.
+
+The reason the agent gave is printed beside the status and stored
 nowhere: it is a claim to weigh, not a finding. One run reported that GitHub was
 unreachable while the same sandbox could reach it. Use it, or do exactly what it does; an orchestration that routes
 and dispatches by hand is one the guarantee above no longer covers.

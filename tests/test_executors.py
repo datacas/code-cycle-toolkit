@@ -662,6 +662,81 @@ class OrcaExitStatusTests(unittest.TestCase):
         self.assertEqual(ex.Availability.READY, result.availability)
 
 
+class PermissionTests(unittest.TestCase):
+    """What a stage is allowed to touch is what the stage is for.
+
+    Four canary runs had an implementer that could not implement: `codex exec`
+    is read-only unless told otherwise and nothing here ever told it. Claude is
+    the opposite — a dispatched one edited a file with no flag at all.
+    """
+
+    def codex(self, **kw):
+        return ex.CodexAdapter().argv(TARGET, "work", **kw)
+
+    def claude(self, **kw):
+        return ex.ClaudeAdapter().argv(
+            router.parse_target("claude:anthropic/claude-sonnet-5 high"), "work", **kw)
+
+    def test_a_writing_stage_may_write_where_it_was_sent(self) -> None:
+        argv = self.codex(writes=True)
+
+        self.assertIn("-s", argv)
+        self.assertEqual("workspace-write", argv[argv.index("-s") + 1])
+
+    def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
+        """A default that changes is a permission nobody chose."""
+        argv = self.codex(writes=False)
+
+        self.assertEqual("read-only", argv[argv.index("-s") + 1])
+
+    def test_asking_for_nothing_asks_for_the_smaller_permission(self) -> None:
+        self.assertEqual("read-only", self.codex()[self.codex().index("-s") + 1])
+
+    def test_no_argument_list_ever_asks_for_full_access(self) -> None:
+        """The CLIs offer it; nothing here builds a command that requests it.
+
+        Asserted over what is executed rather than over the source text, which
+        mentions these names to say they are not used.
+        """
+        forbidden = ("danger-full-access", "--dangerously-bypass-approvals-and-sandbox",
+                     "--dangerously-skip-permissions", "bypassPermissions")
+
+        for writes in (False, True):
+            for argv in (self.codex(writes=writes), self.claude(writes=writes)):
+                for token in forbidden:
+                    with self.subTest(writes=writes, token=token, argv=argv[0]):
+                        self.assertNotIn(token, argv)
+
+    def test_claude_declares_a_writing_stage(self) -> None:
+        argv = self.claude(writes=True)
+
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
+
+    def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
+        """A live probe wrote the file anyway with the edit tools disallowed,
+        and plan mode refuses the edit by turning a review into planning. So a
+        reading stage gets no flag here rather than a false guarantee."""
+        argv = self.claude(writes=False)
+
+        self.assertNotIn("--permission-mode", argv)
+        self.assertNotIn("--disallowedTools", argv)
+
+    def test_the_permission_reaches_the_adapter_from_the_dispatch(self) -> None:
+        seen = {}
+
+        class Watching(ex.CodexAdapter):
+            def argv(self, target, task, cwd=None, writes=False):
+                seen["writes"] = writes
+                return ["true"]
+
+        adapter = Watching()
+        adapter.dispatch(TARGET, "work", writes=True,
+                         runner=lambda *a, **k: completed("{}"))
+
+        self.assertIs(True, seen["writes"])
+
+
 class AgentOutputTests(unittest.TestCase):
     """Each CLI wraps the reply, and each adapter unwraps its own.
 

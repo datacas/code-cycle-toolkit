@@ -472,6 +472,30 @@ module from the installed tree and requiring a non-zero exit. A runtime that
 ships a module whose import is not shipped now fails at installation rather than
 on the first real call.
 
+## What a stage may touch
+
+An implementation edits the tree it was given; a review reads it. The driver
+passes that from the role, and the adapters turn it into their own CLI's terms:
+`codex exec -s workspace-write` against `-s read-only`, and Claude's
+`--permission-mode acceptEdits` for a writing stage. `danger-full-access` and
+the bypass flags are not in any argument list this builds, asserted over the
+commands rather than over the source text.
+
+The two CLIs default in opposite directions, which nobody had declared. `codex
+exec` is read-only unless told otherwise — four canary runs had an implementer
+that could not implement, reporting `BLOCKED` on "the read-only workspace" while
+nothing had ever asked for anything else. A dispatched Claude, by contrast,
+edited a file with no flag at all. So the flag on a writing Claude stage
+declares what is already happening rather than granting something new.
+
+For a **reading** Claude stage there is no honest flag, and this does not
+pretend otherwise. `--permission-mode plan` refuses the edit but turns the task
+into planning it, which is not a review. Disallowing `Edit`, `Write` and
+`NotebookEdit` does not stop a write: a live probe created the file anyway. A
+Claude reviewer is confined by the directory it is given — the isolation
+invariant this toolkit already states for paired reviews — and not by an
+argument.
+
 ## Running a cycle
 
 `run_cycle.py` is the wiring, and only the wiring: probe once, label the work,
