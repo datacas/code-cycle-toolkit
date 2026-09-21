@@ -249,7 +249,9 @@ successful exit. A dispatch that returned is not a stage that worked: when a
 stage's own report is not a completion — `BLOCKED`, or a result that cannot be
 read — the cycle stops there and the dispatch row still says it succeeded,
 because it did. Both facts are true and the store keeps them in separate
-columns. Use it, or do exactly what it does; an orchestration that routes
+columns. The reason the agent gave is printed beside the status and stored
+nowhere: it is a claim to weigh, not a finding. One run reported that GitHub was
+unreachable while the same sandbox could reach it. Use it, or do exactly what it does; an orchestration that routes
 and dispatches by hand is one the guarantee above no longer covers.
 
 ```text

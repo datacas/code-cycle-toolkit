@@ -268,6 +268,151 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertEqual(rc.APPROVED_END, report.status)
 
 
+class ReportedReasonTests(RunCycleTestCase):
+    """Why a stage stopped, in the agent's own words and nowhere else.
+
+    A canary spent three extra dispatches working out a reason the agent had
+    already given, because the driver printed the status and dropped the prose.
+    """
+
+    def test_the_reason_the_agent_gave_reaches_the_operator(self) -> None:
+        said = "GitHub authentication is invalid and the API is unreachable"
+        codex = Talker("codex", block("BLOCKED", summary=said))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual(said, report.reason)
+        self.assertIn(said, report.explain())
+
+    def test_an_error_field_is_preferred_over_a_summary(self) -> None:
+        """`error` is what a blocked skill fills in; `summary` may describe the
+        run rather than the failure."""
+        codex = Talker("codex", block("BLOCKED", summary="ran the bootstrap",
+                                      error="no credential for the code host"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual("no credential for the code host", report.reason)
+
+    def test_a_cycle_that_finished_still_says_how(self) -> None:
+        """Not only the failures: the last stage's own account travels with
+        every ending."""
+        codex = Talker("codex", block("IMPLEMENTED", summary="one file changed"))
+        reviewer = Talker("claude", block("APPROVED", summary="no findings"))
+
+        report = self.run_cycle(codex, reviewer)
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual("no findings", report.reason)
+
+    def test_a_block_without_one_behaves_as_before(self) -> None:
+        report = self.run_cycle(Talker("codex", block("BLOCKED")), Talker("claude"))
+
+        self.assertIsNone(report.reason)
+        self.assertNotIn("reason:", report.explain())
+
+    def test_an_unreadable_block_has_no_reason_to_give(self) -> None:
+        unreadable = 'ORCHESTRATION_RESULT\n"BLOCKED"\nEND_ORCHESTRATION_RESULT'
+
+        report = self.run_cycle(Talker("codex", unreadable), Talker("claude"))
+
+        self.assertIsNone(report.reason)
+
+    def test_a_multi_line_reason_stays_on_one_line(self) -> None:
+        """It is printed in a report whose shape a person reads at a glance."""
+        codex = Talker("codex", block("BLOCKED", error="first line\n\nsecond   line\t"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual("first line second line", report.reason)
+        self.assertEqual(1, report.explain().count("reason:"))
+
+    def test_a_reason_that_is_not_text_is_not_a_reason(self) -> None:
+        for value in (3, ["a"], {"why": "x"}, "", "   "):
+            with self.subTest(value=value):
+                self.setUp()
+                codex = Talker("codex", block("BLOCKED", error=value))
+
+                report = self.run_cycle(codex, Talker("claude"))
+
+                self.assertIsNone(report.reason)
+
+    def test_a_terminal_control_sequence_does_not_reach_the_terminal(self) -> None:
+        """An escape is not whitespace, so collapsing whitespace let it through.
+
+        The prose is printed into somebody's terminal report; an agent that can
+        emit ESC can recolour, erase or forge the lines around its own.
+        """
+        spoof = "\x1b[31mspoofed\x1b[0m\x07 and \x08\x08\x08gone"
+
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error=spoof)),
+                                Talker("claude"))
+
+        for control in ("\x1b", "\x07", "\x08"):
+            with self.subTest(control=repr(control)):
+                self.assertNotIn(control, report.reason)
+                self.assertNotIn(control, report.explain())
+        self.assertIn("spoofed", report.reason)
+
+    def test_every_control_character_is_removed(self) -> None:
+        """Removing the bytes is the guarantee. Recognising escape sequences
+        would mean keeping a grammar in step with every terminal."""
+        noisy = "".join(chr(code) for code in list(range(0, 32)) + [127])
+
+        cleaned = rc.readable("before" + noisy + "after")
+
+        self.assertEqual("before after", cleaned)
+
+    def test_the_executors_own_output_is_cleaned_too(self) -> None:
+        """`detail` is stderr from a CLI: the same trust, the same terminal."""
+        class Rude(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    detail="\x1b[2Jcleared the screen")
+
+        report = self.run_cycle(Rude("codex"), Talker("claude"))
+
+        self.assertNotIn("\x1b", report.stopped_because)
+        self.assertIn("cleared the screen", report.stopped_because)
+
+    def test_a_very_long_reason_is_cut(self) -> None:
+        """One line of a report, not a page of it."""
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error="x" * 4000)),
+                                Talker("claude"))
+
+        self.assertEqual(rc.REASON_LIMIT + 1, len(report.reason))
+        self.assertTrue(report.reason.endswith("\u2026"))
+
+    def test_a_reason_of_nothing_but_control_characters_is_no_reason(self) -> None:
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error="\x1b\x07")),
+                                Talker("claude"))
+
+        self.assertIsNone(report.reason)
+
+    def test_the_prose_never_reaches_the_store(self) -> None:
+        """The one thing this must not do. The store holds references and
+        counts; a reason is the agent's prose about a run."""
+        said = "the credential for owner/api expired at 09:00"
+        self.run_cycle(Talker("codex", block("BLOCKED", summary=said)), Talker("claude"))
+
+        written = " ".join(
+            str(value) for row in self.rows() for value in row.values())
+
+        self.assertNotIn(said, written)
+        self.assertNotIn("credential", written)
+        self.assertIn("BLOCKED", written)
+
+    def test_the_reason_decides_nothing(self) -> None:
+        """A stage that completed still completes, whatever it says beside it."""
+        codex = Talker("codex", block("IMPLEMENTED", error="something went wrong"))
+
+        report = self.run_cycle(codex, Talker("claude"))
+
+        self.assertEqual(["implement", "review"], [s.role for s in report.stages])
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+
 class Sequence(Talker):
     """Answers a different thing each time it is asked."""
 
