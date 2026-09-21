@@ -76,8 +76,12 @@ All notable changes to this project are documented here. This project follows
   ran something other than what was requested. The no-prose, no-credentials
   boundary is enforced by one typed table covering every field, columns
   included: counts are integers, amounts numbers, flags booleans, tokens a
-  closed vocabulary, identifiers short references without whitespace, and
-  containers are refused outright.
+  closed vocabulary, identifiers bounded references matching a selector grammar,
+  and containers are refused outright. Model names are checked against the
+  models the toolkit knows, and published credential prefixes are rejected in
+  any reference; no grammar can separate a model name from a credential, so the
+  closed set is the guarantee and the residual is documented rather than
+  claimed away.
 - `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
   executor could be shown to be and on what evidence, `dispatch()` runs a
   resolved target non-interactively through Codex, Claude or Orca. Only Orca can

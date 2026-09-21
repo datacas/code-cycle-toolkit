@@ -365,8 +365,8 @@ should be looking at.
 ## Telemetry
 
 `scripts/telemetry.py` records one row per stage in a SQLite database outside
-every repository, holding identifiers, statuses and counts — no diffs, no prose,
-no credentials. It never enters Git.
+every repository, holding references, statuses and counts — no diffs and no
+prose. It never enters Git.
 
 That boundary is enforced rather than asserted, by one typed table covering
 **every** field — columns included. `FIELD_SPECS` is the only gate, and there
@@ -379,9 +379,30 @@ types — while promoted columns still accepted anything, so `status="TOP-SECRET
 was stored. A column is not safer than a payload key; it is another door.
 
 A count is an integer, an amount a number, a flag a boolean, a token a value
-from a closed vocabulary, and an identifier a short reference with no whitespace
-— a reference has none and prose does. Containers are refused outright,
-whatever key they arrive under. Refusing is loud rather than silent: dropping
+from a closed vocabulary, and an identifier a bounded reference matching a
+selector grammar. Containers are refused outright, whatever key they arrive
+under.
+
+### What the identifier rule does and does not guarantee
+
+Worth stating exactly, because this boundary was claimed too strongly four
+times. `gpt-5.6-luna` and `sk-live-abc123` have the same shape — lowercase
+letters, digits, hyphens — so **no grammar separates a model name from a
+credential**.
+
+What holds:
+
+- model names are checked against the models this toolkit knows, a closed set,
+  which is a real guarantee rather than a shape test;
+- repository and work-item references must match the selector grammar and must
+  not begin with a published credential prefix — `sk-`, `ghp_`, `AKIA`, `xox`
+  and the rest — which rejects the paste that actually happens by accident.
+
+What does not hold: nothing proves an arbitrary caller-supplied reference is not
+a secret. That residual is mitigated by where these values come from — a
+repository selector out of `.code-cycle.yml` and a work-item id out of the issue
+provider, both derived by the toolkit rather than typed into a field — and not
+by pretending the validator settles it. Refusing is loud rather than silent: dropping
 a field would lose an observation the caller believed it had recorded. Routing
 reasons are reduced to a count — the reasons themselves belong in the published
 comment.

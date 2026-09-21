@@ -22,7 +22,7 @@ observations into a routing decision is worse than the honest constant it would
 replace.
 
 The database lives outside every repository and never enters Git. It holds
-identifiers, statuses and counts — no diffs, no prose, no credentials — and that
+references, statuses and counts — no diffs and no prose — and that
 boundary is enforced by a typed allowlist rather than asserted in this
 paragraph. A field nobody has considered is refused by name, and an approved
 field that arrives with the wrong shape is refused too: a name says who may
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -133,9 +134,58 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     })),
 }
 
-#: An identifier is a reference, not a sentence. Whitespace is what separates
-#: the two, and a length cap keeps a pasted blob from arriving as a task id.
+#: An identifier is a reference, not a sentence, and not a secret.
+#:
+#: What a validator can and cannot do here is worth being exact about, because
+#: this boundary was claimed too strongly four times. `gpt-5.6-luna` and
+#: `sk-live-abc123` have the same shape: lowercase letters, digits, hyphens. No
+#: grammar separates a model name from a credential, so the guarantees are:
+#:
+#:   - model names are checked against the models this toolkit knows, which is
+#:     a closed set and therefore a real guarantee;
+#:   - repository and task references must match a reference grammar and must
+#:     not carry a published credential prefix, which rejects the accidents that
+#:     actually happen;
+#:   - nothing proves an arbitrary caller-supplied reference is not a secret.
+#:
+#: That last line is the honest limit. It is mitigated by where these values
+#: come from — a repository selector out of `.code-cycle.yml` and a work-item id
+#: out of the issue provider, both derived by the toolkit rather than typed into
+#: a field — and not by pretending the validator settles it.
 MAX_IDENTIFIER_LENGTH = 200
+
+#: A reference: alphanumerics and the punctuation real selectors use.
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/#@:+-]*$")
+
+#: Published credential formats. Not a guess about what a secret looks like —
+#: these are documented prefixes, and rejecting them catches the paste that
+#: happens by accident.
+CREDENTIAL_PREFIXES = (
+    "sk-", "sk_", "pk_", "rk_",
+    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
+    "xox", "AKIA", "ASIA", "AIza", "ya29.",
+    "glpat-", "dop_v1_", "shpat_", "npm_",
+    "-----BEGIN",
+)
+
+#: Model names this toolkit knows. A closed set is a guarantee a grammar cannot
+#: give; a repository that uses another model registers it here or in its
+#: profiles rather than having telemetry accept any string.
+def _known_models() -> frozenset:
+    try:
+        from router import DEFAULT_PROFILES, parse_target
+    except Exception:  # pragma: no cover - router is a sibling module
+        return frozenset()
+    models = set()
+    for spec in DEFAULT_PROFILES.values():
+        for key in ("primary", "fallback"):
+            value = spec.get(key)
+            if isinstance(value, str):
+                models.add(parse_target(value).model)
+    return frozenset(models)
+
+
+KNOWN_MODELS = _known_models()
 
 #: Kept for callers that still read it.
 MAX_PAYLOAD_VALUE_LENGTH = 120
@@ -282,11 +332,24 @@ def _checked(key: str, value):
                 f"{key!r} is {len(value)} characters, over the {MAX_IDENTIFIER_LENGTH} "
                 "allowed for an identifier"
             )
-        if any(character.isspace() for character in value):
+        if not IDENTIFIER_PATTERN.match(value):
             raise TelemetryError(
-                f"{key!r} is an identifier and may not contain whitespace: a "
-                "reference has none and prose does"
+                f"{key!r} is not a reference: {value!r} contains whitespace or "
+                "characters a repository, work item or model name does not use"
             )
+        for prefix in CREDENTIAL_PREFIXES:
+            if value.startswith(prefix):
+                raise TelemetryError(
+                    f"{key!r} starts with {prefix!r}, a published credential "
+                    "prefix. Telemetry stores references, never secrets."
+                )
+        if key in ("model_requested", "model_resolved") and KNOWN_MODELS:
+            if value not in KNOWN_MODELS:
+                raise TelemetryError(
+                    f"{key!r} must name a model this toolkit knows, not {value!r}. "
+                    "A closed set is the only real guarantee here: a model name "
+                    "and a credential have the same shape."
+                )
         return value
     raise TelemetryError(f"{key!r} declares an unknown field kind {kind!r}")
 

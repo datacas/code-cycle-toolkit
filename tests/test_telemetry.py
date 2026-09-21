@@ -206,6 +206,51 @@ class ColumnBoundaryTests(TelemetryTestCase):
         self.assertEqual("claude-opus-5", row["model_requested"])
 
 
+class IdentifierBoundaryTests(TelemetryTestCase):
+    """A model name and a credential have the same shape."""
+
+    def test_a_credential_prefix_is_refused_in_any_identifier(self) -> None:
+        for value in ("sk-live-abc123", "ghp_abc123", "AKIAIOSFODNN7", "xoxb-1-2",
+                      "glpat-abc", "-----BEGIN RSA"):
+            with self.subTest(value=value):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage(value, "task", "implement")
+
+    def test_a_credential_shaped_model_is_refused(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "implement",
+                                    model_requested="sk-live-abc123")
+
+        self.assertEqual([], self.store.rows())
+
+    def test_a_model_must_be_one_this_toolkit_knows(self) -> None:
+        """The closed set is the only real guarantee: no grammar separates
+        gpt-5.6-luna from sk-live-abc123."""
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "implement",
+                                    model_requested="some-unknown-model")
+
+    def test_the_known_models_come_from_the_router_profiles(self) -> None:
+        self.assertIn("gpt-5.6-luna", tm.KNOWN_MODELS)
+        self.assertIn("claude-opus-5", tm.KNOWN_MODELS)
+
+    def test_a_reference_grammar_rejects_what_a_selector_never_contains(self) -> None:
+        for value in ("has space", "tab\there", "new\nline", "quote'inside", "<angle>"):
+            with self.subTest(value=value):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage(value, "task", "implement")
+
+    def test_real_selectors_still_pass(self) -> None:
+        for repo, task in (("owner/api", "API-055"),
+                           ("org-name/service", "156"),
+                           ("workspace/repo", "ENG-123")):
+            with self.subTest(repo=repo):
+                self.store.record_stage(repo, task, "implement",
+                                        model_requested="gpt-5.6-luna")
+
+        self.assertEqual(3, len(self.store.rows()))
+
+
 class FirstPassRateTests(TelemetryTestCase):
     """The number router.estimate_cost currently guesses at 0.0."""
 
@@ -389,12 +434,12 @@ class DispatchRecordingTests(TelemetryTestCase):
 class ModelDriftTests(TelemetryTestCase):
     def test_a_different_model_is_reported(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
-                                model_requested="gpt-5.6-luna", model_resolved="gpt-5.6-terra")
+                                model_requested="gpt-5.6-luna", model_resolved="claude-sonnet-5")
 
         drift = self.store.model_drift("repo")
 
         self.assertEqual(1, len(drift))
-        self.assertEqual("gpt-5.6-terra", drift[0]["resolved"])
+        self.assertEqual("claude-sonnet-5", drift[0]["resolved"])
 
     def test_a_match_is_not_drift(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
