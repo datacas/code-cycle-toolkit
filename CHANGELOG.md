@@ -73,6 +73,13 @@ All notable changes to this project are documented here. This project follows
   wrapper applies that to every result, so a started Orca worker can never be
   read as a finished stage. `dispatch()` now rebuilds its result with
   `dataclasses.replace`, so a new field cannot be dropped on the way out.
+- The repository's configuration reaches routing: `run_cycle.py` loads
+  `.code-cycle.yml`, overlays `code_cycle.profiles` through `load_profiles`, and
+  passes the resolved profiles to `CycleRecorder`, which routes with them.
+  `code_cycle.repository.selector` supplies the repository when `--repo` is
+  absent. Until this, every run used the built-in profiles whatever the
+  repository declared. An unreadable configuration or an unknown profile name
+  stops the run before any dispatch; `--no-config` asks for the defaults.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

@@ -497,6 +497,15 @@ first version of this driver reviewed work that was still being written. The
 declaration is on the class, and the dispatch wrapper applies it, so an adapter
 cannot report finished work it only launched by forgetting a keyword.
 
+The driver loads the configuration and the recorder only receives what was
+resolved: `code_cycle.profiles` overlaid on the defaults by `load_profiles`, and
+`code_cycle.repository.selector` when no repository was named. `CycleRecorder`
+does not look for a file itself — a component that reads configuration on its
+own can disagree with its caller about what the configuration says, and both
+would be recording rows. An unknown profile name stops the run before anything
+is dispatched, because learning that afterwards means paying for a cycle to find
+a typo.
+
 The probe map is taken once and handed to the recorder. Without it each dispatch
 probes again on its own, so an availability could change between two stages with
 nothing recording that it had — and the decisions on either side stop being

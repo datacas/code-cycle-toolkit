@@ -161,5 +161,164 @@ class MalformedResultTests(RunCycleTestCase):
         self.assertEqual(rc.APPROVED_END, report.status)
 
 
+class Args:
+    """What argparse would have produced, without the parser."""
+
+    def __init__(self, **fields) -> None:
+        self.repo = None
+        self.cwd = None
+        self.config = None
+        self.no_config = False
+        self.__dict__.update(fields)
+
+
+class ConfigurationTests(RunCycleTestCase):
+    """The repository's declaration reaches the router, or it decides nothing."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+
+    def write(self, body: str) -> Path:
+        path = self.directory / ".code-cycle.yml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def profiles_from(self, body: str) -> dict:
+        return rc.plan(Args(cwd=str(self.directory), repo="owner/api"))[1]
+
+    def test_a_declared_profile_is_what_actually_runs(self) -> None:
+        """The whole point: without this the row describes a policy nobody chose."""
+        self.write("""
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: claude:anthropic/claude-sonnet-5 high
+""")
+        codex, claude = Talker("codex"), Talker("claude")
+
+        report = rc.run_cycle(
+            "owner/api", "API-7", router.TaskSignals(), self.store,
+            profiles=self.profiles_from(""),
+            registry=ex.Registry([codex, claude]),
+            availability={"codex": ex.Availability.READY,
+                          "claude": ex.Availability.READY},
+        )
+
+        implement = report.stages[0]
+        self.assertEqual("claude", implement.result.executor)
+        self.assertEqual("claude-sonnet-5", implement.decision.target.model)
+        self.assertEqual([], codex.dispatched)
+
+    def test_without_a_declaration_the_defaults_are_untouched(self) -> None:
+        report = rc.run_cycle(
+            "owner/api", "API-7", router.TaskSignals(), self.store,
+            profiles=rc.plan(Args(no_config=True, repo="owner/api"))[1],
+            registry=ex.Registry([Talker("codex"), Talker("claude")]),
+            availability={"codex": ex.Availability.READY,
+                          "claude": ex.Availability.READY},
+        )
+
+        implement = report.stages[0]
+        self.assertEqual("codex", implement.result.executor)
+        self.assertEqual("gpt-5.6-luna", implement.decision.target.model)
+
+    def test_the_fallback_is_the_configured_one_not_the_built_in_one(self) -> None:
+        """A reroute must stay inside the policy the repository declared."""
+        self.write("""
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: codex:openai/gpt-5.6-luna high
+      fallback: claude:anthropic/claude-opus-5 high
+""")
+        codex = ScriptedAdapter(
+            "codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])
+        claude = Talker("claude")
+
+        report = rc.run_cycle(
+            "owner/api", "API-7", router.TaskSignals(), self.store,
+            profiles=self.profiles_from(""),
+            registry=ex.Registry([codex, claude]),
+            availability={"codex": ex.Availability.READY,
+                          "claude": ex.Availability.READY},
+        )
+
+        fallback = report.stages[0].attempts[1][0]
+        self.assertEqual("claude-opus-5", fallback.target.model)
+        self.assertTrue(fallback.used_fallback)
+
+    def test_an_explicit_repository_wins_over_the_declared_one(self) -> None:
+        self.write("""
+code_cycle:
+  repository:
+    selector: org-name/service
+""")
+        repo, _ = rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+        self.assertEqual("owner/api", repo)
+
+    def test_the_declared_repository_is_used_when_none_is_given(self) -> None:
+        self.write("""
+code_cycle:
+  repository:
+    selector: org-name/service
+""")
+        repo, _ = rc.plan(Args(cwd=str(self.directory)))
+
+        self.assertEqual("org-name/service", repo)
+
+    def test_no_repository_anywhere_is_an_error_before_anything_runs(self) -> None:
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory)))
+
+        self.assertIn("no repository", str(refused.exception))
+
+    def test_an_unknown_profile_name_stops_the_run_before_dispatch(self) -> None:
+        self.write("""
+code_cycle:
+  profiles:
+    cheep_coder:
+      primary: codex:openai/gpt-5.6-luna high
+""")
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+        self.assertIn("unknown profile names", str(refused.exception))
+
+    def test_unreadable_configuration_is_refused_not_ignored(self) -> None:
+        """Running on the defaults while a file says otherwise would record a
+        policy nobody declared."""
+        self.write("code_cycle: [this is not a mapping")
+
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+        self.assertIn("could not be read", str(refused.exception))
+
+    def test_a_named_configuration_that_is_not_there_is_an_error(self) -> None:
+        with self.assertRaises(rc.CycleDriverError):
+            rc.plan(Args(config=str(self.directory / "absent.yml"), repo="owner/api"))
+
+    def test_the_defaults_can_be_asked_for_explicitly(self) -> None:
+        self.write("""
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: claude:anthropic/claude-sonnet-5 high
+""")
+        _, profiles = rc.plan(Args(cwd=str(self.directory), repo="owner/api",
+                                   no_config=True))
+
+        self.assertEqual("codex", profiles["cheap_coder"].primary.executor)
+
+    def test_asking_for_both_at_once_is_refused(self) -> None:
+        with self.assertRaises(rc.CycleDriverError):
+            rc.plan(Args(config=str(self.write("code_cycle: {}")),
+                         no_config=True, repo="owner/api"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -315,6 +315,13 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
 
+It reads `.code-cycle.yml` from the working directory: `code_cycle.profiles`
+overlays the built-in profiles, and `code_cycle.repository.selector` supplies
+the repository when `--repo` is not given. A configuration that exists and
+cannot be read stops the run instead of falling back to the defaults, because a
+row recorded under the defaults while a file says otherwise describes a policy
+nobody chose. `--no-config` asks for the defaults deliberately.
+
 It probes the executors once, labels the work before routing anything, and runs
 `implement → review → (resolve → rereview)*` with every stage going through the
 recorder, so no dispatch can happen without leaving a row. It reads each

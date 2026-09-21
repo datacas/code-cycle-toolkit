@@ -92,6 +92,7 @@ class CycleRecorder:
         mode: RoutingMode = RoutingMode.PRODUCTION,
         policy: ReadinessPolicy | None = None,
         probes: dict | None = None,
+        profiles: dict | None = None,
     ) -> None:
         self.telemetry = telemetry
         self.repo_id = repo_id
@@ -106,6 +107,11 @@ class CycleRecorder:
         # between two stages with nothing recording that it had — and the
         # decisions on either side of the change become unexplainable.
         self.probes = probes
+        # Already resolved by whoever loaded the repository's configuration.
+        # The recorder does not go looking for a file: a component that reads
+        # configuration on its own is one that can disagree with the caller
+        # about what the configuration says.
+        self.profiles = profiles
         self.iteration = 0
         self.stages: list[StageOutcome] = []
 
@@ -120,7 +126,7 @@ class CycleRecorder:
 
         for attempt in range(2):
             decision = route(role, self.signals, self.availability,
-                             mode=self.mode, profiles=None)
+                             mode=self.mode, profiles=self.profiles)
             if decision.blocked:
                 outcome.decision = decision
                 outcome.rows.append(self._record(role, decision, None))
