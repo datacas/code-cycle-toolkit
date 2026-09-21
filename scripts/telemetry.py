@@ -48,40 +48,96 @@ DATABASE_NAME = "telemetry.sqlite"
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
 
-#: Fields allowed into `payload`, and the shape each one may take.
+#: Every field this store accepts, column or payload, and the shape it may hold.
 #:
-#: An allowlist of names is not enough: a name says who may write, and a type
-#: says what. Allowing any value under an approved key let a short secret
-#: through a numeric field and prose through a nested one, so each key declares
-#: what it holds and anything else is refused.
+#: One table rather than two, because this boundary has now been breached three
+#: times and each breach was the same mistake in different clothes: the promise
+#: was enforced for the part that had just been pointed out — first a docstring,
+#: then payload key names, then payload value types — while another door stayed
+#: open. A promoted column is not safer than a payload key; it is just a
+#: different door. So there are no exempt fields.
 #:
-#: `"token"` means a short enum-like word from a closed vocabulary — never free
-#: text, because free text is where prose and credentials arrive.
-ALLOWED_PAYLOAD_FIELDS = {
-    "routing_reason_count": "count",
-    "iterations": "count",
-    "findings_critical": "count",
-    "findings_high": "count",
-    "findings_medium": "count",
-    "findings_low": "count",
-    "checks_passed": "count",
-    "checks_failed": "count",
-    "exit_code": "count",
-    "tokens_in": "count",
-    "tokens_out": "count",
-    "cost_usd": "amount",
-    "security_audit_ran": "flag",
-    "security_gate_half": "token",
+#: Kinds:
+#:   count      an integer
+#:   amount     a number
+#:   flag       a boolean
+#:   token      a value from a closed vocabulary, never free text
+#:   identifier a short reference with no whitespace: prose has spaces
+FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
+    # identifiers supplied by the caller
+    "repo_id": ("identifier", None),
+    "task_id": ("identifier", None),
+    "model_requested": ("identifier", None),
+    "model_resolved": ("identifier", None),
+    # closed vocabularies
+    "role": ("token", frozenset({
+        "implement", "review", "rereview", "resolve", "verify", "run",
+        "bootstrap", "coordinate", "security", "triage",
+    })),
+    "skill": ("token", frozenset({
+        "cc-implement-issue", "cc-initial-review", "cc-resolve-comments",
+        "cc-rereview", "cc-orchestrator", "cc-orca-orchestrator", "cc-pr-review",
+        "cc-code-review", "cc-security-review", "cc-verify", "cc-run",
+        "cc-provider-bootstrap",
+    })),
+    "profile": ("token", frozenset({
+        "cheap_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
+        "senior_reviewer", "security",
+    })),
+    "executor": ("token", frozenset({"codex", "claude", "orca"})),
+    "provider": ("token", frozenset({"openai", "anthropic"})),
+    "effort": ("token", frozenset({"low", "medium", "high", "max"})),
+    "readiness_policy": ("token", frozenset({"proven", "attempt"})),
+    "dispatched_from": ("token", frozenset({
+        "unknown", "installed", "authenticated", "quota_exhausted", "ready",
+    })),
+    "outcome": ("token", frozenset({
+        "succeeded", "blocked", "failed", "contract_violation",
+    })),
+    "status": ("token", frozenset({
+        "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",
+        "PARTIALLY_RESOLVED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
+        "HUMAN_INTERVENTION", "IN_PROGRESS",
+    })),
+    "missing_capability": ("token", frozenset({
+        "operating_quota", "operating_availability", "proven_readiness",
+        "authenticated_session", "folder_trust", "hook_trust",
+        "bypass_acknowledgement", "trusted_directory", "orchestration_context",
+        "provider_agent_mapping",
+    })),
+    "verifiability": ("token", frozenset({"auto", "partial", "human"})),
+    # numbers and flags
+    "iteration": ("count", None),
+    "difficulty": ("count", None),
+    "findings_total": ("count", None),
+    "findings_blocking": ("count", None),
+    "duration_ms": ("count", None),
+    "used_fallback": ("flag", None),
+    "security_sensitive": ("flag", None),
+    # payload-only
+    "routing_reason_count": ("count", None),
+    "iterations": ("count", None),
+    "findings_critical": ("count", None),
+    "findings_high": ("count", None),
+    "findings_medium": ("count", None),
+    "findings_low": ("count", None),
+    "checks_passed": ("count", None),
+    "checks_failed": ("count", None),
+    "exit_code": ("count", None),
+    "tokens_in": ("count", None),
+    "tokens_out": ("count", None),
+    "cost_usd": ("amount", None),
+    "security_audit_ran": ("flag", None),
+    "security_gate_half": ("token", frozenset({
+        "deterministic", "reviewer", "both", "none",
+    })),
 }
 
-#: Values allowed for keys declared as `"token"`. A closed vocabulary rather
-#: than a length limit: "short enough" is not a property that keeps secrets out.
-ALLOWED_TOKENS = {
-    "security_gate_half": frozenset({"deterministic", "reviewer", "both", "none"}),
-}
+#: An identifier is a reference, not a sentence. Whitespace is what separates
+#: the two, and a length cap keeps a pasted blob from arriving as a task id.
+MAX_IDENTIFIER_LENGTH = 200
 
-#: Kept for callers that still read it; the type rules are what enforce the
-#: boundary now.
+#: Kept for callers that still read it.
 MAX_PAYLOAD_VALUE_LENGTH = 120
 
 #: Review statuses that settle whether the first pass succeeded. A row with any
@@ -178,15 +234,20 @@ _COLUMNS = (
 
 
 def _checked(key: str, value):
-    """Return the value if its shape matches what the key is allowed to hold.
+    """Return the value if its shape matches what the field may hold.
 
-    Typed rather than length-limited. A short string is not safe because it is
-    short — "TOP-SECRET" is ten characters — and a container is not safe because
-    its key was approved, since the prose simply moves one level down. So a
-    count is an integer, an amount is a number, a flag is a boolean, and a token
-    comes from a closed vocabulary. Nothing else is stored.
+    Typed rather than length-limited, and applied to every field. A string is
+    not safe because it is short — `TOP-SECRET` is ten characters — a container
+    is not safe because its key was approved, and a column is not safe because
+    it has a name in the schema.
     """
-    kind = ALLOWED_PAYLOAD_FIELDS[key]
+    if key not in FIELD_SPECS:
+        raise TelemetryError(
+            f"{key!r} is not a telemetry field. This store holds counts, flags, "
+            "identifiers and closed-vocabulary tokens, never prose or "
+            "credentials; add it to FIELD_SPECS deliberately if it belongs."
+        )
+    kind, vocabulary = FIELD_SPECS[key]
     if value is None:
         return None
     if isinstance(value, (dict, list, tuple, set, bytes)):
@@ -207,11 +268,24 @@ def _checked(key: str, value):
             raise TelemetryError(f"{key!r} is a flag and must be a boolean, got {type(value).__name__}")
         return value
     if kind == "token":
-        vocabulary = ALLOWED_TOKENS.get(key, frozenset())
-        if value not in vocabulary:
+        if value not in (vocabulary or frozenset()):
             raise TelemetryError(
-                f"{key!r} accepts only {sorted(vocabulary)}, not {value!r}; a token "
-                "field is a closed vocabulary, not short free text"
+                f"{key!r} accepts only {sorted(vocabulary or ())}, not {value!r}; "
+                "a token field is a closed vocabulary, not short free text"
+            )
+        return value
+    if kind == "identifier":
+        if not isinstance(value, str):
+            raise TelemetryError(f"{key!r} is an identifier and must be a string, got {type(value).__name__}")
+        if len(value) > MAX_IDENTIFIER_LENGTH:
+            raise TelemetryError(
+                f"{key!r} is {len(value)} characters, over the {MAX_IDENTIFIER_LENGTH} "
+                "allowed for an identifier"
+            )
+        if any(character.isspace() for character in value):
+            raise TelemetryError(
+                f"{key!r} is an identifier and may not contain whitespace: a "
+                "reference has none and prose does"
             )
         return value
     raise TelemetryError(f"{key!r} declares an unknown field kind {kind!r}")
@@ -243,20 +317,18 @@ class Telemetry:
         if not repo_id or not task_id or not role:
             raise TelemetryError("a stage needs repo_id, task_id and role")
 
-        row = {"repo_id": repo_id, "task_id": task_id, "role": role}
+        row = {
+            "repo_id": _checked("repo_id", repo_id),
+            "task_id": _checked("task_id", task_id),
+            "role": _checked("role", role),
+        }
         payload = {}
         for key, value in fields.items():
+            checked = _checked(key, value)
             if key in _COLUMNS:
-                row[key] = value
-                continue
-            if key not in ALLOWED_PAYLOAD_FIELDS:
-                raise TelemetryError(
-                    f"{key!r} is not an allowed telemetry field. This store holds "
-                    "counts, flags and closed-vocabulary tokens, never prose or "
-                    "credentials; add the field to ALLOWED_PAYLOAD_FIELDS "
-                    "deliberately if it belongs."
-                )
-            payload[key] = _checked(key, value)
+                row[key] = checked
+            else:
+                payload[key] = checked
         for flag in ("used_fallback", "security_sensitive"):
             if flag in row and row[flag] is not None:
                 row[flag] = int(bool(row[flag]))

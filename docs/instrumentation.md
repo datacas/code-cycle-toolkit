@@ -368,16 +368,20 @@ should be looking at.
 every repository, holding identifiers, statuses and counts — no diffs, no prose,
 no credentials. It never enters Git.
 
-That boundary is enforced rather than asserted, and enforced **by type**. A
-field that is neither a column nor on the allowlist is refused by name, and an
-allowlisted field that arrives with the wrong shape is refused too: a name says
-who may write, a type says what. Both are needed, because a secret can be short
-— `TOP-SECRET` is ten characters — and prose hides one level down inside a
-container whose key was approved.
+That boundary is enforced rather than asserted, by one typed table covering
+**every** field — columns included. `FIELD_SPECS` is the only gate, and there
+are no exempt fields.
 
-So a count is an integer, an amount is a number, a flag is a boolean, and a
-token comes from a closed vocabulary rather than being short free text.
-Containers are refused outright. Refusing is loud rather than silent: dropping
+The single table is the lesson, not a style choice. This boundary was breached
+three times, and each fix covered the door that had just been pointed out: first
+a docstring with nothing behind it, then payload key names, then payload value
+types — while promoted columns still accepted anything, so `status="TOP-SECRET"`
+was stored. A column is not safer than a payload key; it is another door.
+
+A count is an integer, an amount a number, a flag a boolean, a token a value
+from a closed vocabulary, and an identifier a short reference with no whitespace
+— a reference has none and prose does. Containers are refused outright,
+whatever key they arrive under. Refusing is loud rather than silent: dropping
 a field would lose an observation the caller believed it had recorded. Routing
 reasons are reduced to a count — the reasons themselves belong in the published
 comment.

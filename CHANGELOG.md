@@ -74,9 +74,9 @@ All notable changes to this project are documented here. This project follows
   hardening a handful of runs into a routing constant; `dispatch_failures()`
   counts blocked dispatches by capability; `model_drift()` lists executors that
   ran something other than what was requested. The no-prose, no-credentials
-  boundary is enforced by a typed allowlist: an unknown field is refused by
-  name, and an allowlisted field with the wrong shape is refused too — counts
-  are integers, amounts numbers, flags booleans, tokens a closed vocabulary, and
+  boundary is enforced by one typed table covering every field, columns
+  included: counts are integers, amounts numbers, flags booleans, tokens a
+  closed vocabulary, identifiers short references without whitespace, and
   containers are refused outright.
 - `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
   executor could be shown to be and on what evidence, `dispatch()` runs a

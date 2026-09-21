@@ -69,7 +69,7 @@ class StorageTests(TelemetryTestCase):
             self.store.record_stage("repo", "t1", "implement", whatever=1)
 
         self.assertIn("whatever", str(raised.exception))
-        self.assertIn("ALLOWED_PAYLOAD_FIELDS", str(raised.exception))
+        self.assertIn("FIELD_SPECS", str(raised.exception))
 
     def test_a_short_secret_in_a_numeric_field_is_refused(self) -> None:
         """A string is not safe because it is short: TOP-SECRET is ten characters."""
@@ -154,6 +154,58 @@ class StorageTests(TelemetryTestCase):
         self.assertEqual(2, len(self.store.rows()))
 
 
+class ColumnBoundaryTests(TelemetryTestCase):
+    """A promoted column is not safer than a payload key; it is another door.
+
+    This boundary was breached three times, and every time the fix covered the
+    door that had just been pointed out.
+    """
+
+    def test_a_secret_cannot_arrive_through_a_promoted_column(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "review", status="TOP-SECRET")
+
+        self.assertEqual([], self.store.rows())
+
+    def test_prose_cannot_arrive_through_a_promoted_column(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "review", skill="private prose here")
+
+    def test_a_key_shaped_value_cannot_arrive_as_a_profile(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "review", profile="sk-live-abc123")
+
+    def test_an_over_long_value_cannot_arrive_through_a_column(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "task", "review", effort="y" * 300)
+
+    def test_an_identifier_with_whitespace_is_refused(self) -> None:
+        """A reference has no spaces; prose does."""
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "my secret token here", "review")
+
+    def test_an_over_long_identifier_is_refused(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t" * 300, "review")
+
+    def test_every_column_is_covered_by_the_same_table(self) -> None:
+        """No column may be exempt, which is how the last three breaches happened."""
+        uncovered = sorted(set(tm._COLUMNS) - set(tm.FIELD_SPECS))
+
+        self.assertEqual([], uncovered)
+
+    def test_well_formed_values_still_pass(self) -> None:
+        self.store.record_stage("repo", "task-1", "review", status="APPROVED",
+                                profile="senior_reviewer", skill="cc-initial-review",
+                                executor="claude", provider="anthropic", effort="high",
+                                model_requested="claude-opus-5")
+
+        row = self.store.rows()[0]
+
+        self.assertEqual("APPROVED", row["status"])
+        self.assertEqual("claude-opus-5", row["model_requested"])
+
+
 class FirstPassRateTests(TelemetryTestCase):
     """The number router.estimate_cost currently guesses at 0.0."""
 
@@ -224,12 +276,11 @@ class FirstPassRateTests(TelemetryTestCase):
         self.assertFalse(rate.known)
         self.assertEqual(0, rate.observations)
 
-    def test_an_unknown_status_never_counts_as_a_pass_either(self) -> None:
-        for i in range(10):
-            self.store.record_stage("repo", f"t{i}", "implement", profile="cheap_coder")
-            self.store.record_stage("repo", f"t{i}", "review", status="SOMETHING_ELSE")
-
-        self.assertEqual(0, self.store.first_pass_rate("repo").observations)
+    def test_an_unrecognised_status_cannot_be_recorded_at_all(self) -> None:
+        """With a closed vocabulary the question moves earlier: an invented
+        status is refused at write time rather than mis-counted at read time."""
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "review", status="SOMETHING_ELSE")
 
     def test_an_unreviewed_implementation_is_not_counted(self) -> None:
         """Nobody reviewed it, so it is not evidence that it would have passed."""
