@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -38,16 +39,58 @@ class StorageTests(TelemetryTestCase):
                 with self.assertRaises(tm.TelemetryError):
                     self.store.record_stage(*args)
 
-    def test_unknown_fields_are_kept_rather_than_dropped(self) -> None:
-        """A schema that rejects an unpromoted field makes callers drop data."""
+    def test_allowed_payload_fields_are_kept(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
-                                profile="cheap_coder", tokens_in=1234, whatever={"a": 1})
+                                profile="cheap_coder", tokens_in=1234, findings_high=2)
 
         row = self.store.rows("repo")[0]
 
         self.assertEqual("cheap_coder", row["profile"])
         self.assertEqual(1234, row["payload"]["tokens_in"])
-        self.assertEqual({"a": 1}, row["payload"]["whatever"])
+        self.assertEqual(2, row["payload"]["findings_high"])
+
+    def test_a_credential_cannot_be_persisted(self) -> None:
+        """The no-secrets promise is enforced, not asserted in a docstring."""
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "implement", credential="TOP-SECRET")
+
+        self.assertEqual([], self.store.rows())
+
+    def test_prose_cannot_be_persisted(self) -> None:
+        for field in ("transcript", "prompt", "summary", "diff", "reason"):
+            with self.subTest(field=field):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage("repo", "t1", "implement", **{field: "some prose"})
+
+    def test_an_unknown_field_is_refused_by_name_not_dropped(self) -> None:
+        """Dropping silently would lose an observation the caller believed it
+        had recorded; refusing says which field and where to add it."""
+        with self.assertRaises(tm.TelemetryError) as raised:
+            self.store.record_stage("repo", "t1", "implement", whatever=1)
+
+        self.assertIn("whatever", str(raised.exception))
+        self.assertIn("ALLOWED_PAYLOAD_KEYS", str(raised.exception))
+
+    def test_an_allowed_field_carrying_prose_is_still_refused(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "implement",
+                                    security_gate_half="x" * 200)
+
+    def test_routing_reasons_are_reduced_to_a_count(self) -> None:
+        """The reasons are prose and belong in the published comment."""
+        target = router.parse_target("codex:openai/gpt-5.6-luna high")
+        decision = router.RoutingDecision(
+            "cheap_coder", target, router.RoutingMode.PRODUCTION,
+            reasons=("difficulty below 3", "codex is ready"),
+        )
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex", target)
+
+        self.store.record_dispatch("repo", "t1", "implement", decision, result)
+        payload = self.store.rows()[0]["payload"]
+
+        self.assertEqual(2, payload["routing_reason_count"])
+        self.assertNotIn("routing_reasons", payload)
+        self.assertNotIn("difficulty below 3", json.dumps(payload))
 
     def test_every_row_carries_its_schema_version(self) -> None:
         self.store.record_stage("repo", "t1", "implement")
@@ -116,6 +159,36 @@ class FirstPassRateTests(TelemetryTestCase):
                                     profile="senior_reviewer", status="APPROVED")
 
         self.assertEqual(0.0, self.store.first_pass_rate("repo").value)
+
+    def test_a_review_without_a_verdict_is_not_a_failed_first_pass(self) -> None:
+        """An append-only API makes recording before the verdict ordinary, and
+        counting that as a failure would poison the cost model."""
+        for i in range(10):
+            self.store.record_stage("repo", f"t{i}", "implement", profile="cheap_coder")
+            self.store.record_stage("repo", f"t{i}", "review")           # no status yet
+            self.store.record_stage("repo", f"t{i}", "review", iteration=1, status="APPROVED")
+
+        rate = self.store.first_pass_rate("repo")
+
+        self.assertEqual(1.0, rate.value)
+        self.assertEqual(10, rate.observations)
+
+    def test_a_pending_review_leaves_the_rate_unknown(self) -> None:
+        for i in range(10):
+            self.store.record_stage("repo", f"t{i}", "implement", profile="cheap_coder")
+            self.store.record_stage("repo", f"t{i}", "review", status="IN_PROGRESS")
+
+        rate = self.store.first_pass_rate("repo")
+
+        self.assertFalse(rate.known)
+        self.assertEqual(0, rate.observations)
+
+    def test_an_unknown_status_never_counts_as_a_pass_either(self) -> None:
+        for i in range(10):
+            self.store.record_stage("repo", f"t{i}", "implement", profile="cheap_coder")
+            self.store.record_stage("repo", f"t{i}", "review", status="SOMETHING_ELSE")
+
+        self.assertEqual(0, self.store.first_pass_rate("repo").observations)
 
     def test_an_unreviewed_implementation_is_not_counted(self) -> None:
         """Nobody reviewed it, so it is not evidence that it would have passed."""
@@ -201,7 +274,7 @@ class DispatchRecordingTests(TelemetryTestCase):
         self.assertEqual("succeeded", row["outcome"])
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
-        self.assertEqual(["difficulty below 3"], row["payload"]["routing_reasons"])
+        self.assertEqual(1, row["payload"]["routing_reason_count"])
 
     def test_a_fallback_is_visible_in_the_row(self) -> None:
         decision, result = self.decision_and_result(used_fallback=True)

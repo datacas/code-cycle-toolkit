@@ -73,8 +73,9 @@ All notable changes to this project are documented here. This project follows
   currently assumes, reporting unknown below ten observations rather than
   hardening a handful of runs into a routing constant; `dispatch_failures()`
   counts blocked dispatches by capability; `model_drift()` lists executors that
-  ran something other than what was requested. Unpromoted fields travel in a
-  payload column instead of being dropped.
+  ran something other than what was requested. A field that is neither a column
+  nor on a short allowlist is refused by name, and over-long values with it, so
+  the no-prose and no-credentials boundary is enforced rather than asserted.
 - `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
   executor could be shown to be and on what evidence, `dispatch()` runs a
   resolved target non-interactively through Codex, Claude or Orca. Only Orca can
