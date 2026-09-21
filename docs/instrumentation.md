@@ -514,7 +514,11 @@ dispatched, paid for, and then its row cannot be written, so the run happens and
 leaves no trace of having happened. Configuration shape is checked with it:
 `code_cycle`, `code_cycle.repository` and `code_cycle.profiles` must be mappings,
 so a valid YAML document with the wrong shape is a stated refusal rather than a
-traceback from whichever reader reached it first.
+traceback from whichever reader reached it first. `load_profiles` checks the
+shapes below those names — every declared profile is a mapping, every `primary`
+and `fallback` a target string — because a declared `primary: 3` used to be
+carried into a `Profile` as the integer 3, and only something trying to route
+with it ever found out.
 
 The probe map is taken once and handed to the recorder. Without it each dispatch
 probes again on its own, so an availability could change between two stages with

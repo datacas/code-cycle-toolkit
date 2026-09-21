@@ -234,5 +234,54 @@ class ProfileConfigTests(unittest.TestCase):
         )
 
 
+
+class DeclaredProfileShapeTests(unittest.TestCase):
+    """A declaration is a mapping of target strings, refused here or never."""
+
+    def load(self, profiles):
+        return router.load_profiles({"code_cycle": {"profiles": profiles}})
+
+    def test_a_profile_that_is_not_a_mapping_is_refused(self) -> None:
+        with self.assertRaises(router.RouterError) as refused:
+            self.load({"cheap_coder": "nope"})
+
+        self.assertIn("must be a mapping of targets", str(refused.exception))
+
+    def test_a_target_that_is_not_a_string_is_refused(self) -> None:
+        """It used to be carried through: `primary: 3` became the integer 3,
+        and only something trying to route with it ever found out."""
+        for key, value in (("primary", 3), ("fallback", ["a", "b"]),
+                           ("primary", {"model": "x"})):
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(router.RouterError) as refused:
+                    self.load({"cheap_coder": {"primary": "codex:openai/gpt-5.6-luna high",
+                                               key: value}})
+
+                self.assertIn("not a target string", str(refused.exception))
+
+    def test_an_empty_target_string_is_refused(self) -> None:
+        with self.assertRaises(router.RouterError):
+            self.load({"cheap_coder": {"primary": "   "}})
+
+    def test_a_malformed_target_string_is_still_refused(self) -> None:
+        with self.assertRaises(router.RouterError) as refused:
+            self.load({"cheap_coder": {"primary": "nonsense"}})
+
+        self.assertIn("executor:provider/model effort", str(refused.exception))
+
+    def test_a_well_formed_declaration_still_loads(self) -> None:
+        profiles = self.load({"cheap_coder": {
+            "primary": "claude:anthropic/claude-sonnet-5 high",
+            "fallback": "codex:openai/gpt-5.6-luna high"}})
+
+        self.assertEqual("claude-sonnet-5", profiles["cheap_coder"].primary.model)
+        self.assertEqual("gpt-5.6-luna", profiles["cheap_coder"].fallback.model)
+
+    def test_a_section_that_is_not_a_mapping_does_not_raise_its_own_error(self) -> None:
+        """`code_cycle: not-a-mapping` reached `.get` on a string."""
+        with self.assertRaises(router.RouterError):
+            router.load_profiles({"code_cycle": "not-a-mapping"})
+
+
 if __name__ == "__main__":
     unittest.main()

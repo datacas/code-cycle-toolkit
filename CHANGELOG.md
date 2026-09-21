@@ -87,6 +87,10 @@ All notable changes to this project are documented here. This project follows
   never reaches an executor prompt; and `code_cycle`, `code_cycle.repository`
   and `code_cycle.profiles` must be mappings, so valid YAML with the wrong shape
   is refused rather than raising from whichever reader reached it first.
+  `load_profiles` refuses a declared profile that is not a mapping and a
+  `primary` or `fallback` that is not a target string, naming the profile: one
+  used to raise `TypeError` past every handler, and the other was carried into a
+  `Profile` as whatever it was.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

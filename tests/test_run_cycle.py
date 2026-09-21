@@ -388,6 +388,31 @@ code_cycle:
 
                 self.assertIn("must be a mapping", str(refused.exception))
 
+    def test_a_malformed_profile_entry_is_a_stated_refusal(self) -> None:
+        """Valid YAML, valid section, wrong entry. It used to reach a merge and
+        raise TypeError past every handler the CLI has."""
+        for body in ("code_cycle:\n  profiles:\n    cheap_coder: nope\n",
+                     "code_cycle:\n  profiles:\n    cheap_coder:\n      primary: 3\n",
+                     ("code_cycle:\n  profiles:\n    cheap_coder:\n"
+                      "      primary: codex:openai/gpt-5.6-luna high\n"
+                      "      fallback: [a, b]\n")):
+            with self.subTest(body=body):
+                self.write(body)
+
+                with self.assertRaises(rc.CycleDriverError) as refused:
+                    rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+                self.assertIn("profile 'cheap_coder'", str(refused.exception))
+
+    def test_a_declared_target_that_is_not_a_target_never_becomes_one(self) -> None:
+        """`primary: 3` was accepted and carried as the integer 3."""
+        self.write("code_cycle:\n  profiles:\n    cheap_coder:\n      primary: 3\n")
+
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+        self.assertIn("not a target string", str(refused.exception))
+
     def test_asking_for_both_at_once_is_refused(self) -> None:
         with self.assertRaises(rc.CycleDriverError):
             rc.plan(Args(config=str(self.write("code_cycle: {}")),
