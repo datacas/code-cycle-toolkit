@@ -296,10 +296,15 @@ nothing and changes nothing, and the distinction keeps one exhausted window from
 being read as evidence about a model.
 
 Friction is classified from the failure, never from what the agent wrote. A run
-that exits cleanly is never searched for words like "quota" or "sign in" — an
-implementation that adds rate-limit handling says "quota" for ordinary reasons,
-and reporting that as an outage would be the tool inventing one. Only a non-zero
-exit is classified, stderr first.
+that exits cleanly is never inspected at all, and on a failed run only stderr
+and structured error events are read — an implementation that adds rate-limit
+handling says "quota" for ordinary reasons, and a non-zero exit does not turn
+that sentence into evidence about a window.
+
+A production run uses the `attempt` readiness policy and a calibration uses
+`proven`, derived from the mode rather than passed by hand: under `proven` no
+native executor could ever be dispatched to, and under `attempt` a calibration
+arm would start from a state nobody established.
 
 A dispatch that reports running a model other than the one requested is a
 `contract_violation`, not a success. `dispatch(target)` promises that target
@@ -309,10 +314,31 @@ open, which is a third answer rather than a quiet yes.
 
 Orca is the only backend that reports the model it actually launched, in its
 receipt's `launch.effective`. Elsewhere the value is either self-reported by the
-agent — observed to be wrong in both arms of a campaign — or unavailable. Its
-dispatch needs an existing coordinator terminal and Run, and refuses to create
-them: a dispatcher that quietly spawns terminals in a workspace is one nobody
-can reason about.
+agent — observed to be wrong in both arms of a campaign — or unavailable.
+
+Its dispatch takes an explicit `OrcaDispatchContext`: a coordinator terminal, a
+Run and a Task that already exist, plus an optional agent override. The adapter
+refuses to create any of them, because a dispatcher that quietly spawns
+terminals and durable state in someone's workspace is one nobody can reason
+about. The Task ID is separate from the `task` argument every other adapter
+takes: for Codex and Claude that argument is the prompt, while Orca's prompt
+already lives inside the Task and `--task` wants its identifier. The agent is
+chosen from the target's provider, so an Anthropic target launches the Claude
+agent rather than asking Codex to run a model it does not have.
+
+### Learning availability by dispatching
+
+A native probe cannot see quota before spending some, so the only moment anyone
+learns a window is exhausted is a dispatch that tried. If that stays inside the
+result, the production fallback is unreachable in the case it exists for: the
+router picked the primary from an optimistic promotion, the dispatch found the
+truth, and nothing carried it back.
+
+`DispatchResult.learned_availability` reports that evidence. It does not
+re-route — that belongs to the orchestration layer, where a single explicit
+second routing is recorded along with the evidence that caused it. Friction a
+person has to clear teaches nothing about availability and yields `None`, and a
+calibration never re-routes at all.
 
 Claude runs with `-p` and Codex with `exec`, non-interactively and with no
 bypass flag. A run that needs elevated permissions to proceed is a run a person

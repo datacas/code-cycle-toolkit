@@ -53,6 +53,18 @@ class ReadinessPolicy(str, Enum):
     PROVEN = "proven"
     ATTEMPT = "attempt"
 
+    @staticmethod
+    def for_mode(mode: RoutingMode) -> "ReadinessPolicy":
+        """The policy each mode needs, so neither depends on being remembered.
+
+        Production needs `ATTEMPT`: no native executor can demonstrate
+        readiness, so `PROVEN` would refuse to dispatch to Codex or Claude at
+        all. A calibration needs `PROVEN`: an arm that started from an
+        unestablished state would sit in the sample beside arms that did not.
+        """
+        return (ReadinessPolicy.PROVEN if mode is RoutingMode.CALIBRATION
+                else ReadinessPolicy.ATTEMPT)
+
 
 class DispatchOutcome(str, Enum):
     SUCCEEDED = "succeeded"
@@ -96,6 +108,27 @@ class DispatchResult:
     readiness_policy: ReadinessPolicy = ReadinessPolicy.PROVEN
     dispatched_from: Availability = Availability.READY
     artifacts: dict = field(default_factory=dict)
+
+    @property
+    def learned_availability(self) -> Availability | None:
+        """What this attempt demonstrated about the executor, if anything.
+
+        A native probe can never see quota before spending some, so the only
+        moment anyone learns a window is exhausted is a dispatch that tried. If
+        that discovery stays inside the result, the production fallback is
+        unreachable in exactly the case it exists for: the router picked the
+        primary from an optimistic `attempt` promotion, the dispatch found the
+        truth, and nothing carried it back.
+
+        This reports the evidence. It does not re-route: that decision belongs
+        to the orchestration layer, where it can be recorded once instead of
+        happening silently inside a call that was asked to dispatch.
+        """
+        if self.missing_capability == "operating_quota":
+            return Availability.QUOTA_EXHAUSTED
+        if self.missing_capability == "authenticated_session":
+            return Availability.INSTALLED
+        return None
 
     @property
     def model_matches_request(self) -> bool | None:
@@ -272,11 +305,48 @@ class NativeAdapter(Adapter):
         """
         if returncode == 0:
             return None
-        for text in (stderr, stdout):
-            found = self._markers_in(text or "")
-            if found is not None:
-                return found
+        found = self._markers_in(stderr or "")
+        if found is not None:
+            return found
+        # stdout carries the agent's own answer, and a failed run does not make
+        # that answer evidence about the executor: "Implemented quota handling"
+        # says nothing about a window being exhausted whatever the exit status
+        # was. Only structured events are read here, never free text.
+        return self._markers_in_events(stdout or "")
+
+    def _markers_in_events(self, stdout: str) -> tuple[str, str] | None:
+        """Read terminal error events from a structured stream, if there is one.
+
+        Codex `exec --json` and Claude `--output-format json` both emit JSON
+        objects. Only fields an executor uses to report its own trouble are
+        inspected; the assistant's message text is not one of them.
+        """
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            if not self._is_error_event(payload):
+                continue
+            for key in ("error", "message", "reason", "detail", "subtype"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    value = value.get("message") or value.get("code")
+                if isinstance(value, str):
+                    found = self._markers_in(value)
+                    if found is not None:
+                        return found
         return None
+
+    @staticmethod
+    def _is_error_event(payload: dict) -> bool:
+        if payload.get("is_error") is True:
+            return True
+        kind = payload.get("type") or payload.get("event") or ""
+        return isinstance(kind, str) and ("error" in kind.lower() or kind == "failure")
 
     def _markers_in(self, text: str) -> tuple[str, str] | None:
         lowered = text.lower()
@@ -347,6 +417,33 @@ class ClaudeAdapter(NativeAdapter):
         return False, "onboarding not completed"
 
 
+@dataclass(frozen=True)
+class OrcaDispatchContext:
+    """What the orchestration layer must have prepared before an Orca dispatch.
+
+    These are not things a dispatcher may conjure. A Run and a Task are
+    durable state in the user's workspace, and a coordinator terminal is a
+    process: whoever owns the run creates them deliberately, and the adapter
+    only consumes them.
+
+    `task_id` is deliberately separate from the `task` argument every other
+    adapter receives. For Codex and Claude that argument is the prompt; for
+    Orca the prompt already lives inside the Task, and `worker-start --task`
+    wants the Task's identifier. Letting one name mean both would send prose
+    where an ID belongs.
+    """
+
+    coordinator: str
+    run_id: str
+    task_id: str
+    worker_agent: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("coordinator", "run_id", "task_id"):
+            if not getattr(self, field_name):
+                raise ExecutorError(f"an Orca dispatch context needs {field_name}")
+
+
 class OrcaAdapter(Adapter):
     """The one backend that can demonstrate readiness.
 
@@ -360,9 +457,14 @@ class OrcaAdapter(Adapter):
     def __init__(self, binary: str | None = None) -> None:
         self.binary = binary or ("orca-ide" if os.name != "nt" else "orca")
 
+    #: Which Orca agent launches a given provider. Orca picks the agent, the
+    #: target picks the model, and the two have to agree: asking for the Codex
+    #: agent with an Anthropic model is a request no worker can satisfy.
+    AGENT_FOR_PROVIDER = {"openai": "codex", "anthropic": "claude"}
+
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
-                 timeout: int = 3600, runner=_run, coordinator: str | None = None,
-                 run_id: str | None = None) -> DispatchResult:
+                 timeout: int = 3600, runner=_run,
+                 context: "OrcaDispatchContext | None" = None) -> DispatchResult:
         """Run the work as a supervised Orca worker.
 
         Orca is the one backend that reports which model it actually launched,
@@ -376,15 +478,26 @@ class OrcaAdapter(Adapter):
         that quietly spawns terminals is one nobody can reason about; without
         them this returns `BLOCKED` naming what to provide.
         """
-        if not coordinator or not run_id:
+        if context is None:
             return self._blocked(
                 target, "orchestration_context",
-                "an Orca dispatch needs an existing coordinator terminal and Run; "
-                "create them deliberately rather than having the dispatcher spawn them",
+                "an Orca dispatch needs a coordinator terminal, a Run and a Task that "
+                "already exist; create them deliberately rather than having the "
+                "dispatcher spawn them in someone's workspace",
             )
+        agent = context.worker_agent or self.AGENT_FOR_PROVIDER.get(target.provider)
+        if agent is None:
+            return self._blocked(
+                target, "provider_agent_mapping",
+                f"no Orca agent is known for provider {target.provider!r}; "
+                "name one in the dispatch context rather than guessing",
+            )
+        # `task` here is the Task ID Orca already holds, not the prompt. The
+        # prompt went into that Task when it was created; passing prose to
+        # --task would silently create work nobody can find again.
         argv = [self.binary, "orchestration", "worker-start",
-                "--from", coordinator, "--task", task,
-                "--agent", target.executor if target.executor != self.name else "codex",
+                "--from", context.coordinator, "--run", context.run_id,
+                "--task", context.task_id, "--agent", agent,
                 "--model", target.model, "--effort", target.effort, "--json"]
         if cwd:
             argv += ["--worktree", f"path:{cwd}"]
@@ -492,7 +605,7 @@ def dispatch(
     task: str,
     registry: Registry | None = None,
     *,
-    policy: ReadinessPolicy = ReadinessPolicy.PROVEN,
+    policy: ReadinessPolicy | None = None,
     probes: dict[str, ProbeResult] | None = None,
     **kw,
 ) -> DispatchResult:
@@ -507,6 +620,10 @@ def dispatch(
             "a blocked decision has no target to dispatch; "
             "resolve availability and route again"
         )
+    # Derived from the mode rather than defaulting to PROVEN: a caller that
+    # forgot to pass a policy would otherwise silently never reach a native
+    # executor, which is the quiet failure this whole layer exists to avoid.
+    policy = policy if policy is not None else ReadinessPolicy.for_mode(decision.mode)
     registry = registry or Registry()
     target = decision.target
     adapter = registry.get(target.executor)

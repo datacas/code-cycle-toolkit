@@ -240,11 +240,32 @@ own first-pass rate.
    ```
 
    Record the profile, the target, whether a fallback was used and why, and
-   which readiness state the dispatch started from. A stage whose dispatch is
-   `BLOCKED` stops the run with the named capability; it is not retried and not
-   quietly re-routed. A dispatch that reports running a different model than the
-   one requested is a broken contract, not a success: stop rather than letting
-   the cycle continue on work nobody asked that model to do.
+   which readiness state the dispatch started from.
+
+   Use the `attempt` readiness policy in production and `proven` in a
+   calibration. A native executor can never demonstrate readiness, so a
+   production run under `proven` would refuse to dispatch to Codex or Claude at
+   all; a calibration under `attempt` would put an arm that started from an
+   unestablished state beside arms that did not.
+
+   A dispatch that returns `BLOCKED` having **learned** something about the
+   executor — an exhausted window is the case that matters, because no probe can
+   see it before spending quota — updates the availability map with that
+   evidence, and the stage is routed once more. That second routing is the only
+   one allowed, it is recorded with the evidence that caused it, and if it
+   resolves to the same target or to nothing, the run stops. Without it the
+   production fallback is unreachable in the case it exists for: the primary was
+   chosen from an optimistic promotion, the dispatch found the truth, and nobody
+   acted on it.
+
+   A calibration never re-routes. Substituting an arm answers a different
+   question with the same sample, so it stops at the first `BLOCKED`.
+
+   Any other `BLOCKED` stops the run with the named capability: a trust dialog
+   or a missing session needs a person, not another attempt. A dispatch that
+   reports running a different model than the one requested is a broken
+   contract, not a success: stop rather than letting the cycle continue on work
+   nobody asked that model to do.
 
    An execution mode named in the invocation, such as `single_agent` or
    `claude_codex`, fixes the executors for every stage and replaces the routing

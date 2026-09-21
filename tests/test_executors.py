@@ -142,6 +142,36 @@ class ReadinessPolicyTests(unittest.TestCase):
         self.assertIn("not proven ready", result.explain())
 
 
+class DefaultPolicyTests(unittest.TestCase):
+    """Neither mode should depend on someone remembering to pass a policy."""
+
+    def test_production_defaults_to_attempt(self) -> None:
+        self.assertEqual(ex.ReadinessPolicy.ATTEMPT,
+                         ex.ReadinessPolicy.for_mode(router.RoutingMode.PRODUCTION))
+
+    def test_calibration_defaults_to_proven(self) -> None:
+        self.assertEqual(ex.ReadinessPolicy.PROVEN,
+                         ex.ReadinessPolicy.for_mode(router.RoutingMode.CALIBRATION))
+
+    def test_a_production_dispatch_reaches_a_native_executor_without_being_told(self) -> None:
+        adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
+        registry = ex.Registry([adapter])
+
+        result = ex.dispatch(decision(), "work", registry)
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(ex.ReadinessPolicy.ATTEMPT, result.readiness_policy)
+
+    def test_a_calibration_dispatch_still_refuses_an_unproven_executor(self) -> None:
+        adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
+        registry = ex.Registry([adapter])
+
+        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry)
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual([], adapter.dispatched)
+
+
 class DispatchGateTests(unittest.TestCase):
     def test_an_unavailable_executor_blocks_naming_the_capability(self) -> None:
         registry = ex.Registry([FakeAdapter(probe(ex.Availability.INSTALLED, proof="no credential"))])
@@ -249,6 +279,37 @@ class InteractiveFrictionTests(unittest.TestCase):
         )
 
         self.assertEqual("operating_quota", capability)
+
+    def test_a_failed_run_still_does_not_read_the_agent_prose(self) -> None:
+        """A non-zero exit does not turn the assistant's answer into evidence."""
+        self.assertIsNone(
+            ex.CodexAdapter().classify_failure(1, "", "Implemented quota handling")
+        )
+        self.assertIsNone(
+            ex.ClaudeAdapter().classify_failure(1, "", "Added a sign in flow and rate limit tests")
+        )
+
+    def test_a_structured_error_event_on_stdout_is_read(self) -> None:
+        stdout = "\n".join([
+            json.dumps({"type": "assistant", "text": "working on quota handling"}),
+            json.dumps({"type": "error", "message": "usage limit reached"}),
+        ])
+
+        capability, _ = ex.CodexAdapter().classify_failure(1, "", stdout)
+
+        self.assertEqual("operating_quota", capability)
+
+    def test_a_non_error_event_mentioning_those_words_is_ignored(self) -> None:
+        stdout = json.dumps({"type": "assistant", "message": "implemented usage limit handling"})
+
+        self.assertIsNone(ex.CodexAdapter().classify_failure(1, "", stdout))
+
+    def test_an_is_error_flag_counts_as_an_error_event(self) -> None:
+        stdout = json.dumps({"is_error": True, "result": "x", "subtype": "please log in first"})
+
+        capability, _ = ex.ClaudeAdapter().classify_failure(1, "", stdout)
+
+        self.assertEqual("authenticated_session", capability)
 
 
 class NativeDispatchTests(unittest.TestCase):
@@ -409,7 +470,7 @@ class OrcaDispatchTests(unittest.TestCase):
             return self.receipt()
 
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "task_1", coordinator="term_1", run_id="run_1", runner=runner
+            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"), runner=runner
         )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
@@ -420,14 +481,14 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_it_refuses_to_invent_a_coordinator_or_a_run(self) -> None:
         """A dispatcher that quietly spawns terminals is one nobody can reason about."""
-        result = ex.OrcaAdapter().dispatch(self.TARGET, "task_1", runner=lambda *a, **k: self.receipt())
+        result = ex.OrcaAdapter().dispatch(self.TARGET, "prompt", runner=lambda *a, **k: self.receipt())
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("orchestration_context", result.missing_capability)
 
     def test_a_receipt_reporting_another_model_is_a_contract_violation(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
             runner=lambda *a, **k: self.receipt(model="gpt-5.6-terra"),
         )
 
@@ -436,7 +497,7 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_a_worker_that_did_not_reach_ready_is_a_failure(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
             runner=lambda *a, **k: self.receipt(state="failed"),
         )
 
@@ -444,7 +505,7 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_a_rejected_worker_start_carries_its_error(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
             runner=lambda *a, **k: self.receipt(ok=False, error={"message": "terminal_handle_stale"}),
         )
 
@@ -461,12 +522,142 @@ class OrcaDispatchTests(unittest.TestCase):
         d = router.RoutingDecision("cheap_coder", self.TARGET, router.RoutingMode.PRODUCTION)
 
         result = ex.dispatch(
-            d, "task_1", registry,
+            d, "prompt", registry,
             probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "runtime ready")},
         )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("orca", result.executor)
+
+
+class OrcaContractTests(unittest.TestCase):
+    """The Orca command has to say what it means."""
+
+    OPENAI = router.parse_target("orca:openai/gpt-5.6-luna high")
+    ANTHROPIC = router.parse_target("orca:anthropic/claude-opus-5 high")
+
+    def argv_for(self, target, **ctx):
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed(json.dumps({"ok": True, "result": {
+                "state": "ready", "launch": {"effective": {"model": target.model}}}}))
+
+        context = ex.OrcaDispatchContext(
+            coordinator=ctx.get("coordinator", "term_1"),
+            run_id=ctx.get("run_id", "run_1"),
+            task_id=ctx.get("task_id", "task_1"),
+            worker_agent=ctx.get("worker_agent"),
+        )
+        ex.OrcaAdapter().dispatch(target, "the prompt", context=context, runner=runner)
+        return seen["argv"]
+
+    def test_the_run_id_reaches_the_command(self) -> None:
+        """Relying on whatever Run the coordinator happens to be bound to
+        starts workers under the wrong Run when that binding is stale."""
+        argv = self.argv_for(self.OPENAI, run_id="run_42")
+
+        self.assertIn("--run", argv)
+        self.assertEqual("run_42", argv[argv.index("--run") + 1])
+
+    def test_the_task_id_is_sent_not_the_prompt(self) -> None:
+        """--task wants Orca's Task identifier; prose there creates work
+        nobody can find again."""
+        argv = self.argv_for(self.OPENAI, task_id="task_99")
+
+        self.assertEqual("task_99", argv[argv.index("--task") + 1])
+        self.assertNotIn("the prompt", argv)
+
+    def test_the_agent_follows_the_provider_not_the_executor(self) -> None:
+        self.assertEqual("codex", self.argv_for(self.OPENAI)[self.argv_for(self.OPENAI).index("--agent") + 1])
+        anthropic = self.argv_for(self.ANTHROPIC)
+        self.assertEqual("claude", anthropic[anthropic.index("--agent") + 1])
+        self.assertEqual("claude-opus-5", anthropic[anthropic.index("--model") + 1])
+
+    def test_an_explicit_agent_overrides_the_mapping(self) -> None:
+        argv = self.argv_for(self.OPENAI, worker_agent="cursor")
+
+        self.assertEqual("cursor", argv[argv.index("--agent") + 1])
+
+    def test_an_unmappable_provider_is_refused_rather_than_guessed(self) -> None:
+        target = router.parse_target("orca:someone/their-model high")
+        context = ex.OrcaDispatchContext(coordinator="t", run_id="r", task_id="k")
+
+        result = ex.OrcaAdapter().dispatch(target, "p", context=context,
+                                           runner=lambda *a, **k: completed("{}"))
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("provider_agent_mapping", result.missing_capability)
+
+    def test_an_incomplete_context_is_refused_at_construction(self) -> None:
+        for kw in ({"coordinator": ""}, {"run_id": ""}, {"task_id": ""}):
+            with self.subTest(**kw):
+                args = {"coordinator": "t", "run_id": "r", "task_id": "k", **kw}
+                with self.assertRaises(ex.ExecutorError):
+                    ex.OrcaDispatchContext(**args)
+
+
+class LearnedAvailabilityTests(unittest.TestCase):
+    """A native probe cannot see quota, so only a dispatch ever learns it."""
+
+    def test_an_exhausted_window_is_reported_back_as_evidence(self) -> None:
+        result = ex.DispatchResult(
+            ex.DispatchOutcome.BLOCKED, "codex", TARGET,
+            missing_capability="operating_quota", detail="exhausted",
+        )
+
+        self.assertEqual(ex.Availability.QUOTA_EXHAUSTED, result.learned_availability)
+
+    def test_a_missing_session_is_reported_back_too(self) -> None:
+        result = ex.DispatchResult(
+            ex.DispatchOutcome.BLOCKED, "codex", TARGET,
+            missing_capability="authenticated_session",
+        )
+
+        self.assertEqual(ex.Availability.INSTALLED, result.learned_availability)
+
+    def test_friction_a_person_must_clear_teaches_nothing_about_availability(self) -> None:
+        for capability in ("folder_trust", "hook_trust", "bypass_acknowledgement"):
+            with self.subTest(capability=capability):
+                result = ex.DispatchResult(
+                    ex.DispatchOutcome.BLOCKED, "claude", TARGET, missing_capability=capability
+                )
+                self.assertIsNone(result.learned_availability)
+
+    def test_a_success_teaches_nothing_that_needs_recording(self) -> None:
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex", TARGET)
+
+        self.assertIsNone(result.learned_availability)
+
+    def test_the_evidence_makes_the_fallback_reachable(self) -> None:
+        """The case the fallback exists for, end to end.
+
+        Nobody could know Codex was exhausted before spending some, so the
+        router had to pick it. Only the failed dispatch knows better.
+        """
+        probes = {
+            "codex": ex.ProbeResult("codex", ex.Availability.AUTHENTICATED, "credential",
+                                    provable_ceiling=ex.Availability.AUTHENTICATED),
+            "claude": ex.ProbeResult("claude", ex.Availability.AUTHENTICATED, "onboarding",
+                                     provable_ceiling=ex.Availability.AUTHENTICATED),
+        }
+        availability = ex.Registry().availability(ex.ReadinessPolicy.ATTEMPT, probes)
+        first = router.route("implement", router.TaskSignals(), availability)
+        self.assertEqual("codex", first.target.executor)
+        self.assertFalse(first.used_fallback)
+
+        blocked = ex.DispatchResult(
+            ex.DispatchOutcome.BLOCKED, "codex", first.target,
+            missing_capability="operating_quota",
+        )
+        availability["codex"] = blocked.learned_availability
+
+        second = router.route("implement", router.TaskSignals(), availability)
+
+        self.assertEqual("claude", second.target.executor)
+        self.assertTrue(second.used_fallback)
+        self.assertIn("codex is quota_exhausted", second.explain())
 
 
 class ModelVerificationTests(unittest.TestCase):

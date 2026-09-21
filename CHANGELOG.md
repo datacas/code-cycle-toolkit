@@ -79,6 +79,15 @@ All notable changes to this project are documented here. This project follows
   answered blind. Friction is classified from a failed exit, never from a
   successful run's own output. A dispatch that reports a different model than
   the one requested is a `contract_violation` rather than a success.
+- `OrcaDispatchContext`: the coordinator terminal, Run and Task an Orca
+  dispatch consumes and never creates, with the Task ID kept separate from the
+  prompt every other adapter takes. The Orca agent follows the target's
+  provider.
+- `DispatchResult.learned_availability`: the evidence a failed dispatch produced
+  about its executor, so the orchestrator can re-route once when a window turns
+  out to be exhausted — the only moment that is knowable for a native executor.
+- `ReadinessPolicy.for_mode()`: production attempts, a calibration demands
+  proof, neither depending on a caller remembering to pass a policy.
 - `cc-orchestrator` routes and dispatches per stage: probe once, label the work,
   route each role, dispatch the resolved target, validate the result. An
   explicit execution mode still fixes the executors and replaces the routing
