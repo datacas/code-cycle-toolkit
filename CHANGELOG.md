@@ -81,7 +81,12 @@ All notable changes to this project are documented here. This project follows
   repository declared. An unreadable configuration or an unknown profile name
   stops the run before any dispatch; `--no-config` asks for the defaults.
   Reading configuration needs PyYAML, the runtime's one optional dependency,
-  imported only when there is a file to parse.
+  imported only when there is a file to parse. The repository and work item are
+  validated during planning through `telemetry.validate_reference`, the store's
+  own rule exported rather than copied, so a reference the store would refuse
+  never reaches an executor prompt; and `code_cycle`, `code_cycle.repository`
+  and `code_cycle.profiles` must be mappings, so valid YAML with the wrong shape
+  is refused rather than raising from whichever reader reached it first.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

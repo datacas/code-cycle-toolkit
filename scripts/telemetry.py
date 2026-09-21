@@ -320,6 +320,20 @@ _COLUMNS = (
 )
 
 
+def validate_reference(field: str, value):
+    """Apply this store's rule for a field, before anything is spent on it.
+
+    The same check `record_stage` would make, exported so a caller can make it
+    first. A repository or work item that this store will refuse is worth
+    refusing before a stage is dispatched under it: the alternative is an
+    executor run, paid for, whose row cannot be written.
+
+    It is deliberately the same function rather than a second copy of the
+    rules. Two validators agree until one of them is edited.
+    """
+    return _checked(field, value)
+
+
 def _checked(key: str, value):
     """Return the value if its shape matches what the field may hold.
 

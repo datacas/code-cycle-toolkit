@@ -166,6 +166,7 @@ class Args:
 
     def __init__(self, **fields) -> None:
         self.repo = None
+        self.task = "API-7"
         self.cwd = None
         self.config = None
         self.no_config = False
@@ -321,6 +322,71 @@ code_cycle:
                                    no_config=True))
 
         self.assertEqual("codex", profiles["cheap_coder"].primary.executor)
+
+    def test_a_selector_the_store_would_refuse_is_refused_first(self) -> None:
+        """Otherwise a stage is dispatched, paid for, and its row cannot be
+        written — the run happens and leaves no trace of having happened."""
+        self.write("""
+code_cycle:
+  repository:
+    selector: "bad selector"
+""")
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory)))
+
+        self.assertIn("not a reference", str(refused.exception))
+
+    def test_a_credential_shaped_selector_never_reaches_a_prompt(self) -> None:
+        self.write("""
+code_cycle:
+  repository:
+    selector: "ghp_000000000000000000"
+""")
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory)))
+
+        self.assertIn("credential prefix", str(refused.exception))
+
+    def test_an_explicit_repository_is_checked_the_same_way(self) -> None:
+        with self.assertRaises(rc.CycleDriverError):
+            rc.plan(Args(no_config=True, repo="not a repository"))
+
+    def test_the_work_item_is_checked_too(self) -> None:
+        """Same class, same cost: a task id the store refuses wastes the stage."""
+        with self.assertRaises(rc.CycleDriverError):
+            rc.plan(Args(no_config=True, repo="owner/api", task="API 7"))
+
+    def test_nothing_is_dispatched_when_planning_refuses(self) -> None:
+        self.write("""
+code_cycle:
+  repository:
+    selector: "bad selector"
+""")
+        codex, claude = Talker("codex"), Talker("claude")
+
+        with self.assertRaises(rc.CycleDriverError):
+            repo, profiles = rc.plan(Args(cwd=str(self.directory)))
+            rc.run_cycle(repo, "API-7", router.TaskSignals(), self.store,
+                         profiles=profiles, registry=ex.Registry([codex, claude]),
+                         availability={"codex": ex.Availability.READY,
+                                       "claude": ex.Availability.READY})
+
+        self.assertEqual([], codex.dispatched)
+        self.assertEqual([], claude.dispatched)
+        self.assertEqual([], self.store.rows("owner/api"))
+
+    def test_a_section_that_is_not_a_mapping_is_a_stated_refusal(self) -> None:
+        """Valid YAML, wrong shape. It used to reach a `.get` and traceback."""
+        for body in ("code_cycle: not-a-mapping\n",
+                     "code_cycle:\n  repository: nope\n",
+                     "code_cycle:\n  profiles: nope\n"):
+            with self.subTest(body=body):
+                self.write(body)
+
+                with self.assertRaises(rc.CycleDriverError) as refused:
+                    rc.plan(Args(cwd=str(self.directory)))
+
+                self.assertIn("must be a mapping", str(refused.exception))
 
     def test_asking_for_both_at_once_is_refused(self) -> None:
         with self.assertRaises(rc.CycleDriverError):

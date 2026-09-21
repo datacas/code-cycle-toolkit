@@ -506,6 +506,16 @@ would be recording rows. An unknown profile name stops the run before anything
 is dispatched, because learning that afterwards means paying for a cycle to find
 a typo.
 
+The repository and work item are checked the same way and at the same moment,
+through `telemetry.validate_reference` — the store's own rule, exported rather
+than copied, because two validators agree until one of them is edited. A
+reference the store will refuse is one no stage should run under: that stage is
+dispatched, paid for, and then its row cannot be written, so the run happens and
+leaves no trace of having happened. Configuration shape is checked with it:
+`code_cycle`, `code_cycle.repository` and `code_cycle.profiles` must be mappings,
+so a valid YAML document with the wrong shape is a stated refusal rather than a
+traceback from whichever reader reached it first.
+
 The probe map is taken once and handed to the recorder. Without it each dispatch
 probes again on its own, so an availability could change between two stages with
 nothing recording that it had — and the decisions on either side stop being

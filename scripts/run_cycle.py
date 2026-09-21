@@ -38,8 +38,13 @@ from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from executors import DispatchResult, ReadinessPolicy, Registry
-from router import RoutingMode, TaskSignals, load_profiles
-from telemetry import Telemetry, default_database_path
+from router import RouterError, RoutingMode, TaskSignals, load_profiles
+from telemetry import (
+    Telemetry,
+    TelemetryError,
+    default_database_path,
+    validate_reference,
+)
 
 #: The repository's own declaration of how it wants to be run.
 CONFIG_NAME = ".code-cycle.yml"
@@ -98,12 +103,28 @@ def load_config(path: Path) -> dict:
         return {}
     if not isinstance(config, dict):
         raise CycleDriverError(f"{path} must contain a mapping at the top level")
+
+    # The shape, not only the top level. A valid YAML document can still say
+    # `code_cycle: not-a-mapping`, and every reader below would then crash on
+    # its own `.get` — a traceback where a stated refusal belongs.
+    for key in ("code_cycle", "code_cycle.repository", "code_cycle.profiles"):
+        section, value = config, None
+        for part in key.split("."):
+            if not isinstance(section, dict):
+                break
+            value = section.get(part)
+            section = value
+        if value is not None and not isinstance(value, dict):
+            raise CycleDriverError(
+                f"{path}: {key} must be a mapping, not "
+                f"{type(value).__name__}")
     return config
 
 
 def repository_of(config: dict) -> str | None:
     """`code_cycle.repository.selector`, when the repository declares one."""
-    repository = (config.get("code_cycle") or {}).get("repository") or {}
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
     selector = repository.get("selector") if isinstance(repository, dict) else None
     return selector if isinstance(selector, str) and selector else None
 
@@ -340,9 +361,20 @@ def plan(args) -> tuple[str, dict]:
             "no repository: pass --repo or declare "
             f"code_cycle.repository.selector in {CONFIG_NAME}")
 
+    # Checked by the store's own rule, here rather than at the first row. A
+    # reference the store will refuse is one no stage should be dispatched
+    # under: that run is paid for and its row cannot be written.
+    for field, value in (("repo_id", repo), ("task_id", getattr(args, "task", None))):
+        if value is None:
+            continue
+        try:
+            validate_reference(field, value)
+        except TelemetryError as error:
+            raise CycleDriverError(str(error)) from error
+
     try:
         profiles = load_profiles(config)
-    except Exception as error:
+    except RouterError as error:
         raise CycleDriverError(str(error)) from error
     return repo, profiles
 
