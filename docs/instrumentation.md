@@ -513,6 +513,15 @@ later. Showing it is what made that checkable; believing it would have sent
 somebody to read a status page. Before it was shown, finding out what an agent
 had already explained cost three more dispatches.
 
+It is cleaned before it is shown. An escape is not whitespace, so collapsing
+whitespace let `\x1b[31m…` through into a terminal report, where an agent could
+recolour, erase or forge the lines around its own. Every C0 control and DEL is
+removed, and the executor's own `detail` — stderr from a CLI — goes through the
+same function, because it is exactly as untrusted and reaches the same screen.
+The bytes are removed rather than the escape sequences recognised: without
+`ESC` such a sequence is inert text, and that holds without keeping a grammar in
+step with every terminal that might read the output.
+
 Three answers are kept apart where one `None` used to be: a readable report, a
 report present but unreadable, and no report at all. A cycle that cannot tell
 them apart records "no verdict" for a run that was explicitly blocked. A status

@@ -337,6 +337,59 @@ class ReportedReasonTests(RunCycleTestCase):
 
                 self.assertIsNone(report.reason)
 
+    def test_a_terminal_control_sequence_does_not_reach_the_terminal(self) -> None:
+        """An escape is not whitespace, so collapsing whitespace let it through.
+
+        The prose is printed into somebody's terminal report; an agent that can
+        emit ESC can recolour, erase or forge the lines around its own.
+        """
+        spoof = "\x1b[31mspoofed\x1b[0m\x07 and \x08\x08\x08gone"
+
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error=spoof)),
+                                Talker("claude"))
+
+        for control in ("\x1b", "\x07", "\x08"):
+            with self.subTest(control=repr(control)):
+                self.assertNotIn(control, report.reason)
+                self.assertNotIn(control, report.explain())
+        self.assertIn("spoofed", report.reason)
+
+    def test_every_control_character_is_removed(self) -> None:
+        """Removing the bytes is the guarantee. Recognising escape sequences
+        would mean keeping a grammar in step with every terminal."""
+        noisy = "".join(chr(code) for code in list(range(0, 32)) + [127])
+
+        cleaned = rc.readable("before" + noisy + "after")
+
+        self.assertEqual("before after", cleaned)
+
+    def test_the_executors_own_output_is_cleaned_too(self) -> None:
+        """`detail` is stderr from a CLI: the same trust, the same terminal."""
+        class Rude(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    detail="\x1b[2Jcleared the screen")
+
+        report = self.run_cycle(Rude("codex"), Talker("claude"))
+
+        self.assertNotIn("\x1b", report.stopped_because)
+        self.assertIn("cleared the screen", report.stopped_because)
+
+    def test_a_very_long_reason_is_cut(self) -> None:
+        """One line of a report, not a page of it."""
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error="x" * 4000)),
+                                Talker("claude"))
+
+        self.assertEqual(rc.REASON_LIMIT + 1, len(report.reason))
+        self.assertTrue(report.reason.endswith("\u2026"))
+
+    def test_a_reason_of_nothing_but_control_characters_is_no_reason(self) -> None:
+        report = self.run_cycle(Talker("codex", block("BLOCKED", error="\x1b\x07")),
+                                Talker("claude"))
+
+        self.assertIsNone(report.reason)
+
     def test_the_prose_never_reaches_the_store(self) -> None:
         """The one thing this must not do. The store holds references and
         counts; a reason is the agent's prose about a run."""

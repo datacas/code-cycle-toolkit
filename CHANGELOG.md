@@ -108,6 +108,9 @@ All notable changes to this project are documented here. This project follows
   never stored, since telemetry holds references and counts, and never acted on,
   since it is the agent's claim rather than a verified fact — a canary claimed
   GitHub was unreachable while `gh` worked from the same sandbox minutes later.
+  Control characters are stripped and the text is cut to 500 characters before
+  it is printed, and an executor's own `detail` goes through the same cleaning:
+  both are untrusted text on its way to a terminal.
 - A dispatch that returned is no longer read as a stage that worked: a role whose
   own report is not a completion stops the cycle, with the dispatch row still
   recording `succeeded` and the reported status recorded beside it. The canary

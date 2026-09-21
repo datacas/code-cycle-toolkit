@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,15 @@ STRUCTURED_REQUEST = (
 )
 
 BEGIN, END = "ORCHESTRATION_RESULT", "END_ORCHESTRATION_RESULT"
+
+#: Everything a terminal acts on rather than shows: the C0 controls and DEL,
+#: minus tab, newline and carriage return, which whitespace collapsing handles.
+#: Removing the bytes is the guarantee; recognising escape *sequences* is not,
+#: because that means keeping a grammar in step with every terminal.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+#: How much of an agent's prose is worth a line of somebody's screen.
+REASON_LIMIT = 500
 
 #: What each role's own report has to say for the cycle to keep going. Anything
 #: else — `BLOCKED`, `FAILED`, a status this driver does not know — is a stage
@@ -183,8 +193,8 @@ class Reported:
             return None
         for key in ("error", "summary", "blocking_reason", "reason"):
             value = self.payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return " ".join(value.split())
+            if isinstance(value, str) and readable(value):
+                return readable(value)
         return None
 
     def completes(self, role: str) -> bool:
@@ -233,6 +243,26 @@ class CycleReport:
             # another run to find out what it was.
             lines.append(f"  reason:  {self.reason}")
         return "\n".join(lines)
+
+
+def readable(text: str, limit: int = REASON_LIMIT) -> str:
+    """Text from an executor, made safe to put on somebody's screen.
+
+    Everything it is given arrives from an agent or from a CLI's stderr, and is
+    printed straight into a terminal report. Collapsing whitespace was not
+    enough: an escape is not whitespace, so `\x1b[31m...` survived and an agent
+    could recolour, erase or forge the lines around its own.
+
+    The control bytes are removed rather than the escape sequences recognised.
+    Without `ESC` such a sequence is inert text, and that holds without keeping
+    a grammar in step with every terminal that might read the output.
+    """
+    if not isinstance(text, str):
+        return ""
+    cleaned = " ".join(CONTROL_CHARACTERS.sub("", text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "\u2026"
 
 
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "") -> str:
@@ -412,6 +442,7 @@ def _started_elsewhere(outcome: StageOutcome) -> bool:
 def _elsewhere(outcome: StageOutcome) -> str:
     result = outcome.result
     reference = result.artifacts.get("dispatchId") if result else None
+    reference = readable(reference, 100) if isinstance(reference, str) else None
     started = f" as {reference}" if reference else ""
     return (f"{outcome.role} was started on {result.executor}{started} and "
             "finishes elsewhere; this cycle cannot see its result")
@@ -437,10 +468,13 @@ def _why(outcome: StageOutcome) -> str:
     if result is None:
         reasons = "; ".join(outcome.decision.reasons or ())
         return f"{outcome.role} was not routed anywhere: {reasons}"
+    # `detail` is the executor's own stderr or stdout, so it is exactly as
+    # untrusted as the agent's prose and reaches the same terminal.
+    detail = readable(result.detail)
     if result.missing_capability:
         return (f"{outcome.role} on {result.executor} is missing "
-                f"{result.missing_capability}: {result.detail}")
-    return f"{outcome.role} on {result.executor} {result.outcome.value}: {result.detail}"
+                f"{result.missing_capability}: {detail}")
+    return f"{outcome.role} on {result.executor} {result.outcome.value}: {detail}"
 
 
 def plan(args) -> tuple[str, dict]:
