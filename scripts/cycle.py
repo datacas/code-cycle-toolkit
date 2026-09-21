@@ -91,6 +91,7 @@ class CycleRecorder:
         registry: Registry | None = None,
         mode: RoutingMode = RoutingMode.PRODUCTION,
         policy: ReadinessPolicy | None = None,
+        probes: dict | None = None,
     ) -> None:
         self.telemetry = telemetry
         self.repo_id = repo_id
@@ -100,6 +101,11 @@ class CycleRecorder:
         self.registry = registry or Registry()
         self.mode = mode
         self.policy = policy or ReadinessPolicy.for_mode(mode)
+        # What the probes found, kept for the whole cycle. Without it every
+        # dispatch probes again on its own, so an availability could change
+        # between two stages with nothing recording that it had — and the
+        # decisions on either side of the change become unexplainable.
+        self.probes = probes
         self.iteration = 0
         self.stages: list[StageOutcome] = []
 
@@ -122,7 +128,8 @@ class CycleRecorder:
                 return outcome
 
             result = dispatch(decision, task, self.registry,
-                              policy=self.policy, **dispatch_kwargs)
+                              policy=self.policy, probes=self.probes,
+                              **dispatch_kwargs)
             outcome.decision = decision
             outcome.result = result
             outcome.attempts.append((decision, result))

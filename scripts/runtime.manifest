@@ -10,6 +10,7 @@
 # One file per line. Blank lines and `#` comments are ignored.
 
 cycle.py
+run_cycle.py
 executors.py
 router.py
 telemetry.py
