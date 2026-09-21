@@ -362,11 +362,44 @@ Claude runs with `-p` and Codex with `exec`, non-interactively and with no
 bypass flag. A run that needs elevated permissions to proceed is a run a person
 should be looking at.
 
+## Telemetry
+
+`scripts/telemetry.py` records one row per stage in a SQLite database outside
+every repository, holding identifiers, statuses and counts — no diffs, no prose,
+no credentials. It never enters Git.
+
+It exists to replace one guess in particular. `router.DEFAULT_FIRST_PASS_RATE`
+is `0.0` because five real implementations out of five needed a correction
+round, and every routing cost estimate has carried that number since. Five is
+not a measurement; it is the smallest sample that produced a unanimous answer.
+
+`first_pass_rate(repo_id, profile)` measures it per repository, counting each
+task's *first* review only, ignoring implementations nobody reviewed, and
+filtering by the implementer whose work was judged rather than by the reviewer.
+Below ten observations it reports the value as unknown and still returns the
+count, so "we do not know yet" and "it is genuinely zero" never look the same.
+
+Two other questions are already answered from the same rows. `dispatch_failures`
+counts blocked dispatches by the capability that blocked them, keeping an
+exhausted window distinct from a trust dialog — conflating those cost a
+campaign. `model_drift` lists rows where the executor ran something other than
+what was requested, excluding rows with no reported model rather than counting
+silence as agreement, because Codex reports none at all.
+
+The schema will change. A schema designed before its questions are known is one
+that gets migrated, and that was accepted deliberately: recording now, with
+adapters just proven correct against the live CLIs, beats recording later from a
+larger unexamined pile. Only fields already queried have columns, everything
+else travels in `payload` rather than being dropped, and `schema_version` is on
+every row from the first.
+
 ## Not implemented
 
 Named because they are easy to assume from the contract above: no model
-selection from statistics, no SQLite, no scoring, no adaptive learning, no
-escaped-defect tracking, and no automatic matching of findings.
+selection from statistics, no scoring, no adaptive learning, no escaped-defect
+tracking, and no automatic matching of findings. Telemetry records; nothing
+reads it back automatically, and a measured first-pass rate reaches the cost
+model only because someone passed it.
 
 What exists now is profile resolution, availability probing and dispatch to
 Codex, Claude or Orca. What does not is anything that learns: no rule changes
