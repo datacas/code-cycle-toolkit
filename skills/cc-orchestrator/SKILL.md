@@ -150,6 +150,38 @@ the mode or dispatching a review. That reference defines discovery, the
 first-run notice, stage ownership, result validation, and failure behavior. Do
 not read it for Codex, OpenCode, Orca, or an explicit `single_agent` run.
 
+## Routing
+
+Name a profile, never a model. `cheap_coder`, `deep_coder`, `reviewer`,
+`senior_reviewer`, `security`, `coordinator`, `cheap_tool` resolve through
+`code_cycle.profiles` in `.code-cycle.yml`; `scripts/router.py` is the reference
+implementation of how.
+
+Resolve executor availability **before** choosing anything. An executor that is
+merely installed is not dispatchable: a binary on PATH proves no session, no
+repository access and no quota. One whose quota is exhausted is not a candidate
+whatever its profile would score. Report what you observed rather than inferring
+it — a failed dispatch is one exhausted window, not evidence about a model.
+
+When the primary executor is unavailable, a production run may use the profile's
+fallback and must say it did. A calibration run may not: substituting an arm
+answers a different question with the same sample, so it stops with `BLOCKED`
+and waits.
+
+Label `difficulty` and `verifiability` before routing, never after. Choosing a
+model from a judgement and then measuring results by model measures the routing
+rather than the models.
+
+Two rules escalate, both from declared signals: difficulty 3 implementation work
+goes to `deep_coder`, and a security-sensitive change is reviewed by
+`senior_reviewer`. There is no evidence for finer rules yet, and inventing them
+would make this look calibrated when it is not.
+
+When weighing cost, weigh the cycle and not the first pass. Every real
+implementation measured so far needed a correction round, so the estimate
+carries at least one resolution plus its review until a repository measures its
+own first-pass rate.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its

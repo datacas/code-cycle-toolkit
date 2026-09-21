@@ -89,6 +89,24 @@ code_cycle:
     recheck_on_failure: true
 ```
 
+An optional `profiles` key maps a role to an executor, provider, model and
+effort. A repository declares only what it wants to change; everything it omits
+keeps the toolkit default:
+
+```yaml
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: "codex:openai/gpt-5.6-luna high"
+      fallback: "claude:anthropic/claude-sonnet-5 high"
+    senior_reviewer:
+      primary: "claude:anthropic/claude-opus-5 high"
+```
+
+This is the only place a role resolves to a model, so a candidate changes here
+and nowhere else. An unknown profile name is refused rather than ignored: a typo
+that silently routes nowhere is worse than one that stops the run.
+
 An optional `security_review` key declares when the security audit always runs,
 regardless of what any model concludes:
 
