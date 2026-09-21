@@ -362,11 +362,89 @@ Claude runs with `-p` and Codex with `exec`, non-interactively and with no
 bypass flag. A run that needs elevated permissions to proceed is a run a person
 should be looking at.
 
+## Telemetry
+
+`scripts/telemetry.py` records one row per stage in a SQLite database outside
+every repository, holding references, statuses and counts — no diffs and no
+prose. It never enters Git.
+
+That boundary is enforced rather than asserted, by one typed table covering
+**every** field — columns included. `FIELD_SPECS` is the only gate, and there
+are no exempt fields.
+
+The single table is the lesson, not a style choice. This boundary was breached
+three times, and each fix covered the door that had just been pointed out: first
+a docstring with nothing behind it, then payload key names, then payload value
+types — while promoted columns still accepted anything, so `status="TOP-SECRET"`
+was stored. A column is not safer than a payload key; it is another door.
+
+A count is an integer, an amount a number, a flag a boolean, a token a value
+from a closed vocabulary, and an identifier a bounded reference matching a
+selector grammar. Containers are refused outright, whatever key they arrive
+under.
+
+### What the identifier rule does and does not guarantee
+
+Worth stating exactly, because this boundary was claimed too strongly four
+times. `gpt-5.6-luna` and `sk-live-abc123` have the same shape — lowercase
+letters, digits, hyphens — so **no grammar separates a model name from a
+credential**.
+
+What holds:
+
+- model names are checked against the models this toolkit knows, a closed set,
+  which is a real guarantee rather than a shape test. That set is built from the
+  router's profiles under either import shape, and when it cannot be built the
+  check raises instead of passing the value through: a check that switches
+  itself off when it cannot run is not a check;
+- repository and work-item references must match the selector grammar and must
+  not begin with a published credential prefix — `sk-`, `ghp_`, `AKIA`, `xox`
+  and the rest — which rejects the paste that actually happens by accident.
+
+What does not hold: nothing proves an arbitrary caller-supplied reference is not
+a secret. That residual is mitigated by where these values come from — a
+repository selector out of `.code-cycle.yml` and a work-item id out of the issue
+provider, both derived by the toolkit rather than typed into a field — and not
+by pretending the validator settles it. Refusing is loud rather than silent: dropping
+a field would lose an observation the caller believed it had recorded. Routing
+reasons are reduced to a count — the reasons themselves belong in the published
+comment.
+
+It exists to replace one guess in particular. `router.DEFAULT_FIRST_PASS_RATE`
+is `0.0` because five real implementations out of five needed a correction
+round, and every routing cost estimate has carried that number since. Five is
+not a measurement; it is the smallest sample that produced a unanimous answer.
+
+`first_pass_rate(repo_id, profile)` measures it per repository, counting each
+task's first review **that reached a verdict**, ignoring implementations nobody
+reviewed, and filtering by the implementer whose work was judged rather than by
+the reviewer. A review row recorded before its verdict arrived — ordinary with
+an append-only API — leaves the task uncounted rather than counting as a
+failure, which would have poisoned the cost model in the one direction that
+matters.
+Below ten observations it reports the value as unknown and still returns the
+count, so "we do not know yet" and "it is genuinely zero" never look the same.
+
+Two other questions are already answered from the same rows. `dispatch_failures`
+counts blocked dispatches by the capability that blocked them, keeping an
+exhausted window distinct from a trust dialog — conflating those cost a
+campaign. `model_drift` lists rows where the executor ran something other than
+what was requested, excluding rows with no reported model rather than counting
+silence as agreement, because Codex reports none at all.
+
+The schema will change. A schema designed before its questions are known is one
+that gets migrated, and that was accepted deliberately: recording now, with
+adapters just proven correct against the live CLIs, beats recording later from a
+larger unexamined pile. Only fields already queried have columns, a short allowlist of counts and flags
+travels in `payload`, and `schema_version` is on every row from the first.
+
 ## Not implemented
 
 Named because they are easy to assume from the contract above: no model
-selection from statistics, no SQLite, no scoring, no adaptive learning, no
-escaped-defect tracking, and no automatic matching of findings.
+selection from statistics, no scoring, no adaptive learning, no escaped-defect
+tracking, and no automatic matching of findings. Telemetry records; nothing
+reads it back automatically, and a measured first-pass rate reaches the cost
+model only because someone passed it.
 
 What exists now is profile resolution, availability probing and dispatch to
 Codex, Claude or Orca. What does not is anything that learns: no rule changes

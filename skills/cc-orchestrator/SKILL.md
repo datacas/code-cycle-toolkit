@@ -215,6 +215,17 @@ implementation measured so far needed a correction round, so the estimate
 carries at least one resolution plus its review until a repository measures its
 own first-pass rate.
 
+`scripts/telemetry.py` is how a repository measures it. Record every stage —
+the routing decision, the dispatch result, the review status — and read
+`first_pass_rate(repo_id)` back into the cost estimate. Until that rate is
+measured it reports unknown rather than a number, and the conservative constant
+stands: a rate hardened from three observations into a routing decision would be
+worse than the constant it replaced.
+
+Record what happened, not what was intended. A stage that was blocked, fell back
+or ran a different model than requested is exactly the row a later question will
+need, and the one most easily left out.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its

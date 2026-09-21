@@ -68,6 +68,21 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- `scripts/telemetry.py`: one row per stage in a SQLite database outside every
+  repository. `first_pass_rate()` measures per repository what the router
+  currently assumes, reporting unknown below ten observations rather than
+  hardening a handful of runs into a routing constant; `dispatch_failures()`
+  counts blocked dispatches by capability; `model_drift()` lists executors that
+  ran something other than what was requested. The no-prose, no-credentials
+  boundary is enforced by one typed table covering every field, columns
+  included: counts are integers, amounts numbers, flags booleans, tokens a
+  closed vocabulary, identifiers bounded references matching a selector grammar,
+  and containers are refused outright. Model names are checked against the
+  models the toolkit knows — built under either import shape, and raising rather
+  than passing values through when it cannot be built — and published credential
+  prefixes are rejected in any reference; no grammar can separate a model name from a credential, so the
+  closed set is the guarantee and the residual is documented rather than
+  claimed away.
 - `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
   executor could be shown to be and on what evidence, `dispatch()` runs a
   resolved target non-interactively through Codex, Claude or Orca. Only Orca can
