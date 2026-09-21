@@ -125,6 +125,10 @@ class DispatchResult:
     readiness_policy: ReadinessPolicy = ReadinessPolicy.PROVEN
     dispatched_from: Availability = Availability.READY
     artifacts: dict = field(default_factory=dict)
+    #: What the agent actually said, lifted out of its CLI's envelope. Empty
+    #: when the executor produced no message of its own. Transient: it is read
+    #: by whoever drives the stage and never stored.
+    agent_output: str = ""
     #: True when the call succeeded in *starting* work that finishes elsewhere.
     #: Orca's receipt says a worker launched, not that the stage is done, and a
     #: caller that reads `SUCCEEDED` as "finished" would review work still being
@@ -263,6 +267,22 @@ class NativeAdapter(Adapter):
     def argv(self, target: Target, task: str, cwd: str | None = None) -> list[str]:  # pragma: no cover
         raise NotImplementedError
 
+    def agent_output(self, stdout: str) -> str:
+        """The agent's own message, out of whatever its CLI wraps it in.
+
+        Every one of these tools prints a machine envelope and puts the reply
+        inside it, JSON-encoded. Reading the envelope as if it were the reply
+        finds the right words with the wrong escapes: a canary run against the
+        real CLIs located `ORCHESTRATION_RESULT` in Claude's output and then
+        failed to parse the block, because the newlines and quotes were still
+        `\\n` and `\\"` inside a JSON string.
+
+        So each adapter unwraps its own format and hands the rest of the system
+        text. The driver above does not learn what `result` or `item.completed`
+        mean, and neither does the next executor to be added.
+        """
+        return stdout
+
     def read_resolved_model(self, stdout: str) -> str | None:
         """Pull the model the run actually used out of its own output.
 
@@ -324,19 +344,27 @@ class NativeAdapter(Adapter):
                 detail=(completed.stderr or completed.stdout or "").strip()[:400],
                 artifacts={"argv": argv, "returncode": completed.returncode},
             )
-        resolved = self.read_resolved_model(completed.stdout or "")
-        artifacts = {"argv": argv, "stdout": (completed.stdout or "")[-4000:]}
+        stdout = completed.stdout or ""
+        resolved = self.read_resolved_model(stdout)
+        # Two different jobs, and only one of them may be bounded. The tail in
+        # `artifacts` is for a human reading afterwards, so it is cut to keep a
+        # result small. `agent_output` is what the caller parses its answer out
+        # of, so it is whole: a limit on it silently deletes valid results,
+        # which is what a length cap here did to any reply that kept talking
+        # past its own structured block.
+        artifacts = {"argv": argv, "stdout": stdout[-4000:]}
+        spoken = self.agent_output(stdout)
         if resolved is not None and resolved != target.model:
             return DispatchResult(
                 DispatchOutcome.CONTRACT_VIOLATION, self.name, target,
                 model_resolved=resolved,
                 detail=(f"requested {target.model}, the executor reported running"
                         f" {resolved}"),
-                artifacts=artifacts,
+                artifacts=artifacts, agent_output=spoken,
             )
         return DispatchResult(
             DispatchOutcome.SUCCEEDED, self.name, target,
-            model_resolved=resolved, artifacts=artifacts,
+            model_resolved=resolved, artifacts=artifacts, agent_output=spoken,
         )
 
     def classify_failure(self, returncode: int, stderr: str, stdout: str) -> tuple[str, str] | None:
@@ -426,6 +454,34 @@ class CodexAdapter(NativeAdapter):
             argv += ["-C", cwd]
         return argv + [task]
 
+    def agent_output(self, stdout: str) -> str:
+        """Codex prints NDJSON; the reply is the text of its agent messages.
+
+        Observed shape, from a live run:
+
+            {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+
+        When no agent message is there at all, the whole output is returned
+        unchanged rather than some filtered part of it. Returning only the lines
+        this method recognised would quietly drop whatever it did not — and an
+        executor that fell out of its own format still said something.
+        """
+        spoken = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            item = payload.get("item") if isinstance(payload, dict) else None
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    spoken.append(text)
+        return "\n".join(spoken) if spoken else stdout
+
     def auth_evidence(self) -> tuple[bool, str]:
         auth = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"
         if auth.is_file():
@@ -453,6 +509,23 @@ class ClaudeAdapter(NativeAdapter):
         # implement the wrong repository without saying so.
         return [self.binary, "-p", task, "--model", target.model,
                 "--effort", target.effort, "--output-format", "json"]
+
+    def agent_output(self, stdout: str) -> str:
+        """Claude prints one JSON object whose `result` holds the reply.
+
+        Observed on a live run alongside `modelUsage`, `usage` and timings. If
+        the envelope is not there, the output is returned unchanged: a caller
+        with the raw text is better off than one with nothing.
+        """
+        try:
+            payload = json.loads(stdout)
+        except ValueError:
+            return stdout
+        if isinstance(payload, dict):
+            spoken = payload.get("result")
+            if isinstance(spoken, str):
+                return spoken
+        return stdout
 
     def auth_evidence(self) -> tuple[bool, str]:
         config = Path.home() / ".claude.json"

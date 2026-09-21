@@ -122,8 +122,14 @@ class InstalledCycleTests(unittest.TestCase):
 
         self.assertEqual("codex", implement["executor"])
         self.assertEqual("cheap_coder", implement["profile"])
-        self.assertEqual(implement["model_requested"], implement["model_resolved"])
         self.assertEqual("succeeded", implement["outcome"])
+        # Codex reports no model at all, observed on a live run: the column is
+        # empty rather than agreeing with the request, and silence is not
+        # counted as agreement anywhere that reads it.
+        self.assertIsNone(implement["model_resolved"])
+
+        review = [row for row in self.rows() if row["executor"] == "claude"][0]
+        self.assertEqual(review["model_requested"], review["model_resolved"])
 
     def test_a_second_round_is_recorded_as_a_second_round(self) -> None:
         """The review asks for changes once, so the cycle resolves and re-reviews."""
@@ -169,10 +175,34 @@ class InstalledCycleTests(unittest.TestCase):
         result = self.run_cycle(FAKE_SILENT="claude")
 
         self.assertEqual(1, result.returncode)
-        self.assertIn("no structured verdict", result.stdout)
+        self.assertIn("reported no structured result", result.stdout)
         roles = [row["role"] for row in self.rows()]
         self.assertIn("review", roles)
         self.assertEqual("HUMAN_INTERVENTION", self.rows()[-1]["status"])
+
+    def test_a_blocked_implementation_is_recorded_and_stops_the_cycle(self) -> None:
+        """The canary, as an installed run: the CLI exits 0, the agent reports
+        BLOCKED, and no review must follow."""
+        result = self.run_cycle(FAKE_BLOCKED="codex")
+
+        self.assertEqual(1, result.returncode)
+        rows = self.rows()
+        self.assertEqual(["implement", "implement", "coordinate"],
+                         [row["role"] for row in rows])
+        self.assertEqual("succeeded", rows[0]["outcome"])
+        self.assertEqual("BLOCKED", rows[1]["status"])
+        self.assertEqual("HUMAN_INTERVENTION", rows[-1]["status"])
+        self.assertNotIn("review", result.stdout)
+
+    def test_the_block_is_read_out_of_the_real_envelope(self) -> None:
+        """Both fakes wrap their reply the way their CLI does, so a driver that
+        read the envelope instead of the reply would fail here."""
+        self.run_cycle()
+
+        verdicts = [row["status"] for row in self.rows() if row["status"]]
+
+        self.assertEqual(["IMPLEMENTED", "APPROVED", "READY_FOR_MANUAL_MERGE"],
+                         verdicts)
 
     def test_nothing_reached_the_database_outside_the_repository(self) -> None:
         """The store is host state, not a file the project carries."""

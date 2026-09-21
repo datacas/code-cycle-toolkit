@@ -482,7 +482,32 @@ to reopen it.
 
 It reads a review's verdict from the structured result it explicitly asks the
 executor for — a documented opt-in in every review skill — and never from an
-exit code or from prose. When the block is absent the cycle stops and records
+exit code or from prose.
+
+**What the agent said is not what the CLI printed.** Every one of these tools
+prints a machine envelope and puts the reply inside it, JSON-encoded: Claude one
+object whose `result` holds the text, Codex a stream of NDJSON events whose
+`agent_message` items hold it. Each adapter unwraps its own format into
+`agent_output`, and the driver reads that. Reading the envelope instead finds
+the right words with the wrong escapes — a canary run located
+`ORCHESTRATION_RESULT` in Claude's output and then failed to parse the block,
+because the newlines and quotes were still `\n` and `\"` inside a JSON string.
+No fake caught it: the fakes printed the block as plain text. They now write
+their CLI's real envelope, and the fixtures are live captures.
+
+**A dispatch that succeeded is not a stage that worked.** The same canary had
+Codex exit 0 having changed nothing, because the work item did not exist — and
+the cycle reviewed it. Those are two facts about different layers and the store
+already keeps them in separate columns: `outcome` says the call returned,
+`status` says what the agent reported doing. Both stay true; what changed is
+that a stage whose own report is not a completion stops the cycle. The dispatch
+row still says `succeeded`, because it did.
+
+Three answers are kept apart where one `None` used to be: a readable report, a
+report present but unreadable, and no report at all. A cycle that cannot tell
+them apart records "no verdict" for a run that was explicitly blocked. A status
+outside what the store can hold is treated as no status rather than carried to
+`record_verdict`, where it would raise and end the run without its closing row. When the block is absent the cycle stops and records
 that the verdict is unknown. A guess would be indistinguishable from data
 forever after, and this instrument exists to be believed later.
 

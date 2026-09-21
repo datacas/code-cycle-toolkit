@@ -7,6 +7,7 @@ executor whose structured block is delimited, parseable and not a result.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -24,21 +25,49 @@ import telemetry as tm  # noqa: E402
 from test_cycle import ScriptedAdapter  # noqa: E402
 
 
-APPROVED = 'ORCHESTRATION_RESULT\n{"status": "APPROVED"}\nEND_ORCHESTRATION_RESULT'
+def block(status: str, **fields) -> str:
+    """A structured result the way a skill emits one."""
+    payload = json.dumps({"skill": "fake", "status": status, **fields})
+    return f"ORCHESTRATION_RESULT\n{payload}\nEND_ORCHESTRATION_RESULT"
+
+
+APPROVED = block("APPROVED")
+
+#: What each role reports when it does its job. A stage that answered APPROVED
+#: to an implementation used to be enough, which is what the canary found.
+COMPLETED = {
+    "cc-implement-issue": block("IMPLEMENTED"),
+    "cc-resolve-comments": block("RESOLVED"),
+}
 
 
 class Talker(ScriptedAdapter):
-    """An executor that answers with whatever text the test gives it."""
+    """An executor that answers with a structured result, already unwrapped.
 
-    def __init__(self, name: str, body: str = APPROVED) -> None:
+    `agent_output` is what an adapter hands over after lifting the reply out of
+    its CLI's envelope, so a double that sets only `artifacts["stdout"]` would
+    be testing a path no real executor takes.
+    """
+
+    def __init__(self, name: str, body: str | None = None) -> None:
         super().__init__(name)
         self.body = body
 
+    def spoken(self, task: str) -> str:
+        if self.body is not None:
+            return self.body
+        for skill, answer in COMPLETED.items():
+            if skill in task:
+                return answer
+        return APPROVED
+
     def dispatch(self, target, task, **kw):
         self.dispatched.append(task)
+        spoken = self.spoken(task)
         return ex.DispatchResult(
             ex.DispatchOutcome.SUCCEEDED, self.name, target,
-            model_resolved=target.model, artifacts={"stdout": self.body},
+            model_resolved=target.model, artifacts={"stdout": spoken},
+            agent_output=spoken,
         )
 
 
@@ -123,21 +152,29 @@ class MalformedResultTests(RunCycleTestCase):
     def blocks(self, body: str):
         return Talker("codex", body), Talker("claude", body)
 
-    def test_a_block_holding_a_string_is_not_a_result(self) -> None:
-        payload = rc.read_structured_result(ex.DispatchResult(
-            ex.DispatchOutcome.SUCCEEDED, "claude", None,
-            artifacts={"stdout": 'ORCHESTRATION_RESULT\n"APPROVED"\nEND_ORCHESTRATION_RESULT'},
-        ))
+    def read(self, spoken: str) -> rc.Reported:
+        return rc.read_structured_result(ex.DispatchResult(
+            ex.DispatchOutcome.SUCCEEDED, "claude", None, agent_output=spoken))
 
-        self.assertIsNone(payload)
+    def test_a_block_holding_a_string_is_present_but_unreadable(self) -> None:
+        """Present and unreadable are different facts from absent."""
+        reported = self.read('ORCHESTRATION_RESULT\n"APPROVED"\nEND_ORCHESTRATION_RESULT')
 
-    def test_a_block_holding_a_number_is_not_a_result(self) -> None:
-        payload = rc.read_structured_result(ex.DispatchResult(
-            ex.DispatchOutcome.SUCCEEDED, "claude", None,
-            artifacts={"stdout": "ORCHESTRATION_RESULT\n3\nEND_ORCHESTRATION_RESULT"},
-        ))
+        self.assertTrue(reported.present)
+        self.assertFalse(reported.readable)
+        self.assertIsNone(reported.status)
 
-        self.assertIsNone(payload)
+    def test_a_block_holding_a_number_is_present_but_unreadable(self) -> None:
+        reported = self.read("ORCHESTRATION_RESULT\n3\nEND_ORCHESTRATION_RESULT")
+
+        self.assertTrue(reported.present)
+        self.assertFalse(reported.readable)
+
+    def test_nothing_at_all_is_absent_rather_than_unreadable(self) -> None:
+        reported = self.read("I had a look and it seems fine.")
+
+        self.assertFalse(reported.present)
+        self.assertFalse(reported.readable)
 
     def test_a_malformed_block_stops_the_cycle_instead_of_ending_it(self) -> None:
         """It used to raise, which skipped the closing row entirely."""
@@ -147,18 +184,101 @@ class MalformedResultTests(RunCycleTestCase):
         report = self.run_cycle(implementer, reviewer)
 
         self.assertEqual(rc.UNRESOLVED_END, report.status)
-        self.assertIn("no structured verdict", report.stopped_because)
+        self.assertIn("could not be read", report.stopped_because)
         self.assertEqual(rc.UNRESOLVED_END, self.rows()[-1]["status"])
 
     def test_an_echoed_prompt_does_not_shadow_the_real_block(self) -> None:
         """The request itself contains the words, so reading forwards found it."""
-        decoy = ("prompt received: ... include the ORCHESTRATION_RESULT block\n"
-                 + APPROVED)
+        def decoyed(answer: str) -> str:
+            return ("prompt received: ... include the ORCHESTRATION_RESULT block\n"
+                    + answer)
 
-        report = self.run_cycle(Talker("codex", decoy), Talker("claude", decoy))
+        report = self.run_cycle(Talker("codex", decoyed(block("IMPLEMENTED"))),
+                                Talker("claude", decoyed(APPROVED)))
 
         self.assertEqual("APPROVED", report.verdict)
         self.assertEqual(rc.APPROVED_END, report.status)
+
+
+class FunctionalStopTests(RunCycleTestCase):
+    """A dispatch that returned is not a stage that worked."""
+
+    def test_an_implementation_that_reports_blocked_stops_the_cycle(self) -> None:
+        """The canary: Codex exited 0 having changed nothing, because the work
+        item did not exist, and the cycle reviewed it anyway."""
+        codex, claude = Talker("codex", block("BLOCKED")), Talker("claude")
+
+        report = self.run_cycle(codex, claude)
+
+        self.assertEqual(["implement"], [stage.role for stage in report.stages])
+        self.assertEqual([], claude.dispatched)
+        self.assertIn("reported BLOCKED", report.stopped_because)
+
+    def test_the_dispatch_is_still_recorded_as_having_succeeded(self) -> None:
+        """Two layers, two facts, both true: the call returned and the work did
+        not happen. The store keeps them in separate columns on purpose."""
+        self.run_cycle(Talker("codex", block("BLOCKED")), Talker("claude"))
+
+        dispatch, reported = self.rows()[0], self.rows()[1]
+
+        self.assertEqual("succeeded", dispatch["outcome"])
+        self.assertIsNone(dispatch["status"])
+        self.assertEqual("BLOCKED", reported["status"])
+
+    def test_a_status_the_store_cannot_hold_is_not_carried_to_it(self) -> None:
+        """It would raise on the way in and end the run without its last row."""
+        report = self.run_cycle(Talker("codex", block("MOSTLY_FINE")), Talker("claude"))
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("coordinate", self.rows()[-1]["role"])
+        self.assertIn("no status", report.stopped_because)
+
+    def test_a_review_that_reports_blocked_is_not_a_verdict(self) -> None:
+        report = self.run_cycle(Talker("codex"), Talker("claude", block("BLOCKED")))
+
+        self.assertIsNone(report.verdict)
+        self.assertIn("reported BLOCKED", report.stopped_because)
+        self.assertEqual("BLOCKED", self.rows()[-2]["status"])
+
+    def test_a_partial_resolution_still_reaches_its_rereview(self) -> None:
+        """The re-review is what judges how much was resolved."""
+        codex = Talker("codex")
+        codex.body = None
+        reviewer = Sequence("claude", [block("CHANGES_REQUESTED"), APPROVED])
+
+        report = self.run_cycle(codex, reviewer)
+
+        self.assertEqual(["implement", "review", "resolve", "rereview"],
+                         [stage.role for stage in report.stages])
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+    def test_a_long_reply_still_reports_its_status(self) -> None:
+        """End to end, the case a length cap used to eat."""
+        verbose = block("IMPLEMENTED") + "\n" + ("and then some more. " * 600)
+
+        report = self.run_cycle(Talker("codex", verbose), Talker("claude"))
+
+        self.assertEqual(["implement", "review"], [s.role for s in report.stages])
+        self.assertEqual("IMPLEMENTED", self.rows()[1]["status"])
+
+    def test_an_implementation_that_completes_continues(self) -> None:
+        report = self.run_cycle(Talker("codex"), Talker("claude"))
+
+        self.assertEqual(["implement", "review"], [s.role for s in report.stages])
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+
+class Sequence(Talker):
+    """Answers a different thing each time it is asked."""
+
+    def __init__(self, name: str, answers: list[str]) -> None:
+        super().__init__(name)
+        self.answers = list(answers)
+
+    def spoken(self, task: str) -> str:
+        if "cc-resolve-comments" in task:
+            return block("RESOLVED")
+        return self.answers.pop(0) if self.answers else APPROVED
 
 
 class Args:
