@@ -1,0 +1,17 @@
+# The runtime: what an installation needs in order to run and record a cycle.
+#
+# Both installers read this file, so neither can drift from the other, and the
+# validator checks three things about it: every entry exists, every module in
+# `scripts/` is either listed here or declared as tooling that stays behind,
+# and the local imports of everything listed are themselves listed. A runtime
+# that installs a module whose import is missing is a runtime that fails on its
+# first real call instead of at installation.
+#
+# One file per line. Blank lines and `#` comments are ignored.
+
+cycle.py
+executors.py
+router.py
+telemetry.py
+security_gate.py
+review_contract.py
