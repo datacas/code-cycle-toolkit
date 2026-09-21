@@ -261,13 +261,41 @@ routing rather than the models.
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
 
-**It decides; it does not dispatch.** `route()` returns a target —
-`codex:openai/gpt-5.6-luna high` — and stops there. Nothing yet turns that
-target into a running worker on an arbitrary host: `cc-orchestrator` still
-resolves executors through its existing modes, and the generic
-Claude↔Codex↔Orca adapter layer does not exist. Treat a routing decision as a
-recommendation the orchestrator has to honour by hand until that integration
-lands.
+## Executor dispatch
+
+`scripts/executors.py` turns a resolved target into a real execution. It adds no
+routing rules: the decision arrives already made, and a blocked decision is
+never quietly re-routed here, because substituting a target at dispatch time
+would make the recorded decision a lie.
+
+The design is built around an asymmetry that is worth stating plainly:
+
+| Executor | Can prove | Why not more |
+|---|---|---|
+| Orca | `ready` | the runtime reports its own state |
+| Codex | `authenticated` | a credential file proves a session, not quota |
+| Claude | `authenticated` | completed onboarding proves a session, not quota |
+
+Nothing documented reports remaining quota, and the only way to learn it is to
+spend some. So a probe reports what it demonstrated and how, and a caller that
+still wants to dispatch from `authenticated` asks for the `attempt` readiness
+policy. The promotion is then recorded on the result as `dispatched_from`, where
+nobody can later mistake a policy for a finding. A calibration dispatch refuses
+the promotion outright.
+
+Interactive friction is a missing capability, not a failure to retry. A
+folder-trust dialog, a hook-review screen, a bypass acknowledgement or a login
+prompt returns `BLOCKED` naming the capability. The adapter never answers a
+security prompt blind — that was tried during a campaign, and it produced two
+arms running in different environments.
+
+An exhausted window is also `BLOCKED` rather than `FAILED`: retrying costs
+nothing and changes nothing, and the distinction keeps one exhausted window from
+being read as evidence about a model.
+
+Claude runs with `-p` and Codex with `exec`, non-interactively and with no
+bypass flag. A run that needs elevated permissions to proceed is a run a person
+should be looking at.
 
 ## Not implemented
 
@@ -275,12 +303,9 @@ Named because they are easy to assume from the contract above: no model
 selection from statistics, no SQLite, no scoring, no adaptive learning, no
 escaped-defect tracking, and no automatic matching of findings.
 
-Two boundaries are worth stating precisely, because router v1 sits on one side
-of each. **Profile resolution exists**: seven roles resolve to concrete targets
-through configuration, and a skill names a role rather than a model. **Generic
-executor dispatch does not**: nothing converts a resolved target into a running
-worker on an arbitrary host, so `cc-orchestrator` keeps its current execution
-modes and a routing decision is advice it has to act on, not a mechanism that
-acts for it. Closing that gap is integration work, not another experiment. Analysis of what this records is done today by
+What exists now is profile resolution, availability probing and dispatch to
+Codex, Claude or Orca. What does not is anything that learns: no rule changes
+itself from an outcome, and the router's two escalation rules stay where they
+were written until a person moves them. Analysis of what this records is done today by
 reading published comments — `gh api` plus `scripts/review_contract.py` — not by
 a persistence layer.

@@ -157,12 +157,38 @@ Name a profile, never a model. `cheap_coder`, `deep_coder`, `reviewer`,
 `code_cycle.profiles` in `.code-cycle.yml`; `scripts/router.py` is the reference
 implementation of how.
 
-The router decides and does not dispatch. It returns a target such as
-`codex:openai/gpt-5.6-luna high`; turning that into a running worker on an
-arbitrary host is not built yet, so keep using this skill's existing execution
-modes and treat the decision as guidance you honour deliberately. Say in the
-result which profile and target were chosen, whether a fallback was used, and
-whether the execution mode could actually honour it.
+`scripts/executors.py` turns a resolved target into a real execution:
+
+```text
+probe()    -> what each executor could be shown to be, and on what evidence
+route()    -> which target the role resolves to
+dispatch() -> that target actually running, or BLOCKED naming what is missing
+```
+
+Probe before routing, and pass what the probe found. The executors differ in
+what they can prove: Orca reports its runtime state, so `ready` is provable;
+Codex and Claude expose a version and a credential, which proves `authenticated`
+and no more, because remaining quota is not observable without spending it. A
+caller that accepts dispatching from `authenticated` asks for it through the
+`attempt` readiness policy, and the result records that it dispatched from an
+unproven state. Never treat that promotion as a probe finding.
+
+A calibration dispatch requires demonstrated readiness. An arm that ran from an
+unproven state would put a sample whose executor state nobody established next
+to samples where it was.
+
+Interactive friction blocks. A folder-trust dialog, a hook-review screen, a
+bypass acknowledgement or a login prompt makes the run unattainable without a
+person, and the adapter returns `BLOCKED` naming the capability rather than
+answering a security prompt blind. Report the named capability so the user can
+grant it once instead of guessing.
+
+Compare the model that ran against the model requested. When the executor
+reports it, keep both; when it does not, record that it was unreported rather
+than assuming a match — silence is a third answer, not a quiet yes.
+
+Say in the result which profile and target were chosen, whether a fallback was
+used and why, and which readiness state the dispatch actually started from.
 
 Resolve executor availability **before** choosing anything. An executor that is
 merely installed is not dispatchable: a binary on PATH proves no session, no

@@ -68,6 +68,15 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- `scripts/executors.py`: generic executor dispatch. `probe()` reports what each
+  executor could be shown to be and on what evidence, `dispatch()` runs a
+  resolved target non-interactively through Codex, Claude or Orca. Only Orca can
+  prove readiness; the native adapters stop at `authenticated`, because
+  remaining quota is not observable without spending it. Dispatching from that
+  state requires the `attempt` readiness policy and is recorded as such. A
+  calibration dispatch refuses it. Interactive friction and exhausted windows
+  return `BLOCKED` naming the missing capability rather than being retried or
+  answered blind.
 
 ### Changed
 
