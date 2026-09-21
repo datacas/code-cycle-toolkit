@@ -68,6 +68,20 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- Both installers carry the runtime, not the skills alone: `.code-cycle/runtime`
+  under the home directory or the project root, one copy per scope rather than
+  one per host. `scripts/runtime.manifest` is the single list both read, so they
+  cannot drift; a project-scope installation writes `.code-cycle/.gitignore`
+  containing `*` so installed code cannot be committed by accident; and
+  `--no-runtime` / `-NoRuntime` installs the skills alone. Until this existed,
+  `cc-orchestrator` told its reader to drive every stage through `CycleRecorder`
+  while no installation had one.
+- `tests/installed_stage_check.py` runs a full stage against an installed
+  runtime with the repository kept off `sys.path`, and asserts the rows it left.
+  Every other test imports from `scripts/` — the checkout an installation does
+  not have — so none of them could see a runtime that was never installed. The
+  suite also refuses a module in `scripts/` that is neither shipped nor declared
+  as tooling, and a shipped module whose own imports are not shipped.
 - `scripts/cycle.py`: `CycleRecorder` routes, dispatches and records a stage as
   one operation, so no run that goes through it can dispatch without leaving a
   row. It owns the single production reroute — an exhausted window only — and
@@ -75,9 +89,7 @@ All notable changes to this project are documented here. This project follows
   first attempt left no trace makes fallbacks look free. Friction a person must
   clear stops where it is instead, unrerouted and with availability untouched,
   so nothing spends another provider's window on a waiting login screen.
-  `router` and `executors` stay unaware of the store, asserted by test. It is a
-  reference implementation and is not carried by `install.sh`, which ships
-  skills only: an installation records nothing until a host wires it in.
+  `router` and `executors` stay unaware of the store, asserted by test.
 - `router` routes `resolve` and `rereview`, which the cycle uses and which the
   role table had never covered.
 - `scripts/telemetry.py`: one row per stage in a SQLite database outside every

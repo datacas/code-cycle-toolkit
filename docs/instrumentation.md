@@ -438,6 +438,36 @@ adapters just proven correct against the live CLIs, beats recording later from a
 larger unexamined pile. Only fields already queried have columns, a short allowlist of counts and flags
 travels in `payload`, and `schema_version` is on every row from the first.
 
+## What an installation gets
+
+Skills are instructions and can be duplicated harmlessly; the runtime is the
+code that routes a stage, dispatches it and writes the row. Both installers
+carry it to `.code-cycle/runtime` — under the home directory for a global
+installation, under the project root for a project one — one copy per scope
+rather than one per host, because three copies would be three answers to the
+question of which one a run used. It needs Python 3 and that directory on
+`PYTHONPATH`.
+
+The list lives in `scripts/runtime.manifest` and both installers read that one
+file, so neither can drift from the other. `calibration_store.py` and
+`validate-package.py` stay in the checkout: campaign tooling and package tooling,
+which no installed skill points anybody at.
+
+This is the correction of a real gap rather than a convenience. From the moment
+the router landed until this change, `cc-orchestrator` instructed its reader to
+drive every stage through code that `install.sh` never copied — it carried
+`skills/` alone, so no installation had a `CycleRecorder` to call — the exact shape of failure this instrument exists to prevent, in the
+instrument itself. No test could see it, because every test imports from
+`scripts/`, the checkout an installation does not have.
+
+`tests/installed_stage_check.py` is the answer to that. It takes an installed
+runtime directory, keeps the repository off `sys.path`, drives a full stage
+through a scripted executor and asserts the rows. Both CI jobs run it against a
+real installation, and a test asserts the check can still fail by deleting a
+module from the installed tree and requiring a non-zero exit. A runtime that
+ships a module whose import is not shipped now fails at installation rather than
+on the first real call.
+
 ## Not implemented
 
 Named because they are easy to assume from the contract above: no model

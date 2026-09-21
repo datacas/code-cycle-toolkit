@@ -146,6 +146,20 @@ jobs:
               }
           }
 
+      - name: Run a stage from the installed runtime
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
+          $runtime = Join-Path (Join-Path $project '.code-cycle') 'runtime'
+          $database = Join-Path $env:RUNNER_TEMP 'installed-telemetry.sqlite'
+          if (Test-Path -LiteralPath $database) {
+              Remove-Item -LiteralPath $database -Force
+          }
+          py -3 tests\installed_stage_check.py $runtime $database
+          if ($LASTEXITCODE -ne 0) {
+              throw 'The installed runtime could not run and record a stage'
+          }
+
       - name: Refuse to overwrite without -Force
         shell: pwsh
         run: |

@@ -215,16 +215,18 @@ implementation measured so far needed a correction round, so the estimate
 carries at least one resolution plus its review until a repository measures its
 own first-pass rate.
 
-`scripts/cycle.py` is the reference implementation of recording a run, and it
-ships with the toolkit source rather than with an installed skill: an
-installation that has the skills alone has no `CycleRecorder` to call, and
-records nothing until a host wires one in. Say so rather than reporting a
-measured rate that no run produced.
+The installer puts the runtime in `.code-cycle/runtime` — under the home
+directory for a global installation, under the project root for a project one —
+and it needs Python 3 and that directory on `PYTHONPATH`. It is one copy per
+scope rather than one per host: three copies would be three answers to the
+question of which one a run used. An installation made with `--no-runtime` has
+no `CycleRecorder`; say so rather than reporting a measured rate that no run
+produced.
 
-What it fixes is worth copying wherever the wiring happens. `CycleRecorder.stage()`
-routes, dispatches and writes the row as one operation. Do not route and dispatch
-separately and then remember to record: a recording step that depends on being
-remembered is one that will be missing from exactly the runs that mattered.
+Drive every stage through `CycleRecorder.stage()`, which routes, dispatches and
+writes the row as one operation. Do not route and dispatch separately and then
+remember to record: a recording step that depends on being remembered is one
+that will be missing from exactly the runs that mattered.
 
 ```text
 recorder = CycleRecorder(telemetry, repo, task, signals, availability=...)

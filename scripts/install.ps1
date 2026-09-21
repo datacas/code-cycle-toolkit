@@ -5,13 +5,15 @@ param(
     [ValidateSet('global', 'project')]
     [string]$Scope = 'global',
     [string]$ProjectDir = (Get-Location).Path,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoRuntime
 )
 
 $ErrorActionPreference = 'Stop'
 $PackageRoot = Split-Path -Parent $PSScriptRoot
 $UserHome = [Environment]::GetFolderPath('UserProfile')
 $SkillsRoot = Join-Path $PackageRoot 'skills'
+$RuntimeManifest = Join-Path $PSScriptRoot 'runtime.manifest'
 
 if (-not (Test-Path -LiteralPath $SkillsRoot -PathType Container)) {
     throw "Skills directory not found: $SkillsRoot"
@@ -65,6 +67,43 @@ function Install-OpenCode {
     }
 }
 
+# The runtime is host-independent: one copy per scope, not one per agent. A
+# skill is instructions and can be duplicated harmlessly; the runtime is code
+# that records a cycle, and three copies of it would be three answers to the
+# question of which one a run used.
+function Install-Runtime {
+    if (-not (Test-Path -LiteralPath $RuntimeManifest -PathType Leaf)) {
+        throw "Runtime manifest not found: $RuntimeManifest"
+    }
+
+    $Destination = Join-Path (Join-Path $BaseDir '.code-cycle') 'runtime'
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    # The directory holds installed code, never anything a project should carry.
+    # Writing the rule next to it means a project-scope installation cannot be
+    # committed by accident.
+    $Ignore = Join-Path (Join-Path $BaseDir '.code-cycle') '.gitignore'
+    Set-Content -LiteralPath $Ignore -Value '*'
+
+    Get-Content -LiteralPath $RuntimeManifest | ForEach-Object {
+        $Module = $_.Trim()
+        if (-not $Module -or $Module.StartsWith('#')) { return }
+
+        $Source = Join-Path $PSScriptRoot $Module
+        if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+            throw "Runtime module listed but missing: $Source"
+        }
+        $Target = Join-Path $Destination $Module
+        if ((Test-Path -LiteralPath $Target) -and (-not $Force)) {
+            throw "Already exists: $Target (use -Force to replace it)"
+        }
+        Copy-Item -LiteralPath $Source -Destination $Target -Force
+    }
+
+    Write-Host "Installed runtime -> $Destination"
+    Write-Host "Add it to PYTHONPATH to record a cycle: $Destination"
+}
+
 switch ($Agent) {
     'claude' { Install-Claude }
     'codex' { Install-Codex }
@@ -74,6 +113,10 @@ switch ($Agent) {
         Install-Codex
         Install-OpenCode
     }
+}
+
+if (-not $NoRuntime) {
+    Install-Runtime
 }
 
 Write-Host 'Code Cycle Toolkit installation completed.'

@@ -14,6 +14,7 @@ AGENT='all'
 SCOPE='global'
 PROJECT_DIR="$(pwd -P)"
 FORCE=0
+RUNTIME=1
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,7 @@ Options:
   --scope <global|project>            Install for the user or one project
   --project-dir <path>                Project root for project scope
   --force                             Replace existing installed skill folders
+  --no-runtime                        Install the skills only, without the runtime
   -h, --help                          Show this help
 
 Examples:
@@ -53,6 +55,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --no-runtime)
+      RUNTIME=0
       shift
       ;;
     -h|--help)
@@ -130,6 +136,47 @@ install_opencode() {
   fi
 }
 
+# The runtime is host-independent: one copy per scope, not one per agent. A
+# skill is instructions and can be duplicated harmlessly; the runtime is code
+# that records a cycle, and three copies of it would be three answers to the
+# question of which one a run used.
+RUNTIME_MANIFEST="$SCRIPT_DIR/runtime.manifest"
+
+install_runtime() {
+  local destination module source
+  [ -f "$RUNTIME_MANIFEST" ] || {
+    printf 'Runtime manifest not found: %s\n' "$RUNTIME_MANIFEST" >&2
+    return 1
+  }
+
+  destination="$BASE_DIR/.code-cycle/runtime"
+  mkdir -p "$destination"
+
+  # The directory holds installed code, never anything a project should carry.
+  # Writing the rule next to it means a project-scope installation cannot be
+  # committed by accident.
+  printf '%s\n' '*' > "$BASE_DIR/.code-cycle/.gitignore"
+
+  while IFS= read -r module || [ -n "$module" ]; do
+    case "$module" in
+      ''|'#'*) continue ;;
+    esac
+    source="$SCRIPT_DIR/$module"
+    [ -f "$source" ] || {
+      printf 'Runtime module listed but missing: %s\n' "$source" >&2
+      return 1
+    }
+    if [ -e "$destination/$module" ] && [ "$FORCE" -ne 1 ]; then
+      printf 'Already exists: %s (use --force to replace it)\n' "$destination/$module" >&2
+      return 1
+    fi
+    cp "$source" "$destination/$module"
+  done < "$RUNTIME_MANIFEST"
+
+  printf 'Installed runtime -> %s\n' "$destination"
+  printf 'Add it to PYTHONPATH to record a cycle: %s\n' "$destination"
+}
+
 case "$AGENT" in
   claude) install_claude ;;
   codex) install_codex ;;
@@ -140,5 +187,9 @@ case "$AGENT" in
     install_opencode
     ;;
 esac
+
+if [ "$RUNTIME" -eq 1 ]; then
+  install_runtime
+fi
 
 printf '%s\n' 'Code Cycle Toolkit installation completed.'

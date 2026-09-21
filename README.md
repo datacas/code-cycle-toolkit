@@ -225,6 +225,7 @@ Global destinations are:
 | Codex compatibility path | `~/.agents/skills/` |
 | Codex traditional path | `~/.codex/skills/` |
 | OpenCode | `~/.config/opencode/skills/` |
+| Runtime, every host | `~/.code-cycle/runtime/` |
 
 The Codex installation writes both Codex locations for compatibility. OpenCode also discovers `.agents/skills`.
 
@@ -268,6 +269,7 @@ Repository destinations are:
 | Claude Code | `<repo>/.claude/skills/` |
 | Codex | `<repo>/.agents/skills/` |
 | OpenCode | `<repo>/.opencode/skills/` |
+| Runtime, every host | `<repo>/.code-cycle/runtime/` |
 
 These copied files can be committed when the team wants the skills to travel with the repository. Otherwise, use global installation.
 
@@ -280,6 +282,31 @@ bash scripts/install.sh --agent all --scope global --force
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Agent all -Scope global -Force
 ```
+
+### The runtime
+
+Skills are instructions; the runtime is the code that routes a stage, dispatches
+it and records the row. It is installed once per scope rather than once per
+host — three copies would be three answers to the question of which one a run
+used — and it needs Python 3 plus its directory on `PYTHONPATH`:
+
+```bash
+export PYTHONPATH="$HOME/.code-cycle/runtime:${PYTHONPATH:-}"
+```
+
+```powershell
+$env:PYTHONPATH = "$HOME\.code-cycle\runtime;$env:PYTHONPATH"
+```
+
+`scripts/runtime.manifest` lists what it contains, and both installers read that
+one file, so neither can drift from the other. A project-scope installation
+writes `.code-cycle/.gitignore` containing `*`, so installed code cannot be
+committed to the target repository by accident.
+
+Pass `--no-runtime` on Bash or `-NoRuntime` on PowerShell to install the skills
+alone. An installation without the runtime records nothing: `first_pass_rate()`
+stays unmeasured, and the orchestrator is told to say so rather than report a
+number no run produced.
 
 ### WSL and native Windows are separate environments
 
