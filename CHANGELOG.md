@@ -96,7 +96,10 @@ All notable changes to this project are documented here. This project follows
   driver never learns either format. A canary against the real CLIs found the
   block located and then unparseable, because reading the envelope as the reply
   keeps `\n` and `\"` as escapes. Fixtures are live captures, and the fake
-  agents now write their CLI's envelope rather than plain text.
+  agents now write their CLI's envelope rather than plain text. That text is
+  kept whole: the bounded tail in `artifacts` is for a person reading afterwards,
+  and bounding what the caller parses deletes the result of any reply that keeps
+  talking past its own block.
 - A stage's structured result distinguishes readable, present-but-unreadable and
   absent, instead of collapsing all three into `None`, and a status outside the
   store's vocabulary is treated as no status rather than raising on the way in.

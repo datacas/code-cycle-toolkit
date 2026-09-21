@@ -346,10 +346,14 @@ class NativeAdapter(Adapter):
             )
         stdout = completed.stdout or ""
         resolved = self.read_resolved_model(stdout)
+        # Two different jobs, and only one of them may be bounded. The tail in
+        # `artifacts` is for a human reading afterwards, so it is cut to keep a
+        # result small. `agent_output` is what the caller parses its answer out
+        # of, so it is whole: a limit on it silently deletes valid results,
+        # which is what a length cap here did to any reply that kept talking
+        # past its own structured block.
         artifacts = {"argv": argv, "stdout": stdout[-4000:]}
-        # Unwrapped from the whole stream, then truncated. Truncating first
-        # would cut the envelope mid-token and lose the message inside it.
-        spoken = self.agent_output(stdout)[-8000:]
+        spoken = self.agent_output(stdout)
         if resolved is not None and resolved != target.model:
             return DispatchResult(
                 DispatchOutcome.CONTRACT_VIOLATION, self.name, target,

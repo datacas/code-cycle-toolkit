@@ -716,6 +716,38 @@ class AgentOutputTests(unittest.TestCase):
         self.assertIn("ORCHESTRATION_RESULT", result.agent_output)
         self.assertNotIn("thread.started", result.agent_output)
 
+    def test_a_reply_that_keeps_talking_keeps_its_result(self) -> None:
+        """A length cap on the parsed text silently deletes valid results.
+
+        The block comes first and the agent carries on afterwards, which is
+        ordinary: a summary, next steps, a closing paragraph. Cutting the tail
+        cut the block's opening delimiter with it, and the cycle then recorded a
+        completed stage as having reported nothing.
+        """
+        block = ('ORCHESTRATION_RESULT\n{"skill": "fake", "status": "IMPLEMENTED"}\n'
+                 "END_ORCHESTRATION_RESULT")
+        text = block + "\n" + ("and then some more. " * 600)
+        line = json.dumps({"type": "item.completed",
+                           "item": {"type": "agent_message", "text": text}})
+
+        result = ex.CodexAdapter().dispatch(
+            TARGET, "work", runner=lambda *a, **k: completed(line))
+
+        self.assertEqual(len(text), len(result.agent_output))
+        self.assertIn("ORCHESTRATION_RESULT", result.agent_output)
+
+    def test_the_diagnostic_tail_is_still_bounded(self) -> None:
+        """What a person reads afterwards is capped; what the caller parses is
+        not. Two jobs, and only one of them may be cut."""
+        line = json.dumps({"type": "item.completed",
+                           "item": {"type": "agent_message", "text": "x" * 20000}})
+
+        result = ex.CodexAdapter().dispatch(
+            TARGET, "work", runner=lambda *a, **k: completed(line))
+
+        self.assertGreaterEqual(4000, len(result.artifacts["stdout"]))
+        self.assertEqual(20000, len(result.agent_output))
+
     def test_a_started_worker_says_nothing_of_its_own(self) -> None:
         """Orca's receipt is not a reply; its stage answers elsewhere."""
         result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "orca", TARGET,

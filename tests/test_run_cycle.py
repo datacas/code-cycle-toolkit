@@ -252,6 +252,15 @@ class FunctionalStopTests(RunCycleTestCase):
                          [stage.role for stage in report.stages])
         self.assertEqual(rc.APPROVED_END, report.status)
 
+    def test_a_long_reply_still_reports_its_status(self) -> None:
+        """End to end, the case a length cap used to eat."""
+        verbose = block("IMPLEMENTED") + "\n" + ("and then some more. " * 600)
+
+        report = self.run_cycle(Talker("codex", verbose), Talker("claude"))
+
+        self.assertEqual(["implement", "review"], [s.role for s in report.stages])
+        self.assertEqual("IMPLEMENTED", self.rows()[1]["status"])
+
     def test_an_implementation_that_completes_continues(self) -> None:
         report = self.run_cycle(Talker("codex"), Talker("claude"))
 
