@@ -68,6 +68,13 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- `scripts/cycle.py`: `CycleRecorder` routes, dispatches and records a stage as
+  one operation, so no run can dispatch without leaving a row. It owns the
+  single production reroute and records both decisions, including the abandoned
+  attempt — a fallback whose first attempt left no trace makes fallbacks look
+  free. `router` and `executors` stay unaware of the store, asserted by test.
+- `router` routes `resolve` and `rereview`, which the cycle uses and which the
+  role table had never covered.
 - `scripts/telemetry.py`: one row per stage in a SQLite database outside every
   repository. `first_pass_rate()` measures per repository what the router
   currently assumes, reporting unknown below ten observations rather than

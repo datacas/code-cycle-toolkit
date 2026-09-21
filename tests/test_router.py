@@ -129,6 +129,25 @@ class RoleRoutingTests(unittest.TestCase):
     def test_coordination_stays_cheap_even_when_it_sequences_expensive_work(self) -> None:
         self.assertEqual("coordinator", router.route("coordinate", signals(), READY).profile)
 
+    def test_resolving_findings_routes_where_implementing_does(self) -> None:
+        """It edits code and is judged by tests, so it is implementation work."""
+        self.assertEqual("cheap_coder", router.route("resolve", signals(difficulty=2), READY).profile)
+        self.assertEqual("deep_coder", router.route("resolve", signals(difficulty=3), READY).profile)
+
+    def test_a_rereview_routes_where_a_review_does(self) -> None:
+        self.assertEqual("reviewer", router.route("rereview", signals(), READY).profile)
+        self.assertEqual(
+            "senior_reviewer",
+            router.route("rereview", signals(security_sensitive=True), READY).profile,
+        )
+
+    def test_every_cycle_stage_can_be_routed(self) -> None:
+        """A stage the router cannot route is a stage the cycle cannot run."""
+        for role in ("implement", "review", "resolve", "rereview", "security",
+                     "verify", "run", "bootstrap", "coordinate"):
+            with self.subTest(role=role):
+                self.assertFalse(router.route(role, signals(), READY).blocked)
+
     def test_an_unknown_role_is_refused(self) -> None:
         with self.assertRaises(router.RouterError):
             router.route("whatever", signals(), READY)
