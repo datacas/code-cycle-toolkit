@@ -14,6 +14,11 @@ import executors as ex  # noqa: E402
 import router  # noqa: E402
 
 
+def present(_name):
+    """Pretend the binary is on PATH: CI has neither agent installed."""
+    return "/usr/bin/fake"
+
+
 def completed(stdout="", returncode=0, stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
@@ -52,10 +57,10 @@ class ProbeHonestyTests(unittest.TestCase):
     """A probe reports what it demonstrated, never what it hopes."""
 
     def test_a_missing_binary_is_unknown_not_installed(self) -> None:
-        adapter = ex.CodexAdapter()
-        adapter.binary = "definitely-not-a-real-binary-xyz"
+        result = ex.CodexAdapter().probe(which=lambda _name: None)
 
-        self.assertEqual(ex.Availability.UNKNOWN, adapter.probe().availability)
+        self.assertEqual(ex.Availability.UNKNOWN, result.availability)
+        self.assertIn("not on PATH", result.proof)
 
     def test_native_adapters_never_claim_ready(self) -> None:
         """Remaining quota is not observable without spending it."""
@@ -67,7 +72,7 @@ class ProbeHonestyTests(unittest.TestCase):
         adapter = ex.CodexAdapter()
         adapter.auth_evidence = lambda: (True, "credential file present")
 
-        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.1"))
+        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.1"), which=present)
 
         self.assertEqual(ex.Availability.AUTHENTICATED, result.availability)
         self.assertIn("quota is not observable", result.detail)
@@ -77,25 +82,27 @@ class ProbeHonestyTests(unittest.TestCase):
         adapter = ex.CodexAdapter()
         adapter.auth_evidence = lambda: (False, "no credential")
 
-        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.1"))
+        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.1"), which=present)
 
         self.assertEqual(ex.Availability.INSTALLED, result.availability)
 
     def test_orca_can_prove_ready(self) -> None:
         payload = json.dumps({"result": {"runtime": {"state": "ready", "reachable": True}}})
-        adapter = ex.OrcaAdapter(binary="sh")  # on PATH, output is faked
+        adapter = ex.OrcaAdapter()
 
-        result = adapter.probe(runner=lambda *a, **k: completed(payload))
+        result = adapter.probe(runner=lambda *a, **k: completed(payload), which=present)
 
         self.assertEqual(ex.Availability.READY, result.availability)
         self.assertEqual(ex.Availability.READY, result.provable_ceiling)
 
     def test_orca_not_reachable_is_only_installed(self) -> None:
         payload = json.dumps({"result": {"runtime": {"state": "not_running", "reachable": False}}})
-        adapter = ex.OrcaAdapter(binary="sh")
+        adapter = ex.OrcaAdapter()
 
-        self.assertEqual(ex.Availability.INSTALLED,
-                         adapter.probe(runner=lambda *a, **k: completed(payload)).availability)
+        self.assertEqual(
+            ex.Availability.INSTALLED,
+            adapter.probe(runner=lambda *a, **k: completed(payload), which=present).availability,
+        )
 
 
 class ReadinessPolicyTests(unittest.TestCase):

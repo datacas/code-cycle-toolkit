@@ -155,9 +155,8 @@ class NativeAdapter(Adapter):
     def auth_evidence(self) -> tuple[bool, str]:  # pragma: no cover - interface
         raise NotImplementedError
 
-    def probe(self, runner=_run) -> ProbeResult:
-        path = shutil.which(self.binary)
-        if not path:
+    def probe(self, runner=_run, which=shutil.which) -> ProbeResult:
+        if not which(self.binary):
             return ProbeResult(self.name, Availability.UNKNOWN, "not on PATH",
                                provable_ceiling=self.provable_ceiling)
         try:
@@ -317,8 +316,8 @@ class OrcaAdapter(Adapter):
     def __init__(self, binary: str | None = None) -> None:
         self.binary = binary or ("orca-ide" if os.name != "nt" else "orca")
 
-    def probe(self, runner=_run) -> ProbeResult:
-        if not shutil.which(self.binary):
+    def probe(self, runner=_run, which=shutil.which) -> ProbeResult:
+        if not which(self.binary):
             return ProbeResult(self.name, Availability.UNKNOWN, "not on PATH")
         try:
             out = runner([self.binary, "status", "--json"], timeout=30)
