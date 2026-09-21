@@ -157,12 +157,38 @@ Name a profile, never a model. `cheap_coder`, `deep_coder`, `reviewer`,
 `code_cycle.profiles` in `.code-cycle.yml`; `scripts/router.py` is the reference
 implementation of how.
 
-The router decides and does not dispatch. It returns a target such as
-`codex:openai/gpt-5.6-luna high`; turning that into a running worker on an
-arbitrary host is not built yet, so keep using this skill's existing execution
-modes and treat the decision as guidance you honour deliberately. Say in the
-result which profile and target were chosen, whether a fallback was used, and
-whether the execution mode could actually honour it.
+`scripts/executors.py` turns a resolved target into a real execution:
+
+```text
+probe()    -> what each executor could be shown to be, and on what evidence
+route()    -> which target the role resolves to
+dispatch() -> that target actually running, or BLOCKED naming what is missing
+```
+
+Probe before routing, and pass what the probe found. The executors differ in
+what they can prove: Orca reports its runtime state, so `ready` is provable;
+Codex and Claude expose a version and a credential, which proves `authenticated`
+and no more, because remaining quota is not observable without spending it. A
+caller that accepts dispatching from `authenticated` asks for it through the
+`attempt` readiness policy, and the result records that it dispatched from an
+unproven state. Never treat that promotion as a probe finding.
+
+A calibration dispatch requires demonstrated readiness. An arm that ran from an
+unproven state would put a sample whose executor state nobody established next
+to samples where it was.
+
+Interactive friction blocks. A folder-trust dialog, a hook-review screen, a
+bypass acknowledgement or a login prompt makes the run unattainable without a
+person, and the adapter returns `BLOCKED` naming the capability rather than
+answering a security prompt blind. Report the named capability so the user can
+grant it once instead of guessing.
+
+Compare the model that ran against the model requested. When the executor
+reports it, keep both; when it does not, record that it was unreported rather
+than assuming a match — silence is a third answer, not a quiet yes.
+
+Say in the result which profile and target were chosen, whether a fallback was
+used and why, and which readiness state the dispatch actually started from.
 
 Resolve executor availability **before** choosing anything. An executor that is
 merely installed is not dispatchable: a binary on PATH proves no session, no
@@ -194,24 +220,72 @@ own first-pass rate.
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its
    `PROVIDER_BOOTSTRAP_RESULT`. If it returns `BLOCKED` or `FAILED`, stop before
    creating work; otherwise pass its resolved context unchanged to every stage.
-2. Resolve the execution mode once. Record the selected stage executors and do
-   not change them silently after implementation starts.
-3. Run `cc-implement-issue` and request its structured result. Require the
-   change-request ID, branch, and current head SHA before continuing.
-4. Run `cc-initial-review` on that change request with the selected review
-   executor and request its structured
-   result.
-5. If the review returns `APPROVED`, validate the final exit conditions. If it
+2. Probe every executor once and keep the availability map for the whole run.
+   Record what each probe demonstrated and on what evidence, and record the
+   readiness policy in force. Do not re-probe silently between stages: an
+   availability that changes without being recorded makes every later decision
+   unexplainable.
+3. Label `difficulty` and `verifiability` for the work item, and whether the
+   change is security-sensitive, **before** routing anything. Labelling
+   afterwards would mean the routing was chosen and then justified.
+4. For each stage, route its role against those signals and that availability
+   map, then dispatch the resolved target:
+
+   ```text
+   probe -> availability map
+         -> route(stage role, signals)
+         -> dispatch(decision)
+         -> validate the dispatch result
+         -> next stage
+   ```
+
+   Record the profile, the target, whether a fallback was used and why, and
+   which readiness state the dispatch started from.
+
+   Use the `attempt` readiness policy in production and `proven` in a
+   calibration. A native executor can never demonstrate readiness, so a
+   production run under `proven` would refuse to dispatch to Codex or Claude at
+   all; a calibration under `attempt` would put an arm that started from an
+   unestablished state beside arms that did not.
+
+   A dispatch that returns `BLOCKED` having **learned** something about the
+   executor — an exhausted window is the case that matters, because no probe can
+   see it before spending quota — updates the availability map with that
+   evidence, and the stage is routed once more. That second routing is the only
+   one allowed, it is recorded with the evidence that caused it, and if it
+   resolves to the same target or to nothing, the run stops. Without it the
+   production fallback is unreachable in the case it exists for: the primary was
+   chosen from an optimistic promotion, the dispatch found the truth, and nobody
+   acted on it.
+
+   A calibration never re-routes. Substituting an arm answers a different
+   question with the same sample, so it stops at the first `BLOCKED`.
+
+   Any other `BLOCKED` stops the run with the named capability: a trust dialog
+   or a missing session needs a person, not another attempt. A dispatch that
+   reports running a different model than the one requested is a broken
+   contract, not a success: stop rather than letting the cycle continue on work
+   nobody asked that model to do.
+
+   An execution mode named in the invocation, such as `single_agent` or
+   `claude_codex`, fixes the executors for every stage and replaces the routing
+   step. Say which of the two paths the run took; never mix them within one run.
+5. Run `cc-implement-issue` on the target routed for `implement`, and request
+   its structured result. Require the change-request ID, branch, and current
+   head SHA before continuing.
+6. Run `cc-initial-review` on that change request, on the target routed for
+   `review`, and request its structured result.
+7. If the review returns `APPROVED`, validate the final exit conditions. If it
    returns `CHANGES_REQUESTED`, begin an iteration with
    `cc-resolve-comments`. Stop on `BLOCKED` or `FAILED`.
-6. For each iteration, pass the previous structured result to
-   `cc-resolve-comments`, then pass its result to `cc-rereview` using the
-   selected rereview executor.
-7. Continue only when the statuses and external conditions allow it. Record
+8. For each iteration, pass the previous structured result to
+   `cc-resolve-comments`, then pass its result to `cc-rereview`, each on the
+   target routed for its role.
+9. Continue only when the statuses and external conditions allow it. Record
    the current head SHA and open finding IDs after every iteration.
-8. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
-   the same head SHA and open finding set repeat without progress.
-9. Before reporting readiness, confirm that the reviewed SHA equals the current
+10. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
+    the same head SHA and open finding set repeat without progress.
+11. Before reporting readiness, confirm that the reviewed SHA equals the current
    change-request head, required checks have passed, no blocking finding is
    open, and the change request remains unmerged.
 

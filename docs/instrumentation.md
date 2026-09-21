@@ -261,13 +261,95 @@ routing rather than the models.
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
 
-**It decides; it does not dispatch.** `route()` returns a target —
-`codex:openai/gpt-5.6-luna high` — and stops there. Nothing yet turns that
-target into a running worker on an arbitrary host: `cc-orchestrator` still
-resolves executors through its existing modes, and the generic
-Claude↔Codex↔Orca adapter layer does not exist. Treat a routing decision as a
-recommendation the orchestrator has to honour by hand until that integration
-lands.
+## Executor dispatch
+
+`scripts/executors.py` turns a resolved target into a real execution. It adds no
+routing rules: the decision arrives already made, and a blocked decision is
+never quietly re-routed here, because substituting a target at dispatch time
+would make the recorded decision a lie.
+
+The design is built around an asymmetry that is worth stating plainly:
+
+| Executor | Can prove | Why not more |
+|---|---|---|
+| Orca | `ready` | the runtime reports its own state |
+| Codex | `authenticated` | a credential is configured; whether it still works is unknown |
+| Claude | `authenticated` | onboarding completed; whether the session is live is unknown |
+
+`authenticated` here means credential material exists, not that the session
+behind it is valid: a token can be expired or revoked with no local sign of it.
+Nothing documented reports remaining quota or session validity without consuming
+something. So a probe reports what it demonstrated and how, and a caller that
+still wants to dispatch from `authenticated` asks for the `attempt` readiness
+policy. The promotion is then recorded on the result as `dispatched_from`, where
+nobody can later mistake a policy for a finding. A calibration dispatch refuses
+the promotion outright.
+
+Interactive friction is a missing capability, not a failure to retry. A
+folder-trust dialog, a hook-review screen, a bypass acknowledgement or a login
+prompt returns `BLOCKED` naming the capability. The adapter never answers a
+security prompt blind — that was tried during a campaign, and it produced two
+arms running in different environments.
+
+An exhausted window is also `BLOCKED` rather than `FAILED`: retrying costs
+nothing and changes nothing, and the distinction keeps one exhausted window from
+being read as evidence about a model.
+
+Friction is classified from the failure, never from what the agent wrote. A run
+that exits cleanly is never inspected at all, and on a failed run only stderr
+and structured error events are read — an implementation that adds rate-limit
+handling says "quota" for ordinary reasons, and a non-zero exit does not turn
+that sentence into evidence about a window.
+
+A production run uses the `attempt` readiness policy and a calibration uses
+`proven`, derived from the mode rather than passed by hand: under `proven` no
+native executor could ever be dispatched to, and under `attempt` a calibration
+arm would start from a state nobody established.
+
+A dispatch that reports running a model other than the one requested is a
+`contract_violation`, not a success. `dispatch(target)` promises that target
+ran; a different model answering is that promise broken, and the cycle must not
+advance on it. An executor that reports no model at all leaves the question
+open, which is a third answer rather than a quiet yes.
+
+Orca is the only backend that reports the model it actually launched, in its
+receipt's `launch.effective`. Elsewhere the value is either self-reported by the
+agent — observed to be wrong in both arms of a campaign — or unavailable.
+
+Its exit status is part of the receipt: the CLI exits `0` only for `ready`, and
+a failed or uncertain launch exits non-zero while still returning a JSON body
+carrying the stage, residual resources and recovery commands. Reading the body
+and ignoring the status reports a partial launch as a success, and the same
+applies to the status call — readiness is the one thing this backend can prove,
+so a command that failed does not get to prove it.
+
+Its dispatch takes an explicit `OrcaDispatchContext`: a coordinator terminal, a
+Run and a Task that already exist, plus an optional agent override. The adapter
+refuses to create any of them, because a dispatcher that quietly spawns
+terminals and durable state in someone's workspace is one nobody can reason
+about. The Task ID is separate from the `task` argument every other adapter
+takes: for Codex and Claude that argument is the prompt, while Orca's prompt
+already lives inside the Task and `--task` wants its identifier. The agent is
+chosen from the target's provider, so an Anthropic target launches the Claude
+agent rather than asking Codex to run a model it does not have.
+
+### Learning availability by dispatching
+
+A native probe cannot see quota before spending some, so the only moment anyone
+learns a window is exhausted is a dispatch that tried. If that stays inside the
+result, the production fallback is unreachable in the case it exists for: the
+router picked the primary from an optimistic promotion, the dispatch found the
+truth, and nothing carried it back.
+
+`DispatchResult.learned_availability` reports that evidence. It does not
+re-route — that belongs to the orchestration layer, where a single explicit
+second routing is recorded along with the evidence that caused it. Friction a
+person has to clear teaches nothing about availability and yields `None`, and a
+calibration never re-routes at all.
+
+Claude runs with `-p` and Codex with `exec`, non-interactively and with no
+bypass flag. A run that needs elevated permissions to proceed is a run a person
+should be looking at.
 
 ## Not implemented
 
@@ -275,12 +357,9 @@ Named because they are easy to assume from the contract above: no model
 selection from statistics, no SQLite, no scoring, no adaptive learning, no
 escaped-defect tracking, and no automatic matching of findings.
 
-Two boundaries are worth stating precisely, because router v1 sits on one side
-of each. **Profile resolution exists**: seven roles resolve to concrete targets
-through configuration, and a skill names a role rather than a model. **Generic
-executor dispatch does not**: nothing converts a resolved target into a running
-worker on an arbitrary host, so `cc-orchestrator` keeps its current execution
-modes and a routing decision is advice it has to act on, not a mechanism that
-acts for it. Closing that gap is integration work, not another experiment. Analysis of what this records is done today by
+What exists now is profile resolution, availability probing and dispatch to
+Codex, Claude or Orca. What does not is anything that learns: no rule changes
+itself from an outcome, and the router's two escalation rules stay where they
+were written until a person moves them. Analysis of what this records is done today by
 reading published comments — `gh api` plus `scripts/review_contract.py` — not by
 a persistence layer.
