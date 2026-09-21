@@ -188,35 +188,67 @@ class InteractiveFrictionTests(unittest.TestCase):
     """A screen only a human can answer is BLOCKED, never answered blind."""
 
     def test_codex_recognises_a_hook_review_screen(self) -> None:
-        capability, detail = ex.CodexAdapter().classify_output("Hooks need review: 5 hooks are new")
+        capability, detail = ex.CodexAdapter().classify_failure(
+            1, "Hooks need review: 5 hooks are new", ""
+        )
 
         self.assertEqual("hook_trust", capability)
         self.assertIn("interactive screen", detail)
 
     def test_claude_recognises_the_bypass_acknowledgement(self) -> None:
-        capability, _ = ex.ClaudeAdapter().classify_output(
-            "WARNING: Claude Code running in Bypass Permissions mode"
+        capability, _ = ex.ClaudeAdapter().classify_failure(
+            1, "WARNING: Claude Code running in Bypass Permissions mode", ""
         )
 
         self.assertEqual("bypass_acknowledgement", capability)
 
     def test_claude_recognises_a_folder_trust_prompt(self) -> None:
-        capability, _ = ex.ClaudeAdapter().classify_output(
-            "Is this a project you created or one you trust?"
+        capability, _ = ex.ClaudeAdapter().classify_failure(
+            1, "Is this a project you created or one you trust?", ""
         )
 
         self.assertEqual("folder_trust", capability)
 
     def test_an_exhausted_window_is_named_as_quota_not_as_failure(self) -> None:
-        capability, detail = ex.CodexAdapter().classify_output(
-            "You have 2 usage limit resets available"
+        capability, detail = ex.CodexAdapter().classify_failure(
+            1, "You have 2 usage limit resets available", ""
         )
 
         self.assertEqual("operating_quota", capability)
         self.assertIn("exhausted window", detail)
 
     def test_ordinary_output_is_not_misread_as_friction(self) -> None:
-        self.assertIsNone(ex.CodexAdapter().classify_output("wrote 3 files, tests passed"))
+        self.assertIsNone(ex.CodexAdapter().classify_failure(1, "wrote 3 files, tests passed", ""))
+
+    def test_a_successful_run_is_never_classified_as_friction(self) -> None:
+        """The agent's own answer is not the executor's error.
+
+        An implementation that adds rate-limit handling says "quota" for
+        entirely ordinary reasons.
+        """
+        for text in ("Implemented quota handling and rate limit tests",
+                     "Added a sign in flow",
+                     "Hooks need review was the bug; fixed it"):
+            with self.subTest(text=text):
+                self.assertIsNone(ex.CodexAdapter().classify_failure(0, "", text))
+                self.assertIsNone(ex.ClaudeAdapter().classify_failure(0, "", text))
+
+    def test_a_successful_dispatch_survives_those_words_in_its_answer(self) -> None:
+        runner = lambda argv, timeout=None, cwd=None: completed(
+            "Implemented quota handling and rate limit tests"
+        )
+
+        result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIsNone(result.missing_capability)
+
+    def test_stderr_is_preferred_over_stdout_when_the_run_failed(self) -> None:
+        capability, _ = ex.CodexAdapter().classify_failure(
+            1, "usage limit reached", "Hooks need review"
+        )
+
+        self.assertEqual("operating_quota", capability)
 
 
 class NativeDispatchTests(unittest.TestCase):
@@ -225,7 +257,7 @@ class NativeDispatchTests(unittest.TestCase):
     def test_codex_runs_non_interactively_with_the_requested_model_and_effort(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None):
+        def runner(argv, timeout=None, cwd=None):
             seen["argv"] = argv
             return completed('{"model": "gpt-5.6-luna"}')
 
@@ -243,7 +275,7 @@ class NativeDispatchTests(unittest.TestCase):
         """A run needing elevated permissions is a run a human should see."""
         seen = {}
 
-        def runner(argv, timeout=None):
+        def runner(argv, timeout=None, cwd=None):
             seen["argv"] = argv
             return completed("{}")
 
@@ -255,8 +287,8 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", seen["argv"])
 
     def test_an_interactive_screen_blocks_instead_of_being_answered(self) -> None:
-        runner = lambda argv, timeout=None: completed(
-            "WARNING: Claude Code running in Bypass Permissions mode"
+        runner = lambda argv, timeout=None, cwd=None: completed(
+            returncode=1, stderr="WARNING: Claude Code running in Bypass Permissions mode"
         )
         target = router.parse_target("claude:anthropic/claude-opus-5 high")
 
@@ -267,7 +299,9 @@ class NativeDispatchTests(unittest.TestCase):
 
     def test_an_exhausted_window_blocks_rather_than_failing(self) -> None:
         """Quota is a missing capability, not a broken run: retrying is useless."""
-        runner = lambda argv, timeout=None: completed("You have 2 usage limit resets available")
+        runner = lambda argv, timeout=None, cwd=None: completed(
+            returncode=1, stderr="You have 2 usage limit resets available"
+        )
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -275,7 +309,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual("operating_quota", result.missing_capability)
 
     def test_a_nonzero_exit_is_a_failure_with_its_output(self) -> None:
-        runner = lambda argv, timeout=None: completed("", returncode=2, stderr="boom")
+        runner = lambda argv, timeout=None, cwd=None: completed("", returncode=2, stderr="boom")
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -284,7 +318,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual(2, result.artifacts["returncode"])
 
     def test_a_timeout_does_not_claim_the_run_is_dead(self) -> None:
-        def runner(argv, timeout=None):
+        def runner(argv, timeout=None, cwd=None):
             raise subprocess.TimeoutExpired(argv, timeout or 1)
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", timeout=5, runner=runner)
@@ -293,7 +327,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertIn("may still be alive", result.detail)
 
     def test_silence_about_the_model_stays_silence(self) -> None:
-        runner = lambda argv, timeout=None: completed("done, no json here")
+        runner = lambda argv, timeout=None, cwd=None: completed("done, no json here")
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -302,12 +336,137 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertIsNone(result.model_matches_request)
 
     def test_a_reported_mismatch_is_visible(self) -> None:
-        runner = lambda argv, timeout=None: completed('{"model": "gpt-5.6-terra"}')
+        runner = lambda argv, timeout=None, cwd=None: completed('{"model": "gpt-5.6-terra"}')
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
         self.assertEqual("gpt-5.6-terra", result.model_resolved)
+        self.assertEqual("gpt-5.6-luna", result.requested.model)
         self.assertFalse(result.model_matches_request)
+        self.assertIn("requested gpt-5.6-luna", result.detail)
+
+
+class WorkingDirectoryTests(unittest.TestCase):
+    """A multi-repository dispatcher must not run in the coordinator's directory."""
+
+    def test_codex_receives_the_directory_as_a_flag_and_on_the_process(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen.update(argv=argv, cwd=cwd)
+            return completed("{}")
+
+        ex.CodexAdapter().dispatch(TARGET, "work", cwd="/repo/api", runner=runner)
+
+        self.assertIn("-C", seen["argv"])
+        self.assertIn("/repo/api", seen["argv"])
+        self.assertEqual("/repo/api", seen["cwd"])
+
+    def test_claude_has_no_directory_flag_so_the_process_gets_one(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen.update(argv=argv, cwd=cwd)
+            return completed("{}")
+
+        target = router.parse_target("claude:anthropic/claude-opus-5 high")
+        ex.ClaudeAdapter().dispatch(target, "work", cwd="/repo/api", runner=runner)
+
+        self.assertEqual("/repo/api", seen["cwd"])
+        self.assertNotIn("/repo/api", seen["argv"])
+
+    def test_no_directory_means_no_directory_not_the_current_one(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["cwd"] = cwd
+            return completed("{}")
+
+        ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
+
+        self.assertIsNone(seen["cwd"])
+
+
+class OrcaDispatchTests(unittest.TestCase):
+    """The backend that can actually report which model it launched."""
+
+    TARGET = router.parse_target("orca:openai/gpt-5.6-luna high")
+
+    def receipt(self, model="gpt-5.6-luna", state="ready", ok=True, error=None):
+        if not ok:
+            return completed(json.dumps({"ok": False, "error": error or {"message": "nope"}}))
+        return completed(json.dumps({"ok": True, "result": {
+            "state": state, "dispatchId": "ctx_1",
+            "launch": {"requested": {"model": model}, "effective": {"model": model}},
+        }}))
+
+    def test_it_dispatches_and_reads_the_model_from_the_receipt(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return self.receipt()
+
+        result = ex.OrcaAdapter().dispatch(
+            self.TARGET, "task_1", coordinator="term_1", run_id="run_1", runner=runner
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("gpt-5.6-luna", result.model_resolved)
+        self.assertTrue(result.model_matches_request)
+        self.assertIn("worker-start", seen["argv"])
+        self.assertIn("gpt-5.6-luna", seen["argv"])
+
+    def test_it_refuses_to_invent_a_coordinator_or_a_run(self) -> None:
+        """A dispatcher that quietly spawns terminals is one nobody can reason about."""
+        result = ex.OrcaAdapter().dispatch(self.TARGET, "task_1", runner=lambda *a, **k: self.receipt())
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("orchestration_context", result.missing_capability)
+
+    def test_a_receipt_reporting_another_model_is_a_contract_violation(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            runner=lambda *a, **k: self.receipt(model="gpt-5.6-terra"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertEqual("gpt-5.6-terra", result.model_resolved)
+
+    def test_a_worker_that_did_not_reach_ready_is_a_failure(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            runner=lambda *a, **k: self.receipt(state="failed"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+
+    def test_a_rejected_worker_start_carries_its_error(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.TARGET, "task_1", coordinator="term_1", run_id="run_1",
+            runner=lambda *a, **k: self.receipt(ok=False, error={"message": "terminal_handle_stale"}),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertIn("terminal_handle_stale", result.detail)
+
+    def test_the_whole_path_runs_through_the_registry(self) -> None:
+        """Target(executor='orca') reaches OrcaAdapter.dispatch, not a fake."""
+        adapter = ex.OrcaAdapter()
+        adapter.dispatch = lambda target, task, **kw: ex.DispatchResult(
+            ex.DispatchOutcome.SUCCEEDED, "orca", target, model_resolved=target.model
+        )
+        registry = ex.Registry([adapter])
+        d = router.RoutingDecision("cheap_coder", self.TARGET, router.RoutingMode.PRODUCTION)
+
+        result = ex.dispatch(
+            d, "task_1", registry,
+            probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "runtime ready")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("orca", result.executor)
 
 
 class ModelVerificationTests(unittest.TestCase):

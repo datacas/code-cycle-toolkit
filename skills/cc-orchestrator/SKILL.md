@@ -220,24 +220,51 @@ own first-pass rate.
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its
    `PROVIDER_BOOTSTRAP_RESULT`. If it returns `BLOCKED` or `FAILED`, stop before
    creating work; otherwise pass its resolved context unchanged to every stage.
-2. Resolve the execution mode once. Record the selected stage executors and do
-   not change them silently after implementation starts.
-3. Run `cc-implement-issue` and request its structured result. Require the
-   change-request ID, branch, and current head SHA before continuing.
-4. Run `cc-initial-review` on that change request with the selected review
-   executor and request its structured
-   result.
-5. If the review returns `APPROVED`, validate the final exit conditions. If it
+2. Probe every executor once and keep the availability map for the whole run.
+   Record what each probe demonstrated and on what evidence, and record the
+   readiness policy in force. Do not re-probe silently between stages: an
+   availability that changes without being recorded makes every later decision
+   unexplainable.
+3. Label `difficulty` and `verifiability` for the work item, and whether the
+   change is security-sensitive, **before** routing anything. Labelling
+   afterwards would mean the routing was chosen and then justified.
+4. For each stage, route its role against those signals and that availability
+   map, then dispatch the resolved target:
+
+   ```text
+   probe -> availability map
+         -> route(stage role, signals)
+         -> dispatch(decision)
+         -> validate the dispatch result
+         -> next stage
+   ```
+
+   Record the profile, the target, whether a fallback was used and why, and
+   which readiness state the dispatch started from. A stage whose dispatch is
+   `BLOCKED` stops the run with the named capability; it is not retried and not
+   quietly re-routed. A dispatch that reports running a different model than the
+   one requested is a broken contract, not a success: stop rather than letting
+   the cycle continue on work nobody asked that model to do.
+
+   An execution mode named in the invocation, such as `single_agent` or
+   `claude_codex`, fixes the executors for every stage and replaces the routing
+   step. Say which of the two paths the run took; never mix them within one run.
+5. Run `cc-implement-issue` on the target routed for `implement`, and request
+   its structured result. Require the change-request ID, branch, and current
+   head SHA before continuing.
+6. Run `cc-initial-review` on that change request, on the target routed for
+   `review`, and request its structured result.
+7. If the review returns `APPROVED`, validate the final exit conditions. If it
    returns `CHANGES_REQUESTED`, begin an iteration with
    `cc-resolve-comments`. Stop on `BLOCKED` or `FAILED`.
-6. For each iteration, pass the previous structured result to
-   `cc-resolve-comments`, then pass its result to `cc-rereview` using the
-   selected rereview executor.
-7. Continue only when the statuses and external conditions allow it. Record
+8. For each iteration, pass the previous structured result to
+   `cc-resolve-comments`, then pass its result to `cc-rereview`, each on the
+   target routed for its role.
+9. Continue only when the statuses and external conditions allow it. Record
    the current head SHA and open finding IDs after every iteration.
-8. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
-   the same head SHA and open finding set repeat without progress.
-9. Before reporting readiness, confirm that the reviewed SHA equals the current
+10. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
+    the same head SHA and open finding set repeat without progress.
+11. Before reporting readiness, confirm that the reviewed SHA equals the current
    change-request head, required checks have passed, no blocking finding is
    open, and the change request remains unmerged.
 

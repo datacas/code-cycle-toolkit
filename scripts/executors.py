@@ -8,9 +8,11 @@ The uncomfortable fact this design is built around is that the executors differ
 in what they can prove about themselves:
 
 - Orca reports its runtime state, so `READY` is provable.
-- Codex and Claude expose a version and an auth file. That proves `INSTALLED`
-  and at best `AUTHENTICATED`. Nothing documented reports remaining quota, and
-  the only way to learn it is to spend some.
+- Codex and Claude expose a version and stored credential material. That proves
+  `INSTALLED` and at best `AUTHENTICATED`, which here means a credential is
+  configured — not that the session behind it is still valid, since a token can
+  be expired or revoked without any local sign of it. Nothing documented reports
+  remaining quota or session validity without consuming something.
 
 Pretending otherwise is what cost a calibration campaign: a binary on PATH was
 read as readiness, and one exhausted window was read as evidence about a model.
@@ -56,6 +58,11 @@ class DispatchOutcome(str, Enum):
     SUCCEEDED = "succeeded"
     BLOCKED = "blocked"
     FAILED = "failed"
+    #: The run completed, but not as the target that was asked for. The cycle
+    #: must not treat it as success: `dispatch(target)` promises *that* target
+    #: ran, and a different model answering is the promise being broken, not a
+    #: detail to note in passing.
+    CONTRACT_VIOLATION = "contract_violation"
 
 
 class ExecutorError(ValueError):
@@ -114,8 +121,8 @@ class DispatchResult:
         return f"{self.executor}: {self.outcome.value} as {self.model_resolved or '?'}{suffix}"
 
 
-def _run(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+def _run(argv: list[str], timeout: int = 30, cwd: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
 class Adapter:
@@ -172,8 +179,10 @@ class NativeAdapter(Adapter):
         if not authenticated:
             return ProbeResult(self.name, Availability.INSTALLED,
                                "binary runs, no credential found", evidence, self.provable_ceiling)
-        # Deliberately stops here. Remaining quota is not observable without
-        # spending it, so READY is never claimed from configuration alone.
+        # Deliberately stops here. This evidence shows that a credential is
+        # configured, not that the session behind it still works or that quota
+        # remains: both would cost a request to establish. READY is never
+        # claimed from configuration alone.
         return ProbeResult(self.name, Availability.AUTHENTICATED, evidence,
                            "quota is not observable without dispatching",
                            self.provable_ceiling)
@@ -212,7 +221,7 @@ class NativeAdapter(Adapter):
         """
         argv = self.argv(target, task, cwd)
         try:
-            completed = runner(argv, timeout=timeout)
+            completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -221,8 +230,9 @@ class NativeAdapter(Adapter):
         except Exception as exc:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
 
-        output = (completed.stdout or "") + "\n" + (completed.stderr or "")
-        friction = self.classify_output(output)
+        friction = self.classify_failure(
+            completed.returncode, completed.stderr or "", completed.stdout or ""
+        )
         if friction is not None:
             capability, detail = friction
             return self._blocked(target, capability, detail)
@@ -232,14 +242,43 @@ class NativeAdapter(Adapter):
                 detail=(completed.stderr or completed.stdout or "").strip()[:400],
                 artifacts={"argv": argv, "returncode": completed.returncode},
             )
+        resolved = self.read_resolved_model(completed.stdout or "")
+        artifacts = {"argv": argv, "stdout": (completed.stdout or "")[-4000:]}
+        if resolved is not None and resolved != target.model:
+            return DispatchResult(
+                DispatchOutcome.CONTRACT_VIOLATION, self.name, target,
+                model_resolved=resolved,
+                detail=(f"requested {target.model}, the executor reported running"
+                        f" {resolved}"),
+                artifacts=artifacts,
+            )
         return DispatchResult(
             DispatchOutcome.SUCCEEDED, self.name, target,
-            model_resolved=self.read_resolved_model(completed.stdout or ""),
-            artifacts={"argv": argv, "stdout": (completed.stdout or "")[-4000:]},
+            model_resolved=resolved, artifacts=artifacts,
         )
 
-    def classify_output(self, text: str) -> tuple[str, str] | None:
-        """Recognise a failure that a human, not a retry, has to resolve."""
+    def classify_failure(self, returncode: int, stderr: str, stdout: str) -> tuple[str, str] | None:
+        """Recognise a failure that a human, not a retry, has to resolve.
+
+        Only a failed run is classified. Scanning a successful run's output for
+        words like "quota" or "sign in" reads the agent's own answer as the
+        executor's error: an implementation that adds rate-limit handling says
+        "quota" for entirely ordinary reasons, and reporting that as an
+        exhausted window would be the tool inventing an outage.
+
+        stderr is searched first because that is where an executor reports its
+        own trouble; stdout is searched only as a fallback, and only once the
+        exit status has already established that something went wrong.
+        """
+        if returncode == 0:
+            return None
+        for text in (stderr, stdout):
+            found = self._markers_in(text or "")
+            if found is not None:
+                return found
+        return None
+
+    def _markers_in(self, text: str) -> tuple[str, str] | None:
         lowered = text.lower()
         for marker in self.quota_markers:
             if marker.lower() in lowered:
@@ -287,6 +326,11 @@ class ClaudeAdapter(NativeAdapter):
     def argv(self, target: Target, task: str, cwd: str | None = None) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
+        #
+        # `cwd` is absent here on purpose: this CLI has no directory flag, so the
+        # working directory is set on the process itself. A multi-repository
+        # dispatcher that silently ran in the coordinator's directory would
+        # implement the wrong repository without saying so.
         return [self.binary, "-p", task, "--model", target.model,
                 "--effort", target.effort, "--output-format", "json"]
 
@@ -315,6 +359,73 @@ class OrcaAdapter(Adapter):
 
     def __init__(self, binary: str | None = None) -> None:
         self.binary = binary or ("orca-ide" if os.name != "nt" else "orca")
+
+    def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
+                 timeout: int = 3600, runner=_run, coordinator: str | None = None,
+                 run_id: str | None = None) -> DispatchResult:
+        """Run the work as a supervised Orca worker.
+
+        Orca is the one backend that reports which model it actually launched,
+        in the dispatch receipt's `launch.effective`. That is worth more than it
+        looks: everywhere else the resolved model is either self-reported by the
+        agent — which was observed to be wrong in both arms of a campaign — or
+        simply unavailable.
+
+        A coordinator terminal and a Run are required and are not invented here.
+        Creating them is a side effect on the user's workspace, and a dispatcher
+        that quietly spawns terminals is one nobody can reason about; without
+        them this returns `BLOCKED` naming what to provide.
+        """
+        if not coordinator or not run_id:
+            return self._blocked(
+                target, "orchestration_context",
+                "an Orca dispatch needs an existing coordinator terminal and Run; "
+                "create them deliberately rather than having the dispatcher spawn them",
+            )
+        argv = [self.binary, "orchestration", "worker-start",
+                "--from", coordinator, "--task", task,
+                "--agent", target.executor if target.executor != self.name else "codex",
+                "--model", target.model, "--effort", target.effort, "--json"]
+        if cwd:
+            argv += ["--worktree", f"path:{cwd}"]
+        try:
+            completed = runner(argv, timeout=timeout, cwd=cwd)
+            payload = json.loads(completed.stdout or "{}")
+        except subprocess.TimeoutExpired:
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target,
+                                  detail=f"no receipt within {timeout}s; the worker may still be alive")
+        except Exception as exc:
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
+
+        if not payload.get("ok"):
+            error = payload.get("error") or {}
+            return DispatchResult(
+                DispatchOutcome.FAILED, self.name, target,
+                detail=str(error.get("message") or error.get("code") or "worker-start failed")[:400],
+                artifacts={"argv": argv},
+            )
+        result = payload.get("result") or {}
+        effective = (result.get("launch") or {}).get("effective") or {}
+        resolved = effective.get("model")
+        state = result.get("state")
+        artifacts = {"argv": argv, "dispatchId": result.get("dispatchId"),
+                     "state": state, "launch": result.get("launch")}
+
+        if resolved is not None and resolved != target.model:
+            return DispatchResult(
+                DispatchOutcome.CONTRACT_VIOLATION, self.name, target,
+                model_resolved=resolved,
+                detail=f"requested {target.model}, the receipt reports {resolved}",
+                artifacts=artifacts,
+            )
+        if state != "ready":
+            return DispatchResult(
+                DispatchOutcome.FAILED, self.name, target, model_resolved=resolved,
+                detail=str(result.get("lastError") or f"worker state {state!r}")[:400],
+                artifacts=artifacts,
+            )
+        return DispatchResult(DispatchOutcome.SUCCEEDED, self.name, target,
+                              model_resolved=resolved, artifacts=artifacts)
 
     def probe(self, runner=_run, which=shutil.which) -> ProbeResult:
         if not which(self.binary):

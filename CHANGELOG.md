@@ -76,7 +76,13 @@ All notable changes to this project are documented here. This project follows
   state requires the `attempt` readiness policy and is recorded as such. A
   calibration dispatch refuses it. Interactive friction and exhausted windows
   return `BLOCKED` naming the missing capability rather than being retried or
-  answered blind.
+  answered blind. Friction is classified from a failed exit, never from a
+  successful run's own output. A dispatch that reports a different model than
+  the one requested is a `contract_violation` rather than a success.
+- `cc-orchestrator` routes and dispatches per stage: probe once, label the work,
+  route each role, dispatch the resolved target, validate the result. An
+  explicit execution mode still fixes the executors and replaces the routing
+  step, and a run says which of the two paths it took.
 
 ### Changed
 

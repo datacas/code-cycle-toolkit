@@ -273,11 +273,13 @@ The design is built around an asymmetry that is worth stating plainly:
 | Executor | Can prove | Why not more |
 |---|---|---|
 | Orca | `ready` | the runtime reports its own state |
-| Codex | `authenticated` | a credential file proves a session, not quota |
-| Claude | `authenticated` | completed onboarding proves a session, not quota |
+| Codex | `authenticated` | a credential is configured; whether it still works is unknown |
+| Claude | `authenticated` | onboarding completed; whether the session is live is unknown |
 
-Nothing documented reports remaining quota, and the only way to learn it is to
-spend some. So a probe reports what it demonstrated and how, and a caller that
+`authenticated` here means credential material exists, not that the session
+behind it is valid: a token can be expired or revoked with no local sign of it.
+Nothing documented reports remaining quota or session validity without consuming
+something. So a probe reports what it demonstrated and how, and a caller that
 still wants to dispatch from `authenticated` asks for the `attempt` readiness
 policy. The promotion is then recorded on the result as `dispatched_from`, where
 nobody can later mistake a policy for a finding. A calibration dispatch refuses
@@ -292,6 +294,25 @@ arms running in different environments.
 An exhausted window is also `BLOCKED` rather than `FAILED`: retrying costs
 nothing and changes nothing, and the distinction keeps one exhausted window from
 being read as evidence about a model.
+
+Friction is classified from the failure, never from what the agent wrote. A run
+that exits cleanly is never searched for words like "quota" or "sign in" — an
+implementation that adds rate-limit handling says "quota" for ordinary reasons,
+and reporting that as an outage would be the tool inventing one. Only a non-zero
+exit is classified, stderr first.
+
+A dispatch that reports running a model other than the one requested is a
+`contract_violation`, not a success. `dispatch(target)` promises that target
+ran; a different model answering is that promise broken, and the cycle must not
+advance on it. An executor that reports no model at all leaves the question
+open, which is a third answer rather than a quiet yes.
+
+Orca is the only backend that reports the model it actually launched, in its
+receipt's `launch.effective`. Elsewhere the value is either self-reported by the
+agent — observed to be wrong in both arms of a campaign — or unavailable. Its
+dispatch needs an existing coordinator terminal and Run, and refuses to create
+them: a dispatcher that quietly spawns terminals in a workspace is one nobody
+can reason about.
 
 Claude runs with `-p` and Codex with `exec`, non-interactively and with no
 bypass flag. A run that needs elevated permissions to proceed is a run a person
