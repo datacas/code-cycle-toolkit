@@ -724,6 +724,49 @@ class LearnedAvailabilityTests(unittest.TestCase):
         self.assertIn("codex is quota_exhausted", second.explain())
 
 
+class LiveObservationTests(unittest.TestCase):
+    """Shapes taken from a real dispatch, not from documentation."""
+
+    def test_claude_reports_its_model_as_a_usage_key(self) -> None:
+        """Observed live: no `model` field exists, so it was being lost."""
+        stdout = json.dumps({
+            "type": "result", "subtype": "success", "result": "OK",
+            "modelUsage": {"claude-sonnet-5": {"inputTokens": 2, "outputTokens": 4}},
+        })
+
+        self.assertEqual("claude-sonnet-5", ex.ClaudeAdapter().read_resolved_model(stdout))
+
+    def test_an_ambiguous_usage_map_reports_nothing(self) -> None:
+        """Two models used means no single answer; silence beats a guess."""
+        stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}, "claude-haiku-4-5": {}}})
+
+        self.assertIsNone(ex.ClaudeAdapter().read_resolved_model(stdout))
+
+    def test_a_claude_run_now_verifies_its_model_against_the_request(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        stdout = json.dumps({"result": "OK", "modelUsage": {"claude-opus-5": {}}})
+
+        result = ex.ClaudeAdapter().dispatch(
+            target, "work", runner=lambda *a, **k: completed(stdout)
+        )
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertEqual("claude-opus-5", result.model_resolved)
+
+    def test_codex_refusing_an_untrusted_directory_is_a_capability(self) -> None:
+        """Observed live: this exited non-zero with no structured event and was
+        reported as a plain failure, so nobody learned what to grant."""
+        stderr = ("Reading additional input from stdin...\n"
+                  "Not inside a trusted directory and --skip-git-repo-check was not specified.")
+
+        result = ex.CodexAdapter().dispatch(
+            TARGET, "work", runner=lambda *a, **k: completed(returncode=1, stderr=stderr)
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("trusted_directory", result.missing_capability)
+
+
 class ModelVerificationTests(unittest.TestCase):
     def test_a_matching_model_is_confirmed(self) -> None:
         result = ex.DispatchResult(

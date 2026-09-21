@@ -79,6 +79,13 @@ All notable changes to this project are documented here. This project follows
   answered blind. Friction is classified from a failed exit, never from a
   successful run's own output. A dispatch that reports a different model than
   the one requested is a `contract_violation` rather than a success.
+- Claude's resolved model is read from the single key of `modelUsage`, which is
+  where it actually appears; there is no `model` field, so it had been lost on
+  every Claude dispatch and the contract check never fired. Codex reports no
+  model at all, which stays `None`.
+- Codex refusing to run outside a trusted git directory is `BLOCKED` with
+  `trusted_directory` rather than a plain failure, so the missing capability is
+  named instead of guessed at.
 - The Orca adapter checks the process exit status alongside the JSON body, in
   both dispatch and probe. The CLI exits `0` only for `ready`, so a failed
   launch that still returns a valid-looking receipt is a failure, and its stage

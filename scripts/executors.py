@@ -241,6 +241,15 @@ class NativeAdapter(Adapter):
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     return value
+            # Claude reports it as the key of a per-model usage map rather than
+            # as a field. Observed on a live run: without this the resolved
+            # model is lost for every Claude dispatch, and the contract check
+            # that compares it against the request never fires.
+            usage = payload.get("modelUsage")
+            if isinstance(usage, dict) and len(usage) == 1:
+                name = next(iter(usage))
+                if isinstance(name, str) and name:
+                    return name
         return None
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
@@ -366,6 +375,7 @@ class CodexAdapter(NativeAdapter):
     interactive_markers = {
         "hooks need review": "hook_trust",
         "trust this folder": "folder_trust",
+        "not inside a trusted directory": "trusted_directory",
         "sign in": "authenticated_session",
     }
 

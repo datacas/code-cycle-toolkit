@@ -312,9 +312,20 @@ ran; a different model answering is that promise broken, and the cycle must not
 advance on it. An executor that reports no model at all leaves the question
 open, which is a third answer rather than a quiet yes.
 
-Orca is the only backend that reports the model it actually launched, in its
-receipt's `launch.effective`. Elsewhere the value is either self-reported by the
-agent — observed to be wrong in both arms of a campaign — or unavailable.
+Which backend can confirm the model it ran differs, and this was established by
+running each one rather than by reading documentation:
+
+| Backend | Reports the model | Where |
+|---|---|---|
+| Orca | yes | the dispatch receipt's `launch.effective` |
+| Claude | yes | as the single key of `modelUsage` — there is no `model` field |
+| Codex | no | `exec --json` emits `thread_id`, `type`, `item` and `usage`, and nothing naming a model |
+
+So a Codex dispatch reports `model_resolved: None`, and that is the honest
+answer rather than a gap to paper over: the contract check cannot fire for an
+executor that never says what it ran. Anything self-reported by the agent in its
+own prose is not used — that was observed to be wrong in both arms of a
+campaign.
 
 Its exit status is part of the receipt: the CLI exits `0` only for `ready`, and
 a failed or uncertain launch exits non-zero while still returning a JSON body
