@@ -71,19 +71,57 @@ function Install-OpenCode {
 # skill is instructions and can be duplicated harmlessly; the runtime is code
 # that records a cycle, and three copies of it would be three answers to the
 # question of which one a run used.
+# The installer writes into a directory somebody else chose, which may be a
+# repository it did not create. A reparse point on any path it writes to is a
+# request to modify a file outside that directory, so every one of them is
+# refused rather than followed: an installation is not a reason to truncate a
+# file nobody named.
+function Assert-NotReparsePoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$What
+    )
+
+    # Get-Item rather than Test-Path: a link whose target is gone is still a
+    # link, and Test-Path reports it as absent.
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $Item) { return }
+
+    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to write through a link ($What): $Path"
+    }
+}
+
+# The directory holds installed code, never anything a project should carry, so
+# a fresh installation ignores it. An existing file is somebody's own rules and
+# is left exactly as it is - not merged, not replaced by -Force, which asks to
+# replace this toolkit's files and not the target project's.
+function Install-Gitignore {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $Ignore = Join-Path $Root '.gitignore'
+    Assert-NotReparsePoint -Path $Ignore -What 'ignore file'
+
+    if (Get-Item -LiteralPath $Ignore -Force -ErrorAction SilentlyContinue) {
+        Write-Host "Kept the existing $Ignore; add 'runtime/' to it to leave installed code uncommitted."
+        return
+    }
+
+    Set-Content -LiteralPath $Ignore -Value '*'
+}
+
 function Install-Runtime {
     if (-not (Test-Path -LiteralPath $RuntimeManifest -PathType Leaf)) {
         throw "Runtime manifest not found: $RuntimeManifest"
     }
 
-    $Destination = Join-Path (Join-Path $BaseDir '.code-cycle') 'runtime'
+    $Root = Join-Path $BaseDir '.code-cycle'
+    $Destination = Join-Path $Root 'runtime'
+    Assert-NotReparsePoint -Path $Root -What 'installation directory'
+    Assert-NotReparsePoint -Path $Destination -What 'runtime directory'
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
-    # The directory holds installed code, never anything a project should carry.
-    # Writing the rule next to it means a project-scope installation cannot be
-    # committed by accident.
-    $Ignore = Join-Path (Join-Path $BaseDir '.code-cycle') '.gitignore'
-    Set-Content -LiteralPath $Ignore -Value '*'
+    Install-Gitignore -Root $Root
 
     Get-Content -LiteralPath $RuntimeManifest | ForEach-Object {
         $Module = $_.Trim()
@@ -94,10 +132,15 @@ function Install-Runtime {
             throw "Runtime module listed but missing: $Source"
         }
         $Target = Join-Path $Destination $Module
-        if ((Test-Path -LiteralPath $Target) -and (-not $Force)) {
-            throw "Already exists: $Target (use -Force to replace it)"
+        if (Get-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue) {
+            if (-not $Force) {
+                throw "Already exists: $Target (use -Force to replace it)"
+            }
+            # Remove rather than copy over: copying onto a link writes to
+            # whatever it points at, which -Force never authorised.
+            Remove-Item -LiteralPath $Target -Force
         }
-        Copy-Item -LiteralPath $Source -Destination $Target -Force
+        Copy-Item -LiteralPath $Source -Destination $Target
     }
 
     Write-Host "Installed runtime -> $Destination"

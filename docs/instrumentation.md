@@ -449,7 +449,11 @@ question of which one a run used. It needs Python 3 and that directory on
 `PYTHONPATH`.
 
 The list lives in `scripts/runtime.manifest` and both installers read that one
-file, so neither can drift from the other. `calibration_store.py` and
+file, so neither can drift from the other. The installer writes into a directory
+somebody else chose, which may be a repository it did not create, so a symlink
+on any path it writes to is refused rather than followed, and an existing
+`.gitignore` is left exactly as it is — installing is not authority to truncate
+a file nobody named. `calibration_store.py` and
 `validate-package.py` stay in the checkout: campaign tooling and package tooling,
 which no installed skill points anybody at.
 

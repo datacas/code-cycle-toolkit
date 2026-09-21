@@ -142,20 +142,33 @@ install_opencode() {
 # question of which one a run used.
 RUNTIME_MANIFEST="$SCRIPT_DIR/runtime.manifest"
 
+# The installer writes into a directory somebody else chose, which may be a
+# repository it did not create. A symlink on any path it writes to is a request
+# to modify a file outside that directory, so every one of them is refused
+# rather than followed: an installation is not a reason to truncate a file
+# nobody named.
+refuse_symlink() {
+  local path="$1" what="$2"
+  if [ -L "$path" ]; then
+    printf 'Refusing to write through a symlink (%s): %s\n' "$what" "$path" >&2
+    return 1
+  fi
+}
+
 install_runtime() {
-  local destination module source
+  local root destination module source
   [ -f "$RUNTIME_MANIFEST" ] || {
     printf 'Runtime manifest not found: %s\n' "$RUNTIME_MANIFEST" >&2
     return 1
   }
 
-  destination="$BASE_DIR/.code-cycle/runtime"
+  root="$BASE_DIR/.code-cycle"
+  destination="$root/runtime"
+  refuse_symlink "$root" 'installation directory' || return 1
+  refuse_symlink "$destination" 'runtime directory' || return 1
   mkdir -p "$destination"
 
-  # The directory holds installed code, never anything a project should carry.
-  # Writing the rule next to it means a project-scope installation cannot be
-  # committed by accident.
-  printf '%s\n' '*' > "$BASE_DIR/.code-cycle/.gitignore"
+  install_gitignore "$root" || return 1
 
   while IFS= read -r module || [ -n "$module" ]; do
     case "$module" in
@@ -166,15 +179,38 @@ install_runtime() {
       printf 'Runtime module listed but missing: %s\n' "$source" >&2
       return 1
     }
-    if [ -e "$destination/$module" ] && [ "$FORCE" -ne 1 ]; then
-      printf 'Already exists: %s (use --force to replace it)\n' "$destination/$module" >&2
-      return 1
+    if [ -e "$destination/$module" ] || [ -L "$destination/$module" ]; then
+      if [ "$FORCE" -ne 1 ]; then
+        printf 'Already exists: %s (use --force to replace it)\n' "$destination/$module" >&2
+        return 1
+      fi
+      # Remove rather than copy over: copying onto a symlink writes to whatever
+      # it points at, which --force never authorised.
+      rm -f "$destination/$module"
     fi
     cp "$source" "$destination/$module"
   done < "$RUNTIME_MANIFEST"
 
   printf 'Installed runtime -> %s\n' "$destination"
   printf 'Add it to PYTHONPATH to record a cycle: %s\n' "$destination"
+}
+
+# The directory holds installed code, never anything a project should carry, so
+# a fresh installation ignores it. An existing file is somebody's own rules and
+# is left exactly as it is — not merged, not replaced by --force, which asks to
+# replace this toolkit's files and not the target project's.
+install_gitignore() {
+  local root="$1" ignore
+  ignore="$root/.gitignore"
+
+  refuse_symlink "$ignore" 'ignore file' || return 1
+  if [ -e "$ignore" ]; then
+    printf 'Kept the existing %s; add "runtime/" to it to leave installed code uncommitted.\n' \
+      "$ignore"
+    return 0
+  fi
+
+  printf '%s\n' '*' > "$ignore"
 }
 
 case "$AGENT" in

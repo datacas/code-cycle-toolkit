@@ -71,9 +71,11 @@ All notable changes to this project are documented here. This project follows
 - Both installers carry the runtime, not the skills alone: `.code-cycle/runtime`
   under the home directory or the project root, one copy per scope rather than
   one per host. `scripts/runtime.manifest` is the single list both read, so they
-  cannot drift; a project-scope installation writes `.code-cycle/.gitignore`
-  containing `*` so installed code cannot be committed by accident; and
-  `--no-runtime` / `-NoRuntime` installs the skills alone. Until this existed,
+  cannot drift; the installer writes `.code-cycle/.gitignore` containing `*` when
+  none exists, so installed code cannot be committed by accident, and leaves an
+  existing one alone; a symlink on any path it writes to is refused rather than
+  followed, in both installers; and `--no-runtime` / `-NoRuntime` installs the
+  skills alone. Until this existed,
   `cc-orchestrator` told its reader to drive every stage through `CycleRecorder`
   while no installation had one.
 - `tests/installed_stage_check.py` runs a full stage against an installed

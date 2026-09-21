@@ -132,6 +132,57 @@ class InstalledRuntimeTests(unittest.TestCase):
 
         self.assertFalse(self.runtime.exists())
 
+    def test_an_existing_ignore_file_is_left_exactly_as_it_was(self) -> None:
+        """Those are somebody else's rules, in somebody else's repository."""
+        ignore = self.project / ".code-cycle" / ".gitignore"
+        ignore.write_text("keep-existing-rules\n", encoding="utf-8")
+
+        self.install("--force")
+
+        self.assertEqual("keep-existing-rules", ignore.read_text(encoding="utf-8").strip())
+
+    def test_a_symlinked_ignore_file_is_refused_rather_than_followed(self) -> None:
+        """Installing into a repository is not authority to truncate a file
+        somewhere else on the disk that the repository happens to point at."""
+        outside = self.project / "outside.txt"
+        outside.write_text("precious\n", encoding="utf-8")
+        ignore = self.project / ".code-cycle" / ".gitignore"
+        ignore.unlink()
+        ignore.symlink_to(outside)
+
+        with self.assertRaises(subprocess.CalledProcessError) as refused:
+            self.install("--force")
+
+        self.assertIn("symlink", refused.exception.stderr)
+        self.assertEqual("precious", outside.read_text(encoding="utf-8").strip())
+
+    def test_force_replaces_a_symlinked_module_instead_of_writing_through_it(self) -> None:
+        """--force asks to replace this toolkit's files, not to follow a link
+        out of the installation directory."""
+        outside = self.project / "outside.py"
+        outside.write_text("precious\n", encoding="utf-8")
+        module = self.runtime / "cycle.py"
+        module.unlink()
+        module.symlink_to(outside)
+
+        self.install("--force")
+
+        self.assertEqual("precious", outside.read_text(encoding="utf-8").strip())
+        self.assertFalse(module.is_symlink())
+        self.assertIn("CycleRecorder", module.read_text(encoding="utf-8"))
+
+    def test_a_symlinked_runtime_directory_is_refused(self) -> None:
+        elsewhere = self.project / "elsewhere"
+        elsewhere.mkdir()
+        shutil.rmtree(self.runtime)
+        self.runtime.symlink_to(elsewhere, target_is_directory=True)
+
+        with self.assertRaises(subprocess.CalledProcessError) as refused:
+            self.install("--force")
+
+        self.assertIn("symlink", refused.exception.stderr)
+        self.assertEqual([], list(elsewhere.iterdir()))
+
     def test_reinstalling_over_a_runtime_needs_force(self) -> None:
         with self.assertRaises(subprocess.CalledProcessError):
             self.install()
