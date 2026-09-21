@@ -315,6 +315,12 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
 
+Reading `.code-cycle.yml` needs PyYAML, the runtime's one optional dependency
+(`pip install pyyaml`). Nothing else in the toolkit needs it: a repository with
+no configuration file runs on the standard library alone, and when a file is
+present but the parser is not, the run stops and says so rather than quietly
+using the defaults.
+
 It reads `.code-cycle.yml` from the working directory: `code_cycle.profiles`
 overlays the built-in profiles, and `code_cycle.repository.selector` supplies
 the repository when `--repo` is not given. A configuration that exists and

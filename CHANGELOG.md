@@ -80,6 +80,8 @@ All notable changes to this project are documented here. This project follows
   absent. Until this, every run used the built-in profiles whatever the
   repository declared. An unreadable configuration or an unknown profile name
   stops the run before any dispatch; `--no-config` asks for the defaults.
+  Reading configuration needs PyYAML, the runtime's one optional dependency,
+  imported only when there is a file to parse.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

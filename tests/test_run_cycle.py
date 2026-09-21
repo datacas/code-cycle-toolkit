@@ -172,6 +172,14 @@ class Args:
         self.__dict__.update(fields)
 
 
+try:  # The runtime's one optional dependency, and only for reading a config.
+    import yaml  # noqa: F401
+    HAS_YAML = True
+except ImportError:  # pragma: no cover - depends on the environment
+    HAS_YAML = False
+
+
+@unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
 class ConfigurationTests(RunCycleTestCase):
     """The repository's declaration reaches the router, or it decides nothing."""
 
