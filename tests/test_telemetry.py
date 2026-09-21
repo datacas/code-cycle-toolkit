@@ -69,12 +69,53 @@ class StorageTests(TelemetryTestCase):
             self.store.record_stage("repo", "t1", "implement", whatever=1)
 
         self.assertIn("whatever", str(raised.exception))
-        self.assertIn("ALLOWED_PAYLOAD_KEYS", str(raised.exception))
+        self.assertIn("ALLOWED_PAYLOAD_FIELDS", str(raised.exception))
 
-    def test_an_allowed_field_carrying_prose_is_still_refused(self) -> None:
+    def test_a_short_secret_in_a_numeric_field_is_refused(self) -> None:
+        """A string is not safe because it is short: TOP-SECRET is ten characters."""
         with self.assertRaises(tm.TelemetryError):
-            self.store.record_stage("repo", "t1", "implement",
-                                    security_gate_half="x" * 200)
+            self.store.record_stage("repo", "t1", "implement", tokens_in="TOP-SECRET")
+
+        self.assertEqual([], self.store.rows())
+
+    def test_a_container_under_an_allowed_key_is_refused(self) -> None:
+        """An approved key does not make its contents approved; prose just
+        moves one level down."""
+        for value in ({"transcript": "private prose"}, ["prose"], ("prose",), b"prose"):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage("repo", "t1", "implement", cost_usd=value)
+
+    def test_a_token_field_is_a_closed_vocabulary_not_short_text(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "implement", security_gate_half="secret")
+
+        self.store.record_stage("repo", "t1", "implement", security_gate_half="deterministic")
+        self.assertEqual("deterministic", self.store.rows()[0]["payload"]["security_gate_half"])
+
+    def test_each_kind_accepts_only_its_own_shape(self) -> None:
+        bad = {"findings_high": 1.5, "cost_usd": "0.10", "security_audit_ran": 1,
+               "iterations": True}
+        for key, value in bad.items():
+            with self.subTest(key=key):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage("repo", "t1", "implement", **{key: value})
+
+    def test_the_well_formed_values_are_kept(self) -> None:
+        self.store.record_stage("repo", "t1", "implement", tokens_in=1234, cost_usd=0.1,
+                                security_audit_ran=True, security_gate_half="both")
+
+        payload = self.store.rows()[0]["payload"]
+
+        self.assertEqual(1234, payload["tokens_in"])
+        self.assertEqual(0.1, payload["cost_usd"])
+        self.assertIs(True, payload["security_audit_ran"])
+        self.assertEqual("both", payload["security_gate_half"])
+
+    def test_none_is_allowed_as_an_absent_measurement(self) -> None:
+        self.store.record_stage("repo", "t1", "implement", cost_usd=None)
+
+        self.assertIsNone(self.store.rows()[0]["payload"]["cost_usd"])
 
     def test_routing_reasons_are_reduced_to_a_count(self) -> None:
         """The reasons are prose and belong in the published comment."""

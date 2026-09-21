@@ -368,12 +368,19 @@ should be looking at.
 every repository, holding identifiers, statuses and counts — no diffs, no prose,
 no credentials. It never enters Git.
 
-That boundary is enforced rather than asserted. A field that is neither a column
-nor on a short allowlist is refused **by name**: storing it would break the
-promise, and dropping it silently would lose an observation the caller believed
-it had recorded. Values longer than a short limit are refused too, because a
-long string is prose under another name. Routing reasons are reduced to a count
-— the reasons themselves belong in the published comment.
+That boundary is enforced rather than asserted, and enforced **by type**. A
+field that is neither a column nor on the allowlist is refused by name, and an
+allowlisted field that arrives with the wrong shape is refused too: a name says
+who may write, a type says what. Both are needed, because a secret can be short
+— `TOP-SECRET` is ten characters — and prose hides one level down inside a
+container whose key was approved.
+
+So a count is an integer, an amount is a number, a flag is a boolean, and a
+token comes from a closed vocabulary rather than being short free text.
+Containers are refused outright. Refusing is loud rather than silent: dropping
+a field would lose an observation the caller believed it had recorded. Routing
+reasons are reduced to a count — the reasons themselves belong in the published
+comment.
 
 It exists to replace one guess in particular. `router.DEFAULT_FIRST_PASS_RATE`
 is `0.0` because five real implementations out of five needed a correction

@@ -23,9 +23,11 @@ replace.
 
 The database lives outside every repository and never enters Git. It holds
 identifiers, statuses and counts — no diffs, no prose, no credentials — and that
-boundary is enforced by an allowlist rather than asserted in this paragraph. A
-field nobody has considered is refused by name, loudly, so adding one is a
-decision somebody made rather than a transcript that arrived by accident.
+boundary is enforced by a typed allowlist rather than asserted in this
+paragraph. A field nobody has considered is refused by name, and an approved
+field that arrives with the wrong shape is refused too: a name says who may
+write, a type says what. Both are needed, because a secret can be short and
+prose can hide one level down inside a container.
 """
 
 from __future__ import annotations
@@ -46,32 +48,40 @@ DATABASE_NAME = "telemetry.sqlite"
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
 
-#: Fields allowed into `payload`, beyond the promoted columns.
+#: Fields allowed into `payload`, and the shape each one may take.
 #:
-#: An allowlist rather than an open dictionary, because the store promises to
-#: hold no prose and no credentials and a promise the code does not enforce is
-#: not a promise. An unknown key is refused loudly rather than stored or quietly
-#: dropped: a caller that wanted to record something learns it must be added
-#: here on purpose, which is the moment to ask whether it is safe to keep.
-ALLOWED_PAYLOAD_KEYS = frozenset({
-    "routing_reason_count",
-    "iterations",
-    "findings_critical",
-    "findings_high",
-    "findings_medium",
-    "findings_low",
-    "security_audit_ran",
-    "security_gate_half",
-    "tokens_in",
-    "tokens_out",
-    "cost_usd",
-    "checks_passed",
-    "checks_failed",
-    "exit_code",
-})
+#: An allowlist of names is not enough: a name says who may write, and a type
+#: says what. Allowing any value under an approved key let a short secret
+#: through a numeric field and prose through a nested one, so each key declares
+#: what it holds and anything else is refused.
+#:
+#: `"token"` means a short enum-like word from a closed vocabulary — never free
+#: text, because free text is where prose and credentials arrive.
+ALLOWED_PAYLOAD_FIELDS = {
+    "routing_reason_count": "count",
+    "iterations": "count",
+    "findings_critical": "count",
+    "findings_high": "count",
+    "findings_medium": "count",
+    "findings_low": "count",
+    "checks_passed": "count",
+    "checks_failed": "count",
+    "exit_code": "count",
+    "tokens_in": "count",
+    "tokens_out": "count",
+    "cost_usd": "amount",
+    "security_audit_ran": "flag",
+    "security_gate_half": "token",
+}
 
-#: Values are counts, flags, short identifiers and enum-like tokens. Anything
-#: longer is prose by another name.
+#: Values allowed for keys declared as `"token"`. A closed vocabulary rather
+#: than a length limit: "short enough" is not a property that keeps secrets out.
+ALLOWED_TOKENS = {
+    "security_gate_half": frozenset({"deterministic", "reviewer", "both", "none"}),
+}
+
+#: Kept for callers that still read it; the type rules are what enforce the
+#: boundary now.
 MAX_PAYLOAD_VALUE_LENGTH = 120
 
 #: Review statuses that settle whether the first pass succeeded. A row with any
@@ -167,6 +177,46 @@ _COLUMNS = (
 )
 
 
+def _checked(key: str, value):
+    """Return the value if its shape matches what the key is allowed to hold.
+
+    Typed rather than length-limited. A short string is not safe because it is
+    short — "TOP-SECRET" is ten characters — and a container is not safe because
+    its key was approved, since the prose simply moves one level down. So a
+    count is an integer, an amount is a number, a flag is a boolean, and a token
+    comes from a closed vocabulary. Nothing else is stored.
+    """
+    kind = ALLOWED_PAYLOAD_FIELDS[key]
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple, set, bytes)):
+        raise TelemetryError(
+            f"{key!r} may not hold a {type(value).__name__}: a container moves "
+            "prose one level down rather than keeping it out"
+        )
+    if kind == "count":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TelemetryError(f"{key!r} is a count and must be an integer, got {type(value).__name__}")
+        return value
+    if kind == "amount":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TelemetryError(f"{key!r} is an amount and must be a number, got {type(value).__name__}")
+        return float(value)
+    if kind == "flag":
+        if not isinstance(value, bool):
+            raise TelemetryError(f"{key!r} is a flag and must be a boolean, got {type(value).__name__}")
+        return value
+    if kind == "token":
+        vocabulary = ALLOWED_TOKENS.get(key, frozenset())
+        if value not in vocabulary:
+            raise TelemetryError(
+                f"{key!r} accepts only {sorted(vocabulary)}, not {value!r}; a token "
+                "field is a closed vocabulary, not short free text"
+            )
+        return value
+    raise TelemetryError(f"{key!r} declares an unknown field kind {kind!r}")
+
+
 class Telemetry:
     """Append-only record of what each stage did."""
 
@@ -199,19 +249,14 @@ class Telemetry:
             if key in _COLUMNS:
                 row[key] = value
                 continue
-            if key not in ALLOWED_PAYLOAD_KEYS:
+            if key not in ALLOWED_PAYLOAD_FIELDS:
                 raise TelemetryError(
                     f"{key!r} is not an allowed telemetry field. This store holds "
-                    "counts, flags and identifiers, never prose or credentials; add "
-                    "the field to ALLOWED_PAYLOAD_KEYS deliberately if it belongs."
+                    "counts, flags and closed-vocabulary tokens, never prose or "
+                    "credentials; add the field to ALLOWED_PAYLOAD_FIELDS "
+                    "deliberately if it belongs."
                 )
-            if isinstance(value, str) and len(value) > MAX_PAYLOAD_VALUE_LENGTH:
-                raise TelemetryError(
-                    f"{key!r} is {len(value)} characters, over the "
-                    f"{MAX_PAYLOAD_VALUE_LENGTH} allowed; telemetry stores tokens, "
-                    "not text"
-                )
-            payload[key] = value
+            payload[key] = _checked(key, value)
         for flag in ("used_fallback", "security_sensitive"):
             if flag in row and row[flag] is not None:
                 row[flag] = int(bool(row[flag]))
