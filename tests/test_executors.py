@@ -662,6 +662,68 @@ class OrcaExitStatusTests(unittest.TestCase):
         self.assertEqual(ex.Availability.READY, result.availability)
 
 
+class AgentOutputTests(unittest.TestCase):
+    """Each CLI wraps the reply, and each adapter unwraps its own.
+
+    The fixtures are live captures, not guesses. Before them the driver read the
+    envelope as if it were the reply, found `ORCHESTRATION_RESULT` in it, and
+    then failed to parse the block because the newlines and quotes inside a JSON
+    string are still escapes. No fake caught that, because the fakes printed the
+    block as plain text.
+    """
+
+    FIXTURES = Path(__file__).resolve().parent / "fakes"
+
+    def fixture(self, name: str) -> str:
+        return (self.FIXTURES / name).read_text(encoding="utf-8")
+
+    def test_codex_speaks_through_its_agent_messages(self) -> None:
+        spoken = ex.CodexAdapter().agent_output(self.fixture("codex_output.ndjson"))
+
+        self.assertTrue(spoken.startswith("ORCHESTRATION_RESULT"))
+        self.assertIn('"status": "IMPLEMENTED"', spoken)
+        self.assertNotIn("turn.completed", spoken)
+
+    def test_claude_speaks_through_its_result_field(self) -> None:
+        spoken = ex.ClaudeAdapter().agent_output(self.fixture("claude_output.json"))
+
+        self.assertIn("ORCHESTRATION_RESULT", spoken)
+        self.assertNotIn("modelUsage", spoken)
+
+    def test_the_block_survives_the_envelope_intact(self) -> None:
+        """The whole point: escaped in the envelope, parseable once unwrapped."""
+        raw = self.fixture("claude_output.json")
+        spoken = ex.ClaudeAdapter().agent_output(raw)
+
+        self.assertIn("ORCHESTRATION_RESULT\\n", raw)      # escaped in the envelope
+        self.assertIn("ORCHESTRATION_RESULT\n", spoken)     # a real newline after
+        body = spoken.split("ORCHESTRATION_RESULT", 1)[1].split("END_", 1)[0]
+        self.assertEqual("CHANGES_REQUESTED", json.loads(body.strip())["status"])
+
+    def test_an_envelope_it_does_not_recognise_is_passed_through(self) -> None:
+        """Returning a filtered part of it would silently drop the rest."""
+        for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+            with self.subTest(adapter=adapter.name):
+                self.assertEqual("plain words", adapter.agent_output("plain words"))
+
+    def test_a_dispatch_carries_what_the_agent_said(self) -> None:
+        adapter = ex.CodexAdapter()
+        result = adapter.dispatch(
+            TARGET, "work",
+            runner=lambda *a, **k: completed(self.fixture("codex_output.ndjson")),
+        )
+
+        self.assertIn("ORCHESTRATION_RESULT", result.agent_output)
+        self.assertNotIn("thread.started", result.agent_output)
+
+    def test_a_started_worker_says_nothing_of_its_own(self) -> None:
+        """Orca's receipt is not a reply; its stage answers elsewhere."""
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "orca", TARGET,
+                                   asynchronous=True)
+
+        self.assertEqual("", result.agent_output)
+
+
 class AsynchronousDispatchTests(unittest.TestCase):
     """A receipt is not a result, and the difference has to survive the trip."""
 

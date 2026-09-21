@@ -20,6 +20,14 @@ that block as opt-in on request — and never from an exit code or from prose.
 When the block is absent the cycle stops and says the verdict is unknown, which
 is a fact worth recording, unlike a guess that looks like data forever after.
 
+**A dispatch that succeeded is not a stage that worked.** Those are two facts
+about different layers and the store keeps them apart: `outcome` says the call
+returned, `status` says what the agent reported doing. A canary run found both
+true at once — Codex exited 0 having changed nothing, because the work item did
+not exist — and the cycle went on to review it. Now a stage whose own report is
+not a completion stops the cycle, with its dispatch still recorded as having
+succeeded, because it did.
+
 **Orca is a start, not a finish.** Its dispatch returns a started worker and a
 `dispatchId`; the stage's own result arrives later, elsewhere. A cycle routed to
 Orca therefore stops after the dispatch and says so rather than pretending the
@@ -66,6 +74,17 @@ STRUCTURED_REQUEST = (
 )
 
 BEGIN, END = "ORCHESTRATION_RESULT", "END_ORCHESTRATION_RESULT"
+
+#: What each role's own report has to say for the cycle to keep going. Anything
+#: else — `BLOCKED`, `FAILED`, a status this driver does not know — is a stage
+#: that did not complete, whatever its exit code was. `PARTIALLY_RESOLVED`
+#: continues because the re-review is what judges how much was resolved.
+COMPLETES = {
+    "implement": frozenset({"IMPLEMENTED"}),
+    "resolve": frozenset({"RESOLVED", "PARTIALLY_RESOLVED"}),
+    "review": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
+    "rereview": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
+}
 
 #: How a cycle can end. Each one is a fact about this run, not a judgement.
 APPROVED_END = "READY_FOR_MANUAL_MERGE"
@@ -129,6 +148,37 @@ def repository_of(config: dict) -> str | None:
     return selector if isinstance(selector, str) and selector else None
 
 
+@dataclass(frozen=True)
+class Reported:
+    """What a stage said about itself, including saying nothing.
+
+    Three outcomes are different facts and used to arrive as the same `None`:
+    the agent reported a status, the agent reported something unreadable, and
+    the agent reported nothing at all. A cycle that cannot tell them apart
+    records "no verdict" for a run that was explicitly blocked.
+    """
+
+    present: bool = False
+    payload: dict | None = None
+    status: str | None = None
+
+    @property
+    def readable(self) -> bool:
+        return self.payload is not None
+
+    def completes(self, role: str) -> bool:
+        return self.status in COMPLETES.get(role, frozenset())
+
+    def explain(self, role: str) -> str:
+        if not self.present:
+            return f"the {role} reported no structured result"
+        if not self.readable:
+            return f"the {role} reported a structured result that could not be read"
+        if self.status is None:
+            return f"the {role} reported a structured result with no status"
+        return f"the {role} reported {self.status}"
+
+
 @dataclass
 class CycleReport:
     """What the cycle did, and why it stopped there."""
@@ -169,37 +219,57 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "") -> str
     return " ".join(parts)
 
 
-def read_structured_result(result: DispatchResult | None) -> dict | None:
-    """The executor's own report, or None when it did not make one.
+def read_structured_result(result: DispatchResult | None) -> Reported:
+    """The executor's own report of what it did, and how much of it is readable.
 
-    None is the honest answer in three different situations — the executor
-    printed nothing parseable, the dispatch never produced output because it
-    only started a worker, or the block fell outside the captured tail — and the
-    caller treats all three the same way: it does not know.
+    It reads `agent_output`, which each adapter lifts out of its own CLI's
+    envelope. Reading the envelope instead finds the right words with the wrong
+    escapes — which is how a canary located the block in Claude's output and
+    then failed to parse it, because `\n` and `\"` were still escapes inside a
+    JSON string.
     """
     if result is None or result.asynchronous:
-        return None
-    stdout = result.artifacts.get("stdout")
-    if not isinstance(stdout, str):
-        return None
+        return Reported()
+    spoken = result.agent_output
+    if not isinstance(spoken, str) or not spoken:
+        return Reported()
     # From the end, and the last opening before that close. The request this
     # driver composes contains the word ORCHESTRATION_RESULT, so an executor
     # that echoes its own prompt puts a decoy earlier in the stream; reading
     # forwards would parse the prompt and report no verdict.
-    end = stdout.rfind(END)
+    end = spoken.rfind(END)
     if end == -1:
-        return None
-    begin = stdout.rfind(BEGIN, 0, end)
+        return Reported()
+    begin = spoken.rfind(BEGIN, 0, end)
     if begin == -1:
-        return None
+        return Reported()
     try:
-        payload = json.loads(stdout[begin + len(BEGIN):end].strip())
+        payload = json.loads(spoken[begin + len(BEGIN):end].strip())
     except ValueError:
-        return None
+        return Reported(present=True)
     # A block holding a string or a number is delimited, parseable and not a
-    # result. Returning it would hand the caller something that only looks like
-    # one, and the first `.get` on it ends the run without its closing row.
-    return payload if isinstance(payload, dict) else None
+    # result. Present but unreadable: the caller must not `.get` on it.
+    if not isinstance(payload, dict):
+        return Reported(present=True)
+    return Reported(present=True, payload=payload, status=_status_of(payload))
+
+
+def _status_of(payload: dict) -> str | None:
+    """The reported status, when it is one the store can actually hold.
+
+    A status outside the vocabulary is treated as no status rather than carried
+    to `record_verdict`, where it would raise and end the run without its
+    closing row — a failure this driver has already made once.
+    """
+    status = payload.get("status")
+    if not isinstance(status, str):
+        return None
+    status = status.strip().upper()
+    try:
+        validate_reference("status", status)
+    except TelemetryError:
+        return None
+    return status
 
 
 def run_cycle(
@@ -238,7 +308,7 @@ def run_cycle(
     if timeout is not None:
         dispatch_kwargs["timeout"] = timeout
 
-    def run(role: str, instruction: str = "") -> tuple[StageOutcome, dict | None]:
+    def run(role: str, instruction: str = "") -> tuple[StageOutcome, Reported]:
         outcome = recorder.stage(role, compose(role, repo_id, task_id, instruction),
                                  **dispatch_kwargs)
         report.stages.append(outcome)
@@ -251,45 +321,47 @@ def run_cycle(
         recorder.close(status)
         return report
 
-    outcome, payload = run("implement")
-    if not outcome.succeeded:
-        return stop(_why(outcome))
-    if _started_elsewhere(outcome):
-        return stop(_elsewhere(outcome))
-    if payload and payload.get("status"):
-        recorder.record_verdict("implement", str(payload["status"]))
+    def advance(role: str, instruction: str = "") -> tuple[Reported, CycleReport | None]:
+        """Run one stage and decide whether the cycle may continue past it.
 
-    outcome, payload = run("review")
-    if not outcome.succeeded:
-        return stop(_why(outcome))
-    if _started_elsewhere(outcome):
-        return stop(_elsewhere(outcome))
-    verdict = _verdict(payload)
-    if verdict is None:
-        return stop("the review reported no structured verdict")
-    recorder.record_verdict("review", verdict, **_findings(payload))
+        Every reason to stop is here rather than repeated per stage: a stop
+        condition that has to be remembered four times is one that will be
+        missing from the fourth.
+        """
+        outcome, reported = run(role, instruction)
+        if not outcome.succeeded:
+            return reported, stop(_why(outcome))
+        if _started_elsewhere(outcome):
+            return reported, stop(_elsewhere(outcome))
+        # The dispatch and the work are different facts. This records what the
+        # agent said it did; the row already says the call returned.
+        if reported.status:
+            recorder.record_verdict(role, reported.status, **_findings(reported.payload))
+        if not reported.completes(role):
+            return reported, stop(reported.explain(role))
+        return reported, None
+
+    _, stopped = advance("implement")
+    if stopped is not None:
+        return stopped
+
+    reported, stopped = advance("review")
+    if stopped is not None:
+        return stopped
+    verdict = reported.status
     report.verdict = verdict
 
     while verdict == "CHANGES_REQUESTED" and recorder.iteration < max_iterations:
         recorder.next_iteration()
 
-        outcome, payload = run("resolve", "Resolve the findings from the review.")
-        if not outcome.succeeded:
-            return stop(_why(outcome))
-        if _started_elsewhere(outcome):
-            return stop(_elsewhere(outcome))
-        if payload and payload.get("status"):
-            recorder.record_verdict("resolve", str(payload["status"]))
+        _, stopped = advance("resolve", "Resolve the findings from the review.")
+        if stopped is not None:
+            return stopped
 
-        outcome, payload = run("rereview", "Re-review the change after the fixes.")
-        if not outcome.succeeded:
-            return stop(_why(outcome))
-        if _started_elsewhere(outcome):
-            return stop(_elsewhere(outcome))
-        verdict = _verdict(payload)
-        if verdict is None:
-            return stop("the re-review reported no structured verdict")
-        recorder.record_verdict("rereview", verdict, **_findings(payload))
+        reported, stopped = advance("rereview", "Re-review the change after the fixes.")
+        if stopped is not None:
+            return stopped
+        verdict = reported.status
         report.verdict = verdict
 
     if verdict == "APPROVED":
@@ -308,16 +380,6 @@ def _elsewhere(outcome: StageOutcome) -> str:
     started = f" as {reference}" if reference else ""
     return (f"{outcome.role} was started on {result.executor}{started} and "
             "finishes elsewhere; this cycle cannot see its result")
-
-
-def _verdict(payload: dict | None) -> str | None:
-    if not payload:
-        return None
-    status = payload.get("status")
-    if not isinstance(status, str):
-        return None
-    status = status.upper()
-    return status if status in {"APPROVED", "CHANGES_REQUESTED"} else None
 
 
 def _findings(payload: dict | None) -> dict:

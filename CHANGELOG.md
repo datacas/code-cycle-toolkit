@@ -91,6 +91,19 @@ All notable changes to this project are documented here. This project follows
   `primary` or `fallback` that is not a target string, naming the profile: one
   used to raise `TypeError` past every handler, and the other was carried into a
   `Profile` as whatever it was.
+- Adapters hand over `agent_output`: the reply lifted out of their own CLI's
+  envelope — Claude's `result` field, Codex's `agent_message` items — so the
+  driver never learns either format. A canary against the real CLIs found the
+  block located and then unparseable, because reading the envelope as the reply
+  keeps `\n` and `\"` as escapes. Fixtures are live captures, and the fake
+  agents now write their CLI's envelope rather than plain text.
+- A stage's structured result distinguishes readable, present-but-unreadable and
+  absent, instead of collapsing all three into `None`, and a status outside the
+  store's vocabulary is treated as no status rather than raising on the way in.
+- A dispatch that returned is no longer read as a stage that worked: a role whose
+  own report is not a completion stops the cycle, with the dispatch row still
+  recording `succeeded` and the reported status recorded beside it. The canary
+  had Codex exit 0 having changed nothing and the cycle review it.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

@@ -245,7 +245,11 @@ file says otherwise describes a policy nobody chose.
 
 It reads a review's verdict from the structured result it asks the executor to
 emit, and stops when that block is absent rather than inferring a verdict from a
-successful exit. Use it, or do exactly what it does; an orchestration that routes
+successful exit. A dispatch that returned is not a stage that worked: when a
+stage's own report is not a completion — `BLOCKED`, or a result that cannot be
+read — the cycle stops there and the dispatch row still says it succeeded,
+because it did. Both facts are true and the store keeps them in separate
+columns. Use it, or do exactly what it does; an orchestration that routes
 and dispatches by hand is one the guarantee above no longer covers.
 
 ```text

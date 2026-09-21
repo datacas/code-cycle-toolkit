@@ -13,6 +13,12 @@ an exhausted window, and a review that changes its mind on the second round:
     FAKE_QUOTA=codex       that agent reports an exhausted window and exits 1
     FAKE_ROUNDS=<path>     a counter file; the first review asks for changes
     FAKE_SILENT=claude     that agent emits no structured block at all
+    FAKE_BLOCKED=codex     that agent exits 0 reporting BLOCKED, as one did
+
+It writes each CLI's real envelope — Codex NDJSON with `item.completed`, Claude
+one JSON object with `result` — because that is what a canary found the driver
+could not read. A fake that printed the block as plain text passed every test
+while the real thing did not work.
 """
 
 from __future__ import annotations
@@ -62,6 +68,27 @@ def status_for(prompt: str) -> str:
     return review_status(prompt)
 
 
+def speak(model: str, message: str) -> None:
+    """Print the message the way this agent's real CLI prints one.
+
+    Codex emits NDJSON events and puts the reply in an `agent_message` item; it
+    reports no model anywhere, which is what a live run showed. Claude emits one
+    JSON object whose `result` holds the reply, alongside `modelUsage`.
+    """
+    if NAME == "claude":
+        print(json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "modelUsage": {model: {"inputTokens": 1}},
+            "result": message,
+        }))
+        return
+    print(json.dumps({"type": "thread.started", "thread_id": "0" * 8}))
+    print(json.dumps({"type": "item.completed",
+                      "item": {"id": "item_0", "type": "agent_message",
+                               "text": message}}))
+    print(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}))
+
+
 def main(argv: list[str]) -> int:
     if "--version" in argv:
         print(f"{NAME} 0.0.0-fake")
@@ -73,20 +100,13 @@ def main(argv: list[str]) -> int:
 
     model = flag(argv, "-m", "--model") or "unknown"
     prompt = prompt_of(argv)
-
-    # The real binaries report the resolved model differently, and the adapters
-    # read each one its own way.
-    if NAME == "claude":
-        print(json.dumps({"modelUsage": {model: {"inputTokens": 1}}}))
-    else:
-        print(json.dumps({"model": model}))
-
-    print(f"prompt received: {prompt}")
+    said = [f"prompt received: {prompt}"]
 
     if os.environ.get("FAKE_SILENT") == NAME:
+        speak(model, said[0])
         return 0
 
-    status = status_for(prompt)
+    status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)
     payload = {"skill": "fake", "status": status}
     if status == "CHANGES_REQUESTED":
         payload["unresolved_findings"] = [
@@ -95,9 +115,8 @@ def main(argv: list[str]) -> int:
             {"id": "REV-002", "severity": "low", "status": "open",
              "blocks_approval": False},
         ]
-    print(BEGIN)
-    print(json.dumps(payload))
-    print(END)
+    said += [BEGIN, json.dumps(payload), END]
+    speak(model, "\n".join(said))
     return 0
 
 
