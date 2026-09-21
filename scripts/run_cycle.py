@@ -38,8 +38,16 @@ from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from executors import DispatchResult, ReadinessPolicy, Registry
-from router import RoutingMode, TaskSignals
-from telemetry import Telemetry, default_database_path
+from router import RouterError, RoutingMode, TaskSignals, load_profiles
+from telemetry import (
+    Telemetry,
+    TelemetryError,
+    default_database_path,
+    validate_reference,
+)
+
+#: The repository's own declaration of how it wants to be run.
+CONFIG_NAME = ".code-cycle.yml"
 
 #: The skill each role runs, as the executor is told to invoke it.
 SKILL_FOR_ROLE = {
@@ -66,6 +74,59 @@ UNRESOLVED_END = "HUMAN_INTERVENTION"
 
 class CycleDriverError(RuntimeError):
     """The driver was asked for something it cannot honestly do."""
+
+
+def load_config(path: Path) -> dict:
+    """Read `.code-cycle.yml`, or say exactly why it could not be read.
+
+    The toolkit is otherwise pure standard library, and a repository without a
+    configuration file needs no parser at all — so PyYAML is required only when
+    there is something to parse. Refusing loudly beats running with the built-in
+    defaults while a file on disk says otherwise: the whole point of recording a
+    run is that the row describes the policy that was actually in force.
+    """
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise CycleDriverError(
+            f"{path} exists but PyYAML is not installed, so its configuration "
+            "cannot be read; install PyYAML or pass --no-config to accept the "
+            "built-in defaults"
+        ) from exc
+
+    try:
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CycleDriverError(f"{path} could not be read: {exc}") from exc
+
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise CycleDriverError(f"{path} must contain a mapping at the top level")
+
+    # The shape, not only the top level. A valid YAML document can still say
+    # `code_cycle: not-a-mapping`, and every reader below would then crash on
+    # its own `.get` — a traceback where a stated refusal belongs.
+    for key in ("code_cycle", "code_cycle.repository", "code_cycle.profiles"):
+        section, value = config, None
+        for part in key.split("."):
+            if not isinstance(section, dict):
+                break
+            value = section.get(part)
+            section = value
+        if value is not None and not isinstance(value, dict):
+            raise CycleDriverError(
+                f"{path}: {key} must be a mapping, not "
+                f"{type(value).__name__}")
+    return config
+
+
+def repository_of(config: dict) -> str | None:
+    """`code_cycle.repository.selector`, when the repository declares one."""
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    selector = repository.get("selector") if isinstance(repository, dict) else None
+    return selector if isinstance(selector, str) and selector else None
 
 
 @dataclass
@@ -147,6 +208,7 @@ def run_cycle(
     signals: TaskSignals,
     telemetry: Telemetry,
     *,
+    profiles: dict | None = None,
     registry: Registry | None = None,
     availability: dict | None = None,
     mode: RoutingMode = RoutingMode.PRODUCTION,
@@ -167,7 +229,7 @@ def run_cycle(
     recorder = CycleRecorder(
         telemetry, repo_id, task_id, signals,
         availability=availability, registry=registry, mode=mode, policy=policy,
-        probes=probes,
+        probes=probes, profiles=profiles,
     )
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -284,12 +346,68 @@ def _why(outcome: StageOutcome) -> str:
     return f"{outcome.role} on {result.executor} {result.outcome.value}: {result.detail}"
 
 
+def plan(args) -> tuple[str, dict]:
+    """Everything the configuration decides, decided before anything runs.
+
+    An unknown profile name is refused by `load_profiles`, and learning that
+    after a stage has already run would mean paying for a cycle to discover a
+    typo. So this happens first, and it raises rather than falling back.
+    """
+    config = resolve_config(args)
+
+    repo = args.repo or repository_of(config)
+    if not repo:
+        raise CycleDriverError(
+            "no repository: pass --repo or declare "
+            f"code_cycle.repository.selector in {CONFIG_NAME}")
+
+    # Checked by the store's own rule, here rather than at the first row. A
+    # reference the store will refuse is one no stage should be dispatched
+    # under: that run is paid for and its row cannot be written.
+    for field, value in (("repo_id", repo), ("task_id", getattr(args, "task", None))):
+        if value is None:
+            continue
+        try:
+            validate_reference(field, value)
+        except TelemetryError as error:
+            raise CycleDriverError(str(error)) from error
+
+    try:
+        profiles = load_profiles(config)
+    except RouterError as error:
+        raise CycleDriverError(str(error)) from error
+    return repo, profiles
+
+
+def resolve_config(args) -> dict:
+    """Which configuration this run is under, and none by accident.
+
+    An explicit `--config` that is not there is an error, because somebody named
+    it. A file found beside the work is used when it exists. `--no-config` is
+    the only way to run on the built-in defaults while a file sits next to the
+    work, and it has to be asked for.
+    """
+    if args.no_config:
+        if args.config:
+            raise CycleDriverError("--config and --no-config contradict each other")
+        return {}
+    if args.config:
+        path = Path(args.config)
+        if not path.is_file():
+            raise CycleDriverError(f"no configuration at {path}")
+        return load_config(path)
+    path = Path(args.cwd or ".") / CONFIG_NAME
+    return load_config(path) if path.is_file() else {}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_cycle",
         description="Run one work item through a recorded cycle.",
     )
-    parser.add_argument("--repo", required=True, help="repository identifier, owner/name")
+    parser.add_argument("--repo", default=None,
+                        help=("repository identifier, owner/name; defaults to "
+                              f"code_cycle.repository.selector in {CONFIG_NAME}"))
     parser.add_argument("--task", required=True, help="work item identifier")
     # Labelled before routing, never after: choosing a model from a judgement
     # and then measuring by model measures the routing rather than the models.
@@ -306,15 +424,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds one dispatch may take")
     parser.add_argument("--database", default=None,
                         help=f"telemetry database (default: {default_database_path()})")
+    parser.add_argument("--config", default=None,
+                        help=f"path to {CONFIG_NAME} (default: alongside the work)")
+    parser.add_argument("--no-config", action="store_true",
+                        help="run on the built-in defaults, ignoring any configuration")
     args = parser.parse_args(argv)
+
+    try:
+        repo, profiles = plan(args)
+    except CycleDriverError as error:
+        parser.error(str(error))
 
     telemetry = Telemetry(Path(args.database) if args.database else None)
     report = run_cycle(
-        args.repo, args.task,
+        repo, args.task,
         TaskSignals(difficulty=args.difficulty,
                     verifiability=args.verifiability,
                     security_sensitive=args.security_sensitive),
         telemetry,
+        profiles=profiles,
         mode=RoutingMode[args.mode.upper()],
         max_iterations=args.max_iterations,
         cwd=args.cwd,

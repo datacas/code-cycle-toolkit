@@ -200,10 +200,23 @@ def load_profiles(config: dict | None = None) -> dict[str, Profile]:
     A repository declares only what it wants to change. An unknown profile name
     is refused rather than ignored: a typo that silently routes nowhere is worse
     than one that stops the run.
+
+    The same applies to every shape below the name. A declaration is a mapping
+    of target strings, and anything else is refused here — where the file is
+    being read and the error can name the profile — rather than surviving into
+    a `Profile` that only fails when something tries to route with it. A
+    declared `primary: 3` used to be accepted and carried as the integer 3.
     """
     declared = {}
     if config:
-        declared = config.get("code_cycle", {}).get("profiles", {}) or {}
+        section = config.get("code_cycle")
+        if section is not None and not isinstance(section, dict):
+            # Silently reading the defaults out of a broken file would route by
+            # a policy nobody declared, which is the failure this whole function
+            # exists to prevent one level up.
+            raise RouterError(
+                f"code_cycle must be a mapping, not {type(section).__name__}")
+        declared = (section or {}).get("profiles") or {}
     if not isinstance(declared, dict):
         raise RouterError("code_cycle.profiles must be a mapping")
 
@@ -211,19 +224,31 @@ def load_profiles(config: dict | None = None) -> dict[str, Profile]:
     if unknown:
         raise RouterError("unknown profile names: " + ", ".join(unknown))
 
+    for name, spec in declared.items():
+        if not isinstance(spec, dict):
+            raise RouterError(
+                f"profile {name!r} must be a mapping of targets, not "
+                f"{type(spec).__name__}")
+        for key in ("primary", "fallback"):
+            value = spec.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise RouterError(
+                    f"profile {name!r} declares a {key} that is not a target "
+                    f"string: {value!r}")
+
     profiles = {}
     for name, spec in DEFAULT_PROFILES.items():
-        merged = {**spec, **(declared.get(name) or {})}
+        merged = {**spec, **declared.get(name, {})}
         primary = merged.get("primary")
         if not primary:
             raise RouterError(f"profile {name!r} has no primary target")
         fallback = merged.get("fallback")
         profiles[name] = Profile(
             name=name,
-            primary=parse_target(primary) if isinstance(primary, str) else primary,
-            fallback=(parse_target(fallback) if isinstance(fallback, str) else fallback)
-            if fallback
-            else None,
+            primary=parse_target(primary),
+            fallback=parse_target(fallback) if fallback else None,
         )
     return profiles
 

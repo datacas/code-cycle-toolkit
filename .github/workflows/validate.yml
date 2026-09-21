@@ -27,6 +27,12 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install the configuration parser
+        # PyYAML is the runtime's one optional dependency, needed only to read a
+        # repository's `.code-cycle.yml`. Installed here so the configuration
+        # path is exercised rather than skipped.
+        run: python3 -m pip install --quiet pyyaml
+
       - name: Validate skills and package metadata
         run: |
           python3 scripts/validate-package.py
@@ -110,6 +116,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Install the configuration parser
+        run: py -3 -m pip install --quiet pyyaml
 
       - name: Validate package with Windows Python
         run: |

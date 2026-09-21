@@ -73,6 +73,24 @@ All notable changes to this project are documented here. This project follows
   wrapper applies that to every result, so a started Orca worker can never be
   read as a finished stage. `dispatch()` now rebuilds its result with
   `dataclasses.replace`, so a new field cannot be dropped on the way out.
+- The repository's configuration reaches routing: `run_cycle.py` loads
+  `.code-cycle.yml`, overlays `code_cycle.profiles` through `load_profiles`, and
+  passes the resolved profiles to `CycleRecorder`, which routes with them.
+  `code_cycle.repository.selector` supplies the repository when `--repo` is
+  absent. Until this, every run used the built-in profiles whatever the
+  repository declared. An unreadable configuration or an unknown profile name
+  stops the run before any dispatch; `--no-config` asks for the defaults.
+  Reading configuration needs PyYAML, the runtime's one optional dependency,
+  imported only when there is a file to parse. The repository and work item are
+  validated during planning through `telemetry.validate_reference`, the store's
+  own rule exported rather than copied, so a reference the store would refuse
+  never reaches an executor prompt; and `code_cycle`, `code_cycle.repository`
+  and `code_cycle.profiles` must be mappings, so valid YAML with the wrong shape
+  is refused rather than raising from whichever reader reached it first.
+  `load_profiles` refuses a declared profile that is not a mapping and a
+  `primary` or `fallback` that is not a target string, naming the profile: one
+  used to raise `TypeError` past every handler, and the other was carried into a
+  `Profile` as whatever it was.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

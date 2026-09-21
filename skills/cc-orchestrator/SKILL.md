@@ -237,6 +237,12 @@ python3 <runtime>/run_cycle.py --repo owner/name --task API-7 \
   --difficulty 2 --verifiability auto
 ```
 
+It reads `.code-cycle.yml` from the working directory, so `code_cycle.profiles`
+is what routes and `code_cycle.repository.selector` supplies the repository when
+`--repo` is absent. A configuration that cannot be read stops the run rather
+than falling back to the defaults: a row recorded under the defaults while a
+file says otherwise describes a policy nobody chose.
+
 It reads a review's verdict from the structured result it asks the executor to
 emit, and stops when that block is absent rather than inferring a verdict from a
 successful exit. Use it, or do exactly what it does; an orchestration that routes

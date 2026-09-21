@@ -497,6 +497,29 @@ first version of this driver reviewed work that was still being written. The
 declaration is on the class, and the dispatch wrapper applies it, so an adapter
 cannot report finished work it only launched by forgetting a keyword.
 
+The driver loads the configuration and the recorder only receives what was
+resolved: `code_cycle.profiles` overlaid on the defaults by `load_profiles`, and
+`code_cycle.repository.selector` when no repository was named. `CycleRecorder`
+does not look for a file itself — a component that reads configuration on its
+own can disagree with its caller about what the configuration says, and both
+would be recording rows. An unknown profile name stops the run before anything
+is dispatched, because learning that afterwards means paying for a cycle to find
+a typo.
+
+The repository and work item are checked the same way and at the same moment,
+through `telemetry.validate_reference` — the store's own rule, exported rather
+than copied, because two validators agree until one of them is edited. A
+reference the store will refuse is one no stage should run under: that stage is
+dispatched, paid for, and then its row cannot be written, so the run happens and
+leaves no trace of having happened. Configuration shape is checked with it:
+`code_cycle`, `code_cycle.repository` and `code_cycle.profiles` must be mappings,
+so a valid YAML document with the wrong shape is a stated refusal rather than a
+traceback from whichever reader reached it first. `load_profiles` checks the
+shapes below those names — every declared profile is a mapping, every `primary`
+and `fallback` a target string — because a declared `primary: 3` used to be
+carried into a `Profile` as the integer 3, and only something trying to route
+with it ever found out.
+
 The probe map is taken once and handed to the recorder. Without it each dispatch
 probes again on its own, so an availability could change between two stages with
 nothing recording that it had — and the decisions on either side stop being

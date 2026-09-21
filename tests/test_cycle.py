@@ -292,6 +292,39 @@ class ProbeTests(CycleTestCase):
         self.assertGreater(codex.probes, 0)
 
 
+class ProfileTests(CycleTestCase):
+    """Whoever loaded the configuration decides; the recorder only carries it."""
+
+    def test_the_profiles_it_was_given_are_the_ones_it_routes_with(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {"primary": "claude:anthropic/claude-opus-5 high"}}}})
+        codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude], profiles=profiles)
+
+        outcome = recorder.stage("implement", "work")
+
+        self.assertEqual("claude", outcome.decision.target.executor)
+        self.assertEqual("claude-opus-5", outcome.decision.target.model)
+        self.assertEqual([], codex.dispatched)
+
+    def test_without_them_the_built_in_defaults_apply(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+
+        outcome = recorder.stage("implement", "work")
+
+        self.assertEqual("codex", outcome.decision.target.executor)
+
+    def test_it_does_not_go_looking_for_a_configuration_file(self) -> None:
+        """A component that reads configuration on its own can disagree with
+        the caller about what the configuration says."""
+        import inspect
+
+        source = inspect.getsource(cy)
+
+        self.assertNotIn("code-cycle.yml", source)
+        self.assertNotIn("load_profiles", source)
+
+
 class BlockedRoutingTests(CycleTestCase):
     def test_a_routing_that_never_reached_an_executor_still_leaves_a_row(self) -> None:
         """A run that stopped here would otherwise leave no trace of why."""
