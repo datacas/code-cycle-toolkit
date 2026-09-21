@@ -207,7 +207,7 @@ class RerouteRecordingTests(CycleTestCase):
         self.assertFalse(outcome.succeeded)
 
     def test_friction_a_person_must_clear_does_not_trigger_a_reroute(self) -> None:
-        """A trust dialog teaches nothing about availability; retrying elsewhere
+        """A trust dialog teaches nothing worth acting on; retrying elsewhere
         would hide a question somebody has to answer."""
         codex = ScriptedAdapter("codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "folder_trust")])
         claude = ScriptedAdapter("claude")
@@ -218,6 +218,34 @@ class RerouteRecordingTests(CycleTestCase):
         self.assertEqual(1, len(self.store.rows("owner/repo")))
         self.assertFalse(outcome.rerouted)
         self.assertEqual([], claude.dispatched)
+
+    def test_a_login_prompt_is_evidence_but_not_permission_to_go_around_it(self) -> None:
+        """`learned_availability` is non-null for a sign-in screen too, so
+        "we learned something" is not the test for whether to reroute."""
+        codex = ScriptedAdapter(
+            "codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "authenticated_session")]
+        )
+        claude = ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude])
+
+        outcome = recorder.stage("implement", "work")
+
+        self.assertIsNotNone(outcome.result.learned_availability)
+        self.assertTrue(outcome.result.needs_human_action)
+        self.assertFalse(outcome.rerouted)
+        self.assertEqual([], claude.dispatched)
+
+    def test_the_question_stays_where_a_person_can_see_it(self) -> None:
+        """Downgrading availability would reroute every later stage instead,
+        which is the same silent switch one stage further on."""
+        codex = ScriptedAdapter(
+            "codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "authenticated_session")]
+        )
+        recorder = self.recorder([codex, ScriptedAdapter("claude")])
+
+        recorder.stage("implement", "work")
+
+        self.assertEqual(ex.Availability.READY, recorder.availability["codex"])
 
     def test_a_calibration_never_reroutes(self) -> None:
         codex = ScriptedAdapter("codex", ex.Availability.READY,

@@ -97,6 +97,23 @@ class ProbeResult:
         return self.availability is self.provable_ceiling
 
 
+#: Capabilities no retry can supply, because a person has to supply them. An
+#: exhausted window is not one of these: it clears on its own, and going around
+#: it is the whole reason a fallback exists.
+#:
+#: Every capability a native adapter's `interactive_markers` can name belongs
+#: here — an interactive screen is by definition waiting for somebody. A test
+#: asserts that, so a marker added to an adapter cannot quietly become a
+#: condition the orchestration layer thinks it may route around.
+HUMAN_ACTION_CAPABILITIES = frozenset({
+    "authenticated_session",
+    "bypass_acknowledgement",
+    "folder_trust",
+    "hook_trust",
+    "trusted_directory",
+})
+
+
 @dataclass(frozen=True)
 class DispatchResult:
     outcome: DispatchOutcome
@@ -129,6 +146,19 @@ class DispatchResult:
         if self.missing_capability == "authenticated_session":
             return Availability.INSTALLED
         return None
+
+    @property
+    def needs_human_action(self) -> bool:
+        """Whether a person, not another executor, is what this attempt needs.
+
+        Learning something about an executor and being free to go around it are
+        two different questions, and using the first as a proxy for the second
+        is how a login prompt turns into a silent provider switch. A sign-in
+        screen and a trust dialog are both waiting for somebody; running the
+        work elsewhere answers neither, it just hides the question and spends
+        the other provider's window on it.
+        """
+        return self.missing_capability in HUMAN_ACTION_CAPABILITIES
 
     @property
     def model_matches_request(self) -> bool | None:

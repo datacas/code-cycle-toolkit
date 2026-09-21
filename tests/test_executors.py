@@ -689,6 +689,35 @@ class LearnedAvailabilityTests(unittest.TestCase):
                 )
                 self.assertIsNone(result.learned_availability)
 
+    def test_an_interactive_screen_is_always_somebody_elses_turn(self) -> None:
+        """Whatever an adapter can name as interactive friction is human action.
+
+        Enumerating them by hand is how one gets forgotten, so the adapters are
+        asked directly: a marker added to either of them without being declared
+        here would let the orchestration layer route around a waiting screen."""
+        for adapter in (ex.CodexAdapter, ex.ClaudeAdapter):
+            for capability in adapter.interactive_markers.values():
+                with self.subTest(adapter=adapter.name, capability=capability):
+                    self.assertIn(capability, ex.HUMAN_ACTION_CAPABILITIES)
+
+    def test_an_exhausted_window_is_not_somebody_elses_turn(self) -> None:
+        """The one condition a fallback exists for."""
+        result = ex.DispatchResult(
+            ex.DispatchOutcome.BLOCKED, "codex", TARGET,
+            missing_capability="operating_quota",
+        )
+
+        self.assertFalse(result.needs_human_action)
+
+    def test_a_waiting_screen_says_so(self) -> None:
+        for capability in sorted(ex.HUMAN_ACTION_CAPABILITIES):
+            with self.subTest(capability=capability):
+                result = ex.DispatchResult(
+                    ex.DispatchOutcome.BLOCKED, "claude", TARGET,
+                    missing_capability=capability,
+                )
+                self.assertTrue(result.needs_human_action)
+
     def test_a_success_teaches_nothing_that_needs_recording(self) -> None:
         result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex", TARGET)
 

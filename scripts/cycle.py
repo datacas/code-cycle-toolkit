@@ -21,6 +21,12 @@ window is exhausted â€” the only moment that is knowable for a native executor â
 the recorder updates availability and routes once more, and **both** decisions
 are recorded. The abandoned one is the whole point: a fallback whose first
 attempt left no trace makes fallbacks look free.
+
+Friction a person must clear is the other half of that rule, and the one easier
+to get wrong: a sign-in screen is evidence about availability too, so "we
+learned something" is not a usable test for whether to go around it. The recorder asks the narrower question instead, and a
+dispatch waiting on a human stops where it is, unrerouted and with its
+availability untouched, so the question stays visible.
 """
 
 from __future__ import annotations
@@ -126,6 +132,7 @@ class CycleRecorder:
             can_retry = (
                 attempt == 0
                 and learned is not None
+                and not result.needs_human_action
                 and self.mode is not RoutingMode.CALIBRATION
             )
             if not can_retry:

@@ -215,11 +215,16 @@ implementation measured so far needed a correction round, so the estimate
 carries at least one resolution plus its review until a repository measures its
 own first-pass rate.
 
-`scripts/cycle.py` is how a run records itself. Drive every stage through
-`CycleRecorder.stage()`, which routes, dispatches and writes the row as one
-operation. Do not route and dispatch separately and then remember to record: a
-recording step that depends on being remembered is one that will be missing from
-exactly the runs that mattered.
+`scripts/cycle.py` is the reference implementation of recording a run, and it
+ships with the toolkit source rather than with an installed skill: an
+installation that has the skills alone has no `CycleRecorder` to call, and
+records nothing until a host wires one in. Say so rather than reporting a
+measured rate that no run produced.
+
+What it fixes is worth copying wherever the wiring happens. `CycleRecorder.stage()`
+routes, dispatches and writes the row as one operation. Do not route and dispatch
+separately and then remember to record: a recording step that depends on being
+remembered is one that will be missing from exactly the runs that mattered.
 
 ```text
 recorder = CycleRecorder(telemetry, repo, task, signals, availability=...)
