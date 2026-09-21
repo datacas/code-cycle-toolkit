@@ -33,7 +33,7 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -125,6 +125,11 @@ class DispatchResult:
     readiness_policy: ReadinessPolicy = ReadinessPolicy.PROVEN
     dispatched_from: Availability = Availability.READY
     artifacts: dict = field(default_factory=dict)
+    #: True when the call succeeded in *starting* work that finishes elsewhere.
+    #: Orca's receipt says a worker launched, not that the stage is done, and a
+    #: caller that reads `SUCCEEDED` as "finished" would review work still being
+    #: written. Native executors run to completion, so they leave this False.
+    asynchronous: bool = False
 
     @property
     def learned_availability(self) -> Availability | None:
@@ -194,6 +199,11 @@ class Adapter:
     name = "abstract"
     #: The strongest state this adapter can demonstrate without spending quota.
     provable_ceiling = Availability.READY
+    #: Whether a successful dispatch means the work is done. False for a backend
+    #: that starts work and returns a handle to it. Declared on the class rather
+    #: than remembered at each return, so an adapter cannot report finished work
+    #: it only launched by forgetting a keyword.
+    completes_work = True
 
     def probe(self) -> ProbeResult:  # pragma: no cover - interface
         raise NotImplementedError
@@ -493,6 +503,9 @@ class OrcaAdapter(Adapter):
 
     name = "orca"
     provable_ceiling = Availability.READY
+    # A receipt, not a result: `worker-start` returns once the worker is alive,
+    # and the stage it is running finishes later and somewhere else.
+    completes_work = False
 
     def __init__(self, binary: str | None = None) -> None:
         self.binary = binary or ("orca-ide" if os.name != "nt" else "orca")
@@ -590,7 +603,8 @@ class OrcaAdapter(Adapter):
                 artifacts=artifacts,
             )
         return DispatchResult(DispatchOutcome.SUCCEEDED, self.name, target,
-                              model_resolved=resolved, artifacts=artifacts)
+                              model_resolved=resolved, artifacts=artifacts,
+                              asynchronous=True)
 
     def probe(self, runner=_run, which=shutil.which) -> ProbeResult:
         if not which(self.binary):
@@ -713,12 +727,15 @@ def dispatch(
         )
 
     result = adapter.dispatch(target, task, **kw)
-    return DispatchResult(
-        result.outcome, result.executor, result.requested,
-        model_resolved=result.model_resolved,
-        missing_capability=result.missing_capability,
-        detail=result.detail,
-        readiness_policy=policy,
-        dispatched_from=probe.availability,
-        artifacts=result.artifacts,
+    # `replace` rather than a rebuild by hand: the two fields below are what
+    # this layer knows and the adapter does not, and everything else is the
+    # adapter's answer. Listing the rest again would mean every new field on a
+    # result has to be remembered here too, and the one that is forgotten is
+    # silently dropped on its way out.
+    return replace(
+        result, readiness_policy=policy, dispatched_from=probe.availability,
+        # From what the adapter is, not from what this result remembered to say.
+        asynchronous=(result.asynchronous
+                      or (not adapter.completes_work
+                          and result.outcome is DispatchOutcome.SUCCEEDED)),
     )

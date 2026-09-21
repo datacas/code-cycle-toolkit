@@ -490,6 +490,13 @@ Orca is the exception it names out loud: its dispatch returns a started worker
 and a `dispatchId`, not a finished stage, so a cycle routed to Orca stops after
 the dispatch rather than treating absent output as failure.
 
+That distinction is carried by `completes_work` on the adapter and `asynchronous`
+on the result, not by noticing that there was nothing to read — a succeeded
+dispatch with no output looks exactly like a finished one, which is how the
+first version of this driver reviewed work that was still being written. The
+declaration is on the class, and the dispatch wrapper applies it, so an adapter
+cannot report finished work it only launched by forgetting a keyword.
+
 The probe map is taken once and handed to the recorder. Without it each dispatch
 probes again on its own, so an availability could change between two stages with
 nothing recording that it had — and the decisions on either side stop being

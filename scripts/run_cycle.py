@@ -23,7 +23,9 @@ is a fact worth recording, unlike a guess that looks like data forever after.
 **Orca is a start, not a finish.** Its dispatch returns a started worker and a
 `dispatchId`; the stage's own result arrives later, elsewhere. A cycle routed to
 Orca therefore stops after the dispatch and says so rather than pretending the
-absent output means failure.
+absent output means failure — and `result.asynchronous` is what says so, not the
+absence of output, because a succeeded dispatch with nothing to read looks
+exactly like a finished one.
 """
 
 from __future__ import annotations
@@ -114,7 +116,7 @@ def read_structured_result(result: DispatchResult | None) -> dict | None:
     only started a worker, or the block fell outside the captured tail — and the
     caller treats all three the same way: it does not know.
     """
-    if result is None:
+    if result is None or result.asynchronous:
         return None
     stdout = result.artifacts.get("stdout")
     if not isinstance(stdout, str):
@@ -130,9 +132,13 @@ def read_structured_result(result: DispatchResult | None) -> dict | None:
     if begin == -1:
         return None
     try:
-        return json.loads(stdout[begin + len(BEGIN):end].strip())
+        payload = json.loads(stdout[begin + len(BEGIN):end].strip())
     except ValueError:
         return None
+    # A block holding a string or a number is delimited, parseable and not a
+    # result. Returning it would hand the caller something that only looks like
+    # one, and the first `.get` on it ends the run without its closing row.
+    return payload if isinstance(payload, dict) else None
 
 
 def run_cycle(
@@ -186,12 +192,16 @@ def run_cycle(
     outcome, payload = run("implement")
     if not outcome.succeeded:
         return stop(_why(outcome))
+    if _started_elsewhere(outcome):
+        return stop(_elsewhere(outcome))
     if payload and payload.get("status"):
         recorder.record_verdict("implement", str(payload["status"]))
 
     outcome, payload = run("review")
     if not outcome.succeeded:
         return stop(_why(outcome))
+    if _started_elsewhere(outcome):
+        return stop(_elsewhere(outcome))
     verdict = _verdict(payload)
     if verdict is None:
         return stop("the review reported no structured verdict")
@@ -204,12 +214,16 @@ def run_cycle(
         outcome, payload = run("resolve", "Resolve the findings from the review.")
         if not outcome.succeeded:
             return stop(_why(outcome))
+        if _started_elsewhere(outcome):
+            return stop(_elsewhere(outcome))
         if payload and payload.get("status"):
             recorder.record_verdict("resolve", str(payload["status"]))
 
         outcome, payload = run("rereview", "Re-review the change after the fixes.")
         if not outcome.succeeded:
             return stop(_why(outcome))
+        if _started_elsewhere(outcome):
+            return stop(_elsewhere(outcome))
         verdict = _verdict(payload)
         if verdict is None:
             return stop("the re-review reported no structured verdict")
@@ -219,6 +233,19 @@ def run_cycle(
     if verdict == "APPROVED":
         return stop("", APPROVED_END)
     return stop(f"still {verdict} after {recorder.iteration} round(s)")
+
+
+def _started_elsewhere(outcome: StageOutcome) -> bool:
+    """Whether this stage launched work that finishes outside this process."""
+    return outcome.result is not None and outcome.result.asynchronous
+
+
+def _elsewhere(outcome: StageOutcome) -> str:
+    result = outcome.result
+    reference = result.artifacts.get("dispatchId") if result else None
+    started = f" as {reference}" if reference else ""
+    return (f"{outcome.role} was started on {result.executor}{started} and "
+            "finishes elsewhere; this cycle cannot see its result")
 
 
 def _verdict(payload: dict | None) -> str | None:

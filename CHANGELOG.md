@@ -68,6 +68,11 @@ All notable changes to this project are documented here. This project follows
   is integration work that does not exist yet.
 - `code_cycle.profiles` in `.code-cycle.yml`: the single place a role resolves to
   an executor, provider, model and effort.
+- `Adapter.completes_work` and `DispatchResult.asynchronous`: a backend that
+  starts work and returns a handle to it says so on the class, and the dispatch
+  wrapper applies that to every result, so a started Orca worker can never be
+  read as a finished stage. `dispatch()` now rebuilds its result with
+  `dataclasses.replace`, so a new field cannot be dropped on the way out.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and

@@ -662,6 +662,113 @@ class OrcaExitStatusTests(unittest.TestCase):
         self.assertEqual(ex.Availability.READY, result.availability)
 
 
+class AsynchronousDispatchTests(unittest.TestCase):
+    """A receipt is not a result, and the difference has to survive the trip."""
+
+    def orca_receipt(self):
+        payload = json.dumps({"ok": True, "result": {
+            "dispatchId": "D-1", "state": "ready",
+            "launch": {"effective": {"model": "gpt-5.6-luna"}}}})
+        return ex.OrcaAdapter().dispatch(
+            router.parse_target("orca:openai/gpt-5.6-luna high"), "work",
+            runner=lambda *a, **k: completed(payload),
+            context=ex.OrcaDispatchContext(coordinator="C", run_id="R", task_id="T"),
+        )
+
+    def test_a_started_worker_is_reported_as_asynchronous(self) -> None:
+        result = self.orca_receipt()
+
+        self.assertIs(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertTrue(result.asynchronous)
+
+    def test_an_executor_that_runs_to_completion_is_not(self) -> None:
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex", TARGET)
+
+        self.assertFalse(result.asynchronous)
+
+    def test_the_declaration_is_on_the_adapter_not_on_each_return(self) -> None:
+        """An adapter that forgets the keyword still cannot report finished work.
+
+        `completes_work` is the single statement of what a backend is; the
+        dispatch wrapper reads it, so the property does not depend on every
+        return statement remembering to say it.
+        """
+        class Forgetful(ex.Adapter):
+            name = "orca"
+            completes_work = False
+            provable_ceiling = ex.Availability.READY
+
+            def probe(self):
+                return ex.ProbeResult(self.name, ex.Availability.READY, "scripted",
+                                      provable_ceiling=self.provable_ceiling)
+
+            def dispatch(self, target, task, **kw):
+                return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, self.name,
+                                         target, model_resolved=target.model)
+
+        adapter = Forgetful()
+        decision = router.route("implement", router.TaskSignals(),
+                                {"orca": ex.Availability.READY},
+                                profiles=router.load_profiles(
+                                    {"code_cycle": {"profiles": {"cheap_coder": {
+                                        "primary": "orca:openai/gpt-5.6-luna high"}}}}))
+        result = ex.dispatch(decision, "work", ex.Registry([adapter]),
+                             policy=ex.ReadinessPolicy.PROVEN)
+
+        self.assertTrue(result.asynchronous)
+
+    def test_a_blocked_dispatch_started_nothing(self) -> None:
+        class Refuses(ex.Adapter):
+            name = "orca"
+            completes_work = False
+            provable_ceiling = ex.Availability.READY
+
+            def probe(self):
+                return ex.ProbeResult(self.name, ex.Availability.READY, "scripted",
+                                      provable_ceiling=self.provable_ceiling)
+
+            def dispatch(self, target, task, **kw):
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.BLOCKED, self.name, target,
+                    missing_capability="orchestration_context", detail="no run")
+
+        decision = router.route("implement", router.TaskSignals(),
+                                {"orca": ex.Availability.READY},
+                                profiles=router.load_profiles(
+                                    {"code_cycle": {"profiles": {"cheap_coder": {
+                                        "primary": "orca:openai/gpt-5.6-luna high"}}}}))
+        result = ex.dispatch(decision, "work", ex.Registry([Refuses()]),
+                             policy=ex.ReadinessPolicy.PROVEN)
+
+        self.assertFalse(result.asynchronous)
+
+    def test_the_wrapper_keeps_what_the_adapter_reported(self) -> None:
+        """It rebuilds the result, and a field it forgot would vanish silently."""
+        class Detailed(ex.Adapter):
+            name = "codex"
+            provable_ceiling = ex.Availability.AUTHENTICATED
+
+            def probe(self):
+                return ex.ProbeResult(self.name, ex.Availability.AUTHENTICATED,
+                                      "scripted", provable_ceiling=self.provable_ceiling)
+
+            def dispatch(self, target, task, **kw):
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                    model_resolved=target.model, detail="all good",
+                    artifacts={"stdout": "hello"})
+
+        decision = router.route("implement", router.TaskSignals(),
+                                {"codex": ex.Availability.READY})
+        result = ex.dispatch(decision, "work", ex.Registry([Detailed()]),
+                             policy=ex.ReadinessPolicy.ATTEMPT)
+
+        self.assertEqual("all good", result.detail)
+        self.assertEqual({"stdout": "hello"}, result.artifacts)
+        self.assertEqual("gpt-5.6-luna", result.model_resolved)
+        self.assertIs(ex.ReadinessPolicy.ATTEMPT, result.readiness_policy)
+
+
 class LearnedAvailabilityTests(unittest.TestCase):
     """A native probe cannot see quota, so only a dispatch ever learns it."""
 
