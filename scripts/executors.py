@@ -80,6 +80,13 @@ class DispatchOutcome(str, Enum):
 class ExecutorError(ValueError):
     """The dispatch layer was asked for something it must not do."""
 
+class WorkspacePolicy(str, Enum):
+    """The isolation contract a dispatch must satisfy."""
+
+    READ_ONLY = "read_only"
+    WORKSPACE_WRITE = "workspace_write"
+    DISPOSABLE = "disposable"
+
 
 def _canonical_path(path: str) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
@@ -91,6 +98,24 @@ def _paths_overlap(first: str, second: str) -> bool:
     return (first_path == second_path
             or first_path in second_path.parents
             or second_path in first_path.parents)
+
+
+@dataclass(frozen=True)
+class DisposableWorkspace:
+    """An isolated workspace where verification/runtime artifacts may exist."""
+
+    path: str
+    source_path: str
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ExecutorError("a disposable workspace needs a path")
+        if not self.source_path:
+            raise ExecutorError("a disposable workspace needs the source path")
+        if _paths_overlap(self.path, self.source_path):
+            raise ExecutorError(
+                "a disposable workspace must not contain or be contained by "
+                "the source workspace")
 
 
 @dataclass(frozen=True)
@@ -269,6 +294,22 @@ class Adapter:
     def supports_non_writing(self, **dispatch_kwargs) -> bool:
         """Whether this adapter can keep this non-writing dispatch isolated."""
         return self.enforces_read_only
+
+    def supports_workspace_policy(self, policy: WorkspacePolicy | str,
+                                  **dispatch_kwargs) -> bool:
+        """Whether this adapter can honour the complete workspace contract."""
+        policy = WorkspacePolicy(policy)
+        if policy is WorkspacePolicy.READ_ONLY:
+            return self.supports_non_writing(**dispatch_kwargs)
+        if policy is WorkspacePolicy.WORKSPACE_WRITE:
+            return True
+        workspace = dispatch_kwargs.get("workspace")
+        cwd = dispatch_kwargs.get("cwd")
+        return (
+            isinstance(workspace, DisposableWorkspace)
+            and isinstance(cwd, str)
+            and _canonical_path(cwd) == _canonical_path(workspace.path)
+        )
 
 
 class NativeAdapter(Adapter):
@@ -839,6 +880,13 @@ class Registry:
             raise ExecutorError(f"no adapter for executor {name!r}")
         return self._adapters[name]
 
+    def compatible_executors(self, policy: WorkspacePolicy | str, **dispatch_kwargs) -> frozenset[str]:
+        """Return only adapters that can satisfy a workspace contract."""
+        return frozenset(
+            name for name, adapter in self._adapters.items()
+            if adapter.supports_workspace_policy(policy, **dispatch_kwargs)
+        )
+
     def probe_all(self) -> dict[str, ProbeResult]:
         return {name: adapter.probe() for name, adapter in self._adapters.items()}
 
@@ -923,19 +971,44 @@ def dispatch(
             readiness_policy=policy, dispatched_from=probe.availability,
         )
 
-    # `writes=False` is a security boundary, not a hint for an adapter to
-    # honour when convenient. Claude and Orca have no command that proves a
-    # worker cannot mutate the worktree, so a configured profile cannot turn a
-    # review into an untrusted write-capable stage by selecting either one.
-    if (kw.get("writes", False) is False
-            and not adapter.supports_non_writing(**kw)):
+    requested_policy = kw.pop("workspace_policy", None)
+    if requested_policy is None:
+        requested_policy = (
+            WorkspacePolicy.WORKSPACE_WRITE
+            if kw.get("writes", False)
+            else WorkspacePolicy.READ_ONLY
+        )
+    try:
+        workspace_policy = WorkspacePolicy(requested_policy)
+    except ValueError as exc:
+        raise ExecutorError(
+            f"unknown workspace policy {requested_policy!r}") from exc
+
+    if not adapter.supports_workspace_policy(workspace_policy, **kw):
+        capability = {
+            WorkspacePolicy.READ_ONLY: "read_only_enforcement",
+            WorkspacePolicy.DISPOSABLE: "disposable_workspace",
+        }.get(workspace_policy, "workspace_policy")
+        detail = {
+            WorkspacePolicy.READ_ONLY: (
+                f"{target.executor} cannot establish a non-mutating workspace; "
+                "choose an adapter that can or provide an isolated review workspace"
+            ),
+            WorkspacePolicy.DISPOSABLE: (
+                "a disposable policy needs a DisposableWorkspace whose path is "
+                "the dispatch cwd and does not overlap the source workspace"
+            ),
+        }.get(workspace_policy, "the adapter cannot satisfy the workspace policy")
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
-            missing_capability="read_only_enforcement",
-            detail=(f"{target.executor} cannot establish a non-mutating workspace; "
-                    "choose an adapter that can or provide an isolated review workspace"),
+            missing_capability=capability,
+            detail=detail,
             readiness_policy=policy, dispatched_from=probe.availability,
         )
+
+    # The contract is consumed by this layer. Adapters receive only concrete
+    # execution arguments, never an unrecognised policy keyword.
+    kw.pop("workspace", None)
 
     result = adapter.dispatch(target, task, **kw)
     # `replace` rather than a rebuild by hand: the two fields below are what

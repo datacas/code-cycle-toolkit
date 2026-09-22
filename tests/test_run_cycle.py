@@ -610,7 +610,7 @@ code_cycle:
   profiles:
     cheap_coder:
       primary: codex:openai/gpt-5.6-luna high
-      fallback: claude:anthropic/claude-opus-5 high
+      fallback: claude:anthropic/claude-sonnet-5 high
 """)
         codex = ScriptedAdapter(
             "codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])
@@ -625,7 +625,7 @@ code_cycle:
         )
 
         fallback = report.stages[0].attempts[1][0]
-        self.assertEqual("claude-opus-5", fallback.target.model)
+        self.assertEqual("claude-sonnet-5", fallback.target.model)
         self.assertTrue(fallback.used_fallback)
 
     def test_an_explicit_repository_wins_over_the_declared_one(self) -> None:

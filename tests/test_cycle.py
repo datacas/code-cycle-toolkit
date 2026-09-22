@@ -155,6 +155,57 @@ class FullCycleTests(CycleTestCase):
         self.assertEqual(10, rate.observations)
 
 
+class RoleWorkspacePolicyTests(CycleTestCase):
+    def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:
+        self.assertEqual(
+            cy.WorkspacePolicy.READ_ONLY,
+            cy.role_contract("security").workspace_policy,
+        )
+        self.assertEqual(
+            cy.WorkspacePolicy.READ_ONLY,
+            cy.role_contract("bootstrap").workspace_policy,
+        )
+        for role in ("verify", "run"):
+            with self.subTest(role=role):
+                contract = cy.role_contract(role)
+                self.assertEqual(cy.WorkspacePolicy.DISPOSABLE, contract.workspace_policy)
+                self.assertTrue(contract.generated_artifacts)
+
+    def test_verify_is_blocked_without_a_disposable_workspace(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("claude")])
+
+        outcome = recorder.stage("verify", "run checks")
+
+        self.assertFalse(outcome.succeeded)
+        self.assertIsNone(outcome.result)
+        self.assertTrue(any("cannot satisfy the workspace policy" in reason
+                            for reason in outcome.decision.reasons))
+
+    def test_security_never_routes_to_an_adapter_without_read_only_enforcement(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("claude")])
+
+        outcome = recorder.stage("security", "audit the change")
+
+        self.assertIsNone(outcome.result)
+        self.assertTrue(outcome.decision.blocked)
+        self.assertTrue(any("cannot satisfy the workspace policy" in reason
+                            for reason in outcome.decision.reasons))
+
+    def test_verify_can_use_an_isolated_workspace_for_generated_artifacts(self) -> None:
+        source = tempfile.TemporaryDirectory()
+        disposable = tempfile.TemporaryDirectory()
+        self.addCleanup(source.cleanup)
+        self.addCleanup(disposable.cleanup)
+        workspace = ex.DisposableWorkspace(disposable.name, source.name)
+        recorder = self.recorder([ScriptedAdapter("claude")])
+
+        outcome = recorder.stage(
+            "verify", "run checks", cwd=workspace.path, workspace=workspace,
+        )
+
+        self.assertTrue(outcome.succeeded)
+
+
 class RerouteRecordingTests(CycleTestCase):
     """A fallback whose first attempt left no trace makes fallbacks look free."""
 
@@ -298,14 +349,14 @@ class ProfileTests(CycleTestCase):
 
     def test_the_profiles_it_was_given_are_the_ones_it_routes_with(self) -> None:
         profiles = router.load_profiles({"code_cycle": {"profiles": {
-            "cheap_coder": {"primary": "claude:anthropic/claude-opus-5 high"}}}})
+            "cheap_coder": {"primary": "claude:anthropic/claude-sonnet-5 high"}}}})
         codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
         recorder = self.recorder([codex, claude], profiles=profiles)
 
         outcome = recorder.stage("implement", "work")
 
         self.assertEqual("claude", outcome.decision.target.executor)
-        self.assertEqual("claude-opus-5", outcome.decision.target.model)
+        self.assertEqual("claude-sonnet-5", outcome.decision.target.model)
         self.assertEqual([], codex.dispatched)
 
     def test_without_them_the_built_in_defaults_apply(self) -> None:

@@ -39,6 +39,7 @@ from executors import (
     DispatchResult,
     ReadinessPolicy,
     Registry,
+    WorkspacePolicy,
     dispatch,
 )
 from router import RoutingDecision, RoutingMode, TaskSignals, route
@@ -48,7 +49,30 @@ SCHEMA_VERSION = 1
 
 #: Roles whose functional verdict is a review outcome rather than a dispatch one.
 REVIEW_ROLES = frozenset({"review", "rereview"})
-WRITING_ROLES = frozenset({"implement", "resolve"})
+
+@dataclass(frozen=True)
+class RoleContract:
+    """The workspace boundary a role must receive before it can run."""
+
+    workspace_policy: WorkspacePolicy
+    generated_artifacts: bool = False
+
+ROLE_CONTRACTS = {
+    "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
+    "resolve": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
+    "review": RoleContract(WorkspacePolicy.READ_ONLY),
+    "rereview": RoleContract(WorkspacePolicy.READ_ONLY),
+    "security": RoleContract(WorkspacePolicy.READ_ONLY),
+    "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
+    "verify": RoleContract(WorkspacePolicy.DISPOSABLE, generated_artifacts=True),
+    "run": RoleContract(WorkspacePolicy.DISPOSABLE, generated_artifacts=True),
+    "coordinate": RoleContract(WorkspacePolicy.READ_ONLY),
+}
+DEFAULT_ROLE_CONTRACT = RoleContract(WorkspacePolicy.READ_ONLY)
+
+def role_contract(role: str) -> RoleContract:
+    """Return a role's contract, defaulting unknown roles to least privilege."""
+    return ROLE_CONTRACTS.get(role, DEFAULT_ROLE_CONTRACT)
 
 
 class CycleError(ValueError):
@@ -126,16 +150,38 @@ class CycleRecorder:
         already been written down by the time this returns.
         """
         outcome = StageOutcome(role=role, decision=None, result=None)  # type: ignore[arg-type]
-        writes = role in WRITING_ROLES
+        contract = role_contract(role)
+        workspace_policy = contract.workspace_policy
+        writes = workspace_policy in {
+            WorkspacePolicy.WORKSPACE_WRITE, WorkspacePolicy.DISPOSABLE,
+        }
         requested_writes = dispatch_kwargs.pop("writes", writes)
         if requested_writes is not writes:
             raise CycleError(
                 f"{role!r} stages must use writes={writes}, not {requested_writes!r}")
         dispatch_kwargs["writes"] = writes
+        requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
+        try:
+            requested_policy = WorkspacePolicy(requested_policy)
+        except ValueError as exc:
+            raise CycleError(
+                f"{role!r} stages must use workspace_policy={workspace_policy.value!r}, "
+                f"not {requested_policy!r}") from exc
+        if requested_policy is not workspace_policy:
+            raise CycleError(
+                f"{role!r} stages must use workspace_policy={workspace_policy.value!r}, "
+                f"not {requested_policy!r}")
+        dispatch_kwargs["workspace_policy"] = workspace_policy
 
         for attempt in range(2):
-            decision = route(role, self.signals, self.availability,
-                             mode=self.mode, profiles=self.profiles)
+            eligible = self.registry.compatible_executors(
+                workspace_policy, **dispatch_kwargs,
+            )
+            decision = route(
+                role, self.signals, self.availability,
+                mode=self.mode, profiles=self.profiles,
+                eligible_executors=eligible,
+            )
             if decision.blocked:
                 outcome.decision = decision
                 outcome.rows.append(self._record(role, decision, None))

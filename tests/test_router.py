@@ -124,6 +124,7 @@ class RoleRoutingTests(unittest.TestCase):
         d = router.route("security", signals(security_sensitive=False), READY)
 
         self.assertEqual("security", d.profile)
+        self.assertEqual("codex", d.target.executor)
 
     def test_steps_judged_by_execution_stay_cheap(self) -> None:
         for role in ("verify", "run", "bootstrap"):

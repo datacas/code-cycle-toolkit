@@ -159,7 +159,9 @@ DEFAULT_PROFILES: dict[str, dict] = {
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
     "reviewer":       {"primary": "codex:openai/gpt-5.6-terra high"},
     "senior_reviewer": {"primary": "codex:openai/gpt-5.6-terra max"},
-    "security":       {"primary": "claude:anthropic/claude-opus-5 high"},
+    # Security audits are strict read-only stages. Claude remains available
+    # for write-capable roles, but its adapter cannot enforce this boundary.
+    "security":       {"primary": "codex:openai/gpt-5.6-terra high"},
 }
 
 # Relative cost per profile, same unit as CostEstimate.
@@ -320,6 +322,7 @@ def route(
     *,
     mode: RoutingMode = RoutingMode.PRODUCTION,
     profiles: dict[str, Profile] | None = None,
+    eligible_executors: frozenset[str] | set[str] | None = None,
 ) -> RoutingDecision:
     """Resolve a role to a concrete target, or block.
 
@@ -333,6 +336,11 @@ def route(
 
     primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)
     for index, target in enumerate(profile.targets()):
+        if eligible_executors is not None and target.executor not in eligible_executors:
+            reasons = reasons + (
+                f"{target.executor} cannot satisfy the workspace policy",
+            )
+            continue
         state = availability.get(target.executor, Availability.UNKNOWN)
         if state.dispatchable:
             if index == 0:
