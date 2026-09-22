@@ -133,13 +133,22 @@ class Finding:
         return self.disposition != UNTRIAGED
 
 
+@dataclass(frozen=True)
+class ProviderComment:
+    """One provider comment with identity metadata kept separate from its body."""
+
+    author: str
+    body: str
+
+
 @dataclass
 class ReviewRecord:
-    """Everything the contract lets a later run recover from one comment."""
+    """Everything the contract lets a later run recover from trusted comments."""
 
     runs: list[RunLine] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     attribution: dict[str, str] = field(default_factory=dict)
+    recovery_notes: list[str] = field(default_factory=list)
 
     @property
     def review_runs(self) -> list[RunLine]:
@@ -379,60 +388,113 @@ def merge_finding(previous: Finding | None, incoming: Finding) -> Finding:
         return incoming
     return replace(
         incoming,
-        title=incoming.title or previous.title,
+        severity=previous.severity,
+        title=previous.title or incoming.title,
         disposition=merge_disposition(previous.disposition, incoming.disposition),
     )
 
 
-def _finding_identity_conflicts(previous: Finding, incoming: Finding) -> bool:
-    """Whether two headers make incompatible claims about one stable ID.
+def _finding_identity_disagreements(previous: Finding, incoming: Finding) -> list[str]:
+    """Describe mutable-header disagreements without rewriting first publication.
 
-    Severity and a non-empty title describe which finding the ID names. Status,
-    disposition, and approval blocking are deliberately excluded: those are the
-    fields a later comment may legitimately update. A legacy empty title cannot
-    prove a collision, so it remains compatible with a later current header.
+    A review can legitimately re-score or reword a finding. Those differences
+    are audit data, not evidence by themselves that an ID was reused for a
+    different finding. The recovered record keeps the first severity, title,
+    and disposition while allowing status and approval blocking to advance.
     """
+    disagreements: list[str] = []
     if previous.severity != incoming.severity:
-        return True
-    return bool(
+        disagreements.append(
+            f"severity {previous.severity!r} was republished as {incoming.severity!r}"
+        )
+    if (
         previous.title
         and incoming.title
         and previous.title.casefold() != incoming.title.casefold()
+    ):
+        disagreements.append(
+            f"title {previous.title!r} was republished as {incoming.title!r}"
+        )
+    if (
+        previous.triaged
+        and incoming.triaged
+        and previous.disposition != incoming.disposition
+    ):
+        disagreements.append(
+            "disposition "
+            f"{previous.disposition!r} was republished as {incoming.disposition!r}"
+        )
+    return disagreements
+
+
+def _same_comment_collision(previous: Finding, incoming: Finding) -> bool:
+    """Whether one trusted snapshot assigns an ID to incompatible findings."""
+    return bool(
+        previous.severity != incoming.severity
+        or (
+            previous.title
+            and incoming.title
+            and previous.title.casefold() != incoming.title.casefold()
+        )
     )
 
 
-def recover_comment_history(comments: Iterable[str]) -> ReviewRecord:
+def recover_comment_history(
+    comments: Iterable[ProviderComment], *, trusted_authors: Iterable[str]
+) -> ReviewRecord:
     """Fold complete change-request comments, oldest first, into one record.
 
     A comment is a partial update, not a replacement snapshot. Omitting a
     finding therefore leaves its recovered state intact; a later header for the
-    same ID may advance its status while preserving its first disposition.
-    Callers must pass every available comment and thread in chronological order.
+    same ID may advance its status while preserving its first published fields.
+    The caller must pass provider author metadata and the configured review
+    identities; bodies from every other author are ignored and reported.
     """
+    trusted = frozenset(trusted_authors)
+    if not trusted:
+        raise ContractError("history recovery needs at least one trusted author")
+
     recovered = ReviewRecord()
     findings: dict[str, Finding] = {}
+    positions: dict[str, int] = {}
     runs: set[str] = set()
 
-    for comment in comments:
-        record = parse_comment(comment)
+    for number, comment in enumerate(comments, start=1):
+        if comment.author not in trusted:
+            recovered.recovery_notes.append(
+                f"comment {number} from {comment.author!r} ignored: author is not trusted"
+            )
+            continue
+        try:
+            record = parse_comment(comment.body)
+        except ContractError as error:
+            recovered.recovery_notes.append(
+                f"comment {number} from {comment.author!r} skipped: {error}"
+            )
+            continue
         for run in record.runs:
             if run.id not in runs:
                 recovered.runs.append(run)
                 runs.add(run.id)
+        in_comment: dict[str, Finding] = {}
         for incoming in record.findings:
-            previous = findings.get(incoming.id)
-            if previous is not None and _finding_identity_conflicts(previous, incoming):
+            snapshot = in_comment.get(incoming.id)
+            if snapshot is not None and _same_comment_collision(snapshot, incoming):
                 raise FindingCollisionError(
-                    f"{incoming.id} identifies both "
-                    f"{previous.severity!r}/{previous.title!r} and "
-                    f"{incoming.severity!r}/{incoming.title!r}"
+                    f"{incoming.id} identifies incompatible findings in comment {number}"
                 )
+            in_comment[incoming.id] = incoming
+            previous = findings.get(incoming.id)
+            if previous is not None:
+                for disagreement in _finding_identity_disagreements(previous, incoming):
+                    recovered.recovery_notes.append(f"{incoming.id}: {disagreement}")
             merged = merge_finding(previous, incoming)
             findings[incoming.id] = merged
             if previous is None:
+                positions[incoming.id] = len(recovered.findings)
                 recovered.findings.append(merged)
             else:
-                recovered.findings[recovered.findings.index(previous)] = merged
+                recovered.findings[positions[incoming.id]] = merged
         for finding_id, run_id in record.attribution.items():
             recovered.attribution.setdefault(finding_id, run_id)
 

@@ -7,6 +7,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Trusted full-history finding recovery: provider author metadata is required,
+  untrusted and malformed comments are recorded without changing or wedging the
+  recovered record, and later re-scores remain audit data instead of permanent
+  ID collisions.
 - Finding headers carry a disposition token: `#### [REV-004] · medium · resolved · valid · blocks:yes — Short title`.
   It records what the first resolver made of the finding, independently of what
   happened to the code.
