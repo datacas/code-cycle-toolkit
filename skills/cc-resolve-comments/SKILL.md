@@ -179,6 +179,14 @@ from. Three kinds of line carry that record. Their tokens stay language-neutral
 even when the comment body is written in the project's language, and every skill
 that republishes the comment preserves the ones it did not write.
 
+When reconstructing from provider comments and threads, read the complete
+history in chronological order and fold every finding header by `REV-xxx` ID.
+A later comment is a partial update, not a replacement snapshot: omitting an ID
+never removes it, status may move, and an assigned disposition stays frozen.
+Treat a reused ID whose severity differs, or whose two non-empty titles differ,
+as a real collision and return `BLOCKED`; otherwise allocate new IDs after the
+highest historical numeric ID, never after the latest comment alone.
+
 A review run line opens each published review and identifies the run that
 produced the findings below it:
 

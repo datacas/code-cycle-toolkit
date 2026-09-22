@@ -438,5 +438,73 @@ class CommentRecoveryTests(unittest.TestCase):
         self.assertIsNone(record.finding("REV-999"))
 
 
+class CommentHistoryRecoveryTests(unittest.TestCase):
+    def test_an_omitted_finding_survives_a_later_comment(self) -> None:
+        record = contract.recover_comment_history(
+            [
+                "#### [REV-001] · high · open · - · blocks:yes — First",
+                "#### [REV-002] · low · open · - · blocks:no — Second",
+            ]
+        )
+
+        self.assertEqual(["REV-001", "REV-002"], [item.id for item in record.findings])
+        self.assertEqual("open", record.finding("REV-001").status)
+
+    def test_a_later_header_advances_status_but_keeps_disposition(self) -> None:
+        record = contract.recover_comment_history(
+            [
+                "#### [REV-001] · high · open · valid · blocks:yes — First",
+                "#### [REV-001] · high · resolved · incorrect · blocks:no — First",
+            ]
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("resolved", finding.status)
+        self.assertEqual("valid", finding.disposition)
+        self.assertFalse(finding.blocks_approval)
+
+    def test_a_real_id_collision_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.FindingCollisionError, "REV-001"):
+            contract.recover_comment_history(
+                [
+                    "#### [REV-001] · high · open · - · blocks:yes — First",
+                    "#### [REV-001] · high · open · - · blocks:yes — Different",
+                ]
+            )
+
+    def test_a_severity_change_for_one_id_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.FindingCollisionError, "REV-001"):
+            contract.recover_comment_history(
+                [
+                    "#### [REV-001] · high · open · - · blocks:yes — First",
+                    "#### [REV-001] · medium · open · - · blocks:yes — First",
+                ]
+            )
+
+    def test_a_legacy_title_gap_is_not_treated_as_a_collision(self) -> None:
+        record = contract.recover_comment_history(
+            [
+                "#### [REV-001] · high · open · blocks:yes",
+                "#### [REV-001] · high · resolved · valid · blocks:no — First",
+            ]
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("First", finding.title)
+        self.assertEqual("resolved", finding.status)
+
+    def test_the_next_id_uses_the_historical_maximum_not_the_last_comment(self) -> None:
+        record = contract.recover_comment_history(
+            [
+                "#### [REV-007] · high · open · - · blocks:yes — First",
+                "#### [REV-001] · low · open · - · blocks:no — Second",
+            ]
+        )
+
+        self.assertEqual("REV-008", contract.next_finding_id(record))
+
+
 if __name__ == "__main__":
     unittest.main()

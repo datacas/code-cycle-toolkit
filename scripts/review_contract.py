@@ -24,6 +24,7 @@ published finding, new or previous.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 SCHEMA_VERSION = 1
@@ -62,6 +63,10 @@ _BLOCKS_RE = re.compile(r"^blocks:(yes|no)$")
 
 class ContractError(ValueError):
     """A line claims to follow the contract but violates it."""
+
+
+class FindingCollisionError(ContractError):
+    """One stable finding ID was reused for a different finding."""
 
 
 @dataclass(frozen=True)
@@ -372,7 +377,78 @@ def merge_finding(previous: Finding | None, incoming: Finding) -> Finding:
     """
     if previous is None:
         return incoming
-    return replace(incoming, disposition=merge_disposition(previous.disposition, incoming.disposition))
+    return replace(
+        incoming,
+        title=incoming.title or previous.title,
+        disposition=merge_disposition(previous.disposition, incoming.disposition),
+    )
+
+
+def _finding_identity_conflicts(previous: Finding, incoming: Finding) -> bool:
+    """Whether two headers make incompatible claims about one stable ID.
+
+    Severity and a non-empty title describe which finding the ID names. Status,
+    disposition, and approval blocking are deliberately excluded: those are the
+    fields a later comment may legitimately update. A legacy empty title cannot
+    prove a collision, so it remains compatible with a later current header.
+    """
+    if previous.severity != incoming.severity:
+        return True
+    return bool(
+        previous.title
+        and incoming.title
+        and previous.title.casefold() != incoming.title.casefold()
+    )
+
+
+def recover_comment_history(comments: Iterable[str]) -> ReviewRecord:
+    """Fold complete change-request comments, oldest first, into one record.
+
+    A comment is a partial update, not a replacement snapshot. Omitting a
+    finding therefore leaves its recovered state intact; a later header for the
+    same ID may advance its status while preserving its first disposition.
+    Callers must pass every available comment and thread in chronological order.
+    """
+    recovered = ReviewRecord()
+    findings: dict[str, Finding] = {}
+    runs: set[str] = set()
+
+    for comment in comments:
+        record = parse_comment(comment)
+        for run in record.runs:
+            if run.id not in runs:
+                recovered.runs.append(run)
+                runs.add(run.id)
+        for incoming in record.findings:
+            previous = findings.get(incoming.id)
+            if previous is not None and _finding_identity_conflicts(previous, incoming):
+                raise FindingCollisionError(
+                    f"{incoming.id} identifies both "
+                    f"{previous.severity!r}/{previous.title!r} and "
+                    f"{incoming.severity!r}/{incoming.title!r}"
+                )
+            merged = merge_finding(previous, incoming)
+            findings[incoming.id] = merged
+            if previous is None:
+                recovered.findings.append(merged)
+            else:
+                recovered.findings[recovered.findings.index(previous)] = merged
+        for finding_id, run_id in record.attribution.items():
+            recovered.attribution.setdefault(finding_id, run_id)
+
+    return recovered
+
+
+def next_finding_id(record: ReviewRecord | Iterable[Finding]) -> str:
+    """Allocate after the highest numeric REV-ID recovered from all history."""
+    findings = record.findings if isinstance(record, ReviewRecord) else record
+    numeric_ids = [
+        int(match.group(1))
+        for item in findings
+        if (match := re.fullmatch(rf"{FINDING_PREFIX}(\d+)", item.id)) is not None
+    ]
+    next_number = max(numeric_ids, default=0) + 1
+    return f"{FINDING_PREFIX}{next_number:03d}"
 
 
 def disposition_conflicts(
