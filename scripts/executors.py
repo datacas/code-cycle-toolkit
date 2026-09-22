@@ -1000,8 +1000,19 @@ def dispatch(
                 "choose an adapter that can or provide an isolated review workspace"
             ),
             WorkspacePolicy.DISPOSABLE: (
-                "a disposable policy needs a DisposableWorkspace whose path is "
-                "the dispatch cwd and does not overlap the source workspace"
+                (
+                    "a disposable policy needs a DisposableWorkspace whose path is "
+                    "the dispatch cwd and does not overlap the source workspace"
+                    if not (
+                        isinstance(kw.get("workspace"), DisposableWorkspace)
+                        and isinstance(kw.get("cwd"), str)
+                        and _canonical_path(kw["cwd"])
+                        == _canonical_path(kw["workspace"].path)
+                    ) else (
+                        f"{target.executor} cannot confine writes to a disposable "
+                        "workspace"
+                    )
+                )
             ),
         }.get(workspace_policy, "the adapter cannot satisfy the workspace policy")
         return DispatchResult(

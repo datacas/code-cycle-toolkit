@@ -226,6 +226,25 @@ class ProfileConfigTests(unittest.TestCase):
         self.assertEqual("claude", profiles["cheap_coder"].primary.executor)
         self.assertEqual("codex", profiles["coordinator"].primary.executor)
 
+    def test_policy_filtered_fallback_explains_the_policy_skip(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "reviewer": {
+                "primary": "claude:anthropic/claude-sonnet-5 high",
+                "fallback": "codex:openai/gpt-5.6-terra high",
+            },
+        }}})
+        decision = router.route(
+            "review", signals(),
+            {"claude": router.Availability.READY, "codex": router.Availability.READY},
+            profiles=profiles, eligible_executors={"codex"},
+        )
+
+        self.assertTrue(decision.used_fallback)
+        self.assertIn(
+            "primary executor claude cannot satisfy the workspace policy -> fell back to codex",
+            decision.reasons,
+        )
+
     def test_an_unknown_profile_name_is_refused_not_ignored(self) -> None:
         with self.assertRaises(router.RouterError):
             router.load_profiles({"code_cycle": {"profiles": {"cheep_coder": {"primary": "a:b/c d"}}}})

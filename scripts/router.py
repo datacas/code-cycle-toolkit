@@ -163,6 +163,8 @@ DEFAULT_PROFILES: dict[str, dict] = {
     # Security audits are strict read-only stages. Claude remains available
     # for write-capable roles, but its adapter cannot enforce this boundary.
     "security":       {"primary": "codex:openai/gpt-5.6-terra high",
+                       # Compatibility-only registry entry: the read-only
+                       # eligibility filter deliberately never selects Claude.
                        "fallback": "claude:anthropic/claude-opus-5 high"},
 }
 
@@ -338,11 +340,16 @@ def route(
     profile = profiles[name]
 
     primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)
+    primary_policy_reason = None
     for index, target in enumerate(profile.targets()):
         if eligible_executors is not None and target.executor not in eligible_executors:
             reasons = reasons + (
                 f"{target.executor} cannot satisfy the workspace policy",
             )
+            if index == 0:
+                primary_policy_reason = (
+                    f"primary executor {target.executor} cannot satisfy the workspace policy"
+                )
             continue
         state = availability.get(target.executor, Availability.UNKNOWN)
         if state.dispatchable:
@@ -354,14 +361,19 @@ def route(
             # fallback's state here reported a healthy primary while routing
             # around it, and a routing decision is only auditable if its reasons
             # are true.
+            fallback_reason = primary_policy_reason or (
+                f"primary executor {profile.primary.executor} is"
+                f" {primary_state.value} -> fell back to {target.executor}"
+            )
+            if primary_policy_reason:
+                fallback_reason += f" -> fell back to {target.executor}"
             return RoutingDecision(
                 name,
                 target,
                 mode,
                 used_fallback=True,
                 reasons=reasons
-                + (f"primary executor {profile.primary.executor} is"
-                   f" {primary_state.value} -> fell back to {target.executor}",),
+                + (fallback_reason,),
             )
         reasons = reasons + (f"{target.executor} is {state.value}",)
 

@@ -153,9 +153,11 @@ not read it for Codex, OpenCode, Orca, or an explicit `single_agent` run.
 ## Routing
 
 Name a profile, never a model. `cheap_coder`, `deep_coder`, `reviewer`,
-`senior_reviewer`, `security`, `coordinator`, `cheap_tool` resolve through
-`code_cycle.profiles` in `.code-cycle.yml`; `scripts/router.py` is the reference
-implementation of how.
+`senior_reviewer`, `security`, `coordinator`, and `auxiliary_tool` resolve
+through `code_cycle.profiles` in `.code-cycle.yml`; `cheap_tool` remains a
+compatibility profile for direct/custom callers and is not selected by the
+built-in auxiliary roles. `scripts/router.py` is the reference implementation
+of how.
 
 `scripts/executors.py` turns a resolved target into a real execution:
 

@@ -912,6 +912,7 @@ class PermissionTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("disposable_workspace", result.missing_capability)
+        self.assertIn("DisposableWorkspace", result.detail)
 
     def test_disposable_dispatch_fails_closed_for_unconfined_claude(self) -> None:
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
@@ -928,6 +929,7 @@ class PermissionTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("disposable_workspace", result.missing_capability)
+        self.assertIn("cannot confine writes", result.detail)
 
     def test_disposable_dispatch_uses_the_declared_workspace(self) -> None:
         target = router.parse_target("codex:openai/gpt-5.6-terra high")
