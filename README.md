@@ -94,6 +94,8 @@ Machine-readable tokens never translate, in any language: the `REV-xxx` identifi
 The host must provide a way to load Agent Skills. The workflows also normally require:
 
 - Git;
+- Python 3 for the runtime and the scripts in `scripts/`;
+- PyYAML, only to read `.code-cycle.yml`; a repository with no configuration file does not need it;
 - authenticated tooling for the selected issue provider;
 - authenticated tooling for the selected code host;
 - access to the target repository and its change requests;
