@@ -491,10 +491,10 @@ declares what is already happening rather than granting something new.
 For a **reading** Claude stage there is no honest flag, and this does not
 pretend otherwise. `--permission-mode plan` refuses the edit but turns the task
 into planning it, which is not a review. Disallowing `Edit`, `Write` and
-`NotebookEdit` does not stop a write: a live probe created the file anyway. A
-Claude reviewer is confined by the directory it is given — the isolation
-invariant this toolkit already states for paired reviews — and not by an
-argument.
+`NotebookEdit` does not stop a write: a live probe created the file anyway.
+Review and rereview therefore route to Codex, whose explicit `-s read-only`
+sandbox enforces non-mutation. A configured adapter that cannot enforce that
+boundary is blocked before it starts rather than sharing the writable tree.
 
 ## Running a cycle
 

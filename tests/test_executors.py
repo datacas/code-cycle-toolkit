@@ -722,6 +722,41 @@ class PermissionTests(unittest.TestCase):
         self.assertNotIn("--permission-mode", argv)
         self.assertNotIn("--disallowedTools", argv)
 
+    def test_a_reading_dispatch_fails_closed_for_an_unconfined_adapter(self) -> None:
+        """A configured Claude review cannot silently share the writable tree."""
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.ClaudeAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("the adapter must not be invoked")
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]), writes=False, runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("read_only_enforcement", result.missing_capability)
+
+    def test_a_reading_dispatch_reaches_an_adapter_with_enforced_sandboxing(self) -> None:
+        target = router.parse_target("codex:openai/gpt-5.6-terra high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.CodexAdapter()
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("{}")
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]), writes=False, runner=runner,
+            probes={"codex": ex.ProbeResult("codex", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("read-only", seen["argv"][seen["argv"].index("-s") + 1])
+
     def test_the_permission_reaches_the_adapter_from_the_dispatch(self) -> None:
         seen = {}
 

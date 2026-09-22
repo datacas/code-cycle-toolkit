@@ -48,6 +48,7 @@ SCHEMA_VERSION = 1
 
 #: Roles whose functional verdict is a review outcome rather than a dispatch one.
 REVIEW_ROLES = frozenset({"review", "rereview"})
+WRITING_ROLES = frozenset({"implement", "resolve"})
 
 
 class CycleError(ValueError):
@@ -123,6 +124,12 @@ class CycleRecorder:
         already been written down by the time this returns.
         """
         outcome = StageOutcome(role=role, decision=None, result=None)  # type: ignore[arg-type]
+        writes = role in WRITING_ROLES
+        requested_writes = dispatch_kwargs.pop("writes", writes)
+        if requested_writes is not writes:
+            raise CycleError(
+                f"{role!r} stages must use writes={writes}, not {requested_writes!r}")
+        dispatch_kwargs["writes"] = writes
 
         for attempt in range(2):
             decision = route(role, self.signals, self.availability,

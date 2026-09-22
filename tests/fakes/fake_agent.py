@@ -13,6 +13,7 @@ an exhausted window, and a review that changes its mind on the second round:
     FAKE_QUOTA=codex       that agent reports an exhausted window and exits 1
     FAKE_ROUNDS=<path>     a counter file; the first review asks for changes
     FAKE_SILENT=claude     that agent emits no structured block at all
+    FAKE_SILENT_REVIEW=codex that agent omits only an initial-review result
     FAKE_BLOCKED=codex     that agent exits 0 reporting BLOCKED, as one did
 
 It writes each CLI's real envelope — Codex NDJSON with `item.completed`, Claude
@@ -102,7 +103,9 @@ def main(argv: list[str]) -> int:
     prompt = prompt_of(argv)
     said = [f"prompt received: {prompt}"]
 
-    if os.environ.get("FAKE_SILENT") == NAME:
+    if (os.environ.get("FAKE_SILENT") == NAME
+            or (os.environ.get("FAKE_SILENT_REVIEW") == NAME
+                and "cc-initial-review" in prompt)):
         speak(model, said[0])
         return 0
 

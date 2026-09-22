@@ -116,6 +116,10 @@ class RoleRoutingTests(unittest.TestCase):
 
         self.assertEqual("senior_reviewer", d.profile)
 
+    def test_review_profiles_use_the_executor_that_enforces_read_only(self) -> None:
+        self.assertEqual("codex", router.load_profiles()["reviewer"].primary.executor)
+        self.assertEqual("codex", router.load_profiles()["senior_reviewer"].primary.executor)
+
     def test_the_security_audit_always_uses_the_security_profile(self) -> None:
         d = router.route("security", signals(security_sensitive=False), READY)
 

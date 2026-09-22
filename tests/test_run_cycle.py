@@ -92,11 +92,18 @@ class RunCycleTestCase(unittest.TestCase):
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
 
     def run_cycle(self, implementer, reviewer, **kw):
+        profiles = kw.pop("profiles", router.load_profiles({"code_cycle": {
+            # These scripted adapters declare an in-memory non-mutation
+            # boundary, so tests of the driver can choose their reviewer while
+            # production defaults continue to select Codex's real sandbox.
+            "profiles": {"reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}},
+        }}))
         return rc.run_cycle(
             "owner/api", "API-7", router.TaskSignals(), self.store,
             registry=ex.Registry([implementer, reviewer]),
             availability={implementer.name: ex.Availability.READY,
                           reviewer.name: ex.Availability.READY},
+            profiles=profiles,
             **kw,
         )
 
@@ -525,7 +532,7 @@ code_cycle:
         implement = report.stages[0]
         self.assertEqual("claude", implement.result.executor)
         self.assertEqual("claude-sonnet-5", implement.decision.target.model)
-        self.assertEqual([], codex.dispatched)
+        self.assertEqual(1, len(codex.dispatched))
 
     def test_without_a_declaration_the_defaults_are_untouched(self) -> None:
         report = rc.run_cycle(

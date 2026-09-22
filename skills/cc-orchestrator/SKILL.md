@@ -252,8 +252,8 @@ because it did. Both facts are true and the store keeps them in separate
 columns. A stage is dispatched with the permission its role needs: implementation and
 resolution may write the tree they were given, a review reads it. Codex is
 read-only unless asked otherwise and Claude is not, so neither default can be
-relied on — the role decides. A Claude reviewer is confined by the directory it
-runs in, not by a flag.
+relied on — the role decides. Review profiles use Codex's explicit read-only
+sandbox; an adapter that cannot enforce non-mutation is blocked before it runs.
 
 The reason the agent gave is printed beside the status and stored
 nowhere: it is a claim to weigh, not a finding. One run reported that GitHub was

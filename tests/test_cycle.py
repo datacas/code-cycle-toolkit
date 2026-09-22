@@ -19,6 +19,7 @@ class ScriptedAdapter(ex.Adapter):
     """Answers with whatever the test says, and remembers being asked."""
 
     provable_ceiling = ex.Availability.AUTHENTICATED
+    enforces_read_only = True
 
     def __init__(self, name, availability=ex.Availability.AUTHENTICATED, outcomes=None):
         self.name = name

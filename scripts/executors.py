@@ -201,6 +201,10 @@ class Adapter:
     """One way of running work. Subclasses implement `probe` and `dispatch`."""
 
     name = "abstract"
+    #: Whether this adapter can enforce that a stage cannot mutate its assigned
+    #: workspace. A review result is not trustworthy when its reviewer can
+    #: change the diff it is judging, so unconfined reads fail closed.
+    enforces_read_only = False
     #: The strongest state this adapter can demonstrate without spending quota.
     provable_ceiling = Availability.READY
     #: Whether a successful dispatch means the work is done. False for a backend
@@ -446,6 +450,7 @@ class NativeAdapter(Adapter):
 class CodexAdapter(NativeAdapter):
     name = "codex"
     binary = "codex"
+    enforces_read_only = True
     quota_markers = ("usage limit", "rate limit", "quota")
     interactive_markers = {
         "hooks need review": "hook_trust",
@@ -828,6 +833,19 @@ def dispatch(
             missing_capability="proven_readiness",
             detail=("a calibration dispatch requires demonstrated readiness; "
                     f"{target.executor} could only show {probe.availability.value}"),
+            readiness_policy=policy, dispatched_from=probe.availability,
+        )
+
+    # `writes=False` is a security boundary, not a hint for an adapter to
+    # honour when convenient. Claude and Orca have no command that proves a
+    # worker cannot mutate the worktree, so a configured profile cannot turn a
+    # review into an untrusted write-capable stage by selecting either one.
+    if kw.get("writes") is False and not adapter.enforces_read_only:
+        return DispatchResult(
+            DispatchOutcome.BLOCKED, target.executor, target,
+            missing_capability="read_only_enforcement",
+            detail=(f"{target.executor} cannot enforce a read-only workspace; "
+                    "choose an adapter that can or provide an immutable review workspace"),
             readiness_policy=policy, dispatched_from=probe.availability,
         )
 

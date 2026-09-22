@@ -128,8 +128,11 @@ class InstalledCycleTests(unittest.TestCase):
         # counted as agreement anywhere that reads it.
         self.assertIsNone(implement["model_resolved"])
 
-        review = [row for row in self.rows() if row["executor"] == "claude"][0]
-        self.assertEqual(review["model_requested"], review["model_resolved"])
+        review = [row for row in self.rows()
+                  if row["role"] == "review" and row["outcome"] == "succeeded"][0]
+        self.assertEqual("codex", review["executor"])
+        self.assertEqual("gpt-5.6-terra", review["model_requested"])
+        self.assertIsNone(review["model_resolved"])
 
     def test_a_second_round_is_recorded_as_a_second_round(self) -> None:
         """The review asks for changes once, so the cycle resolves and re-reviews."""
@@ -157,7 +160,7 @@ class InstalledCycleTests(unittest.TestCase):
         """
         result = self.run_cycle(FAKE_QUOTA="codex")
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode)
         implement = [row for row in self.rows() if row["role"] == "implement"]
         abandoned, fallback = implement[0], implement[1]
 
@@ -168,11 +171,12 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual("claude", fallback["executor"])
         self.assertEqual(1, fallback["used_fallback"])
         self.assertEqual("succeeded", fallback["outcome"])
+        self.assertEqual("HUMAN_INTERVENTION", self.rows()[-1]["status"])
 
     def test_a_review_that_reports_no_verdict_stops_the_cycle(self) -> None:
         """An unknown verdict is recorded as unknown, never guessed from a
         successful exit."""
-        result = self.run_cycle(FAKE_SILENT="claude")
+        result = self.run_cycle(FAKE_SILENT_REVIEW="codex")
 
         self.assertEqual(1, result.returncode)
         self.assertIn("reported no structured result", result.stdout)
