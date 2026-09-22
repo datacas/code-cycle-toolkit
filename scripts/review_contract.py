@@ -137,7 +137,7 @@ class Finding:
 class ProviderComment:
     """One provider comment with identity metadata kept separate from its body."""
 
-    author: str
+    author: str | None
     body: str
 
 
@@ -382,7 +382,9 @@ def merge_disposition(previous: str | None, incoming: str) -> str:
 def merge_finding(previous: Finding | None, incoming: Finding) -> Finding:
     """Carry a finding forward into a republished comment.
 
-    `status` moves with the code. `disposition` does not.
+    `status` and approval blocking move with the code. The first published
+    severity and non-empty title, as well as a triaged disposition, are frozen
+    as the historical identity of the finding.
     """
     if previous is None:
         return incoming
@@ -395,25 +397,17 @@ def merge_finding(previous: Finding | None, incoming: Finding) -> Finding:
 
 
 def _finding_identity_disagreements(previous: Finding, incoming: Finding) -> list[str]:
-    """Describe mutable-header disagreements without rewriting first publication.
+    """Describe non-identity disagreements without rewriting first publication.
 
-    A review can legitimately re-score or reword a finding. Those differences
-    are audit data, not evidence by themselves that an ID was reused for a
-    different finding. The recovered record keeps the first severity, title,
-    and disposition while allowing status and approval blocking to advance.
+    A review can legitimately re-score a finding. That difference is audit
+    data, not evidence by itself that an ID was reused for a different finding.
+    The recovered record keeps the first severity, title, and disposition while
+    allowing status and approval blocking to advance.
     """
     disagreements: list[str] = []
     if previous.severity != incoming.severity:
         disagreements.append(
             f"severity {previous.severity!r} was republished as {incoming.severity!r}"
-        )
-    if (
-        previous.title
-        and incoming.title
-        and previous.title.casefold() != incoming.title.casefold()
-    ):
-        disagreements.append(
-            f"title {previous.title!r} was republished as {incoming.title!r}"
         )
     if (
         previous.triaged
@@ -427,15 +421,12 @@ def _finding_identity_disagreements(previous: Finding, incoming: Finding) -> lis
     return disagreements
 
 
-def _same_comment_collision(previous: Finding, incoming: Finding) -> bool:
-    """Whether one trusted snapshot assigns an ID to incompatible findings."""
+def _finding_id_collision(previous: Finding, incoming: Finding) -> bool:
+    """Whether an ID was assigned to two distinct non-legacy findings."""
     return bool(
-        previous.severity != incoming.severity
-        or (
-            previous.title
-            and incoming.title
-            and previous.title.casefold() != incoming.title.casefold()
-        )
+        previous.title
+        and incoming.title
+        and previous.title.casefold() != incoming.title.casefold()
     )
 
 
@@ -448,9 +439,12 @@ def recover_comment_history(
     finding therefore leaves its recovered state intact; a later header for the
     same ID may advance its status while preserving its first published fields.
     The caller must pass provider author metadata and the configured review
-    identities; bodies from every other author are ignored and reported.
+    identities. Identity comparison is case-insensitive for provider logins;
+    bodies from every other author are ignored and reported. A non-empty
+    history that contains no trusted comment is a configuration failure, not
+    an empty finding record.
     """
-    trusted = frozenset(trusted_authors)
+    trusted = frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
     if not trusted:
         raise ContractError("history recovery needs at least one trusted author")
 
@@ -458,13 +452,21 @@ def recover_comment_history(
     findings: dict[str, Finding] = {}
     positions: dict[str, int] = {}
     runs: set[str] = set()
+    saw_comment = False
+    saw_trusted_comment = False
 
     for number, comment in enumerate(comments, start=1):
-        if comment.author not in trusted:
+        saw_comment = True
+        if not isinstance(comment.author, str) or not (author := comment.author.strip()):
+            raise ContractError(
+                f"history recovery needs provider author metadata for comment {number}"
+            )
+        if author.casefold() not in trusted:
             recovered.recovery_notes.append(
-                f"comment {number} from {comment.author!r} ignored: author is not trusted"
+                f"comment {number} from {author!r} ignored: author is not trusted"
             )
             continue
+        saw_trusted_comment = True
         try:
             record = parse_comment(comment.body)
         except ContractError as error:
@@ -479,12 +481,16 @@ def recover_comment_history(
         in_comment: dict[str, Finding] = {}
         for incoming in record.findings:
             snapshot = in_comment.get(incoming.id)
-            if snapshot is not None and _same_comment_collision(snapshot, incoming):
+            if snapshot is not None and _finding_id_collision(snapshot, incoming):
                 raise FindingCollisionError(
                     f"{incoming.id} identifies incompatible findings in comment {number}"
                 )
             in_comment[incoming.id] = incoming
             previous = findings.get(incoming.id)
+            if previous is not None and _finding_id_collision(previous, incoming):
+                raise FindingCollisionError(
+                    f"{incoming.id} identifies incompatible findings across comment history"
+                )
             if previous is not None:
                 for disagreement in _finding_identity_disagreements(previous, incoming):
                     recovered.recovery_notes.append(f"{incoming.id}: {disagreement}")
@@ -497,6 +503,9 @@ def recover_comment_history(
                 recovered.findings[positions[incoming.id]] = merged
         for finding_id, run_id in record.attribution.items():
             recovered.attribution.setdefault(finding_id, run_id)
+
+    if saw_comment and not saw_trusted_comment:
+        raise ContractError("history recovery found no comments from trusted authors")
 
     return recovered
 

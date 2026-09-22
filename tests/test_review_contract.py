@@ -479,6 +479,13 @@ class CommentHistoryRecoveryTests(unittest.TestCase):
                 )
             )
 
+    def test_a_real_id_collision_across_comments_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.FindingCollisionError, "REV-001"):
+            self.recover(
+                "#### [REV-001] · critical · open · - · blocks:yes — SQL injection",
+                "#### [REV-001] · low · resolved · - · blocks:no — README typo",
+            )
+
     def test_a_rescore_is_audit_data_not_a_collision(self) -> None:
         record = self.recover(
             "#### [REV-001] · high · open · - · blocks:yes — First",
@@ -490,6 +497,27 @@ class CommentHistoryRecoveryTests(unittest.TestCase):
         self.assertEqual("high", finding.severity)
         self.assertEqual("resolved", finding.status)
         self.assertTrue(any("severity" in note for note in record.recovery_notes))
+
+    def test_trusted_author_matching_is_case_insensitive(self) -> None:
+        record = contract.recover_comment_history(
+            [contract.ProviderComment("review-bot", "#### [REV-001] · high · open · - · blocks:yes — First")],
+            trusted_authors={"REVIEW-BOT"},
+        )
+        self.assertIsNotNone(record.finding("REV-001"))
+
+    def test_missing_provider_author_metadata_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.ContractError, "author metadata"):
+            contract.recover_comment_history(
+                [contract.ProviderComment(None, "#### [REV-001] · high · open · - · blocks:yes — First")],
+                trusted_authors={self.reviewer},
+            )
+
+    def test_nonempty_history_without_a_trusted_author_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.ContractError, "no comments from trusted authors"):
+            contract.recover_comment_history(
+                [contract.ProviderComment("someone-else", "no findings")],
+                trusted_authors={self.reviewer},
+            )
 
     def test_a_legacy_title_gap_is_not_treated_as_a_collision(self) -> None:
         record = self.recover(

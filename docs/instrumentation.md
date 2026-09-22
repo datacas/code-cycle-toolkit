@@ -55,13 +55,15 @@ resolver assigns a disposition.
 ## Trusted finding recovery
 
 `scripts/review_contract.py` recovers findings from provider comments only when
-each body is paired with provider-supplied author metadata and an explicit set
-of reviewing identities. It reads the complete chronological history, ignores
-and records other authors, and skips and records malformed trusted comments so
-one bad heading cannot wedge the record. Status and approval blocking may move;
-the first severity, title, and disposition remain the historical record. A
-later re-score or rewording is audit data. Only incompatible definitions of one
-ID inside the same trusted comment are a collision that blocks recovery.
+each body is paired with provider-supplied author metadata and the configured
+`code_cycle.review.trusted_authors` allow-list. Provider logins compare
+case-insensitively; an absent or empty allow-list, missing author metadata, or a
+non-empty history with no trusted author blocks recovery. It reads the complete
+chronological history, ignores and records other authors, and skips and records
+malformed trusted comments so one bad heading cannot wedge the record. Status
+and approval blocking may move; the first severity, title, and disposition
+remain the historical record. A later re-score is audit data, but two non-empty
+titles for one ID are a collision that blocks recovery, even across comments.
 
 ## Dispositions are frozen
 
