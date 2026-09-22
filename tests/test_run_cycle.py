@@ -7,6 +7,8 @@ executor whose structured block is delimited, parseable and not a result.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -116,15 +118,15 @@ class LocalOnlyPolicyTests(RunCycleTestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         worktree = Path(temporary.name)
-        (worktree / ".git").mkdir()
+        (worktree / ".git").write_text("gitdir: /tmp/example/.git/worktrees/test\n")
         implementer, reviewer = Talker("codex"), Talker("claude")
 
         report = self.run_cycle(implementer, reviewer, cwd=str(worktree),
                                 local_only=True)
 
-        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
         self.assertIn("Safety boundary", implementer.dispatched[0])
-        self.assertIn("do not push", reviewer.dispatched[0])
+        self.assertEqual([], reviewer.dispatched)
         self.assertTrue(all(row["payload"]["local_only"] for row in self.rows()))
 
     def test_local_only_requires_a_git_worktree(self) -> None:
@@ -134,13 +136,35 @@ class LocalOnlyPolicyTests(RunCycleTestCase):
             self.run_cycle(Talker("codex"), Talker("claude"),
                            cwd=temporary.name, local_only=True)
 
+    def test_local_only_rejects_the_live_repository(self) -> None:
+        with self.assertRaises(rc.CycleDriverError):
+            self.run_cycle(Talker("codex"), Talker("claude"),
+                           cwd=str(ROOT), local_only=True)
+
+
+class MainLocalOnlyTests(unittest.TestCase):
+    def test_cli_rejects_missing_worktree_before_creating_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "telemetry.sqlite"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    rc.main(["--repo", "owner/api", "--task", "API-7",
+                             "--local-only", "--no-config",
+                             "--database", str(database)])
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertFalse(database.exists())
+            self.assertIn("requires an explicit --cwd", stderr.getvalue())
+
 
 class PromptContractTests(unittest.TestCase):
     def test_compose_can_request_a_local_only_run(self) -> None:
         prompt = rc.compose("implement", "owner/api", "API-7", local_only=True)
         self.assertIn("Safety boundary", prompt)
-        self.assertIn("draft", prompt)
+        self.assertIn("stops after implementation", prompt)
         self.assertIn("ORCHESTRATION_RESULT", prompt)
+        self.assertIn("Do not omit the block when the stage is blocked", prompt)
 
 
 class AsynchronousStageTests(RunCycleTestCase):

@@ -80,10 +80,9 @@ STRUCTURED_REQUEST = (
 # and the CLI invocation, so a later operator can tell a safe rehearsal from a
 # run that was allowed to publish changes.
 LOCAL_ONLY_REQUEST = (
-    "Safety boundary: work only in the supplied cwd worktree. Keep all changes "
-    "local; do not push, merge, publish issue or review comments, or create a "
-    "non-draft pull request. If a pull request is strictly required, create only "
-    "a draft and report it in the structured result."
+    "Safety boundary: work only in the supplied cwd linked worktree. This local-only "
+    "cycle stops after implementation; keep all changes local, and do not push, "
+    "merge, publish issue or review comments, or create a pull request."
 )
 
 BEGIN, END = "ORCHESTRATION_RESULT", "END_ORCHESTRATION_RESULT"
@@ -306,8 +305,17 @@ def validate_local_only_cwd(cwd: str | None) -> None:
     path = Path(cwd).expanduser()
     if not path.is_dir():
         raise CycleDriverError(f"--local-only requires an existing worktree: {path}")
-    if not (path / ".git").exists():
-        raise CycleDriverError(f"--local-only requires a Git worktree: {path}")
+    marker = path / ".git"
+    if not marker.is_file():
+        raise CycleDriverError(
+            f"--local-only requires a linked Git worktree, not a live repository: {path}"
+        )
+    try:
+        marker_text = marker.read_text(encoding="utf-8", errors="strict")
+    except OSError as error:
+        raise CycleDriverError(f"--local-only could not read the worktree marker: {error}") from error
+    if not marker_text.startswith("gitdir:"):
+        raise CycleDriverError(f"--local-only requires a linked Git worktree: {path}")
 
 
 def read_structured_result(result: DispatchResult | None) -> Reported:
@@ -440,9 +448,15 @@ def run_cycle(
             return reported, stop(reported.explain(role), reported=reported)
         return reported, None
 
-    _, stopped = advance("implement")
+    reported, stopped = advance("implement")
     if stopped is not None:
         return stopped
+    if local_only:
+        return stop(
+            "local-only run stops after implementation; no change request was created for review",
+            UNRESOLVED_END,
+            reported=reported,
+        )
 
     reported, stopped = advance("review")
     if stopped is not None:
@@ -521,6 +535,9 @@ def plan(args) -> tuple[str, dict]:
     after a stage has already run would mean paying for a cycle to discover a
     typo. So this happens first, and it raises rather than falling back.
     """
+    if getattr(args, "local_only", False):
+        validate_local_only_cwd(getattr(args, "cwd", None))
+
     config = resolve_config(args)
 
     repo = args.repo or repository_of(config)
@@ -589,8 +606,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
     parser.add_argument("--local-only", action="store_true",
-                        help=("run only in the explicit --cwd Git worktree; "
-                              "do not publish remote changes (draft PR only if required)"))
+                        help=("run only in the explicit --cwd linked worktree; "
+                              "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
     parser.add_argument("--database", default=None,

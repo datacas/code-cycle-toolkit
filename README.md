@@ -317,9 +317,10 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
 
-For a rehearsal that must stay in a disposable Git worktree, pass both
+For a rehearsal that must stay in a disposable linked Git worktree, pass both
 `--cwd /path/to/worktree` and `--local-only`. The driver refuses to enable this
-mode without an existing worktree, adds the no-publish boundary to every stage
+mode for the live repository, runs implementation only, records the resulting
+human-intervention stop, adds the no-publish boundary to the implementation
 prompt, and records `local_only` in each telemetry row. It is an orchestration
 policy, not an operating-system sandbox: block network credentials and remote
 Git access separately when a hard no-publish guarantee is required.
