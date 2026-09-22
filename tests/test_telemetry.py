@@ -304,6 +304,25 @@ class IdentifierBoundaryTests(TelemetryTestCase):
             second.record_stage("repo-two", "other", "implement",
                                model_requested="gpt-repository-one")
 
+    def test_repository_model_additions_are_scoped_on_a_shared_store(self) -> None:
+        self.store.add_known_models("repo-one", {"gpt-repository-one"})
+
+        self.store.record_stage("repo-one", "task", "implement",
+                                model_requested="gpt-repository-one")
+
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo-two", "task", "implement",
+                                    model_requested="gpt-repository-one")
+
+    def test_validate_reference_accepts_an_injected_model_set(self) -> None:
+        self.assertEqual(
+            "gpt-repository-one",
+            tm.validate_reference(
+                "model_requested", "gpt-repository-one",
+                model_names={"gpt-repository-one"},
+            ),
+        )
+
 
 class FirstPassRateTests(TelemetryTestCase):
     """The number router.estimate_cost currently guesses at 0.0."""
@@ -524,6 +543,23 @@ class ModelDriftTests(TelemetryTestCase):
         self.assertIsNone(drift[0]["resolved"])
         self.assertEqual(1, self.store.summary("repo")["model_drift"])
 
+    def test_legacy_rows_without_a_resolution_token_still_report_drift(self) -> None:
+        self.store.record_stage(
+            "repo", "legacy", "implement",
+            model_requested="gpt-5.6-luna",
+            model_resolved="claude-sonnet-5",
+        )
+        row_id = self.store.rows("repo")[0]["id"]
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE stages SET payload = ? WHERE id = ?", ("{}", row_id)
+            )
+
+        drift = self.store.model_drift("repo")
+
+        self.assertEqual(1, len(drift))
+        self.assertEqual("claude-sonnet-5", drift[0]["resolved"])
+
 
 class ModelResolutionTests(TelemetryTestCase):
     """The dispatch receipt maps to a closed observation token."""
@@ -545,6 +581,15 @@ class ModelResolutionTests(TelemetryTestCase):
         row = self.record(None)
 
         self.assertIsNone(row["model_resolved"])
+        self.assertEqual("unreported", row["payload"]["model_resolution"])
+
+    def test_omitting_the_resolved_model_records_unreported(self) -> None:
+        self.store.record_stage(
+            "repo", "task", "implement", model_requested="gpt-5.6-luna"
+        )
+
+        row = self.store.rows("repo")[0]
+
         self.assertEqual("unreported", row["payload"]["model_resolution"])
 
     def test_matched_resolution(self) -> None:

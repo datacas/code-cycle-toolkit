@@ -458,7 +458,9 @@ counts blocked dispatches by the capability that blocked them, keeping an
 exhausted window distinct from a trust dialog — conflating those cost a
 campaign. `model_drift` reads `model_resolution` and includes both known and
 unrecognised mismatches, while excluding `unreported` rows rather than counting
-silence as agreement, because Codex reports none at all.
+silence as agreement, because Codex reports none at all. Rows written before
+the token existed fall back to the two model columns, so historical drift is
+not erased by the new representation.
 
 The schema will change. A schema designed before its questions are known is one
 that gets migrated, and that was accepted deliberately: recording now, with

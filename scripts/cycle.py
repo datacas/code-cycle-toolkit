@@ -144,7 +144,7 @@ class CycleRecorder:
         # about what the configuration says.
         self.profiles = profiles
         if profiles is not None:
-            telemetry.add_known_models(models_from_profiles(profiles))
+            telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
         self.iteration = 0
         self.stages: list[StageOutcome] = []
