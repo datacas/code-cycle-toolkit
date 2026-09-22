@@ -71,7 +71,18 @@ SKILL_FOR_ROLE = {
 #: this is a documented capability rather than a hopeful one.
 STRUCTURED_REQUEST = (
     "Return the structured result: include the ORCHESTRATION_RESULT block in "
-    "your response."
+    "your response. Do not omit the block when the stage is blocked; report "
+    "the blocking status and reason in it."
+)
+
+# This is deliberately a named policy rather than an incidental sentence in a
+# caller's prompt.  A local-only run must be visible in the prompt, telemetry,
+# and the CLI invocation, so a later operator can tell a safe rehearsal from a
+# run that was allowed to publish changes.
+LOCAL_ONLY_REQUEST = (
+    "Safety boundary: work only in the supplied cwd linked worktree. This local-only "
+    "cycle stops after implementation; keep all changes local, and do not push, "
+    "merge, publish issue or review comments, or create a pull request."
 )
 
 BEGIN, END = "ORCHESTRATION_RESULT", "END_ORCHESTRATION_RESULT"
@@ -265,7 +276,8 @@ def readable(text: str, limit: int = REASON_LIMIT) -> str:
     return cleaned[:limit].rstrip() + "\u2026"
 
 
-def compose(role: str, repo_id: str, task_id: str, instruction: str = "") -> str:
+def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
+            *, local_only: bool = False) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -273,8 +285,37 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "") -> str
     parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
+    if local_only:
+        parts.append(LOCAL_ONLY_REQUEST)
     parts.append(STRUCTURED_REQUEST)
     return " ".join(parts)
+
+
+def validate_local_only_cwd(cwd: str | None) -> None:
+    """Require an explicit Git worktree before enabling the local-only policy.
+
+    Without this check ``--local-only`` could silently run in the coordinator's
+    current directory, which is exactly the accidental write the flag is meant
+    to make difficult.  This is a policy boundary, not an OS sandbox; the
+    caller still needs normal network and credential isolation for a hard
+    guarantee against remote side effects.
+    """
+    if not cwd:
+        raise CycleDriverError("--local-only requires an explicit --cwd worktree")
+    path = Path(cwd).expanduser()
+    if not path.is_dir():
+        raise CycleDriverError(f"--local-only requires an existing worktree: {path}")
+    marker = path / ".git"
+    if not marker.is_file():
+        raise CycleDriverError(
+            f"--local-only requires a linked Git worktree, not a live repository: {path}"
+        )
+    try:
+        marker_text = marker.read_text(encoding="utf-8", errors="strict")
+    except OSError as error:
+        raise CycleDriverError(f"--local-only could not read the worktree marker: {error}") from error
+    if not marker_text.startswith("gitdir:"):
+        raise CycleDriverError(f"--local-only requires a linked Git worktree: {path}")
 
 
 def read_structured_result(result: DispatchResult | None) -> Reported:
@@ -344,8 +385,11 @@ def run_cycle(
     max_iterations: int = 3,
     cwd: str | None = None,
     timeout: int | None = None,
+    local_only: bool = False,
 ) -> CycleReport:
     """implement -> review -> (resolve -> rereview)*, every stage recorded."""
+    if local_only:
+        validate_local_only_cwd(cwd)
     registry = registry or Registry()
     policy = policy or ReadinessPolicy.for_mode(mode)
     # Once, for the whole cycle. Re-probing between stages would let an
@@ -357,7 +401,7 @@ def run_cycle(
     recorder = CycleRecorder(
         telemetry, repo_id, task_id, signals,
         availability=availability, registry=registry, mode=mode, policy=policy,
-        probes=probes, profiles=profiles,
+        probes=probes, profiles=profiles, local_only=local_only,
     )
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -367,7 +411,8 @@ def run_cycle(
         dispatch_kwargs["timeout"] = timeout
 
     def run(role: str, instruction: str = "") -> tuple[StageOutcome, Reported]:
-        outcome = recorder.stage(role, compose(role, repo_id, task_id, instruction),
+        outcome = recorder.stage(
+            role, compose(role, repo_id, task_id, instruction, local_only=local_only),
                                  **dispatch_kwargs)
         report.stages.append(outcome)
         return outcome, read_structured_result(outcome.result)
@@ -403,9 +448,15 @@ def run_cycle(
             return reported, stop(reported.explain(role), reported=reported)
         return reported, None
 
-    _, stopped = advance("implement")
+    reported, stopped = advance("implement")
     if stopped is not None:
         return stopped
+    if local_only:
+        return stop(
+            "local-only run stops after implementation; no change request was created for review",
+            UNRESOLVED_END,
+            reported=reported,
+        )
 
     reported, stopped = advance("review")
     if stopped is not None:
@@ -484,6 +535,9 @@ def plan(args) -> tuple[str, dict]:
     after a stage has already run would mean paying for a cycle to discover a
     typo. So this happens first, and it raises rather than falling back.
     """
+    if getattr(args, "local_only", False):
+        validate_local_only_cwd(getattr(args, "cwd", None))
+
     config = resolve_config(args)
 
     repo = args.repo or repository_of(config)
@@ -551,6 +605,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
+    parser.add_argument("--local-only", action="store_true",
+                        help=("run only in the explicit --cwd linked worktree; "
+                              "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
     parser.add_argument("--database", default=None,
@@ -567,18 +624,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
 
     telemetry = Telemetry(Path(args.database) if args.database else None)
-    report = run_cycle(
-        repo, args.task,
-        TaskSignals(difficulty=args.difficulty,
-                    verifiability=args.verifiability,
-                    security_sensitive=args.security_sensitive),
-        telemetry,
-        profiles=profiles,
-        mode=RoutingMode[args.mode.upper()],
-        max_iterations=args.max_iterations,
-        cwd=args.cwd,
-        timeout=args.timeout,
-    )
+    try:
+        report = run_cycle(
+            repo, args.task,
+            TaskSignals(difficulty=args.difficulty,
+                        verifiability=args.verifiability,
+                        security_sensitive=args.security_sensitive),
+            telemetry,
+            profiles=profiles,
+            mode=RoutingMode[args.mode.upper()],
+            max_iterations=args.max_iterations,
+            cwd=args.cwd,
+            timeout=args.timeout,
+            local_only=args.local_only,
+        )
+    except CycleDriverError as error:
+        parser.error(str(error))
 
     print(report.explain())
     print(f"recorded in {telemetry.path}")
