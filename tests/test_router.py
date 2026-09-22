@@ -129,7 +129,8 @@ class RoleRoutingTests(unittest.TestCase):
     def test_steps_judged_by_execution_stay_cheap(self) -> None:
         for role in ("verify", "run", "bootstrap"):
             with self.subTest(role=role):
-                self.assertEqual("cheap_tool", router.route(role, signals(), READY).profile)
+                self.assertEqual("auxiliary_tool", router.route(role, signals(), READY).profile)
+                self.assertEqual("codex", router.route(role, signals(), READY).target.executor)
 
     def test_coordination_stays_cheap_even_when_it_sequences_expensive_work(self) -> None:
         self.assertEqual("coordinator", router.route("coordinate", signals(), READY).profile)
@@ -205,6 +206,9 @@ class CostModelTests(unittest.TestCase):
 
         self.assertIn("expected resolution work", text)
         self.assertIn("= 8.0", text)
+
+    def test_security_cost_matches_its_codex_reviewer_target(self) -> None:
+        self.assertEqual(router.PROFILE_COST["reviewer"], router.PROFILE_COST["security"])
 
 
 class ProfileConfigTests(unittest.TestCase):

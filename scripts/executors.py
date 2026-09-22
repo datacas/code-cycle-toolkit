@@ -271,6 +271,8 @@ class Adapter:
     #: workspace. A review result is not trustworthy when its reviewer can
     #: change the diff it is judging, so unconfined reads fail closed.
     enforces_read_only = False
+    #: Whether this adapter confines writes to the declared disposable cwd.
+    enforces_workspace_boundary = False
     #: The strongest state this adapter can demonstrate without spending quota.
     provable_ceiling = Availability.READY
     #: Whether a successful dispatch means the work is done. False for a backend
@@ -306,6 +308,8 @@ class Adapter:
         workspace = dispatch_kwargs.get("workspace")
         cwd = dispatch_kwargs.get("cwd")
         return (
+            self.enforces_workspace_boundary
+            and
             isinstance(workspace, DisposableWorkspace)
             and isinstance(cwd, str)
             and _canonical_path(cwd) == _canonical_path(workspace.path)
@@ -535,6 +539,7 @@ class NativeAdapter(Adapter):
 
 class CodexAdapter(NativeAdapter):
     name = "codex"
+    enforces_workspace_boundary = True
     binary = "codex"
     enforces_read_only = True
     quota_markers = ("usage limit", "rate limit", "quota")

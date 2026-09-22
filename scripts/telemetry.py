@@ -82,7 +82,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "cc-provider-bootstrap",
     })),
     "profile": ("token", frozenset({
-        "cheap_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
+        "cheap_tool", "auxiliary_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
         "senior_reviewer", "security",
     })),
     "executor": ("token", frozenset({"codex", "claude", "orca"})),

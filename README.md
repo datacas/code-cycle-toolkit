@@ -20,6 +20,9 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
   Claude while delegating initial review and rereview to Codex.
 - Publishes consolidated pull-request comments when the workflow requires them.
 - Preserves a manual merge boundary: the toolkit never merges a pull request.
+- Documents and enforces role workspace contracts in
+  [docs/role-workspace-policy.md](docs/role-workspace-policy.md), including
+  isolated handling for verification and runtime artifacts.
 
 ## What it does not do
 

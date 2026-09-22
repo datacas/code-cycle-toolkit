@@ -913,6 +913,22 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("disposable_workspace", result.missing_capability)
 
+    def test_disposable_dispatch_fails_closed_for_unconfined_claude(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        decision = router.RoutingDecision("auxiliary_tool", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.ClaudeAdapter()
+        workspace = ex.DisposableWorkspace("/tmp/verification-worktree", "/repo/source")
+
+        result = ex.dispatch(
+            decision, "run checks", ex.Registry([adapter]), cwd=workspace.path, writes=True,
+            workspace=workspace, workspace_policy=ex.WorkspacePolicy.DISPOSABLE,
+            runner=lambda *args, **kwargs: self.fail("the adapter must not be invoked"),
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("disposable_workspace", result.missing_capability)
+
     def test_disposable_dispatch_uses_the_declared_workspace(self) -> None:
         target = router.parse_target("codex:openai/gpt-5.6-terra high")
         decision = router.RoutingDecision("cheap_tool", target, router.RoutingMode.PRODUCTION)

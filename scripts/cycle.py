@@ -55,7 +55,6 @@ class RoleContract:
     """The workspace boundary a role must receive before it can run."""
 
     workspace_policy: WorkspacePolicy
-    generated_artifacts: bool = False
 
 ROLE_CONTRACTS = {
     "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
@@ -64,8 +63,8 @@ ROLE_CONTRACTS = {
     "rereview": RoleContract(WorkspacePolicy.READ_ONLY),
     "security": RoleContract(WorkspacePolicy.READ_ONLY),
     "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
-    "verify": RoleContract(WorkspacePolicy.DISPOSABLE, generated_artifacts=True),
-    "run": RoleContract(WorkspacePolicy.DISPOSABLE, generated_artifacts=True),
+    "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
+    "run": RoleContract(WorkspacePolicy.DISPOSABLE),
     "coordinate": RoleContract(WorkspacePolicy.READ_ONLY),
 }
 DEFAULT_ROLE_CONTRACT = RoleContract(WorkspacePolicy.READ_ONLY)

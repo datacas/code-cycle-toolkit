@@ -151,6 +151,7 @@ class RoutingDecision:
 # though the calibration could not measure one.
 DEFAULT_PROFILES: dict[str, dict] = {
     "cheap_tool":     {"primary": "claude:anthropic/claude-haiku-4-5-20251001 low"},
+    "auxiliary_tool": {"primary": "codex:openai/gpt-5.6-luna medium"},
     "coordinator":    {"primary": "codex:openai/gpt-5.6-luna medium",
                        "fallback": "claude:anthropic/claude-sonnet-5 low"},
     "cheap_coder":    {"primary": "codex:openai/gpt-5.6-luna high",
@@ -161,18 +162,20 @@ DEFAULT_PROFILES: dict[str, dict] = {
     "senior_reviewer": {"primary": "codex:openai/gpt-5.6-terra max"},
     # Security audits are strict read-only stages. Claude remains available
     # for write-capable roles, but its adapter cannot enforce this boundary.
-    "security":       {"primary": "codex:openai/gpt-5.6-terra high"},
+    "security":       {"primary": "codex:openai/gpt-5.6-terra high",
+                       "fallback": "claude:anthropic/claude-opus-5 high"},
 }
 
 # Relative cost per profile, same unit as CostEstimate.
 PROFILE_COST = {
     "cheap_tool": 0.1,
+    "auxiliary_tool": 0.1,
     "coordinator": 0.2,
     "cheap_coder": 1.0,
     "deep_coder": 2.5,
     "reviewer": 3.0,
     "senior_reviewer": 6.0,
-    "security": 6.0,
+    "security": 3.0,
 }
 
 # Five of five real implementations needed changes. Until a repository measures
@@ -283,7 +286,7 @@ def profile_for(role: str, signals: TaskSignals) -> tuple[str, tuple[str, ...]]:
             return "senior_reviewer", tuple(reasons)
         return "reviewer", ("ordinary change uses the standard reviewer",)
     if role in ("coordinate", "verify", "run", "bootstrap"):
-        return ("coordinator" if role == "coordinate" else "cheap_tool"), (
+        return ("coordinator" if role == "coordinate" else "auxiliary_tool"), (
             "a step whose result is judged by execution, not by judgement",
         )
     raise RouterError(f"unknown role: {role!r}")
@@ -362,11 +365,16 @@ def route(
             )
         reasons = reasons + (f"{target.executor} is {state.value}",)
 
-    blocked_because = (
-        "a calibration never substitutes an arm: an unavailable executor blocks and waits"
-        if mode is RoutingMode.CALIBRATION
-        else "no executor for this profile is ready"
-    )
+    if (eligible_executors is not None
+            and not any(target.executor in eligible_executors
+                        for target in profile.targets())):
+        blocked_because = "no executor for this profile satisfies the workspace policy"
+    else:
+        blocked_because = (
+            "a calibration never substitutes an arm: an unavailable executor blocks and waits"
+            if mode is RoutingMode.CALIBRATION
+            else "no executor for this profile is ready"
+        )
     return RoutingDecision(
         name, None, mode, blocked=True, reasons=reasons + (blocked_because,)
     )

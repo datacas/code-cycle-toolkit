@@ -199,12 +199,12 @@ class ColumnBoundaryTests(TelemetryTestCase):
         self.store.record_stage("repo", "task-1", "review", status="APPROVED",
                                 profile="senior_reviewer", skill="cc-initial-review",
                                 executor="claude", provider="anthropic", effort="high",
-                                model_requested="claude-sonnet-5")
+                                model_requested="claude-opus-5")
 
         row = self.store.rows()[0]
 
         self.assertEqual("APPROVED", row["status"])
-        self.assertEqual("claude-sonnet-5", row["model_requested"])
+        self.assertEqual("claude-opus-5", row["model_requested"])
 
 
 class IdentifierBoundaryTests(TelemetryTestCase):
@@ -233,7 +233,7 @@ class IdentifierBoundaryTests(TelemetryTestCase):
 
     def test_the_known_models_come_from_the_router_profiles(self) -> None:
         self.assertIn("gpt-5.6-luna", tm.known_models())
-        self.assertIn("claude-sonnet-5", tm.known_models())
+        self.assertIn("claude-opus-5", tm.known_models())
 
     def test_the_model_check_survives_a_package_qualified_import(self) -> None:
         """A guarantee that depends on import topology is not a guarantee."""
