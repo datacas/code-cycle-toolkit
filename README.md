@@ -317,6 +317,13 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
 
+For a rehearsal that must stay in a disposable Git worktree, pass both
+`--cwd /path/to/worktree` and `--local-only`. The driver refuses to enable this
+mode without an existing worktree, adds the no-publish boundary to every stage
+prompt, and records `local_only` in each telemetry row. It is an orchestration
+policy, not an operating-system sandbox: block network credentials and remote
+Git access separately when a hard no-publish guarantee is required.
+
 Reading `.code-cycle.yml` needs PyYAML, the runtime's one optional dependency
 (`pip install pyyaml`). Nothing else in the toolkit needs it: a repository with
 no configuration file runs on the standard library alone, and when a file is

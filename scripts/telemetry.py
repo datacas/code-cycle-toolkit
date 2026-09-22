@@ -129,6 +129,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "tokens_out": ("count", None),
     "cost_usd": ("amount", None),
     "security_audit_ran": ("flag", None),
+    "local_only": ("flag", None),
     "security_gate_half": ("token", frozenset({
         "deterministic", "reviewer", "both", "none",
     })),

@@ -94,6 +94,7 @@ class CycleRecorder:
         policy: ReadinessPolicy | None = None,
         probes: dict | None = None,
         profiles: dict | None = None,
+        local_only: bool = False,
     ) -> None:
         self.telemetry = telemetry
         self.repo_id = repo_id
@@ -113,6 +114,7 @@ class CycleRecorder:
         # configuration on its own is one that can disagree with the caller
         # about what the configuration says.
         self.profiles = profiles
+        self.local_only = local_only
         self.iteration = 0
         self.stages: list[StageOutcome] = []
 
@@ -175,7 +177,8 @@ class CycleRecorder:
             raise CycleError(f"a {role} verdict needs a status; an empty one counts as nothing")
         return self.telemetry.record_stage(
             self.repo_id, self.task_id, role,
-            iteration=self.iteration, status=status, **fields,
+            iteration=self.iteration, status=status,
+            local_only=self.local_only, **fields,
         )
 
     def next_iteration(self) -> int:
@@ -187,7 +190,7 @@ class CycleRecorder:
         return self.telemetry.record_stage(
             self.repo_id, self.task_id, "coordinate",
             iteration=self.iteration, status=final_status,
-            iterations=self.iteration, **fields,
+            iterations=self.iteration, local_only=self.local_only, **fields,
         )
 
     def _record(self, role: str, decision: RoutingDecision,
@@ -203,6 +206,7 @@ class CycleRecorder:
                 used_fallback=decision.used_fallback,
                 outcome=DispatchOutcome.BLOCKED.value,
                 routing_reason_count=len(decision.reasons or ()),
+                local_only=self.local_only,
             )
         return self.telemetry.record_dispatch(
             self.repo_id, self.task_id, role, decision, result,
@@ -210,4 +214,5 @@ class CycleRecorder:
             difficulty=self.signals.difficulty,
             verifiability=self.signals.verifiability,
             security_sensitive=self.signals.security_sensitive,
+            local_only=self.local_only,
         )

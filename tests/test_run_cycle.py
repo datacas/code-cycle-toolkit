@@ -111,6 +111,38 @@ class RunCycleTestCase(unittest.TestCase):
         return self.store.rows("owner/api")
 
 
+class LocalOnlyPolicyTests(RunCycleTestCase):
+    def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        worktree = Path(temporary.name)
+        (worktree / ".git").mkdir()
+        implementer, reviewer = Talker("codex"), Talker("claude")
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(worktree),
+                                local_only=True)
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertIn("Safety boundary", implementer.dispatched[0])
+        self.assertIn("do not push", reviewer.dispatched[0])
+        self.assertTrue(all(row["payload"]["local_only"] for row in self.rows()))
+
+    def test_local_only_requires_a_git_worktree(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        with self.assertRaises(rc.CycleDriverError):
+            self.run_cycle(Talker("codex"), Talker("claude"),
+                           cwd=temporary.name, local_only=True)
+
+
+class PromptContractTests(unittest.TestCase):
+    def test_compose_can_request_a_local_only_run(self) -> None:
+        prompt = rc.compose("implement", "owner/api", "API-7", local_only=True)
+        self.assertIn("Safety boundary", prompt)
+        self.assertIn("draft", prompt)
+        self.assertIn("ORCHESTRATION_RESULT", prompt)
+
+
 class AsynchronousStageTests(RunCycleTestCase):
     """A started worker is not a finished stage."""
 

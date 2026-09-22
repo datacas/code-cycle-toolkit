@@ -524,6 +524,12 @@ then `implement → review → (resolve → rereview)*`, every stage through
 because that is the hole the recorder closes and a driver is the easiest place
 to reopen it.
 
+The `--local-only` mode is the safe rehearsal path: it requires an explicit Git
+worktree via `--cwd`, carries a no-publish policy in every stage prompt, and
+marks each telemetry row with `local_only`. That policy is auditable but is not
+an OS-level network sandbox; use isolated credentials and remote access controls
+when remote writes must be impossible.
+
 It reads a review's verdict from the structured result it explicitly asks the
 executor for — a documented opt-in in every review skill — and never from an
 exit code or from prose.
