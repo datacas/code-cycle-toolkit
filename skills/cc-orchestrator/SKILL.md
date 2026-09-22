@@ -254,6 +254,9 @@ resolution may write the tree they were given, a review reads it. Codex is
 read-only unless asked otherwise and Claude is not, so neither default can be
 relied on — the role decides. Review profiles use Codex's explicit read-only
 sandbox; an adapter that cannot enforce non-mutation is blocked before it runs.
+They intentionally have no fallback: blocked review availability is preferable
+to silently using an executor without a proven non-mutating workspace. A future
+fallback needs an immutable or otherwise enforced read-only workspace first.
 
 The reason the agent gave is printed beside the status and stored
 nowhere: it is a claim to weigh, not a finding. One run reported that GitHub was

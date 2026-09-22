@@ -135,7 +135,8 @@ class ReadinessPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(), "work", registry, policy=ex.ReadinessPolicy.ATTEMPT)
+        result = ex.dispatch(decision(), "work", registry, policy=ex.ReadinessPolicy.ATTEMPT,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual(ex.Availability.AUTHENTICATED, result.dispatched_from)
@@ -157,7 +158,7 @@ class DefaultPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(), "work", registry)
+        result = ex.dispatch(decision(), "work", registry, writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual(ex.ReadinessPolicy.ATTEMPT, result.readiness_policy)
@@ -166,7 +167,8 @@ class DefaultPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry)
+        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual([], adapter.dispatched)
@@ -204,7 +206,8 @@ class DispatchGateTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.READY, ceiling=ex.Availability.READY))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry)
+        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
 
@@ -523,6 +526,7 @@ class OrcaDispatchTests(unittest.TestCase):
 
         result = ex.dispatch(
             d, "prompt", registry,
+            writes=True,
             probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "runtime ready")},
         )
 
@@ -739,6 +743,21 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("read_only_enforcement", result.missing_capability)
 
+    def test_an_omitted_permission_defaults_to_the_same_read_only_boundary(self) -> None:
+        """The dispatch contract must not become fail-open outside CycleRecorder."""
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.ClaudeAdapter()
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]),
+            runner=lambda *args, **kwargs: self.fail("the adapter must not be invoked"),
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("read_only_enforcement", result.missing_capability)
+
     def test_a_reading_dispatch_reaches_an_adapter_with_enforced_sandboxing(self) -> None:
         target = router.parse_target("codex:openai/gpt-5.6-terra high")
         decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
@@ -917,7 +936,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
                                     {"code_cycle": {"profiles": {"cheap_coder": {
                                         "primary": "orca:openai/gpt-5.6-luna high"}}}}))
         result = ex.dispatch(decision, "work", ex.Registry([adapter]),
-                             policy=ex.ReadinessPolicy.PROVEN)
+                             policy=ex.ReadinessPolicy.PROVEN, writes=True)
 
         self.assertTrue(result.asynchronous)
 
@@ -965,7 +984,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
         decision = router.route("implement", router.TaskSignals(),
                                 {"codex": ex.Availability.READY})
         result = ex.dispatch(decision, "work", ex.Registry([Detailed()]),
-                             policy=ex.ReadinessPolicy.ATTEMPT)
+                             policy=ex.ReadinessPolicy.ATTEMPT, writes=True)
 
         self.assertEqual("all good", result.detail)
         self.assertEqual({"stdout": "hello"}, result.artifacts)
@@ -1136,7 +1155,7 @@ class EndToEndTests(unittest.TestCase):
         registry = ex.Registry([adapter])
         d = router.route("implement", router.TaskSignals(), {"codex": ex.Availability.READY})
 
-        result = ex.dispatch(d, "implement issue 1", registry)
+        result = ex.dispatch(d, "implement issue 1", registry, writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("gpt-5.6-luna", result.model_resolved)
@@ -1150,7 +1169,7 @@ class EndToEndTests(unittest.TestCase):
 
         d = router.route("implement", router.TaskSignals(),
                          {"codex": ex.Availability.QUOTA_EXHAUSTED, "claude": ex.Availability.READY})
-        result = ex.dispatch(d, "work", registry)
+        result = ex.dispatch(d, "work", registry, writes=True)
 
         self.assertTrue(d.used_fallback)
         self.assertEqual("claude", result.executor)

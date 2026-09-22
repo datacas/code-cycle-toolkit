@@ -840,7 +840,7 @@ def dispatch(
     # honour when convenient. Claude and Orca have no command that proves a
     # worker cannot mutate the worktree, so a configured profile cannot turn a
     # review into an untrusted write-capable stage by selecting either one.
-    if kw.get("writes") is False and not adapter.enforces_read_only:
+    if kw.get("writes", False) is False and not adapter.enforces_read_only:
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="read_only_enforcement",

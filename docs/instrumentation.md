@@ -496,6 +496,12 @@ Review and rereview therefore route to Codex, whose explicit `-s read-only`
 sandbox enforces non-mutation. A configured adapter that cannot enforce that
 boundary is blocked before it starts rather than sharing the writable tree.
 
+The default review profiles intentionally have no fallback. If Codex is
+unavailable, a review blocks instead of silently falling back to Claude or Orca
+without a proven read-only workspace. This favors review integrity over
+availability; any future fallback must first provide an immutable or otherwise
+enforced non-mutating workspace.
+
 ## Running a cycle
 
 `run_cycle.py` is the wiring, and only the wiring: probe once, label the work,
