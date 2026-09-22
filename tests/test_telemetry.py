@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+from contextlib import closing
 from pathlib import Path
 
 
@@ -550,7 +551,7 @@ class ModelDriftTests(TelemetryTestCase):
             model_resolved="claude-sonnet-5",
         )
         row_id = self.store.rows("repo")[0]["id"]
-        with self.store._connect() as connection:
+        with closing(self.store._connect()) as connection:
             connection.execute(
                 "UPDATE stages SET payload = ? WHERE id = ?", ("{}", row_id)
             )
