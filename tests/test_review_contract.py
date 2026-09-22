@@ -512,10 +512,23 @@ class CommentHistoryRecoveryTests(unittest.TestCase):
                 trusted_authors={self.reviewer},
             )
 
-    def test_nonempty_history_without_a_trusted_author_blocks_recovery(self) -> None:
-        with self.assertRaisesRegex(contract.ContractError, "no comments from trusted authors"):
+    def test_ordinary_discussion_without_a_trusted_author_starts_an_empty_record(self) -> None:
+        record = contract.recover_comment_history(
+            [contract.ProviderComment("contributor", "Thanks for the PR, could you rebase?")],
+            trusted_authors={self.reviewer},
+        )
+        self.assertEqual([], record.findings)
+        self.assertTrue(any("ignored" in note for note in record.recovery_notes))
+
+    def test_untrusted_contract_headings_without_a_trusted_author_block_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.ContractError, "contract headings only"):
             contract.recover_comment_history(
-                [contract.ProviderComment("someone-else", "no findings")],
+                [
+                    contract.ProviderComment(
+                        "someone-else",
+                        "#### [REV-001] · high · open · - · blocks:yes — First",
+                    )
+                ],
                 trusted_authors={self.reviewer},
             )
 

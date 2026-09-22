@@ -430,6 +430,17 @@ def _finding_id_collision(previous: Finding, incoming: Finding) -> bool:
     )
 
 
+def _contains_recovery_contract_header(text: str) -> bool:
+    """Whether text contains a heading that could carry recovered state."""
+    for line in text.splitlines():
+        match = _HEADER_RE.match(line.strip())
+        if match is not None and match.group(1).startswith(
+            (REVIEW_RUN_PREFIX, TRIAGE_RUN_PREFIX, FINDING_PREFIX)
+        ):
+            return True
+    return False
+
+
 def recover_comment_history(
     comments: Iterable[ProviderComment], *, trusted_authors: Iterable[str]
 ) -> ReviewRecord:
@@ -440,9 +451,9 @@ def recover_comment_history(
     same ID may advance its status while preserving its first published fields.
     The caller must pass provider author metadata and the configured review
     identities. Identity comparison is case-insensitive for provider logins;
-    bodies from every other author are ignored and reported. A non-empty
-    history that contains no trusted comment is a configuration failure, not
-    an empty finding record.
+    bodies from every other author are ignored and reported. Ordinary discussion
+    without contract headings is not review state. If only untrusted authors
+    publish contract headings, recovery fails rather than silently losing them.
     """
     trusted = frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
     if not trusted:
@@ -452,16 +463,16 @@ def recover_comment_history(
     findings: dict[str, Finding] = {}
     positions: dict[str, int] = {}
     runs: set[str] = set()
-    saw_comment = False
     saw_trusted_comment = False
+    saw_untrusted_contract_header = False
 
     for number, comment in enumerate(comments, start=1):
-        saw_comment = True
         if not isinstance(comment.author, str) or not (author := comment.author.strip()):
             raise ContractError(
                 f"history recovery needs provider author metadata for comment {number}"
             )
         if author.casefold() not in trusted:
+            saw_untrusted_contract_header |= _contains_recovery_contract_header(comment.body)
             recovered.recovery_notes.append(
                 f"comment {number} from {author!r} ignored: author is not trusted"
             )
@@ -504,8 +515,8 @@ def recover_comment_history(
         for finding_id, run_id in record.attribution.items():
             recovered.attribution.setdefault(finding_id, run_id)
 
-    if saw_comment and not saw_trusted_comment:
-        raise ContractError("history recovery found no comments from trusted authors")
+    if saw_untrusted_contract_header and not saw_trusted_comment:
+        raise ContractError("history recovery found contract headings only from untrusted authors")
 
     return recovered
 

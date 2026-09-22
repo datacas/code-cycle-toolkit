@@ -58,12 +58,13 @@ resolver assigns a disposition.
 each body is paired with provider-supplied author metadata and the configured
 `code_cycle.review.trusted_authors` allow-list. Provider logins compare
 case-insensitively; an absent or empty allow-list, missing author metadata, or a
-non-empty history with no trusted author blocks recovery. It reads the complete
-chronological history, ignores and records other authors, and skips and records
-malformed trusted comments so one bad heading cannot wedge the record. Status
-and approval blocking may move; the first severity, title, and disposition
-remain the historical record. A later re-score is audit data, but two non-empty
-titles for one ID are a collision that blocks recovery, even across comments.
+history with contract headings only from untrusted authors blocks recovery.
+Ordinary discussion starts an empty record. It reads the complete chronological
+history, ignores and records other authors, and skips and records malformed
+trusted comments so one bad heading cannot wedge the record. Status and approval
+blocking may move; the first severity, title, and disposition remain the
+historical record. A later re-score is audit data, but two non-empty titles for
+one ID are a collision that blocks recovery, even across comments.
 
 ## Dispositions are frozen
 

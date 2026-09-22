@@ -67,6 +67,33 @@ PUBLIC_REPOSITORY_REFERENCE = re.compile(
 )
 SCANNED_SUFFIXES = {".md", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".sh", ".ps1", ".py"}
 
+
+def redact_public_repository_owner_trust(text: str) -> str:
+    """Hide only a public repository owner repeated as a trusted author."""
+    owner_match = re.search(
+        r"(?m)^\s*selector:\s*([^/\s`<>{}]+)/code-cycle-toolkit(?:\.git)?\s*$",
+        text,
+    )
+    if owner_match is None:
+        return text
+    owner = owner_match.group(1)
+    lines = text.splitlines(keepends=True)
+    trusted_indent: int | None = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped == "trusted_authors:":
+            trusted_indent = indent
+            continue
+        if trusted_indent is None:
+            continue
+        if stripped and indent <= trusted_indent:
+            trusted_indent = None
+            continue
+        if stripped == f"- {owner}":
+            lines[index] = f"{' ' * indent}- <public repository owner>\n"
+    return "".join(lines)
+
 # Windows alternate data streams surface in WSL and on copied trees as a sibling
 # file, usually `<name>.md:Zone.Identifier`. The colon means it carries neither a
 # recognised suffix nor a `.Zone.Identifier` ending, so it slipped past both the
@@ -381,6 +408,8 @@ def validate_package(root: Path) -> list[str]:
         if path.resolve() == (root / "scripts" / "validate-package.py").resolve():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
+        if path.name == ".code-cycle.yml":
+            text = redact_public_repository_owner_trust(text)
         # The public repository URL is expected release metadata, not a private
         # project reference.
         text = PUBLIC_REPOSITORY_REFERENCE.sub("", text)

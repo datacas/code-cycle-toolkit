@@ -186,9 +186,11 @@ When reconstructing from provider comments and threads, read the complete
 history in chronological order with each author supplied by the provider. Fold
 only `code_cycle.review.trusted_authors`, comparing provider logins
 case-insensitively; its default is no trusted authors, so an absent or empty
-allow-list, missing author metadata, or a non-empty history with no matching
-author returns `BLOCKED`. Ignore and record every other author. A malformed
-trusted comment is skipped and recorded rather than aborting the whole history.
+allow-list or missing author metadata returns `BLOCKED`. Ignore and record every
+other author. Ordinary discussion without contract headings starts an empty
+record; return `BLOCKED` only when contract headings occur only under untrusted
+authors. A malformed trusted comment is skipped and recorded rather than
+aborting the whole history.
 A later trusted comment is a partial update, not a replacement snapshot:
 omitting an ID never removes it, status may move, and an assigned disposition
 stays frozen. Preserve the first severity and title; report a later re-score as

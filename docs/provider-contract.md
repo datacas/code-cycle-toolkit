@@ -73,8 +73,9 @@ tokens, passwords, private keys, or client secrets in it.
 may create or advance recovered findings. Its default is no trusted authors:
 when it is absent or empty, a cycle that needs history recovery returns
 `BLOCKED`. Code-host adapters must supply the author from authenticated provider
-metadata; missing metadata or a non-empty history with no matching author also
-returns `BLOCKED`. Compare provider login identities case-insensitively.
+metadata; missing metadata or contract headings published only by untrusted
+authors also returns `BLOCKED`. Ordinary discussion without contract headings
+starts an empty record. Compare provider login identities case-insensitively.
 
 ## Provider responsibilities
 

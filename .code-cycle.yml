@@ -7,8 +7,9 @@ code_cycle:
   review:
     # The provider identities whose comments may advance recovered findings.
     # Provider logins are compared case-insensitively. An absent or empty list
-    # must block recovery rather than treating the history as finding-free.
-    trusted_authors: []
+    # must block recovery rather than treating contract state as finding-free.
+    trusted_authors:
+      - datacas
   # Experimental candidates for a reviewer comparison that has not run yet.
   # Neither is the default reviewer and nothing presumes which is better; the
   # calibration decides that. This is the only place an alias maps to a

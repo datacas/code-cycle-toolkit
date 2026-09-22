@@ -9,8 +9,9 @@ All notable changes to this project are documented here. This project follows
 
 - Trusted full-history finding recovery: `code_cycle.review.trusted_authors`
   defines a case-insensitive provider-login allow-list, invalid trust anchors
-  block rather than silently empty the record, malformed/untrusted comments are
-  recorded without wedging recovery, and cross-comment ID reuse blocks safely.
+  block only when untrusted contract state could be lost, ordinary discussion
+  starts an empty record, malformed/untrusted comments are recorded without
+  wedging recovery, and cross-comment ID reuse blocks safely.
 - Finding headers carry a disposition token: `#### [REV-004] · medium · resolved · valid · blocks:yes — Short title`.
   It records what the first resolver made of the finding, independently of what
   happened to the code.
