@@ -209,6 +209,9 @@ All notable changes to this project are documented here. This project follows
   dispatch consumes and never creates, with the Task ID kept separate from the
   prompt every other adapter takes. The Orca agent follows the target's
   provider.
+- Orca review dispatches now require an explicit `OrcaReviewWorkspace` whose
+  immutable or disposable path does not overlap the implementer's workspace;
+  missing, mismatched and contradictory workspace contracts fail closed.
 - `DispatchResult.learned_availability`: the evidence a failed dispatch produced
   about its executor, so the orchestrator can re-route once when a window turns
   out to be exhausted — the only moment that is knowable for a native executor.

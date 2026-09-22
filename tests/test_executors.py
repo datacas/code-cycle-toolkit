@@ -53,6 +53,24 @@ def decision(target=TARGET, mode=router.RoutingMode.PRODUCTION, blocked=False):
     return router.RoutingDecision("cheap_coder", None if blocked else target, mode, blocked=blocked)
 
 
+def orca_context(**kwargs):
+    return ex.OrcaDispatchContext(
+        coordinator=kwargs.pop("coordinator", "term_1"),
+        run_id=kwargs.pop("run_id", "run_1"),
+        task_id=kwargs.pop("task_id", "task_1"),
+        worker_agent=kwargs.pop("worker_agent", None),
+        review_workspace=kwargs.pop(
+            "review_workspace",
+            ex.OrcaReviewWorkspace(
+                path="/repo/review",
+                implementer_path="/repo/implementer",
+                isolation="disposable",
+            ),
+        ),
+        **kwargs,
+    )
+
+
 class ProbeHonestyTests(unittest.TestCase):
     """A probe reports what it demonstrated, never what it hopes."""
 
@@ -473,7 +491,8 @@ class OrcaDispatchTests(unittest.TestCase):
             return self.receipt()
 
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"), runner=runner
+            self.TARGET, "ignored-prompt", cwd="/repo/implementer",
+            context=orca_context(), runner=runner
         )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
@@ -491,7 +510,8 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_a_receipt_reporting_another_model_is_a_contract_violation(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
+            self.TARGET, "ignored-prompt", cwd="/repo/implementer",
+            context=orca_context(),
             runner=lambda *a, **k: self.receipt(model="gpt-5.6-terra"),
         )
 
@@ -500,7 +520,8 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_a_worker_that_did_not_reach_ready_is_a_failure(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
+            self.TARGET, "ignored-prompt", cwd="/repo/implementer",
+            context=orca_context(),
             runner=lambda *a, **k: self.receipt(state="failed"),
         )
 
@@ -508,7 +529,8 @@ class OrcaDispatchTests(unittest.TestCase):
 
     def test_a_rejected_worker_start_carries_its_error(self) -> None:
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "ignored-prompt", context=ex.OrcaDispatchContext(coordinator="term_1", run_id="run_1", task_id="task_1"),
+            self.TARGET, "ignored-prompt", cwd="/repo/implementer",
+            context=orca_context(),
             runner=lambda *a, **k: self.receipt(ok=False, error={"message": "terminal_handle_stale"}),
         )
 
@@ -533,6 +555,25 @@ class OrcaDispatchTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("orca", result.executor)
 
+    def test_a_review_fallback_carries_the_isolation_contract(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["cwd"] = cwd
+            return self.receipt()
+
+        adapter = ex.OrcaAdapter()
+        routing = router.RoutingDecision(
+            "reviewer", self.TARGET, router.RoutingMode.PRODUCTION)
+        result = ex.dispatch(
+            routing, "review it", ex.Registry([adapter]), writes=False,
+            cwd="/repo/implementer", context=orca_context(), runner=runner,
+            probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("/repo/review", seen["cwd"])
+
 
 class OrcaContractTests(unittest.TestCase):
     """The Orca command has to say what it means."""
@@ -553,8 +594,11 @@ class OrcaContractTests(unittest.TestCase):
             run_id=ctx.get("run_id", "run_1"),
             task_id=ctx.get("task_id", "task_1"),
             worker_agent=ctx.get("worker_agent"),
+            review_workspace=ctx.get("review_workspace", orca_context().review_workspace),
         )
-        ex.OrcaAdapter().dispatch(target, "the prompt", context=context, runner=runner)
+        ex.OrcaAdapter().dispatch(
+            target, "the prompt", cwd=ctx.get("cwd", "/repo/implementer"),
+            context=context, runner=runner)
         return seen["argv"]
 
     def test_the_run_id_reaches_the_command(self) -> None:
@@ -586,9 +630,9 @@ class OrcaContractTests(unittest.TestCase):
 
     def test_an_unmappable_provider_is_refused_rather_than_guessed(self) -> None:
         target = router.parse_target("orca:someone/their-model high")
-        context = ex.OrcaDispatchContext(coordinator="t", run_id="r", task_id="k")
+        context = orca_context(coordinator="t", run_id="r", task_id="k")
 
-        result = ex.OrcaAdapter().dispatch(target, "p", context=context,
+        result = ex.OrcaAdapter().dispatch(target, "p", cwd="/repo/implementer", context=context,
                                            runner=lambda *a, **k: completed("{}"))
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
@@ -601,6 +645,84 @@ class OrcaContractTests(unittest.TestCase):
                 with self.assertRaises(ex.ExecutorError):
                     ex.OrcaDispatchContext(**args)
 
+    def test_a_review_requires_an_explicit_isolated_workspace(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.OPENAI, "the prompt",
+            cwd="/repo/implementer",
+            context=ex.OrcaDispatchContext(
+                coordinator="term_1", run_id="run_1", task_id="task_1"),
+            runner=lambda *args, **kwargs: self.fail("the worker must not start"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("review_workspace_isolation", result.missing_capability)
+
+    def test_a_review_workspace_cannot_be_the_implementer_workspace(self) -> None:
+        cases = (
+            ("/repo/implementer", "/repo/implementer"),
+            ("/repo", "/repo/implementer"),
+            ("/repo/implementer/.review", "/repo/implementer"),
+        )
+        for path, implementer_path in cases:
+            with self.subTest(path=path, implementer_path=implementer_path):
+                with self.assertRaises(ex.ExecutorError):
+                    ex.OrcaReviewWorkspace(
+                        path=path,
+                        implementer_path=implementer_path,
+                        isolation="disposable",
+                    )
+
+    def test_orca_uses_a_declared_workspace_contract_not_read_only_claim(self) -> None:
+        adapter = ex.OrcaAdapter()
+
+        self.assertFalse(adapter.enforces_read_only)
+        self.assertTrue(adapter.supports_non_writing(context=orca_context()))
+        self.assertFalse(adapter.supports_non_writing())
+
+    def test_a_review_with_no_cwd_cannot_verify_the_implementer_workspace(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.OPENAI, "the prompt", context=orca_context(),
+            runner=lambda *args, **kwargs: self.fail("the worker must not start"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("review_workspace_mismatch", result.missing_capability)
+
+    def test_a_writing_dispatch_rejects_a_review_workspace(self) -> None:
+        result = ex.OrcaAdapter().dispatch(
+            self.OPENAI, "the prompt", cwd="/repo/implementer",
+            context=orca_context(), writes=True,
+            runner=lambda *args, **kwargs: self.fail("the worker must not start"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("review_workspace_conflict", result.missing_capability)
+
+    def test_a_review_runs_in_the_isolated_workspace(self) -> None:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            seen["cwd"] = cwd
+            return completed(json.dumps({"ok": True, "result": {
+                "state": "ready",
+                "launch": {"effective": {"model": self.OPENAI.model}},
+            }}))
+
+        result = ex.OrcaAdapter().dispatch(
+            self.OPENAI, "the prompt", cwd="/repo/implementer",
+            context=orca_context(), runner=runner,
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("/repo/review", seen["cwd"])
+        self.assertEqual(
+            "path:/repo/review",
+            seen["argv"][seen["argv"].index("--worktree") + 1],
+        )
+        self.assertNotEqual("/repo/implementer", seen["cwd"])
+        self.assertEqual("disposable", result.artifacts["reviewWorkspace"]["isolation"])
+
 
 class OrcaExitStatusTests(unittest.TestCase):
     """The CLI exits 0 only for ready; the body alone is not the answer."""
@@ -609,7 +731,7 @@ class OrcaExitStatusTests(unittest.TestCase):
     CONTEXT = None
 
     def setUp(self) -> None:
-        self.CONTEXT = ex.OrcaDispatchContext(coordinator="t", run_id="r", task_id="k")
+        self.CONTEXT = orca_context(coordinator="t", run_id="r", task_id="k")
         self.ready_receipt = json.dumps({"ok": True, "result": {
             "state": "ready", "stage": "dispatch_input",
             "launch": {"effective": {"model": "gpt-5.6-luna"}}}})
@@ -617,7 +739,7 @@ class OrcaExitStatusTests(unittest.TestCase):
 
     def dispatch(self, returncode):
         return ex.OrcaAdapter().dispatch(
-            self.TARGET, "p", context=self.CONTEXT,
+            self.TARGET, "p", cwd="/repo/implementer", context=self.CONTEXT,
             runner=lambda *a, **k: completed(self.ready_receipt, returncode=returncode),
         )
 
@@ -637,7 +759,7 @@ class OrcaExitStatusTests(unittest.TestCase):
             "residualResources": [{"kind": "worktree"}]}})
 
         result = ex.OrcaAdapter().dispatch(
-            self.TARGET, "p", context=self.CONTEXT,
+            self.TARGET, "p", cwd="/repo/implementer", context=self.CONTEXT,
             runner=lambda *a, **k: completed(body, returncode=1),
         )
 
@@ -895,7 +1017,8 @@ class AsynchronousDispatchTests(unittest.TestCase):
         return ex.OrcaAdapter().dispatch(
             router.parse_target("orca:openai/gpt-5.6-luna high"), "work",
             runner=lambda *a, **k: completed(payload),
-            context=ex.OrcaDispatchContext(coordinator="C", run_id="R", task_id="T"),
+            cwd="/repo/implementer",
+            context=orca_context(coordinator="C", run_id="R", task_id="T"),
         )
 
     def test_a_started_worker_is_reported_as_asynchronous(self) -> None:
