@@ -135,7 +135,8 @@ class ReadinessPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(), "work", registry, policy=ex.ReadinessPolicy.ATTEMPT)
+        result = ex.dispatch(decision(), "work", registry, policy=ex.ReadinessPolicy.ATTEMPT,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual(ex.Availability.AUTHENTICATED, result.dispatched_from)
@@ -157,7 +158,7 @@ class DefaultPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(), "work", registry)
+        result = ex.dispatch(decision(), "work", registry, writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual(ex.ReadinessPolicy.ATTEMPT, result.readiness_policy)
@@ -166,7 +167,8 @@ class DefaultPolicyTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry)
+        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual([], adapter.dispatched)
@@ -204,7 +206,8 @@ class DispatchGateTests(unittest.TestCase):
         adapter = FakeAdapter(probe(ex.Availability.READY, ceiling=ex.Availability.READY))
         registry = ex.Registry([adapter])
 
-        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry)
+        result = ex.dispatch(decision(mode=router.RoutingMode.CALIBRATION), "work", registry,
+                             writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
 
@@ -523,6 +526,7 @@ class OrcaDispatchTests(unittest.TestCase):
 
         result = ex.dispatch(
             d, "prompt", registry,
+            writes=True,
             probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "runtime ready")},
         )
 
@@ -660,6 +664,131 @@ class OrcaExitStatusTests(unittest.TestCase):
         )
 
         self.assertEqual(ex.Availability.READY, result.availability)
+
+
+class PermissionTests(unittest.TestCase):
+    """What a stage is allowed to touch is what the stage is for.
+
+    Four canary runs had an implementer that could not implement: `codex exec`
+    is read-only unless told otherwise and nothing here ever told it. Claude is
+    the opposite — a dispatched one edited a file with no flag at all.
+    """
+
+    def codex(self, **kw):
+        return ex.CodexAdapter().argv(TARGET, "work", **kw)
+
+    def claude(self, **kw):
+        return ex.ClaudeAdapter().argv(
+            router.parse_target("claude:anthropic/claude-sonnet-5 high"), "work", **kw)
+
+    def test_a_writing_stage_may_write_where_it_was_sent(self) -> None:
+        argv = self.codex(writes=True)
+
+        self.assertIn("-s", argv)
+        self.assertEqual("workspace-write", argv[argv.index("-s") + 1])
+
+    def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
+        """A default that changes is a permission nobody chose."""
+        argv = self.codex(writes=False)
+
+        self.assertEqual("read-only", argv[argv.index("-s") + 1])
+
+    def test_asking_for_nothing_asks_for_the_smaller_permission(self) -> None:
+        self.assertEqual("read-only", self.codex()[self.codex().index("-s") + 1])
+
+    def test_no_argument_list_ever_asks_for_full_access(self) -> None:
+        """The CLIs offer it; nothing here builds a command that requests it.
+
+        Asserted over what is executed rather than over the source text, which
+        mentions these names to say they are not used.
+        """
+        forbidden = ("danger-full-access", "--dangerously-bypass-approvals-and-sandbox",
+                     "--dangerously-skip-permissions", "bypassPermissions")
+
+        for writes in (False, True):
+            for argv in (self.codex(writes=writes), self.claude(writes=writes)):
+                for token in forbidden:
+                    with self.subTest(writes=writes, token=token, argv=argv[0]):
+                        self.assertNotIn(token, argv)
+
+    def test_claude_declares_a_writing_stage(self) -> None:
+        argv = self.claude(writes=True)
+
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
+
+    def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
+        """A live probe wrote the file anyway with the edit tools disallowed,
+        and plan mode refuses the edit by turning a review into planning. So a
+        reading stage gets no flag here rather than a false guarantee."""
+        argv = self.claude(writes=False)
+
+        self.assertNotIn("--permission-mode", argv)
+        self.assertNotIn("--disallowedTools", argv)
+
+    def test_a_reading_dispatch_fails_closed_for_an_unconfined_adapter(self) -> None:
+        """A configured Claude review cannot silently share the writable tree."""
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.ClaudeAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("the adapter must not be invoked")
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]), writes=False, runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("read_only_enforcement", result.missing_capability)
+
+    def test_an_omitted_permission_defaults_to_the_same_read_only_boundary(self) -> None:
+        """The dispatch contract must not become fail-open outside CycleRecorder."""
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.ClaudeAdapter()
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]),
+            runner=lambda *args, **kwargs: self.fail("the adapter must not be invoked"),
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("read_only_enforcement", result.missing_capability)
+
+    def test_a_reading_dispatch_reaches_an_adapter_with_enforced_sandboxing(self) -> None:
+        target = router.parse_target("codex:openai/gpt-5.6-terra high")
+        decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
+        adapter = ex.CodexAdapter()
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("{}")
+
+        result = ex.dispatch(
+            decision, "review it", ex.Registry([adapter]), writes=False, runner=runner,
+            probes={"codex": ex.ProbeResult("codex", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("read-only", seen["argv"][seen["argv"].index("-s") + 1])
+
+    def test_the_permission_reaches_the_adapter_from_the_dispatch(self) -> None:
+        seen = {}
+
+        class Watching(ex.CodexAdapter):
+            def argv(self, target, task, cwd=None, writes=False):
+                seen["writes"] = writes
+                return ["true"]
+
+        adapter = Watching()
+        adapter.dispatch(TARGET, "work", writes=True,
+                         runner=lambda *a, **k: completed("{}"))
+
+        self.assertIs(True, seen["writes"])
 
 
 class AgentOutputTests(unittest.TestCase):
@@ -807,7 +936,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
                                     {"code_cycle": {"profiles": {"cheap_coder": {
                                         "primary": "orca:openai/gpt-5.6-luna high"}}}}))
         result = ex.dispatch(decision, "work", ex.Registry([adapter]),
-                             policy=ex.ReadinessPolicy.PROVEN)
+                             policy=ex.ReadinessPolicy.PROVEN, writes=True)
 
         self.assertTrue(result.asynchronous)
 
@@ -855,7 +984,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
         decision = router.route("implement", router.TaskSignals(),
                                 {"codex": ex.Availability.READY})
         result = ex.dispatch(decision, "work", ex.Registry([Detailed()]),
-                             policy=ex.ReadinessPolicy.ATTEMPT)
+                             policy=ex.ReadinessPolicy.ATTEMPT, writes=True)
 
         self.assertEqual("all good", result.detail)
         self.assertEqual({"stdout": "hello"}, result.artifacts)
@@ -1026,7 +1155,7 @@ class EndToEndTests(unittest.TestCase):
         registry = ex.Registry([adapter])
         d = router.route("implement", router.TaskSignals(), {"codex": ex.Availability.READY})
 
-        result = ex.dispatch(d, "implement issue 1", registry)
+        result = ex.dispatch(d, "implement issue 1", registry, writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("gpt-5.6-luna", result.model_resolved)
@@ -1040,7 +1169,7 @@ class EndToEndTests(unittest.TestCase):
 
         d = router.route("implement", router.TaskSignals(),
                          {"codex": ex.Availability.QUOTA_EXHAUSTED, "claude": ex.Availability.READY})
-        result = ex.dispatch(d, "work", registry)
+        result = ex.dispatch(d, "work", registry, writes=True)
 
         self.assertTrue(d.used_fallback)
         self.assertEqual("claude", result.executor)

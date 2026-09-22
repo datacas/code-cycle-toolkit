@@ -92,11 +92,18 @@ class RunCycleTestCase(unittest.TestCase):
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
 
     def run_cycle(self, implementer, reviewer, **kw):
+        profiles = kw.pop("profiles", router.load_profiles({"code_cycle": {
+            # These scripted adapters declare an in-memory non-mutation
+            # boundary, so tests of the driver can choose their reviewer while
+            # production defaults continue to select Codex's real sandbox.
+            "profiles": {"reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}},
+        }}))
         return rc.run_cycle(
             "owner/api", "API-7", router.TaskSignals(), self.store,
             registry=ex.Registry([implementer, reviewer]),
             availability={implementer.name: ex.Availability.READY,
                           reviewer.name: ex.Availability.READY},
+            profiles=profiles,
             **kw,
         )
 
@@ -266,6 +273,47 @@ class FunctionalStopTests(RunCycleTestCase):
 
         self.assertEqual(["implement", "review"], [s.role for s in report.stages])
         self.assertEqual(rc.APPROVED_END, report.status)
+
+
+class RolePermissionTests(RunCycleTestCase):
+    """The driver decides what a stage may touch, from what the stage is."""
+
+    class Watching(Talker):
+        def __init__(self, name, body=None):
+            super().__init__(name, body)
+            self.permissions = []
+
+        def dispatch(self, target, task, **kw):
+            self.permissions.append(kw.get("writes"))
+            return super().dispatch(target, task, **kw)
+
+    def test_the_implementer_may_write_and_the_reviewer_may_not(self) -> None:
+        codex = self.Watching("codex")
+        claude = self.Watching("claude")
+
+        self.run_cycle(codex, claude)
+
+        self.assertEqual([True], codex.permissions)
+        self.assertEqual([False], claude.permissions)
+
+    def test_a_resolution_may_write_and_its_rereview_may_not(self) -> None:
+        codex = self.Watching("codex")
+        claude = self.Watching("claude")
+        claude.body = None
+        reviewer = Sequence("claude", [block("CHANGES_REQUESTED"), APPROVED])
+        reviewer.permissions = []
+        original = reviewer.dispatch
+
+        def watching(target, task, **kw):
+            reviewer.permissions.append(kw.get("writes"))
+            return original(target, task, **kw)
+
+        reviewer.dispatch = watching
+
+        self.run_cycle(codex, reviewer)
+
+        self.assertEqual([True, True], codex.permissions)
+        self.assertEqual([False, False], reviewer.permissions)
 
 
 class ReportedReasonTests(RunCycleTestCase):
@@ -484,7 +532,7 @@ code_cycle:
         implement = report.stages[0]
         self.assertEqual("claude", implement.result.executor)
         self.assertEqual("claude-sonnet-5", implement.decision.target.model)
-        self.assertEqual([], codex.dispatched)
+        self.assertEqual(1, len(codex.dispatched))
 
     def test_without_a_declaration_the_defaults_are_untouched(self) -> None:
         report = rc.run_cycle(

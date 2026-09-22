@@ -157,9 +157,8 @@ DEFAULT_PROFILES: dict[str, dict] = {
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
     "deep_coder":     {"primary": "codex:openai/gpt-5.6-luna max",
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
-    "reviewer":       {"primary": "claude:anthropic/claude-sonnet-5 high"},
-    "senior_reviewer": {"primary": "claude:anthropic/claude-opus-5 high",
-                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
+    "reviewer":       {"primary": "codex:openai/gpt-5.6-terra high"},
+    "senior_reviewer": {"primary": "codex:openai/gpt-5.6-terra max"},
     "security":       {"primary": "claude:anthropic/claude-opus-5 high"},
 }
 

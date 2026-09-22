@@ -115,6 +115,14 @@ All notable changes to this project are documented here. This project follows
   own report is not a completion stops the cycle, with the dispatch row still
   recording `succeeded` and the reported status recorded beside it. The canary
   had Codex exit 0 having changed nothing and the cycle review it.
+- A stage is dispatched with the permission its role needs: `implement` and
+  `resolve` may write, everything else reads. `codex exec` gets `-s
+  workspace-write` or `-s read-only`, Claude gets `--permission-mode acceptEdits`
+  when writing. Until this, `codex exec` defaulted to read-only and nothing asked
+  otherwise, so a dispatched implementer could never implement. No argument list
+  built here asks for `danger-full-access` or a bypass flag. Review profiles use
+  Codex, which enforces its read-only sandbox; any configured adapter that cannot
+  enforce non-mutation fails closed before it is started.
 - `scripts/run_cycle.py`, the production wiring: probe once, label the work,
   then `implement → review → (resolve → rereview)*` with every stage through
   `CycleRecorder.stage()`. It decides nothing — no cost model, no learning — and
