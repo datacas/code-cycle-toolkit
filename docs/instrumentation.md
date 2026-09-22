@@ -52,6 +52,20 @@ resolver rejected; `open` + `debatable` is one still under discussion.
 `-` means not triaged yet. A reviewer always publishes `-`, because only a
 resolver assigns a disposition.
 
+## Trusted finding recovery
+
+`scripts/review_contract.py` recovers findings from provider comments only when
+each body is paired with provider-supplied author metadata and the configured
+`code_cycle.review.trusted_authors` allow-list. Provider logins compare
+case-insensitively; an absent or empty allow-list, missing author metadata, or a
+history with contract headings only from untrusted authors blocks recovery.
+Ordinary discussion starts an empty record. It reads the complete chronological
+history, ignores and records other authors, and skips and records malformed
+trusted comments so one bad heading cannot wedge the record. Status and approval
+blocking may move; the first severity, title, and disposition remain the
+historical record. A later re-score is audit data, but two non-empty titles for
+one ID are a collision that blocks recovery, even across comments.
+
 ## Dispositions are frozen
 
 The first resolver that triages a finding assigns its disposition. From then on

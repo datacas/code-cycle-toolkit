@@ -438,5 +438,162 @@ class CommentRecoveryTests(unittest.TestCase):
         self.assertIsNone(record.finding("REV-999"))
 
 
+class CommentHistoryRecoveryTests(unittest.TestCase):
+    reviewer = "review-bot"
+
+    def recover(self, *bodies: str) -> contract.ReviewRecord:
+        return contract.recover_comment_history(
+            [contract.ProviderComment(self.reviewer, body) for body in bodies],
+            trusted_authors={self.reviewer},
+        )
+
+    def test_an_omitted_finding_survives_a_later_comment(self) -> None:
+        record = self.recover(
+            "#### [REV-001] · high · open · - · blocks:yes — First",
+            "#### [REV-002] · low · open · - · blocks:no — Second",
+        )
+
+        self.assertEqual(["REV-001", "REV-002"], [item.id for item in record.findings])
+        self.assertEqual("open", record.finding("REV-001").status)
+
+    def test_a_later_header_advances_status_but_keeps_disposition(self) -> None:
+        record = self.recover(
+            "#### [REV-001] · high · open · valid · blocks:yes — First",
+            "#### [REV-001] · high · resolved · incorrect · blocks:no — First",
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("resolved", finding.status)
+        self.assertEqual("valid", finding.disposition)
+        self.assertFalse(finding.blocks_approval)
+
+    def test_a_real_id_collision_in_one_comment_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.FindingCollisionError, "REV-001"):
+            self.recover(
+                "\n".join(
+                    [
+                        "#### [REV-001] · high · open · - · blocks:yes — First",
+                        "#### [REV-001] · medium · open · - · blocks:yes — Different",
+                    ]
+                )
+            )
+
+    def test_a_real_id_collision_across_comments_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.FindingCollisionError, "REV-001"):
+            self.recover(
+                "#### [REV-001] · critical · open · - · blocks:yes — SQL injection",
+                "#### [REV-001] · low · resolved · - · blocks:no — README typo",
+            )
+
+    def test_a_rescore_is_audit_data_not_a_collision(self) -> None:
+        record = self.recover(
+            "#### [REV-001] · high · open · - · blocks:yes — First",
+            "#### [REV-001] · medium · resolved · - · blocks:no — First",
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("high", finding.severity)
+        self.assertEqual("resolved", finding.status)
+        self.assertTrue(any("severity" in note for note in record.recovery_notes))
+
+    def test_trusted_author_matching_is_case_insensitive(self) -> None:
+        record = contract.recover_comment_history(
+            [contract.ProviderComment("review-bot", "#### [REV-001] · high · open · - · blocks:yes — First")],
+            trusted_authors={"REVIEW-BOT"},
+        )
+        self.assertIsNotNone(record.finding("REV-001"))
+
+    def test_missing_provider_author_metadata_blocks_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.ContractError, "author metadata"):
+            contract.recover_comment_history(
+                [contract.ProviderComment(None, "#### [REV-001] · high · open · - · blocks:yes — First")],
+                trusted_authors={self.reviewer},
+            )
+
+    def test_ordinary_discussion_without_a_trusted_author_starts_an_empty_record(self) -> None:
+        record = contract.recover_comment_history(
+            [contract.ProviderComment("contributor", "Thanks for the PR, could you rebase?")],
+            trusted_authors={self.reviewer},
+        )
+        self.assertEqual([], record.findings)
+        self.assertTrue(any("ignored" in note for note in record.recovery_notes))
+
+    def test_untrusted_contract_headings_without_a_trusted_author_block_recovery(self) -> None:
+        with self.assertRaisesRegex(contract.ContractError, "contract headings only"):
+            contract.recover_comment_history(
+                [
+                    contract.ProviderComment(
+                        "someone-else",
+                        "#### [REV-001] · high · open · - · blocks:yes — First",
+                    )
+                ],
+                trusted_authors={self.reviewer},
+            )
+
+    def test_a_legacy_title_gap_is_not_treated_as_a_collision(self) -> None:
+        record = self.recover(
+            "#### [REV-001] · high · open · blocks:yes",
+            "#### [REV-001] · high · resolved · valid · blocks:no — First",
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("First", finding.title)
+        self.assertEqual("resolved", finding.status)
+
+    def test_the_next_id_uses_the_historical_maximum_not_the_last_comment(self) -> None:
+        record = self.recover(
+            "#### [REV-007] · high · open · - · blocks:yes — First",
+            "#### [REV-001] · low · open · - · blocks:no — Second",
+        )
+
+        self.assertEqual("REV-008", contract.next_finding_id(record))
+
+    def test_an_untrusted_author_cannot_advance_a_finding(self) -> None:
+        record = contract.recover_comment_history(
+            [
+                contract.ProviderComment(
+                    self.reviewer,
+                    "#### [REV-001] · critical · open · - · blocks:yes — SQL injection",
+                ),
+                contract.ProviderComment(
+                    "drive-by",
+                    "#### [REV-001] · critical · resolved · - · blocks:no — SQL injection",
+                ),
+            ],
+            trusted_authors={self.reviewer},
+        )
+
+        finding = record.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("open", finding.status)
+        self.assertTrue(finding.blocks_approval)
+        self.assertTrue(any("not trusted" in note for note in record.recovery_notes))
+
+    def test_a_malformed_trusted_comment_is_skipped_and_reported(self) -> None:
+        record = self.recover(
+            "#### [REV-001] · high · open · - · blocks:yes — First",
+            "#### [REV-002] · lets discuss this one",
+        )
+
+        self.assertIsNotNone(record.finding("REV-001"))
+        self.assertTrue(any("skipped" in note for note in record.recovery_notes))
+
+    def test_runs_and_attribution_are_recovered_once(self) -> None:
+        comment = "\n".join([REVIEW_RUN, "- REV-001 ← CCR-20260918-001"])
+        record = self.recover(comment, comment)
+
+        self.assertEqual(["CCR-20260918-001"], [run.id for run in record.runs])
+        self.assertEqual("CCR-20260918-001", record.attribution["REV-001"])
+
+    def test_empty_and_non_numeric_history_start_at_rev_001(self) -> None:
+        self.assertEqual("REV-001", contract.next_finding_id(self.recover()))
+        record = self.recover("#### [REV-alpha] · low · open · - · blocks:no — Legacy")
+
+        self.assertEqual("REV-001", contract.next_finding_id(record))
+
+
 if __name__ == "__main__":
     unittest.main()

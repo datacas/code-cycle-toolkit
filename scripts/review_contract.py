@@ -24,6 +24,7 @@ published finding, new or previous.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 SCHEMA_VERSION = 1
@@ -62,6 +63,10 @@ _BLOCKS_RE = re.compile(r"^blocks:(yes|no)$")
 
 class ContractError(ValueError):
     """A line claims to follow the contract but violates it."""
+
+
+class FindingCollisionError(ContractError):
+    """One stable finding ID was reused for a different finding."""
 
 
 @dataclass(frozen=True)
@@ -128,13 +133,22 @@ class Finding:
         return self.disposition != UNTRIAGED
 
 
+@dataclass(frozen=True)
+class ProviderComment:
+    """One provider comment with identity metadata kept separate from its body."""
+
+    author: str | None
+    body: str
+
+
 @dataclass
 class ReviewRecord:
-    """Everything the contract lets a later run recover from one comment."""
+    """Everything the contract lets a later run recover from trusted comments."""
 
     runs: list[RunLine] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     attribution: dict[str, str] = field(default_factory=dict)
+    recovery_notes: list[str] = field(default_factory=list)
 
     @property
     def review_runs(self) -> list[RunLine]:
@@ -368,11 +382,155 @@ def merge_disposition(previous: str | None, incoming: str) -> str:
 def merge_finding(previous: Finding | None, incoming: Finding) -> Finding:
     """Carry a finding forward into a republished comment.
 
-    `status` moves with the code. `disposition` does not.
+    `status` and approval blocking move with the code. The first published
+    severity and non-empty title, as well as a triaged disposition, are frozen
+    as the historical identity of the finding.
     """
     if previous is None:
         return incoming
-    return replace(incoming, disposition=merge_disposition(previous.disposition, incoming.disposition))
+    return replace(
+        incoming,
+        severity=previous.severity,
+        title=previous.title or incoming.title,
+        disposition=merge_disposition(previous.disposition, incoming.disposition),
+    )
+
+
+def _finding_identity_disagreements(previous: Finding, incoming: Finding) -> list[str]:
+    """Describe non-identity disagreements without rewriting first publication.
+
+    A review can legitimately re-score a finding. That difference is audit
+    data, not evidence by itself that an ID was reused for a different finding.
+    The recovered record keeps the first severity, title, and disposition while
+    allowing status and approval blocking to advance.
+    """
+    disagreements: list[str] = []
+    if previous.severity != incoming.severity:
+        disagreements.append(
+            f"severity {previous.severity!r} was republished as {incoming.severity!r}"
+        )
+    if (
+        previous.triaged
+        and incoming.triaged
+        and previous.disposition != incoming.disposition
+    ):
+        disagreements.append(
+            "disposition "
+            f"{previous.disposition!r} was republished as {incoming.disposition!r}"
+        )
+    return disagreements
+
+
+def _finding_id_collision(previous: Finding, incoming: Finding) -> bool:
+    """Whether an ID was assigned to two distinct non-legacy findings."""
+    return bool(
+        previous.title
+        and incoming.title
+        and previous.title.casefold() != incoming.title.casefold()
+    )
+
+
+def _contains_recovery_contract_header(text: str) -> bool:
+    """Whether text contains a heading that could carry recovered state."""
+    for line in text.splitlines():
+        match = _HEADER_RE.match(line.strip())
+        if match is not None and match.group(1).startswith(
+            (REVIEW_RUN_PREFIX, TRIAGE_RUN_PREFIX, FINDING_PREFIX)
+        ):
+            return True
+    return False
+
+
+def recover_comment_history(
+    comments: Iterable[ProviderComment], *, trusted_authors: Iterable[str]
+) -> ReviewRecord:
+    """Fold complete change-request comments, oldest first, into one record.
+
+    A comment is a partial update, not a replacement snapshot. Omitting a
+    finding therefore leaves its recovered state intact; a later header for the
+    same ID may advance its status while preserving its first published fields.
+    The caller must pass provider author metadata and the configured review
+    identities. Identity comparison is case-insensitive for provider logins;
+    bodies from every other author are ignored and reported. Ordinary discussion
+    without contract headings is not review state. If only untrusted authors
+    publish contract headings, recovery fails rather than silently losing them.
+    """
+    trusted = frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
+    if not trusted:
+        raise ContractError("history recovery needs at least one trusted author")
+
+    recovered = ReviewRecord()
+    findings: dict[str, Finding] = {}
+    positions: dict[str, int] = {}
+    runs: set[str] = set()
+    saw_trusted_comment = False
+    saw_untrusted_contract_header = False
+
+    for number, comment in enumerate(comments, start=1):
+        if not isinstance(comment.author, str) or not (author := comment.author.strip()):
+            raise ContractError(
+                f"history recovery needs provider author metadata for comment {number}"
+            )
+        if author.casefold() not in trusted:
+            saw_untrusted_contract_header |= _contains_recovery_contract_header(comment.body)
+            recovered.recovery_notes.append(
+                f"comment {number} from {author!r} ignored: author is not trusted"
+            )
+            continue
+        saw_trusted_comment = True
+        try:
+            record = parse_comment(comment.body)
+        except ContractError as error:
+            recovered.recovery_notes.append(
+                f"comment {number} from {comment.author!r} skipped: {error}"
+            )
+            continue
+        for run in record.runs:
+            if run.id not in runs:
+                recovered.runs.append(run)
+                runs.add(run.id)
+        in_comment: dict[str, Finding] = {}
+        for incoming in record.findings:
+            snapshot = in_comment.get(incoming.id)
+            if snapshot is not None and _finding_id_collision(snapshot, incoming):
+                raise FindingCollisionError(
+                    f"{incoming.id} identifies incompatible findings in comment {number}"
+                )
+            in_comment[incoming.id] = incoming
+            previous = findings.get(incoming.id)
+            if previous is not None and _finding_id_collision(previous, incoming):
+                raise FindingCollisionError(
+                    f"{incoming.id} identifies incompatible findings across comment history"
+                )
+            if previous is not None:
+                for disagreement in _finding_identity_disagreements(previous, incoming):
+                    recovered.recovery_notes.append(f"{incoming.id}: {disagreement}")
+            merged = merge_finding(previous, incoming)
+            findings[incoming.id] = merged
+            if previous is None:
+                positions[incoming.id] = len(recovered.findings)
+                recovered.findings.append(merged)
+            else:
+                recovered.findings[positions[incoming.id]] = merged
+        for finding_id, run_id in record.attribution.items():
+            recovered.attribution.setdefault(finding_id, run_id)
+
+    if saw_untrusted_contract_header and not saw_trusted_comment:
+        raise ContractError("history recovery found contract headings only from untrusted authors")
+
+    return recovered
+
+
+def next_finding_id(record: ReviewRecord | Iterable[Finding]) -> str:
+    """Allocate after the highest numeric REV-ID recovered from all history."""
+    findings = record.findings if isinstance(record, ReviewRecord) else record
+    numeric_ids = [
+        int(match.group(1))
+        for item in findings
+        if (match := re.fullmatch(rf"{FINDING_PREFIX}(\d+)", item.id)) is not None
+    ]
+    next_number = max(numeric_ids, default=0) + 1
+    return f"{FINDING_PREFIX}{next_number:03d}"
 
 
 def disposition_conflicts(

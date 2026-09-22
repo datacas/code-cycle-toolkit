@@ -60,10 +60,22 @@ code_cycle:
   repository:
     selector: workspace/repository
     default_branch: main
+  review:
+    # Required for finding-history recovery; provider logins are case-insensitive.
+    trusted_authors:
+      - review-bot
 ```
 
 This file may contain selectors and non-secret defaults only. Never put access
 tokens, passwords, private keys, or client secrets in it.
+
+`code_cycle.review.trusted_authors` is the complete allow-list for comments that
+may create or advance recovered findings. Its default is no trusted authors:
+when it is absent or empty, a cycle that needs history recovery returns
+`BLOCKED`. Code-host adapters must supply the author from authenticated provider
+metadata; missing metadata or contract headings published only by untrusted
+authors also returns `BLOCKED`. Ordinary discussion without contract headings
+starts an empty record. Compare provider login identities case-insensitively.
 
 ## Provider responsibilities
 
