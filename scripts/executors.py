@@ -81,6 +81,38 @@ class ExecutorError(ValueError):
     """The dispatch layer was asked for something it must not do."""
 
 
+def _canonical_path(path: str) -> str:
+    return str(Path(path).expanduser().resolve(strict=False))
+
+
+@dataclass(frozen=True)
+class OrcaReviewWorkspace:
+    """The non-mutating workspace a direct Orca review is allowed to use.
+
+    Orca workers are asynchronous and the CLI does not offer a trustworthy
+    read-only permission flag. A review therefore needs a workspace that is
+    explicitly separate from the implementer's tree. The caller prepares that
+    workspace and declares whether it is immutable or disposable; this
+    contract verifies the separation before a worker can be launched.
+    """
+
+    path: str
+    implementer_path: str
+    isolation: str
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ExecutorError("an Orca review workspace needs a path")
+        if not self.implementer_path:
+            raise ExecutorError("an Orca review workspace needs the implementer path")
+        if self.isolation not in {"immutable", "disposable"}:
+            raise ExecutorError(
+                "an Orca review workspace must be immutable or disposable")
+        if _canonical_path(self.path) == _canonical_path(self.implementer_path):
+            raise ExecutorError(
+                "an Orca review workspace must differ from the implementer workspace")
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     """What an executor could be shown to be, and on what evidence."""
@@ -596,11 +628,15 @@ class OrcaDispatchContext:
     run_id: str
     task_id: str
     worker_agent: str | None = None
+    review_workspace: OrcaReviewWorkspace | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("coordinator", "run_id", "task_id"):
             if not getattr(self, field_name):
                 raise ExecutorError(f"an Orca dispatch context needs {field_name}")
+        if (self.review_workspace is not None
+                and not isinstance(self.review_workspace, OrcaReviewWorkspace)):
+            raise ExecutorError("an Orca review workspace must use its explicit contract")
 
 
 class OrcaAdapter(Adapter):
@@ -611,6 +647,10 @@ class OrcaAdapter(Adapter):
     """
 
     name = "orca"
+    # Orca can enforce review isolation when its explicit workspace contract is
+    # present. `dispatch()` still fails closed when it is absent, including for
+    # callers that bypass the generic dispatch gate.
+    enforces_read_only = True
     provable_ceiling = Availability.READY
     # A receipt, not a result: `worker-start` returns once the worker is alive,
     # and the stage it is running finishes later and somewhere else.
@@ -648,6 +688,23 @@ class OrcaAdapter(Adapter):
                 "already exist; create them deliberately rather than having the "
                 "dispatcher spawn them in someone's workspace",
             )
+        review_workspace = None
+        if not writes:
+            review_workspace = context.review_workspace
+            if review_workspace is None:
+                return self._blocked(
+                    target, "review_workspace_isolation",
+                    "an Orca review needs an explicit immutable or disposable "
+                    "workspace separate from the implementer's workspace",
+                )
+            if (cwd is not None
+                    and _canonical_path(cwd)
+                    != _canonical_path(review_workspace.implementer_path)):
+                return self._blocked(
+                    target, "review_workspace_mismatch",
+                    "the dispatch cwd must identify the implementer's workspace "
+                    "declared by the Orca review contract",
+                )
         agent = context.worker_agent or self.AGENT_FOR_PROVIDER.get(target.provider)
         if agent is None:
             return self._blocked(
@@ -658,14 +715,15 @@ class OrcaAdapter(Adapter):
         # `task` here is the Task ID Orca already holds, not the prompt. The
         # prompt went into that Task when it was created; passing prose to
         # --task would silently create work nobody can find again.
+        worktree = review_workspace.path if review_workspace is not None else cwd
         argv = [self.binary, "orchestration", "worker-start",
                 "--from", context.coordinator, "--run", context.run_id,
                 "--task", context.task_id, "--agent", agent,
                 "--model", target.model, "--effort", target.effort, "--json"]
-        if cwd:
-            argv += ["--worktree", f"path:{cwd}"]
+        if worktree:
+            argv += ["--worktree", f"path:{worktree}"]
         try:
-            completed = runner(argv, timeout=timeout, cwd=cwd)
+            completed = runner(argv, timeout=timeout, cwd=worktree)
             payload = json.loads(completed.stdout or "{}")
         except subprocess.TimeoutExpired:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target,
@@ -698,6 +756,12 @@ class OrcaAdapter(Adapter):
         state = result.get("state")
         artifacts = {"argv": argv, "dispatchId": result.get("dispatchId"),
                      "state": state, "launch": result.get("launch")}
+        if review_workspace is not None:
+            artifacts["reviewWorkspace"] = {
+                "path": review_workspace.path,
+                "implementerPath": review_workspace.implementer_path,
+                "isolation": review_workspace.isolation,
+            }
 
         if resolved is not None and resolved != target.model:
             return DispatchResult(
