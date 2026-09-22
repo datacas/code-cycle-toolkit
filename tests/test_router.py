@@ -124,11 +124,13 @@ class RoleRoutingTests(unittest.TestCase):
         d = router.route("security", signals(security_sensitive=False), READY)
 
         self.assertEqual("security", d.profile)
+        self.assertEqual("codex", d.target.executor)
 
     def test_steps_judged_by_execution_stay_cheap(self) -> None:
         for role in ("verify", "run", "bootstrap"):
             with self.subTest(role=role):
-                self.assertEqual("cheap_tool", router.route(role, signals(), READY).profile)
+                self.assertEqual("auxiliary_tool", router.route(role, signals(), READY).profile)
+                self.assertEqual("codex", router.route(role, signals(), READY).target.executor)
 
     def test_coordination_stays_cheap_even_when_it_sequences_expensive_work(self) -> None:
         self.assertEqual("coordinator", router.route("coordinate", signals(), READY).profile)
@@ -205,6 +207,9 @@ class CostModelTests(unittest.TestCase):
         self.assertIn("expected resolution work", text)
         self.assertIn("= 8.0", text)
 
+    def test_security_cost_matches_its_codex_reviewer_target(self) -> None:
+        self.assertEqual(router.PROFILE_COST["reviewer"], router.PROFILE_COST["security"])
+
 
 class ProfileConfigTests(unittest.TestCase):
     def test_defaults_load_without_configuration(self) -> None:
@@ -220,6 +225,25 @@ class ProfileConfigTests(unittest.TestCase):
 
         self.assertEqual("claude", profiles["cheap_coder"].primary.executor)
         self.assertEqual("codex", profiles["coordinator"].primary.executor)
+
+    def test_policy_filtered_fallback_explains_the_policy_skip(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "reviewer": {
+                "primary": "claude:anthropic/claude-sonnet-5 high",
+                "fallback": "codex:openai/gpt-5.6-terra high",
+            },
+        }}})
+        decision = router.route(
+            "review", signals(),
+            {"claude": router.Availability.READY, "codex": router.Availability.READY},
+            profiles=profiles, eligible_executors={"codex"},
+        )
+
+        self.assertTrue(decision.used_fallback)
+        self.assertIn(
+            "primary executor claude cannot satisfy the workspace policy -> fell back to codex",
+            decision.reasons,
+        )
 
     def test_an_unknown_profile_name_is_refused_not_ignored(self) -> None:
         with self.assertRaises(router.RouterError):

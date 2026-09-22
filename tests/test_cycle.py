@@ -20,6 +20,7 @@ class ScriptedAdapter(ex.Adapter):
 
     provable_ceiling = ex.Availability.AUTHENTICATED
     enforces_read_only = True
+    enforces_workspace_boundary = True
 
     def __init__(self, name, availability=ex.Availability.AUTHENTICATED, outcomes=None):
         self.name = name
@@ -153,6 +154,59 @@ class FullCycleTests(CycleTestCase):
         self.assertTrue(rate.known)
         self.assertEqual(0.6, rate.value)
         self.assertEqual(10, rate.observations)
+
+
+class RoleWorkspacePolicyTests(CycleTestCase):
+    def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:
+        self.assertEqual(
+            cy.WorkspacePolicy.READ_ONLY,
+            cy.role_contract("security").workspace_policy,
+        )
+        self.assertEqual(
+            cy.WorkspacePolicy.READ_ONLY,
+            cy.role_contract("bootstrap").workspace_policy,
+        )
+        for role in ("verify", "run"):
+            with self.subTest(role=role):
+                contract = cy.role_contract(role)
+                self.assertEqual(cy.WorkspacePolicy.DISPOSABLE, contract.workspace_policy)
+
+    def test_verify_is_blocked_without_a_disposable_workspace(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex")])
+
+        outcome = recorder.stage("verify", "run checks")
+
+        self.assertFalse(outcome.succeeded)
+        self.assertIsNone(outcome.result)
+        self.assertTrue(any("cannot satisfy the workspace policy" in reason
+                            for reason in outcome.decision.reasons))
+
+    def test_security_never_routes_to_an_adapter_without_read_only_enforcement(self) -> None:
+        claude = ScriptedAdapter("claude")
+        claude.enforces_read_only = False
+        claude.enforces_workspace_boundary = False
+        recorder = self.recorder([claude])
+
+        outcome = recorder.stage("security", "audit the change")
+
+        self.assertIsNone(outcome.result)
+        self.assertTrue(outcome.decision.blocked)
+        self.assertTrue(any("cannot satisfy the workspace policy" in reason
+                            for reason in outcome.decision.reasons))
+
+    def test_verify_can_use_an_isolated_workspace_for_generated_artifacts(self) -> None:
+        source = tempfile.TemporaryDirectory()
+        disposable = tempfile.TemporaryDirectory()
+        self.addCleanup(source.cleanup)
+        self.addCleanup(disposable.cleanup)
+        workspace = ex.DisposableWorkspace(disposable.name, source.name)
+        recorder = self.recorder([ScriptedAdapter("codex")])
+
+        outcome = recorder.stage(
+            "verify", "run checks", cwd=workspace.path, workspace=workspace,
+        )
+
+        self.assertTrue(outcome.succeeded)
 
 
 class RerouteRecordingTests(CycleTestCase):

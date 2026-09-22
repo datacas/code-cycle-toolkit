@@ -82,7 +82,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "cc-provider-bootstrap",
     })),
     "profile": ("token", frozenset({
-        "cheap_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
+        "cheap_tool", "auxiliary_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
         "senior_reviewer", "security",
     })),
     "executor": ("token", frozenset({"codex", "claude", "orca"})),
@@ -104,7 +104,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "operating_quota", "operating_availability", "proven_readiness",
         "authenticated_session", "folder_trust", "hook_trust",
         "bypass_acknowledgement", "trusted_directory", "orchestration_context",
-        "provider_agent_mapping",
+        "provider_agent_mapping", "read_only_enforcement", "disposable_workspace",
+        "review_workspace_isolation", "review_workspace_mismatch",
+        "review_workspace_conflict",
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
     # numbers and flags

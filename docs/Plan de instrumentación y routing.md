@@ -247,6 +247,8 @@ profiles:
   cheap_tool:
     primary:  claude/haiku-4.5
     fallback: openai/luna-medium
+  auxiliary_tool:
+    primary:  openai/luna-medium
   coordinator:
     primary:  openai/luna-medium
   cheap_coder:
@@ -263,15 +265,19 @@ profiles:
     independent: claude/opus-5-high
 ```
 
+`auxiliary_tool` es el perfil que usan las skills auxiliares integradas. El
+perfil `cheap_tool` se conserva por compatibilidad con configuraciones y
+llamadas directas existentes; no es una asignación de las skills integradas.
+
 Usa alias y resuelve contra lo que aparezca en `/model`, sin fijar identificadores de versión: el catálogo cambia solo.
 
 ### Asignación por skill
 
 | Skill | Perfil | Quién juzga el resultado |
 | --- | --- | --- |
-| `cc-provider-bootstrap` | `cheap_tool` | health checks del provider |
-| `cc-run` | `cheap_tool` | el servicio responde o no |
-| `cc-verify` | `cheap_tool` | comandos ejecutados |
+| `cc-provider-bootstrap` | `auxiliary_tool` | health checks del provider |
+| `cc-run` | `auxiliary_tool` | el servicio responde o no |
+| `cc-verify` | `auxiliary_tool` | comandos ejecutados |
 | `cc-orchestrator` | `coordinator` | secuenciación, se ve al momento |
 | `cc-orca-orchestrator` | `coordinator` | ídem |
 | `cc-initial-review` | `coordinator` | coordina; delega el criterio |

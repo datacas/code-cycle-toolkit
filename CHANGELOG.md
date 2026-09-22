@@ -7,6 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Explicit workspace contracts for cycle roles: security and bootstrap are
+  strictly read-only, verify and run use a confined disposable workspace, and
+  incompatible adapters are excluded before dispatch. The security profile
+  retains `claude-opus-5` as a compatibility fallback in the model registry,
+  while the read-only router will not select it.
 - Trusted full-history finding recovery: `code_cycle.review.trusted_authors`
   defines a case-insensitive provider-login allow-list, invalid trust anchors
   block only when untrusted contract state could be lost, ordinary discussion
