@@ -85,6 +85,14 @@ def _canonical_path(path: str) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
+def _paths_overlap(first: str, second: str) -> bool:
+    first_path = Path(_canonical_path(first))
+    second_path = Path(_canonical_path(second))
+    return (first_path == second_path
+            or first_path in second_path.parents
+            or second_path in first_path.parents)
+
+
 @dataclass(frozen=True)
 class OrcaReviewWorkspace:
     """The non-mutating workspace a direct Orca review is allowed to use.
@@ -108,9 +116,10 @@ class OrcaReviewWorkspace:
         if self.isolation not in {"immutable", "disposable"}:
             raise ExecutorError(
                 "an Orca review workspace must be immutable or disposable")
-        if _canonical_path(self.path) == _canonical_path(self.implementer_path):
+        if _paths_overlap(self.path, self.implementer_path):
             raise ExecutorError(
-                "an Orca review workspace must differ from the implementer workspace")
+                "an Orca review workspace must not contain or be contained by "
+                "the implementer workspace")
 
 
 @dataclass(frozen=True)
@@ -256,6 +265,10 @@ class Adapter:
             DispatchOutcome.BLOCKED, self.name, target,
             missing_capability=capability, detail=detail,
         )
+
+    def supports_non_writing(self, **dispatch_kwargs) -> bool:
+        """Whether this adapter can keep this non-writing dispatch isolated."""
+        return self.enforces_read_only
 
 
 class NativeAdapter(Adapter):
@@ -647,10 +660,10 @@ class OrcaAdapter(Adapter):
     """
 
     name = "orca"
-    # Orca can enforce review isolation when its explicit workspace contract is
-    # present. `dispatch()` still fails closed when it is absent, including for
-    # callers that bypass the generic dispatch gate.
-    enforces_read_only = True
+    # Orca does not provide an OS-enforced read-only permission. It supports a
+    # non-writing review only when the explicit isolated-workspace contract is
+    # present; `dispatch()` validates it again for direct callers.
+    enforces_read_only = False
     provable_ceiling = Availability.READY
     # A receipt, not a result: `worker-start` returns once the worker is alive,
     # and the stage it is running finishes later and somewhere else.
@@ -663,6 +676,11 @@ class OrcaAdapter(Adapter):
     #: target picks the model, and the two have to agree: asking for the Codex
     #: agent with an Anthropic model is a request no worker can satisfy.
     AGENT_FOR_PROVIDER = {"openai": "codex", "anthropic": "claude"}
+
+    def supports_non_writing(self, **dispatch_kwargs) -> bool:
+        context = dispatch_kwargs.get("context")
+        return (isinstance(context, OrcaDispatchContext)
+                and context.review_workspace is not None)
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
@@ -697,14 +715,19 @@ class OrcaAdapter(Adapter):
                     "an Orca review needs an explicit immutable or disposable "
                     "workspace separate from the implementer's workspace",
                 )
-            if (cwd is not None
-                    and _canonical_path(cwd)
+            if (cwd is None
+                    or _canonical_path(cwd)
                     != _canonical_path(review_workspace.implementer_path)):
                 return self._blocked(
                     target, "review_workspace_mismatch",
                     "the dispatch cwd must identify the implementer's workspace "
                     "declared by the Orca review contract",
                 )
+        elif context.review_workspace is not None:
+            return self._blocked(
+                target, "review_workspace_conflict",
+                "a review workspace cannot be supplied to a writing Orca dispatch",
+            )
         agent = context.worker_agent or self.AGENT_FOR_PROVIDER.get(target.provider)
         if agent is None:
             return self._blocked(
@@ -904,12 +927,13 @@ def dispatch(
     # honour when convenient. Claude and Orca have no command that proves a
     # worker cannot mutate the worktree, so a configured profile cannot turn a
     # review into an untrusted write-capable stage by selecting either one.
-    if kw.get("writes", False) is False and not adapter.enforces_read_only:
+    if (kw.get("writes", False) is False
+            and not adapter.supports_non_writing(**kw)):
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="read_only_enforcement",
-            detail=(f"{target.executor} cannot enforce a read-only workspace; "
-                    "choose an adapter that can or provide an immutable review workspace"),
+            detail=(f"{target.executor} cannot establish a non-mutating workspace; "
+                    "choose an adapter that can or provide an isolated review workspace"),
             readiness_policy=policy, dispatched_from=probe.availability,
         )
 

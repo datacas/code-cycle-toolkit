@@ -349,14 +349,17 @@ applies to the status call — readiness is the one thing this backend can prove
 so a command that failed does not get to prove it.
 
 Its dispatch takes an explicit `OrcaDispatchContext`: a coordinator terminal, a
-Run and a Task that already exist, plus an optional agent override. The adapter
-refuses to create any of them, because a dispatcher that quietly spawns
-terminals and durable state in someone's workspace is one nobody can reason
-about. The Task ID is separate from the `task` argument every other adapter
-takes: for Codex and Claude that argument is the prompt, while Orca's prompt
-already lives inside the Task and `--task` wants its identifier. The agent is
-chosen from the target's provider, so an Anthropic target launches the Claude
-agent rather than asking Codex to run a model it does not have.
+Run and a Task that already exist, plus an optional agent override. A non-writing
+review also requires an `OrcaReviewWorkspace` with a path that does not overlap
+the implementer's workspace and an explicit `immutable` or `disposable`
+isolation mode. The adapter refuses to create any of these, because a
+dispatcher that quietly spawns terminals, durable state or review worktrees in
+someone's workspace is one nobody can reason about. The Task ID is separate
+from the `task` argument every other adapter takes: for Codex and Claude that
+argument is the prompt, while Orca's prompt already lives inside the Task and
+`--task` wants its identifier. The agent is chosen from the target's provider,
+so an Anthropic target launches the Claude agent rather than asking Codex to run
+a model it does not have.
 
 ### Learning availability by dispatching
 
@@ -507,14 +510,17 @@ pretend otherwise. `--permission-mode plan` refuses the edit but turns the task
 into planning it, which is not a review. Disallowing `Edit`, `Write` and
 `NotebookEdit` does not stop a write: a live probe created the file anyway.
 Review and rereview therefore route to Codex, whose explicit `-s read-only`
-sandbox enforces non-mutation. A configured adapter that cannot enforce that
-boundary is blocked before it starts rather than sharing the writable tree.
+sandbox enforces non-mutation. Orca may be used only when its explicit review
+workspace contract is present; it does not claim an OS-level read-only flag and
+fails closed for a missing, mismatched or overlapping workspace. A configured
+adapter that cannot establish a non-mutating boundary is blocked before it
+starts rather than sharing the writable tree.
 
 The default review profiles intentionally have no fallback. If Codex is
 unavailable, a review blocks instead of silently falling back to Claude or Orca
-without a proven read-only workspace. This favors review integrity over
-availability; any future fallback must first provide an immutable or otherwise
-enforced non-mutating workspace.
+without the required boundary. A direct or future Orca fallback must provide
+an immutable or otherwise disposable non-mutating workspace before it starts.
+This favors review integrity over availability.
 
 ## Running a cycle
 

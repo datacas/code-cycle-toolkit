@@ -253,10 +253,12 @@ columns. A stage is dispatched with the permission its role needs: implementatio
 resolution may write the tree they were given, a review reads it. Codex is
 read-only unless asked otherwise and Claude is not, so neither default can be
 relied on — the role decides. Review profiles use Codex's explicit read-only
-sandbox; an adapter that cannot enforce non-mutation is blocked before it runs.
-They intentionally have no fallback: blocked review availability is preferable
-to silently using an executor without a proven non-mutating workspace. A future
-fallback needs an immutable or otherwise enforced read-only workspace first.
+sandbox; an adapter that cannot establish non-mutation is blocked before it
+runs. Orca may satisfy that boundary only with an explicit isolated review
+workspace; it does not claim an OS-level read-only permission and rejects a
+missing, mismatched or overlapping workspace. They intentionally have no
+fallback: blocked review availability is preferable to silently using an
+executor without a proven non-mutating workspace.
 
 The reason the agent gave is printed beside the status and stored
 nowhere: it is a claim to weigh, not a finding. One run reported that GitHub was
