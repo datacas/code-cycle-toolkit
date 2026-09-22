@@ -261,6 +261,18 @@ class ProfileConfigTests(unittest.TestCase):
             str(router.parse_target("codex:openai/gpt-5.6-luna high")),
         )
 
+    def test_effective_profiles_expose_declared_models(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-fictional-9 high",
+            },
+        }}})
+
+        models = router.models_from_profiles(profiles)
+
+        self.assertIn("gpt-fictional-9", models)
+        self.assertIn("gpt-5.6-terra", models)
+
 
 
 class DeclaredProfileShapeTests(unittest.TestCase):

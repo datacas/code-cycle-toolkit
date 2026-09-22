@@ -286,6 +286,24 @@ class IdentifierBoundaryTests(TelemetryTestCase):
 
         self.assertEqual(3, len(self.store.rows()))
 
+    def test_configured_models_are_scoped_to_the_telemetry_instance(self) -> None:
+        first = tm.Telemetry(self.dir / "first.sqlite",
+                             known_models={"gpt-repository-one"})
+        second = tm.Telemetry(self.dir / "second.sqlite",
+                              known_models={"gpt-repository-two"})
+
+        first.record_stage("repo-one", "task", "implement",
+                           model_requested="gpt-repository-one")
+        second.record_stage("repo-two", "task", "implement",
+                            model_requested="gpt-repository-two")
+
+        with self.assertRaises(tm.TelemetryError):
+            first.record_stage("repo-one", "other", "implement",
+                               model_requested="gpt-repository-two")
+        with self.assertRaises(tm.TelemetryError):
+            second.record_stage("repo-two", "other", "implement",
+                               model_requested="gpt-repository-one")
+
 
 class FirstPassRateTests(TelemetryTestCase):
     """The number router.estimate_cost currently guesses at 0.0."""
@@ -489,6 +507,67 @@ class ModelDriftTests(TelemetryTestCase):
                                 model_requested="gpt-5.6-luna", model_resolved=None)
 
         self.assertEqual([], self.store.model_drift("repo"))
+
+    def test_an_unrecognised_model_is_drift_without_persisting_its_name(self) -> None:
+        self.store.record_stage("repo", "t1", "implement",
+                                model_requested="gpt-5.6-luna",
+                                model_resolved="gpt-fictional-9")
+
+        row = self.store.rows("repo")[0]
+        drift = self.store.model_drift("repo")
+
+        self.assertIsNone(row["model_resolved"])
+        self.assertEqual("mismatch_unrecognized",
+                         row["payload"]["model_resolution"])
+        self.assertNotIn("gpt-fictional-9", json.dumps(row))
+        self.assertEqual(1, len(drift))
+        self.assertIsNone(drift[0]["resolved"])
+        self.assertEqual(1, self.store.summary("repo")["model_drift"])
+
+
+class ModelResolutionTests(TelemetryTestCase):
+    """The dispatch receipt maps to a closed observation token."""
+
+    def record(self, resolved):
+        target = router.parse_target("codex:openai/gpt-5.6-luna high")
+        decision = router.RoutingDecision(
+            "cheap_coder", target, router.RoutingMode.PRODUCTION,
+        )
+        outcome = (ex.DispatchOutcome.SUCCEEDED
+                   if resolved in (None, target.model)
+                   else ex.DispatchOutcome.CONTRACT_VIOLATION)
+        result = ex.DispatchResult(outcome, "codex", target,
+                                   model_resolved=resolved)
+        self.store.record_dispatch("repo", "task", "implement", decision, result)
+        return self.store.rows("repo")[0]
+
+    def test_unreported_resolution(self) -> None:
+        row = self.record(None)
+
+        self.assertIsNone(row["model_resolved"])
+        self.assertEqual("unreported", row["payload"]["model_resolution"])
+
+    def test_matched_resolution(self) -> None:
+        row = self.record("gpt-5.6-luna")
+
+        self.assertEqual("gpt-5.6-luna", row["model_resolved"])
+        self.assertEqual("matched", row["payload"]["model_resolution"])
+
+    def test_known_mismatch_resolution(self) -> None:
+        row = self.record("claude-sonnet-5")
+
+        self.assertEqual("claude-sonnet-5", row["model_resolved"])
+        self.assertEqual("mismatch_known", row["payload"]["model_resolution"])
+        self.assertEqual("contract_violation", row["outcome"])
+
+    def test_unrecognised_mismatch_resolution_keeps_the_row(self) -> None:
+        row = self.record("gpt-fictional-9")
+
+        self.assertIsNone(row["model_resolved"])
+        self.assertEqual("mismatch_unrecognized",
+                         row["payload"]["model_resolution"])
+        self.assertEqual("contract_violation", row["outcome"])
+        self.assertNotIn("gpt-fictional-9", json.dumps(row))
 
 
 class SummaryTests(TelemetryTestCase):
