@@ -57,8 +57,35 @@ class RoutingMode(str, Enum):
     CALIBRATION = "calibration"
 
 
+class RoutingStrategy(str, Enum):
+    """The configured policy for selecting a target."""
+
+    FIXED = "fixed"
+    MEASURED = "measured"
+
+
 class RouterError(ValueError):
     """The router was asked for something it must not answer."""
+
+
+def load_routing_strategy(config: dict | None = None) -> RoutingStrategy:
+    """Return the configured routing strategy, defaulting to fixed."""
+    section = (config or {}).get("code_cycle", {})
+    routing = section.get("routing") if isinstance(section, dict) else None
+    if routing is None:
+        routing = {}
+    elif not isinstance(routing, dict):
+        raise RouterError(
+            f"code_cycle.routing must be a mapping, not {type(routing).__name__}"
+        )
+    strategy = routing.get("strategy", RoutingStrategy.FIXED.value)
+    try:
+        return RoutingStrategy(strategy)
+    except (TypeError, ValueError) as exc:
+        raise RouterError(
+            f"unknown code_cycle.routing.strategy value: {strategy!r} "
+            "(expected 'fixed' or 'measured')"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -139,6 +166,7 @@ class RoutingDecision:
     used_fallback: bool = False
     reasons: tuple[str, ...] = ()
     cost: CostEstimate | None = None
+    strategy: RoutingStrategy = RoutingStrategy.FIXED
 
     def explain(self) -> str:
         head = "BLOCKED" if self.blocked else str(self.target)
@@ -342,6 +370,7 @@ def route(
     mode: RoutingMode = RoutingMode.PRODUCTION,
     profiles: dict[str, Profile] | None = None,
     eligible_executors: frozenset[str] | set[str] | None = None,
+    strategy: RoutingStrategy = RoutingStrategy.FIXED,
 ) -> RoutingDecision:
     """Resolve a role to a concrete target, or block.
 
@@ -368,7 +397,9 @@ def route(
         state = availability.get(target.executor, Availability.UNKNOWN)
         if state.dispatchable:
             if index == 0:
-                return RoutingDecision(name, target, mode, reasons=reasons)
+                return RoutingDecision(
+                    name, target, mode, reasons=reasons, strategy=strategy,
+                )
             if mode is RoutingMode.CALIBRATION:
                 break
             # Describe the primary with the primary's own state. Reusing the
@@ -388,6 +419,7 @@ def route(
                 used_fallback=True,
                 reasons=reasons
                 + (fallback_reason,),
+                strategy=strategy,
             )
         reasons = reasons + (f"{target.executor} is {state.value}",)
 
@@ -402,5 +434,6 @@ def route(
             else "no executor for this profile is ready"
         )
     return RoutingDecision(
-        name, None, mode, blocked=True, reasons=reasons + (blocked_because,)
+        name, None, mode, blocked=True, reasons=reasons + (blocked_because,),
+        strategy=strategy,
     )

@@ -45,6 +45,7 @@ from executors import (
 from router import (
     RoutingDecision,
     RoutingMode,
+    RoutingStrategy,
     TaskSignals,
     models_from_profiles,
     route,
@@ -123,6 +124,7 @@ class CycleRecorder:
         policy: ReadinessPolicy | None = None,
         probes: dict | None = None,
         profiles: dict | None = None,
+        routing_strategy: RoutingStrategy = RoutingStrategy.FIXED,
         local_only: bool = False,
     ) -> None:
         self.telemetry = telemetry
@@ -143,6 +145,7 @@ class CycleRecorder:
         # configuration on its own is one that can disagree with the caller
         # about what the configuration says.
         self.profiles = profiles
+        self.routing_strategy = routing_strategy
         if profiles is not None:
             telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
@@ -188,6 +191,7 @@ class CycleRecorder:
                 role, self.signals, self.availability,
                 mode=self.mode, profiles=self.profiles,
                 eligible_executors=eligible,
+                strategy=self.routing_strategy,
             )
             if decision.blocked:
                 outcome.decision = decision
@@ -231,6 +235,7 @@ class CycleRecorder:
         return self.telemetry.record_stage(
             self.repo_id, self.task_id, role,
             iteration=self.iteration, status=status,
+            routing_strategy=self.routing_strategy.value,
             local_only=self.local_only, **fields,
         )
 
@@ -243,7 +248,9 @@ class CycleRecorder:
         return self.telemetry.record_stage(
             self.repo_id, self.task_id, "coordinate",
             iteration=self.iteration, status=final_status,
-            iterations=self.iteration, local_only=self.local_only, **fields,
+            iterations=self.iteration,
+            routing_strategy=self.routing_strategy.value,
+            local_only=self.local_only, **fields,
         )
 
     def _record(self, role: str, decision: RoutingDecision,
@@ -259,6 +266,7 @@ class CycleRecorder:
                 used_fallback=decision.used_fallback,
                 outcome=DispatchOutcome.BLOCKED.value,
                 routing_reason_count=len(decision.reasons or ()),
+                routing_strategy=decision.strategy.value,
                 local_only=self.local_only,
             )
         return self.telemetry.record_dispatch(
