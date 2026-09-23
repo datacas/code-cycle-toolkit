@@ -263,6 +263,19 @@ class RecorderSignalTests(CycleTestCase):
         recorder.stage("review", "review")
         self.assertEqual([1], calls)
 
+    def test_every_post_implementation_role_is_routed_knowing_the_change(self) -> None:
+        for role in ("review", "rereview", "resolve", "security", "verify", "run"):
+            with self.subTest(role=role):
+                calls = []
+                recorder = self.recorder(
+                    [ScriptedAdapter("codex"), ScriptedAdapter("claude")],
+                    change_observer=lambda: calls.append(role) or CHANGE,
+                )
+                recorder.stage(role, "work")
+                self.assertEqual([role], calls)
+                row = self.rows_by_role(role)[-1]
+                self.assertEqual(2, row["payload"]["changed_files_count"])
+
     def test_an_unreadable_change_is_left_out(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")],
                                  change_observer=lambda: None)

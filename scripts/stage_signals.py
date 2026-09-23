@@ -59,7 +59,9 @@ LANGUAGE_FIELDS: tuple[str, ...] = tuple(
 
 #: Roles routed after a change exists. An `implement` stage is routed before
 #: there is anything to observe, so it gets no change signals.
-CHANGE_OBSERVED_ROLES = frozenset({"review", "rereview", "resolve", "security", "verify"})
+CHANGE_OBSERVED_ROLES = frozenset({
+    "review", "rereview", "resolve", "security", "verify", "run",
+})
 
 #: Roles for which `resolution_round` means something.
 RESOLUTION_ROLES = frozenset({"resolve", "rereview"})
