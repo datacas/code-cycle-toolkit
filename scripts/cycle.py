@@ -146,6 +146,10 @@ class CycleRecorder:
         # about what the configuration says.
         self.profiles = profiles
         self.routing_strategy = routing_strategy
+        self.first_pass_rate = (
+            telemetry.first_pass_rate(self.repo_id)
+            if routing_strategy is RoutingStrategy.MEASURED else None
+        )
         if profiles is not None:
             telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
@@ -192,6 +196,27 @@ class CycleRecorder:
                 mode=self.mode, profiles=self.profiles,
                 eligible_executors=eligible,
                 strategy=self.routing_strategy,
+                first_pass_rate=(
+                    self.first_pass_rate.value
+                    if self.first_pass_rate is not None and self.first_pass_rate.known
+                    else None
+                ),
+                rate_observations=(
+                    self.first_pass_rate.observations
+                    if self.first_pass_rate is not None else None
+                ),
+                rate_minimum=(
+                    self.first_pass_rate.minimum
+                    if self.first_pass_rate is not None else None
+                ),
+                rate_known=(
+                    self.first_pass_rate.known
+                    if self.first_pass_rate is not None else None
+                ),
+                rate_explanation=(
+                    self.first_pass_rate.explain()
+                    if self.first_pass_rate is not None else None
+                ),
             )
             if decision.blocked:
                 outcome.decision = decision
@@ -267,6 +292,7 @@ class CycleRecorder:
                 outcome=DispatchOutcome.BLOCKED.value,
                 routing_reason_count=len(decision.reasons or ()),
                 routing_strategy=decision.strategy.value,
+                **self._cost_record(decision),
                 local_only=self.local_only,
             )
         return self.telemetry.record_dispatch(
@@ -277,3 +303,21 @@ class CycleRecorder:
             security_sensitive=self.signals.security_sensitive,
             local_only=self.local_only,
         )
+
+    @staticmethod
+    def _cost_record(decision: RoutingDecision) -> dict:
+        cost = decision.cost
+        return {
+            "routing_cost_implementation": getattr(cost, "implementation", None),
+            "routing_cost_expected_resolutions": getattr(
+                cost, "expected_resolutions", None,
+            ),
+            "routing_cost_review": getattr(cost, "review", None),
+            "routing_cost_total": getattr(cost, "total", None),
+            "routing_rate_source": decision.rate_source,
+            "routing_rate_value": decision.rate_value,
+            "routing_rate_used": decision.rate_used,
+            "routing_rate_observations": decision.rate_observations,
+            "routing_rate_minimum": decision.rate_minimum,
+            "routing_rate_known": decision.rate_known,
+        }

@@ -288,9 +288,16 @@ place a role maps to a model.
 
 `code_cycle.routing.strategy` names the selection policy: `fixed` or `measured`.
 It defaults to `fixed`. Both values currently select the declared primary, then
-the declared fallback when availability and workspace policy allow it; neither
-reads telemetry to choose a target. `measured` is reserved for a later change.
-Every recorded stage includes the active value as `payload.routing_strategy`.
+the declared fallback when availability and workspace policy allow it; the
+strategy does not change target selection. Under `measured`, `CycleRecorder`
+reads the repository's first-pass rate once when the run starts and passes the
+number to `estimate_cost`. A known rate reduces the expected resolution cost;
+an unknown rate uses `DEFAULT_FIRST_PASS_RATE` and records `Rate.explain()` on
+the decision. Under `fixed`, the recorder does not query that rate.
+
+Stage rows record the strategy, cost breakdown, rate source, known value when
+available, and observation threshold. The router receives those values from its
+caller and never opens the telemetry database.
 
 ## Executor dispatch
 

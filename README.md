@@ -343,8 +343,10 @@ nobody chose. `--no-config` asks for the defaults deliberately.
 
 `code_cycle.routing.strategy` accepts `fixed` or `measured` and defaults to
 `fixed`. Both currently follow the declared primary and fallback targets;
-`measured` is recorded for a later routing change. Each stage row records the
-active value in `payload.routing_strategy`.
+`measured` also uses the repository's first-pass rate for its recorded cost
+estimate. If the sample is too small, it keeps the conservative default and
+records that the rate is unknown. Neither strategy changes target selection.
+Each stage row records the active strategy and cost inputs.
 
 It probes the executors once, labels the work before routing anything, and runs
 `implement → review → (resolve → rereview)*` with every stage going through the

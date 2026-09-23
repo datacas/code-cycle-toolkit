@@ -114,6 +114,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
     "routing_strategy": ("token", frozenset({"fixed", "measured"})),
+    "routing_rate_source": ("token", frozenset({
+        "default", "measured", "conservative_default",
+    })),
     # numbers and flags
     "iteration": ("count", None),
     "difficulty": ("count", None),
@@ -124,6 +127,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "security_sensitive": ("flag", None),
     # payload-only
     "routing_reason_count": ("count", None),
+    "routing_rate_observations": ("count", None),
+    "routing_rate_minimum": ("count", None),
     "iterations": ("count", None),
     "findings_critical": ("count", None),
     "findings_high": ("count", None),
@@ -135,8 +140,15 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "tokens_in": ("count", None),
     "tokens_out": ("count", None),
     "cost_usd": ("amount", None),
+    "routing_cost_implementation": ("amount", None),
+    "routing_cost_expected_resolutions": ("amount", None),
+    "routing_cost_review": ("amount", None),
+    "routing_cost_total": ("amount", None),
+    "routing_rate_value": ("amount", None),
+    "routing_rate_used": ("amount", None),
     "security_audit_ran": ("flag", None),
     "local_only": ("flag", None),
+    "routing_rate_known": ("flag", None),
     "security_gate_half": ("token", frozenset({
         "deterministic", "reviewer", "both", "none",
     })),
@@ -529,6 +541,7 @@ class Telemetry:
         disagree with what actually happened.
         """
         target = decision.target
+        cost = getattr(decision, "cost", None)
         return self.record_stage(
             repo_id, task_id, role,
             profile=decision.profile,
@@ -550,6 +563,18 @@ class Telemetry:
             # were is still useful for spotting a decision that needed
             # explaining.
             routing_reason_count=len(getattr(decision, "reasons", ()) or ()),
+            routing_cost_implementation=getattr(cost, "implementation", None),
+            routing_cost_expected_resolutions=getattr(
+                cost, "expected_resolutions", None,
+            ),
+            routing_cost_review=getattr(cost, "review", None),
+            routing_cost_total=getattr(cost, "total", None),
+            routing_rate_source=getattr(decision, "rate_source", "default"),
+            routing_rate_value=getattr(decision, "rate_value", None),
+            routing_rate_used=getattr(decision, "rate_used", None),
+            routing_rate_observations=getattr(decision, "rate_observations", None),
+            routing_rate_minimum=getattr(decision, "rate_minimum", None),
+            routing_rate_known=getattr(decision, "rate_known", None),
             **extra,
         )
 
