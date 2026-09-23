@@ -319,6 +319,32 @@ class RoleWorkspacePolicyTests(CycleTestCase):
             with self.subTest(role=role):
                 self.assertEqual(permissions, cy.role_contract(role).publication_permissions)
 
+    def test_each_stage_is_told_its_publication_policy(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter])
+
+        recorder.stage("review", "review it")
+        recorder.stage("resolve", "resolve it")
+        recorder.stage("implement", "implement it")
+
+        review, resolve, implement = adapter.dispatched
+        self.assertIn("you may comment on the work item", review)
+        self.assertIn("You may not create the change request", review)
+        self.assertIn("push the working branch", review.split("You may not")[1])
+        self.assertIn("You may not create the change request", resolve)
+        self.assertIn("you may comment", resolve)
+        self.assertNotIn("You may not", implement)
+        for task in adapter.dispatched:
+            self.assertIn("Never merge, force-push, delete remote refs", task)
+
+    def test_a_local_only_stage_is_told_it_publishes_nothing(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter], local_only=True)
+
+        recorder.stage("implement", "implement locally")
+
+        self.assertIn("it publishes nothing", adapter.dispatched[0])
+
     def test_missing_publication_access_is_recorded_without_running_the_adapter(self) -> None:
         class DeniedPublicationAdapter(ScriptedAdapter):
             def publication_access(self, probe, *, writes):
@@ -426,8 +452,9 @@ class RerouteRecordingTests(CycleTestCase):
 
         recorder.stage("implement", "the real task")
 
-        self.assertEqual(["the real task"], codex.dispatched)
-        self.assertEqual(["the real task"], claude.dispatched)
+        self.assertEqual(1, len(codex.dispatched))
+        self.assertEqual(codex.dispatched, claude.dispatched)
+        self.assertTrue(codex.dispatched[0].startswith("the real task\n\n"))
 
     def test_it_reroutes_at_most_once(self) -> None:
         codex = ScriptedAdapter("codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])

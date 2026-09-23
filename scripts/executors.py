@@ -710,7 +710,7 @@ class ClaudeAdapter(NativeAdapter):
     }
 
     def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
-        return True, "Claude receives stage-specific GitHub comment, pull-request creation, and working-branch push commands"
+        return True, "Claude receives gh and git; the stage's publication policy is stated in its prompt"
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
@@ -738,29 +738,11 @@ class ClaudeAdapter(NativeAdapter):
                 "--effort", target.effort, "--output-format", "json"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
+        # A publishing stage keeps its ordinary GitHub tooling. Which of those
+        # operations the stage may perform is a behavioural rule stated in its
+        # prompt (`cycle.publication_policy`), not a permission narrowed here.
         if publishes:
-            allowed_tools = []
-            if "comment" in publication_permissions:
-                allowed_tools.append("Bash(gh pr comment:*)")
-            if "create_pr" in publication_permissions:
-                allowed_tools.append("Bash(gh pr create:*)")
-            if "push_branch" in publication_permissions:
-                directory = cwd or os.getcwd()
-                branch = subprocess.run(
-                    ["git", "-C", directory, "branch", "--show-current"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                branch_name = branch.stdout.strip() if branch.returncode == 0 else ""
-                # The ref is inserted into a Claude Bash permission pattern.
-                # Only admit a shell-metacharacter-free spelling so a crafted
-                # branch name cannot turn that permission into another command.
-                if (branch_name and not branch_name.startswith("-")
-                        and re.fullmatch(r"[A-Za-z0-9._/-]+", branch_name)):
-                    allowed_tools.append(
-                        f"Bash(git push origin HEAD:refs/heads/{branch_name})"
-                    )
-            if allowed_tools:
-                argv += ["--allowedTools", *allowed_tools]
+            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git:*)"]
         return argv
 
     def agent_output(self, stdout: str) -> str:

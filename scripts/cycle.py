@@ -109,6 +109,43 @@ def role_contract(role: str) -> RoleContract:
     return ROLE_CONTRACTS.get(role, DEFAULT_ROLE_CONTRACT)
 
 
+#: How each publication permission is described to the agent.
+PUBLICATION_OPERATIONS = {
+    "comment": "comment on the work item or change request of this cycle",
+    "create_pr": "create the change request for the working branch",
+    "push_branch": "push the working branch",
+}
+
+#: Forbidden in every stage, whatever its contract allows.
+PUBLICATION_PROHIBITIONS = (
+    "Never merge, force-push, delete remote refs, push to or otherwise modify "
+    "the base branch, close an issue or change request unless explicitly "
+    "instructed, or publish anything that belongs to another stage."
+)
+
+
+def publication_policy(role: str, publication_permissions: tuple[str, ...]) -> str:
+    """The stage's publication rules, stated to the agent.
+
+    This is a behavioural boundary. Agents keep their normal `gh`, `git` and
+    network access; nothing here or in the adapters prevents an operation the
+    contract does not list. The prompt states the rule, and the published
+    comments and telemetry are how a person audits that it was followed.
+    """
+    if not publication_permissions:
+        return (f"Publication policy for this {role} stage: it publishes nothing. "
+                "Do not comment, push, create a change request, or change any "
+                f"remote state. {PUBLICATION_PROHIBITIONS}")
+    allowed = "; ".join(PUBLICATION_OPERATIONS[name]
+                        for name in publication_permissions)
+    denied = [text for name, text in PUBLICATION_OPERATIONS.items()
+              if name not in publication_permissions]
+    rule = f"Publication policy for this {role} stage: you may {allowed}."
+    if denied:
+        rule += f" You may not {'; '.join(denied)}."
+    return f"{rule} {PUBLICATION_PROHIBITIONS}"
+
+
 class CycleError(ValueError):
     """The recorder was asked for something inconsistent."""
 
@@ -247,6 +284,7 @@ class CycleRecorder:
                 f"{publication_permissions!r}, not {requested_publication_permissions!r}"
             )
         dispatch_kwargs["publication_permissions"] = publication_permissions
+        task = f"{task}\n\n{publication_policy(role, publication_permissions)}"
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)

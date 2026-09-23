@@ -7,6 +7,21 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Publication policy per stage. The role contract declares what each stage
+  may publish: `implement` may comment, create the change request, and push its
+  branch; `resolve` may comment and push; `review` and `rereview` may only
+  comment. `--local-only` removes publication. Every stage's prompt states its
+  allowed operations and the prohibitions that apply to every stage (no merge,
+  force push, ref deletion, base-branch change, unrequested closing, or
+  publication for another stage). The boundary is behavioural: agents keep
+  their normal `gh`, `git`, and GitHub network access.
+- A publication readiness check before each publishing dispatch (`gh auth
+  status`, repository permission, `git push --dry-run`). A failure is recorded
+  as `missing_capability=publication_access` before any model starts. Publishing
+  Codex stages use a permission profile with GitHub and Bitbucket network
+  access and need Codex CLI 0.138.0 or newer. Publishing Claude stages receive
+  `gh` and `git`. Adapters without a publication contract, including Orca, fail
+  closed.
 - A privacy-safe `cc-stats` report for local telemetry, with repository-scoped
   stage, role, activity, outcome, routing, and verification summaries in Markdown
   or JSON. Dispatch attempts count once per stage, while verdict, shadow, and

@@ -932,68 +932,19 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("--permission-mode", argv)
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
 
-    def test_claude_review_publication_only_allows_pr_comments(self) -> None:
-        argv = self.claude(
-            writes=False, publishes=True, publication_permissions=("comment",),
-        )
-
-        self.assertEqual(["--allowedTools", "Bash(gh pr comment:*)"], argv[-2:])
-
-    def test_claude_implement_publication_scopes_pr_creation_and_branch_push(self) -> None:
-        branch = "feature/test-publication"
-        with patch.object(ex.subprocess, "run", return_value=completed(f"{branch}\n")):
-            argv = self.claude(
-                cwd="/repo", writes=True, publishes=True,
-                publication_permissions=("comment", "create_pr", "push_branch"),
-            )
-
-        self.assertEqual(
-            ["--allowedTools", "Bash(gh pr comment:*)", "Bash(gh pr create:*)",
-             f"Bash(git push origin HEAD:refs/heads/{branch})"],
-            argv[-4:],
-        )
-
-    def test_claude_resolve_publication_allows_push_and_comment_but_not_create(self) -> None:
-        branch = "feature/test-publication"
-        with patch.object(ex.subprocess, "run", return_value=completed(f"{branch}\n")):
-            argv = self.claude(
-                cwd="/repo", writes=True, publishes=True,
-                publication_permissions=("comment", "push_branch"),
-            )
-
-        self.assertEqual(
-            ["--allowedTools", "Bash(gh pr comment:*)",
-             f"Bash(git push origin HEAD:refs/heads/{branch})"],
-            argv[-3:],
-        )
-        self.assertNotIn("Bash(gh pr create:*)", argv)
-
-    def test_claude_never_allows_general_gh_or_git_push_prefixes(self) -> None:
+    def test_claude_publishing_stage_keeps_its_github_tooling(self) -> None:
+        """The publication boundary is behavioural: gh and git stay available,
+        and the stage's prompt says which operations it may perform."""
         for permissions in (("comment",), ("comment", "push_branch"),
                             ("comment", "create_pr", "push_branch")):
             argv = self.claude(
                 writes="push_branch" in permissions, publishes=True,
                 publication_permissions=permissions,
             )
-            allowed = argv[argv.index("--allowedTools") + 1:]
-            self.assertFalse(any(tool in {"Bash(gh:*)", "Bash(git push:*)"}
-                                 for tool in allowed))
+            self.assertEqual(["--allowedTools", "Bash(gh:*)", "Bash(git:*)"], argv[-3:])
 
-    def test_claude_does_not_allow_push_for_shell_syntax_in_branch_name(self) -> None:
-        def branch_result(argv, **_kwargs):
-            self.assertEqual(
-                ["git", "-C", "/repo", "branch", "--show-current"], argv,
-            )
-            return completed("feature/fix;touch /tmp/unwanted\n")
-
-        with patch.object(ex.subprocess, "run", side_effect=branch_result):
-            argv = self.claude(
-                cwd="/repo", writes=True, publishes=True,
-                publication_permissions=("comment", "push_branch"),
-            )
-
-        self.assertNotIn("Bash(git push origin HEAD:refs/heads/feature/fix;touch /tmp/unwanted)", argv)
-        self.assertNotIn("Bash(git push:*)", argv)
+    def test_claude_non_publishing_stage_gets_no_extra_tools(self) -> None:
+        self.assertNotIn("--allowedTools", self.claude(writes=True))
 
     def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
         """A live probe wrote the file anyway with the edit tools disallowed,

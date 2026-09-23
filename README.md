@@ -422,25 +422,38 @@ prompt, and records `local_only` in each telemetry row. It is an orchestration
 policy, not an operating-system sandbox: block network credentials and remote
 Git access separately when a hard no-publish guarantee is required.
 
-Publishing stages are explicit in the role contract: `implement`, `resolve`,
-`review` and `rereview` can publish; security, bootstrap, verification and
-runtime stages cannot. Before a publishing dispatch, the runtime checks the
-current GitHub CLI authentication when `origin` is GitHub and runs
-`git push --dry-run` against a temporary preflight ref (without creating it).
-A failure is recorded as `missing_capability=publication_access` before the
-model CLI starts. This is a no-change readiness check; the actual change
-request or review comment still depends on the provider's live permissions.
+Publishing stages are explicit in the role contract. `implement` may comment,
+create the change request, and push its working branch. `resolve` may comment
+and push its working branch. `review` and `rereview` may only comment.
+Security, bootstrap, verification, and runtime stages publish nothing, and
+`--local-only` removes publication from every stage. Every stage's prompt states
+its allowed operations and the prohibitions that apply to all stages: never
+merge, force-push, delete remote refs, modify the base branch, close an issue or
+change request without an explicit instruction, or publish for another stage.
 
-Codex publication uses a CLI permission profile: its filesystem boundary
-matches the stage (read-only for review, workspace write for implementation),
-and network access is limited to GitHub and Bitbucket hosts. This requires
-Codex CLI 0.138.0 or newer; older versions record `publication_access` and do
-not dispatch. Claude receives stage-specific publication commands alongside
-its existing file permission: implement can create a PR, comment, and push its
-current branch; resolve can comment and push that branch; review and rereview
-can only comment on a PR. Local-only implementation never receives
-publication access. Orca and new adapters fail closed until they expose a
-publication permission contract.
+**This publication boundary is behavioural, not technical.** Codex and Claude
+keep their normal GitHub access: `gh`, `git`, their skills, MCP servers, and the
+user's credentials. The toolkit does not stop an operation the role contract
+does not list. It tells the agent the rule, and the published comments and
+telemetry let a person check that the rule was followed. Use a separate
+credential or repository permissions when you need a hard guarantee. Local
+file access is different: each role's `WorkspacePolicy` is enforced where the
+adapter can enforce it (see [the role workspace policy](docs/role-workspace-policy.md)).
+
+Before a publishing dispatch, the runtime checks that publication is possible.
+For a GitHub `origin` it checks `gh` authentication and the account's
+repository permission. It then runs `git push --dry-run` against a temporary
+preflight ref, which it does not create. A failure is recorded as
+`missing_capability=publication_access` before the model CLI starts. This is a
+readiness check, not a permission check per operation.
+
+A publishing Codex stage keeps the stage's filesystem sandbox (read-only for
+review, workspace write for implementation) and gets network access to GitHub
+and Bitbucket through a CLI permission profile. That needs Codex CLI 0.138.0 or
+newer; older versions record `publication_access` and do not dispatch. A
+publishing Claude stage receives `gh` and `git` alongside its existing file
+permission. Orca and new adapters fail closed until they declare how
+publication access is granted.
 
 Reading `.code-cycle.yml` needs PyYAML, the runtime's one optional dependency
 (`pip install pyyaml`). Nothing else in the toolkit needs it: a repository with
