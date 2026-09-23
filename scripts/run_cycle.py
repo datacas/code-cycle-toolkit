@@ -267,6 +267,31 @@ class Reported:
         return self.payload is not None
 
     @property
+    def change_request_id(self) -> str | None:
+        """A safe change-request reference, including the legacy alias.
+
+        The identifier is inserted into a later stage's prompt, so accept only
+        a short scalar made from reference characters. It is never stored in
+        telemetry.
+        """
+        if not self.payload:
+            return None
+        for key in ("change_request_id", "pr_number"):
+            value = self.payload.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                reference = str(value)
+            elif isinstance(value, str):
+                reference = value.strip()
+            else:
+                continue
+            if (reference and len(reference) <= 128
+                    and all(char.isalnum() or char in "#._:/-" for char in reference)):
+                return reference
+        return None
+
+    @property
     def reason(self) -> str | None:
         """What the agent said about its own outcome, in its own words.
 
@@ -356,12 +381,17 @@ def readable(text: str, limit: int = REASON_LIMIT) -> str:
 
 
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
-            *, local_only: bool = False) -> str:
+            *, change_request_id: str | None = None,
+            local_only: bool = False) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
         raise CycleDriverError(f"no skill is defined for the role {role!r}")
-    parts = [f"Run {skill} for {task_id} in {repo_id}."]
+    if role in {"review", "resolve", "rereview"} and change_request_id:
+        parts = [f"Run {skill} for change request `{change_request_id}` in "
+                 f"{repo_id} (work item {task_id})."]
+    else:
+        parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
     if local_only:
@@ -512,9 +542,11 @@ def run_cycle(
     if timeout is not None:
         dispatch_kwargs["timeout"] = timeout
 
-    def run(role: str, instruction: str = "") -> tuple[StageOutcome, Reported]:
+    def run(role: str, instruction: str = "", *,
+            change_request_id: str | None = None) -> tuple[StageOutcome, Reported]:
         outcome = recorder.stage(
-            role, compose(role, repo_id, task_id, instruction, local_only=local_only),
+            role, compose(role, repo_id, task_id, instruction,
+                          change_request_id=change_request_id, local_only=local_only),
                                  **dispatch_kwargs)
         report.stages.append(outcome)
         return outcome, read_structured_result(outcome.result)
@@ -529,14 +561,15 @@ def run_cycle(
         recorder.close(status)
         return report
 
-    def advance(role: str, instruction: str = "") -> tuple[Reported, CycleReport | None]:
+    def advance(role: str, instruction: str = "", *,
+                change_request_id: str | None = None) -> tuple[Reported, CycleReport | None]:
         """Run one stage and decide whether the cycle may continue past it.
 
         Every reason to stop is here rather than repeated per stage: a stop
         condition that has to be remembered four times is one that will be
         missing from the fourth.
         """
-        outcome, reported = run(role, instruction)
+        outcome, reported = run(role, instruction, change_request_id=change_request_id)
         if not outcome.succeeded:
             return reported, stop(_why(outcome), reported=reported)
         if _started_elsewhere(outcome):
@@ -561,7 +594,15 @@ def run_cycle(
             reported=reported,
         )
 
-    reported, stopped = advance("review")
+    change_request_id = reported.change_request_id
+    if change_request_id is None:
+        return stop(
+            "implement completed without change_request_id or legacy pr_number; "
+            "stopping before review",
+            reported=reported,
+        )
+
+    reported, stopped = advance("review", change_request_id=change_request_id)
     if stopped is not None:
         return stopped
     verdict = reported.status
@@ -570,11 +611,13 @@ def run_cycle(
     while verdict == "CHANGES_REQUESTED" and recorder.iteration < max_iterations:
         recorder.next_iteration()
 
-        _, stopped = advance("resolve", "Resolve the findings from the review.")
+        _, stopped = advance("resolve", "Resolve the findings from the review.",
+                             change_request_id=change_request_id)
         if stopped is not None:
             return stopped
 
-        reported, stopped = advance("rereview", "Re-review the change after the fixes.")
+        reported, stopped = advance("rereview", "Re-review the change after the fixes.",
+                                    change_request_id=change_request_id)
         if stopped is not None:
             return stopped
         verdict = reported.status
