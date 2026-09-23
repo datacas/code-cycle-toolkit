@@ -7,6 +7,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- A minimal profile-selection seam in `scripts/router.py`: `route()` asks a
+  `ProfileSelector` for a profile name among the role's `ROLE_CANDIDATES` and
+  refuses anything else. The existing rules are the default `rule_selector`,
+  with identical decisions for identical inputs; policy, availability,
+  fallback, calibration blocking and target resolution stay outside the
+  selector. No configuration change. (#36)
 - Typed pre-routing signals on every stage row (telemetry schema 2): diff
   counts, area flags and fixed per-language counters from
   `scripts/stage_signals.py`, prior findings by severity, failed attempts,

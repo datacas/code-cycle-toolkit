@@ -291,6 +291,15 @@ implementation work goes to `deep_coder`, and a security-sensitive change is
 reviewed by `senior_reviewer`. Labelling after the fact would mean measuring the
 routing rather than the models.
 
+**Profile selection is a seam, and only a seam.** Those rules live in
+`rule_selector`, the default `ProfileSelector`: a callable that receives the
+role, the role's allowed profiles (`ROLE_CANDIDATES`) and the `TaskSignals`, and
+returns a profile name with its reasons. `route()` refuses any name outside the
+candidates, and keeps everything else — workspace policy, the availability
+gate, fallback, the calibration block and target resolution — so a selector can
+never return a model or skip a gate. Nothing in the cycle passes another
+selector yet.
+
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
 
