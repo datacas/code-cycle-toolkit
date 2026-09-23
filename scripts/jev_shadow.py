@@ -24,7 +24,8 @@ exception text is never kept, so nothing the service says can reach the store.
 
 **Disabled means absent.** With the mode unset or `disabled`, no `JevShadow`
 is built, no key is read and no socket is opened. In `shadow` without
-`JEV_API_KEY`, the stage records `unavailable` and the cycle carries on.
+`TYPESAFE_API_KEY` or the legacy `JEV_API_KEY`, the stage records `unavailable`
+and the cycle carries on.
 
 The key is read from the environment at the moment of the call, placed in one
 request header, and held nowhere else.
@@ -43,13 +44,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from telemetry import JEV_MODELS, PRE_ROUTING_SIGNALS
+from telemetry import PRE_ROUTING_SIGNALS, is_jev_model
 
 #: The only host the adapter talks to. Not configurable: a configurable
 #: endpoint is a place to send pre-routing data that nobody reviewed.
-JEV_URL = "https://www.jevai.org/api/v1/decisions"
-API_KEY_ENV = "JEV_API_KEY"
-DEFAULT_MODEL = "typesafe-ai/jev"
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+API_KEY_ENV = "TYPESAFE_API_KEY"
+LEGACY_API_KEY_ENV = "JEV_API_KEY"
+USER_AGENT = "code-cycle-toolkit"
+DEFAULT_MODEL = "jev-latest"
+LEGACY_MODEL_ALIAS = "typesafe-ai/jev"
 DEFAULT_TIMEOUT_SECONDS = 3.0
 MAX_TIMEOUT_SECONDS = 10.0
 #: A decision is a few hundred bytes; anything much larger is not one.
@@ -93,6 +97,13 @@ class JevConfigError(ValueError):
     """`code_cycle.routing.jev` declares something this adapter will not run."""
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not forward the bearer credential to a redirect destination."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 @dataclass(frozen=True)
 class JevConfig:
     mode: JevMode = JevMode.DISABLED
@@ -134,10 +145,12 @@ def load_jev_config(config: dict | None = None) -> JevConfig:
             "(expected 'disabled' or 'shadow')") from None
 
     model = jev.get("model", DEFAULT_MODEL)
-    if model not in JEV_MODELS:
+    if model == LEGACY_MODEL_ALIAS:
+        model = DEFAULT_MODEL
+    if not is_jev_model(model):
         raise JevConfigError(
-            f"code_cycle.routing.jev.model must be one of "
-            f"{', '.join(sorted(JEV_MODELS))}, not {model!r}")
+            "code_cycle.routing.jev.model must be 'jev-latest' or a concrete "
+            f"TypeSafe Jev version, not {model!r}")
 
     timeout = jev.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
@@ -202,8 +215,9 @@ Transport = Callable[[str, bytes, dict, float], tuple[int, bytes]]
 def urllib_transport(url: str, body: bytes, headers: dict,
                      timeout: float) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    opener = urllib.request.build_opener(_NoRedirectHandler())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.status, response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         return error.code, b""
@@ -234,12 +248,12 @@ def parse_response(status: int, body: bytes, model: str) -> Suggestion:
         envelope = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return Suggestion("invalid_response")
-    if not isinstance(envelope, dict) or envelope.get("code") != 0:
+    if not isinstance(envelope, dict):
         return Suggestion("invalid_response")
-    data = envelope.get("data")
-    answers = data.get("answers") if isinstance(data, dict) else None
+    answers = envelope.get("answers")
     answer = answers.get(QUESTION) if isinstance(answers, dict) else None
-    if not isinstance(answer, dict) or answer.get("choice") not in OPTIONS:
+    if (not isinstance(answer, dict) or answer.get("type") != "choice"
+            or answer.get("choice") not in OPTIONS):
         return Suggestion("invalid_response")
 
     confidence = answer.get("confidence")
@@ -258,12 +272,16 @@ def parse_response(status: int, body: bytes, model: str) -> Suggestion:
         probabilities = checked
 
     # Only a model the service names is recorded, and only a known one by name.
-    reported = data.get("model")
+    reported = envelope.get("model")
     if reported is None:
         resolved, resolution = None, "unreported"
     elif reported == model:
         resolved, resolution = reported, "matched"
-    elif reported in JEV_MODELS:
+    elif model == DEFAULT_MODEL and reported != DEFAULT_MODEL and is_jev_model(reported):
+        # Resolving the rolling alias to a concrete published version is the
+        # expected result, not model drift.
+        resolved, resolution = reported, "matched"
+    elif is_jev_model(reported):
         resolved, resolution = reported, "mismatch_known"
     else:
         resolved, resolution = None, "mismatch_unrecognized"
@@ -291,11 +309,12 @@ class JevShadow:
         return role in SHADOW_ROLES
 
     def suggest(self, role: str, signals: Mapping) -> Suggestion:
-        key = self._environ.get(API_KEY_ENV)
+        key = self._environ.get(API_KEY_ENV) or self._environ.get(LEGACY_API_KEY_ENV)
         if not key:
             return Suggestion("unavailable")
         body = json.dumps(build_request(self.config.model, role, signals)).encode("utf-8")
         headers = {"Content-Type": "application/json",
+                   "User-Agent": USER_AGENT,
                    "Authorization": f"Bearer {key}"}
         started = self._clock()
         try:

@@ -57,9 +57,16 @@ DATABASE_NAME = "telemetry.sqlite"
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
 
-#: The Jev model identifiers a shadow suggestion may request or report. Closed,
-#: like every other token: a model name and a credential share a shape.
-JEV_MODELS = frozenset({"typesafe-ai/jev"})
+#: TypeSafe model identifiers are constrained to its alias and version format.
+#: This records future concrete versions without accepting arbitrary strings.
+JEV_MODELS = frozenset({"jev-latest"})
+JEV_MODEL_VERSION_PATTERN = re.compile(r"jev-[0-9]+\.[0-9]+\.[0-9]+\Z")
+
+
+def is_jev_model(value) -> bool:
+    return (isinstance(value, str) and len(value) <= 64
+            and (value in JEV_MODELS
+                 or JEV_MODEL_VERSION_PATTERN.fullmatch(value) is not None))
 
 #: The profiles a shadow selector compares, which are the `implement` and
 #: `resolve` candidates in `router.ROLE_CANDIDATES`.
@@ -79,6 +86,7 @@ SHADOW_PROFILES = frozenset({"cheap_coder", "deep_coder"})
 #:   amount     a number
 #:   flag       a boolean
 #:   token      a value from a closed vocabulary, never free text
+#:   jev_model  the constrained TypeSafe alias/version grammar above
 #:   identifier a short reference with no whitespace: prose has spaces
 FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     # identifiers supplied by the caller
@@ -226,8 +234,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "jev_confidence": ("amount", None),
     "jev_probability_cheap_coder": ("amount", None),
     "jev_probability_deep_coder": ("amount", None),
-    "jev_model_requested": ("token", JEV_MODELS),
-    "jev_model_resolved": ("token", JEV_MODELS),
+    "jev_model_requested": ("jev_model", None),
+    "jev_model_resolved": ("jev_model", None),
     "jev_model_resolution": ("token", frozenset({
         "matched", "mismatch_known", "mismatch_unrecognized", "unreported",
     })),
@@ -567,6 +575,12 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
     if kind == "flag":
         if not isinstance(value, bool):
             raise TelemetryError(f"{key!r} is a flag and must be a boolean, got {type(value).__name__}")
+        return value
+    if kind == "jev_model":
+        if not is_jev_model(value):
+            raise TelemetryError(
+                f"{key!r} must be a TypeSafe alias or versioned Jev model identifier, not {value!r}"
+            )
         return value
     if kind == "token":
         if value not in (vocabulary or frozenset()):

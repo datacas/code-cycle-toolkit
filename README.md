@@ -158,7 +158,7 @@ listed here, by name and before a stage is dispatched (see
 | `verification.cache_ttl`, `verification.recheck_on_failure` | `cc-provider-bootstrap` | How long a provider health check stays fresh (default `7d`). `recheck_on_failure` appears in the documented shape, but no component reads it: a live provider failure always forces a recheck. |
 | `profiles.<name>.primary`, `profiles.<name>.fallback` | `run_cycle.py` via `router.load_profiles()`; `cc-orchestrator` | Where each of the eight profiles resolves. Only the profiles you declare change; the rest keep `DEFAULT_PROFILES` in `scripts/router.py`. An unknown profile name is refused. The models declared here are added to telemetry's accepted model set for that repository. |
 | `routing.strategy` | `run_cycle.py` via `router.load_routing_strategy()` | `fixed` (default) or `measured`. Neither changes which target is selected; `measured` only feeds the repository's first-pass rate into the recorded cost estimate. |
-| `routing.jev.mode`, `routing.jev.model`, `routing.jev.timeout_seconds` | `run_cycle.py` via `jev_shadow.load_jev_config()` | `disabled` (default) or `shadow`. In `shadow`, `implement` and `resolve` stages ask [Jev](https://www.jevai.org/docs) which of `cheap_coder` or `deep_coder` it would pick and record the answer beside the rules' choice; the suggestion never selects a profile, a target or a dispatch. `model` defaults to `typesafe-ai/jev`, `timeout_seconds` to `3` (at most `10`). The key comes only from `JEV_API_KEY` in the environment; without it the stage records `unavailable`. See [docs/instrumentation.md](docs/instrumentation.md#shadow-suggestions). |
+| `routing.jev.mode`, `routing.jev.model`, `routing.jev.timeout_seconds` | `run_cycle.py` via `jev_shadow.load_jev_config()` | `disabled` (default) or `shadow`. In `shadow`, `implement` and `resolve` stages ask [TypeSafe](https://docs.typesafe.ai/) which of `cheap_coder` or `deep_coder` it would pick and record the answer beside the rules' choice; the suggestion never selects a profile, a target or a dispatch. `model` defaults to `jev-latest` and accepts it or a concrete version such as `jev-1.13.0`; the legacy `typesafe-ai/jev` value is normalized to `jev-latest`. `timeout_seconds` defaults to `3` (at most `10`). The key comes from `TYPESAFE_API_KEY`, with `JEV_API_KEY` as a compatibility fallback; without either, the stage records `unavailable`. See [docs/instrumentation.md](docs/instrumentation.md#shadow-suggestions). |
 | `review.trusted_authors` | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` | The provider logins whose comments may advance recovered findings. An absent or empty list blocks recovery. |
 | `security_review.always_when.paths`, `.files`, `.labels` | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments`; implemented as a library in `scripts/security_gate.py` | When the security audit always runs. A declared list replaces its default; an absent block keeps the defaults, so configuration cannot switch the gate off. |
 | `orchestration.mode` | `cc-orchestrator` | `auto` (default), `single_agent`, or `claude_codex`. |
@@ -498,8 +498,8 @@ Each stage row records the active strategy and cost inputs.
 `code_cycle.routing.jev` is off unless `mode: shadow` is declared. In shadow
 mode, `implement` and `resolve` stages also record Jev's suggested profile on a
 separate `shadow` row; the rules still choose every profile, and a missing
-`JEV_API_KEY`, a timeout or an error only records its category. Any other key
-under `code_cycle.routing` is refused.
+`TYPESAFE_API_KEY` (or legacy `JEV_API_KEY`), a timeout or an error only
+records its category. Any other key under `code_cycle.routing` is refused.
 
 It probes the executors once, labels the work before routing anything, and runs
 `implement → review → (resolve → rereview)*` with every stage going through the
