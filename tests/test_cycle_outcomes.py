@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
 from test_cycle import CycleTestCase, ScriptedAdapter  # noqa: E402
 from test_run_cycle import RunCycleTestCase, Talker, block  # noqa: E402
@@ -226,6 +227,18 @@ class LegacyRowTests(unittest.TestCase):
 
 
 class DriverTests(RunCycleTestCase):
+    def test_every_documented_verdict_outcome_is_one_the_driver_records(self) -> None:
+        """REV-001: a documented outcome nothing writes is a promise, not data."""
+        payload = {
+            "status": "CHANGES_REQUESTED", "tests": {"passed": False},
+            "checks": {"passed": 4, "failed": 1},
+            "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
+        }
+
+        emitted = {"status", *rc._findings(payload), *rc._tests(payload)}
+
+        self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)
+
     def cycle_row(self):
         return [row for row in self.rows() if row["payload"].get("record_kind") == "cycle"][-1]
 

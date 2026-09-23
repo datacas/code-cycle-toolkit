@@ -262,12 +262,14 @@ CORRELATION_FIELDS = frozenset({"cycle_id", "stage_seq", "record_kind"})
 #: What was learned after a routing, by the row that is its source. None of it
 #: is ever written onto a `dispatch` row: those carry the pre-routing signals,
 #: and an outcome beside them would leak into any evaluation that reads them.
-#: A field that was not observed is absent, never a default.
+#: A field that was not observed is absent, never a default. Only what the
+#: driver can read off a structured result is listed: `checks_passed` and
+#: `checks_failed` stay accepted fields, but no skill reports check counts, so
+#: promising them here would describe an outcome nothing records.
 OUTCOME_FIELDS: dict[str, frozenset[str]] = {
     "verdict": frozenset({
         "status", "findings_total", "findings_blocking", "findings_critical",
         "findings_high", "findings_medium", "findings_low", "tests_passed",
-        "checks_passed", "checks_failed",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",

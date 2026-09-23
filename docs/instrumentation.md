@@ -564,7 +564,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 
 | Source | Fields | Written when |
 |---|---|---|
-| `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed`, `checks_passed`, `checks_failed` | the stage's structured result is read |
+| `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
 | `cycle` | `first_review_status`, `first_pass_approved`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
 | `cycle` | `tests_passed` | a verdict reported a boolean `tests.passed`; the latest one wins |
@@ -578,6 +578,9 @@ not a boolean `passed` is not a test result. `Telemetry.cycle_outcome(repo_id,
 cycle_id)` reassembles a run from these rows and reports `closed: false` for one
 that never wrote its closing row, whose outcome is then unknown rather than
 failed. `resolution_rounds` counts the `resolve` stages the run attempted.
+`checks_passed` and `checks_failed` remain accepted telemetry fields, but no
+skill's structured result reports check counts, so they are not a recorded
+outcome; CI state stays in the published review comment.
 
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
