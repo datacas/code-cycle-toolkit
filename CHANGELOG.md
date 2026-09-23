@@ -10,8 +10,12 @@ All notable changes to this project are documented here. This project follows
 - A privacy-safe `cc-stats` report for local telemetry, with repository-scoped
   stage, role, activity, outcome, routing, and verification summaries in Markdown
   or JSON. Dispatch attempts count once per stage, while verdict, shadow, and
-  cycle rows contribute only to their respective metrics. All-time reports leave
-  the previous-period comparison unset. (#42)
+  cycle rows contribute only to their respective metrics; rows recorded before
+  schema 3 count as stages only when they carry dispatch evidence (`outcome`,
+  `executor` or `profile`). All-time reports leave the previous-period
+  comparison unset. The Markdown report renders roles, verdicts, findings,
+  dispatch blockages and the Jev comparison as tables with exact counts beside
+  proportional bars. (#42)
 - Jev as an opt-in shadow profile selector (`code_cycle.routing.jev.mode:
   shadow`, default `disabled`). `implement` and `resolve` stages ask Jev to
   choose between `cheap_coder` and `deep_coder` from allowlisted scalar

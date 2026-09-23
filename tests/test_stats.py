@@ -105,6 +105,63 @@ class StatsTests(unittest.TestCase):
         self.assertNotIn("coordinate", report["summary"]["roles"])
         self.assertIsNone(report["comparison"]["previous_first_pass"])
 
+    def test_rows_before_record_kind_count_only_dispatches_as_stages(self) -> None:
+        # Schema 2: no record_kind, but verdicts and the close were own rows.
+        self.store.record_stage("owner/repo", "task-1", "implement", profile="cheap_coder",
+                                outcome="succeeded", duration_ms=1000)
+        self.store.record_stage("owner/repo", "task-1", "review", profile="senior_reviewer",
+                                outcome="succeeded", duration_ms=500)
+        self.store.record_stage("owner/repo", "task-1", "review", status="APPROVED")
+        self.store.record_stage("owner/repo", "task-1", "coordinate",
+                                status="READY_FOR_MANUAL_MERGE", iterations=0)
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of(), days=None)
+
+        self.assertEqual(2, report["summary"]["stages"])
+        self.assertEqual({"implement": 1, "review": 1}, report["summary"]["roles"])
+        self.assertEqual({"APPROVED": 1}, report["summary"]["verdicts"])
+        self.assertEqual(2, report["summary"]["duration_ms"]["measured"])
+        self.assertEqual(2, sum(report["trend_daily"].values()))
+
+    def test_markdown_renders_breakdowns_as_tables_not_inline_json(self) -> None:
+        for index in range(10):
+            cycle_id = f"cycle-{index}"
+            self.store.record_stage(
+                "owner/repo", f"task-{index}", "implement", profile="cheap_coder",
+                cycle_id=cycle_id, stage_seq=1, record_kind="dispatch",
+                missing_capability="operating_quota" if index == 0 else None,
+            )
+            self.store.record_stage(
+                "owner/repo", f"task-{index}", "implement", cycle_id=cycle_id,
+                stage_seq=1, record_kind="shadow", jev_status="suggested",
+                jev_suggested_profile="cheap_coder", jev_rule_profile="cheap_coder",
+                jev_agreement=index % 3 != 0, jev_confidence=0.6,
+            )
+            self.store.record_stage(
+                "owner/repo", f"task-{index}", "review", cycle_id=cycle_id,
+                stage_seq=2, record_kind="verdict",
+                status="APPROVED" if index < 8 else "CHANGES_REQUESTED",
+                findings_high=1, findings_low=2,
+            )
+            self.store.record_stage(
+                "owner/repo", f"task-{index}", "coordinate", cycle_id=cycle_id,
+                record_kind="cycle", first_pass_approved=index < 8,
+            )
+
+        markdown = stats.render_markdown(stats.aggregate(
+            stats._read_rows(self.database, "owner/repo"),
+            repo_id="owner/repo", now=self.as_of()))
+
+        self.assertNotIn("`{", markdown)
+        self.assertIn("| APPROVED | 8 | ████████████ |", markdown)
+        self.assertIn("| high | 10 | 10 |", markdown)
+        self.assertIn("| critical | unknown | 0 | — |", markdown)
+        self.assertIn("| operating_quota | 1 |", markdown)
+        self.assertIn("| agree | 6 |", markdown)
+        self.assertIn("| medium | 0.50–<0.75 | 10 |", markdown)
+        self.assertIn("| cheap_coder | 8/10 (80%) |", markdown)
+
     def test_jev_summary_uses_correlated_observations_and_sample_gate(self) -> None:
         for index in range(10):
             cycle_id = f"cycle-{index}"
