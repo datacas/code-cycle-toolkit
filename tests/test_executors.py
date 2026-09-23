@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,6 +96,14 @@ class ProbeHonestyTests(unittest.TestCase):
         self.assertEqual(ex.Availability.AUTHENTICATED, result.availability)
         self.assertIn("quota is not observable", result.detail)
         self.assertTrue(result.honest_ceiling_reached)
+
+    def test_codex_probe_records_the_cli_version_for_permission_readiness(self) -> None:
+        adapter = ex.CodexAdapter()
+        adapter.auth_evidence = lambda: (True, "credential file present")
+
+        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.138.2"), which=present)
+
+        self.assertEqual((0, 138, 2), result.version)
 
     def test_no_credential_stops_at_installed(self) -> None:
         adapter = ex.CodexAdapter()
@@ -201,6 +210,68 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("operating_availability", result.missing_capability)
         self.assertIn("no credential", result.detail)
+
+    def test_missing_publication_permission_blocks_before_invoking_the_agent(self) -> None:
+        adapter = ex.CodexAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("an unsupported publication profile must not dispatch")
+
+        result = ex.dispatch(
+            decision(), "publish", ex.Registry([adapter]), publishes=True, writes=True,
+            probes={"codex": ex.ProbeResult(
+                "codex", ex.Availability.AUTHENTICATED, "credential present",
+                provable_ceiling=ex.Availability.AUTHENTICATED, version=(0, 137, 0),
+            )},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("publication_access", result.missing_capability)
+        self.assertIn("0.138.0", result.detail)
+
+    def test_failed_remote_preflight_is_recorded_before_agent_dispatch(self) -> None:
+        adapter = ex.ClaudeAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("the agent must not run without remote write access")
+
+        with patch.object(ex, "_publication_preflight",
+                          return_value=(False, "remote write permission is missing")):
+            result = ex.dispatch(
+                decision(target=router.parse_target(
+                    "claude:anthropic/claude-sonnet-5 high")),
+                "publish", ex.Registry([adapter]), publishes=True, writes=True,
+                runner=runner,
+                probes={"claude": ex.ProbeResult(
+                    "claude", ex.Availability.AUTHENTICATED, "credential present",
+                    provable_ceiling=ex.Availability.AUTHENTICATED,
+                )},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("publication_access", result.missing_capability)
+        self.assertIn("remote write", result.detail)
+
+    def test_codex_publish_dispatch_uses_verified_scoped_permissions(self) -> None:
+        seen = {}
+        adapter = ex.CodexAdapter()
+        ready_probe = ex.ProbeResult(
+            "codex", ex.Availability.AUTHENTICATED, "credential present",
+            provable_ceiling=ex.Availability.AUTHENTICATED, version=(0, 138, 0),
+        )
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("done")
+
+        with patch.object(ex, "_publication_preflight", return_value=(True, "verified")):
+            result = ex.dispatch(
+                decision(), "publish", ex.Registry([adapter]), publishes=True, writes=True,
+                runner=runner, probes={"codex": ready_probe},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
 
     def test_a_blocked_decision_is_never_re_routed_here(self) -> None:
         """The router already decided; substituting now would falsify the record."""
@@ -809,6 +880,28 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("-s", argv)
         self.assertEqual("workspace-write", argv[argv.index("-s") + 1])
 
+    def test_codex_publish_profile_keeps_review_read_only_and_limits_network(self) -> None:
+        argv = ex.CodexAdapter().argv(TARGET, "review", writes=False, publishes=True)
+
+        self.assertIn('default_permissions="code_cycle_publish_read"', argv)
+        self.assertIn('permissions.code_cycle_publish_read.extends=":read-only"', argv)
+        self.assertIn("permissions.code_cycle_publish_read.network.enabled=true", argv)
+        self.assertIn(
+            'permissions.code_cycle_publish_read.network.domains={"github.com"="allow",'
+            '"api.github.com"="allow","bitbucket.org"="allow",'
+            '"api.bitbucket.org"="allow"}',
+            argv,
+        )
+        self.assertFalse(any('network.domains."' in arg for arg in argv))
+        self.assertNotIn("-s", argv)
+
+    def test_codex_publish_profile_preserves_workspace_write_for_implementers(self) -> None:
+        argv = ex.CodexAdapter().argv(TARGET, "implement", writes=True, publishes=True)
+
+        self.assertIn('default_permissions="code_cycle_publish_write"', argv)
+        self.assertIn('permissions.code_cycle_publish_write.extends=":workspace"', argv)
+        self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
+
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""
         argv = self.codex(writes=False)
@@ -839,6 +932,20 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("--permission-mode", argv)
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
 
+    def test_claude_publishing_stage_keeps_its_github_tooling(self) -> None:
+        """The publication boundary is behavioural: gh and git stay available,
+        and the stage's prompt says which operations it may perform."""
+        for permissions in (("comment",), ("comment", "push_branch"),
+                            ("comment", "create_pr", "push_branch")):
+            argv = self.claude(
+                writes="push_branch" in permissions, publishes=True,
+                publication_permissions=permissions,
+            )
+            self.assertEqual(["--allowedTools", "Bash(gh:*)", "Bash(git:*)"], argv[-3:])
+
+    def test_claude_non_publishing_stage_gets_no_extra_tools(self) -> None:
+        self.assertNotIn("--allowedTools", self.claude(writes=True))
+
     def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
         """A live probe wrote the file anyway with the edit tools disallowed,
         and plan mode refuses the edit by turning a review into planning. So a
@@ -847,6 +954,32 @@ class PermissionTests(unittest.TestCase):
 
         self.assertNotIn("--permission-mode", argv)
         self.assertNotIn("--disallowedTools", argv)
+
+
+class PublicationPreflightTests(unittest.TestCase):
+    def test_github_write_permission_uses_repository_permission_write_value(self) -> None:
+        def run(argv, **_kwargs):
+            if argv == ["git", "rev-parse", "--show-toplevel"]:
+                return completed("/repo\n")
+            if argv == ["git", "branch", "--show-current"]:
+                return completed("feature\n")
+            if argv == ["git", "remote", "get-url", "origin"]:
+                return completed("https://github.com/owner/repo.git\n")
+            if argv == ["gh", "repo", "view", "--json", "nameWithOwner,viewerPermission"]:
+                return completed('{"nameWithOwner":"owner/repo","viewerPermission":"WRITE"}')
+            if argv == ["gh", "auth", "status"]:
+                return completed()
+            if argv == ["git", "push", "--dry-run", "origin",
+                        "HEAD:refs/heads/cc-cycle-preflight"]:
+                return completed()
+            self.fail(f"unexpected preflight command: {argv!r}")
+
+        with patch.object(ex.subprocess, "run", side_effect=run), \
+             patch.object(ex.shutil, "which", return_value="/usr/bin/gh"):
+            ready, detail = ex._publication_preflight("/repo")
+
+        self.assertTrue(ready)
+        self.assertIn("passed", detail)
 
     def test_a_reading_dispatch_fails_closed_for_an_unconfined_adapter(self) -> None:
         """A configured Claude review cannot silently share the writable tree."""

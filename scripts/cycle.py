@@ -76,12 +76,26 @@ class RoleContract:
     """The workspace boundary a role must receive before it can run."""
 
     workspace_policy: WorkspacePolicy
+    publishes: bool = False
+    publication_permissions: tuple[str, ...] = ()
 
 ROLE_CONTRACTS = {
-    "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
-    "resolve": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
-    "review": RoleContract(WorkspacePolicy.READ_ONLY),
-    "rereview": RoleContract(WorkspacePolicy.READ_ONLY),
+    "implement": RoleContract(
+        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
+        publication_permissions=("comment", "create_pr", "push_branch"),
+    ),
+    "resolve": RoleContract(
+        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
+        publication_permissions=("comment", "push_branch"),
+    ),
+    "review": RoleContract(
+        WorkspacePolicy.READ_ONLY, publishes=True,
+        publication_permissions=("comment",),
+    ),
+    "rereview": RoleContract(
+        WorkspacePolicy.READ_ONLY, publishes=True,
+        publication_permissions=("comment",),
+    ),
     "security": RoleContract(WorkspacePolicy.READ_ONLY),
     "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
     "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
@@ -93,6 +107,43 @@ DEFAULT_ROLE_CONTRACT = RoleContract(WorkspacePolicy.READ_ONLY)
 def role_contract(role: str) -> RoleContract:
     """Return a role's contract, defaulting unknown roles to least privilege."""
     return ROLE_CONTRACTS.get(role, DEFAULT_ROLE_CONTRACT)
+
+
+#: How each publication permission is described to the agent.
+PUBLICATION_OPERATIONS = {
+    "comment": "comment on the work item or change request of this cycle",
+    "create_pr": "create the change request for the working branch",
+    "push_branch": "push the working branch",
+}
+
+#: Forbidden in every stage, whatever its contract allows.
+PUBLICATION_PROHIBITIONS = (
+    "Never merge, force-push, delete remote refs, push to or otherwise modify "
+    "the base branch, close an issue or change request unless explicitly "
+    "instructed, or publish anything that belongs to another stage."
+)
+
+
+def publication_policy(role: str, publication_permissions: tuple[str, ...]) -> str:
+    """The stage's publication rules, stated to the agent.
+
+    This is a behavioural boundary. Agents keep their normal `gh`, `git` and
+    network access; nothing here or in the adapters prevents an operation the
+    contract does not list. The prompt states the rule, and the published
+    comments and telemetry are how a person audits that it was followed.
+    """
+    if not publication_permissions:
+        return (f"Publication policy for this {role} stage: it publishes nothing. "
+                "Do not comment, push, create a change request, or change any "
+                f"remote state. {PUBLICATION_PROHIBITIONS}")
+    allowed = "; ".join(PUBLICATION_OPERATIONS[name]
+                        for name in publication_permissions)
+    denied = [text for name, text in PUBLICATION_OPERATIONS.items()
+              if name not in publication_permissions]
+    rule = f"Publication policy for this {role} stage: you may {allowed}."
+    if denied:
+        rule += f" You may not {'; '.join(denied)}."
+    return f"{rule} {PUBLICATION_PROHIBITIONS}"
 
 
 class CycleError(ValueError):
@@ -215,6 +266,25 @@ class CycleRecorder:
             raise CycleError(
                 f"{role!r} stages must use writes={writes}, not {requested_writes!r}")
         dispatch_kwargs["writes"] = writes
+        publishes = contract.publishes and not self.local_only
+        requested_publishes = dispatch_kwargs.pop("publishes", publishes)
+        if requested_publishes is not publishes:
+            raise CycleError(
+                f"{role!r} stages must use publishes={publishes}, not {requested_publishes!r}")
+        dispatch_kwargs["publishes"] = publishes
+        publication_permissions = (
+            contract.publication_permissions if publishes else ()
+        )
+        requested_publication_permissions = dispatch_kwargs.pop(
+            "publication_permissions", publication_permissions,
+        )
+        if requested_publication_permissions != publication_permissions:
+            raise CycleError(
+                f"{role!r} stages must use publication_permissions="
+                f"{publication_permissions!r}, not {requested_publication_permissions!r}"
+            )
+        dispatch_kwargs["publication_permissions"] = publication_permissions
+        task = f"{task}\n\n{publication_policy(role, publication_permissions)}"
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)

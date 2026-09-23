@@ -28,6 +28,7 @@ class ScriptedAdapter(ex.Adapter):
         self._availability = availability
         self._outcomes = list(outcomes or [])
         self.dispatched = []
+        self.dispatch_kwargs = []
         self.probes = 0
 
     def probe(self):
@@ -37,6 +38,7 @@ class ScriptedAdapter(ex.Adapter):
 
     def dispatch(self, target, task, **kw):
         self.dispatched.append(task)
+        self.dispatch_kwargs.append(kw)
         if self._outcomes:
             outcome, capability = self._outcomes.pop(0)
         else:
@@ -48,6 +50,9 @@ class ScriptedAdapter(ex.Adapter):
             readiness_policy=ex.ReadinessPolicy.ATTEMPT,
             dispatched_from=self._availability,
         )
+
+    def publication_access(self, probe, *, writes):
+        return True, "test publication permission"
 
 
 class CycleTestCase(unittest.TestCase):
@@ -282,6 +287,78 @@ class MeasuredCostTests(CycleTestCase):
 
 
 class RoleWorkspacePolicyTests(CycleTestCase):
+    def test_only_change_and_review_roles_receive_publication_access(self) -> None:
+        expected = {
+            "implement": True, "resolve": True, "review": True, "rereview": True,
+            "security": False, "bootstrap": False, "verify": False, "run": False,
+        }
+
+        for role, publishes in expected.items():
+            with self.subTest(role=role):
+                self.assertEqual(publishes, cy.role_contract(role).publishes)
+
+    def test_local_only_implementation_does_not_receive_publication_access(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter], local_only=True)
+
+        recorder.stage("implement", "implement locally")
+
+        self.assertFalse(adapter.dispatch_kwargs[0]["publishes"])
+        self.assertEqual((), adapter.dispatch_kwargs[0]["publication_permissions"])
+
+    def test_publication_permissions_follow_each_role(self) -> None:
+        expected = {
+            "implement": ("comment", "create_pr", "push_branch"),
+            "resolve": ("comment", "push_branch"),
+            "review": ("comment",),
+            "rereview": ("comment",),
+            "security": (), "bootstrap": (), "verify": (), "run": (),
+        }
+
+        for role, permissions in expected.items():
+            with self.subTest(role=role):
+                self.assertEqual(permissions, cy.role_contract(role).publication_permissions)
+
+    def test_each_stage_is_told_its_publication_policy(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter])
+
+        recorder.stage("review", "review it")
+        recorder.stage("resolve", "resolve it")
+        recorder.stage("implement", "implement it")
+
+        review, resolve, implement = adapter.dispatched
+        self.assertIn("you may comment on the work item", review)
+        self.assertIn("You may not create the change request", review)
+        self.assertIn("push the working branch", review.split("You may not")[1])
+        self.assertIn("You may not create the change request", resolve)
+        self.assertIn("you may comment", resolve)
+        self.assertNotIn("You may not", implement)
+        for task in adapter.dispatched:
+            self.assertIn("Never merge, force-push, delete remote refs", task)
+
+    def test_a_local_only_stage_is_told_it_publishes_nothing(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter], local_only=True)
+
+        recorder.stage("implement", "implement locally")
+
+        self.assertIn("it publishes nothing", adapter.dispatched[0])
+
+    def test_missing_publication_access_is_recorded_without_running_the_adapter(self) -> None:
+        class DeniedPublicationAdapter(ScriptedAdapter):
+            def publication_access(self, probe, *, writes):
+                return False, "permission is not configured"
+
+        adapter = DeniedPublicationAdapter("codex")
+        recorder = self.recorder([adapter])
+
+        outcome = recorder.stage("implement", "implement and publish")
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, outcome.result.outcome)
+        self.assertEqual([], adapter.dispatched)
+        self.assertEqual("publication_access", self.store.rows("owner/repo")[0]["missing_capability"])
+
     def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:
         self.assertEqual(
             cy.WorkspacePolicy.READ_ONLY,
@@ -375,8 +452,9 @@ class RerouteRecordingTests(CycleTestCase):
 
         recorder.stage("implement", "the real task")
 
-        self.assertEqual(["the real task"], codex.dispatched)
-        self.assertEqual(["the real task"], claude.dispatched)
+        self.assertEqual(1, len(codex.dispatched))
+        self.assertEqual(codex.dispatched, claude.dispatched)
+        self.assertTrue(codex.dispatched[0].startswith("the real task\n\n"))
 
     def test_it_reroutes_at_most_once(self) -> None:
         codex = ScriptedAdapter("codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])

@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from router import Availability, RoutingDecision, RoutingMode, Target
 
@@ -156,6 +158,7 @@ class ProbeResult:
     proof: str
     detail: str = ""
     provable_ceiling: Availability = Availability.READY
+    version: tuple[int, ...] | None = None
 
     @property
     def honest_ceiling_reached(self) -> bool:
@@ -263,6 +266,56 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None) -> subproce
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
+def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
+    """Check the live GitHub/Git remote write path without changing remote state."""
+    directory = cwd or os.getcwd()
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=directory)
+
+    try:
+        root = run(["git", "rev-parse", "--show-toplevel"])
+        if root.returncode:
+            return False, "publication requires a Git worktree"
+        branch = run(["git", "branch", "--show-current"])
+        if branch.returncode or not branch.stdout.strip():
+            return False, "publication requires a named branch"
+        remote = run(["git", "remote", "get-url", "origin"])
+        if remote.returncode or not remote.stdout.strip():
+            return False, "publication requires an origin remote"
+        remote_url = remote.stdout.strip()
+        parsed_remote = urlsplit(remote_url)
+        hostname = parsed_remote.hostname or ""
+        if not hostname:
+            scp_remote = re.match(r"(?:[^@]+@)?([^:/]+):", remote_url)
+            hostname = scp_remote.group(1) if scp_remote else ""
+        hostname = hostname.lower()
+        if hostname == "github.com" or hostname.endswith(".github.com"):
+            if not shutil.which("gh"):
+                return False, "GitHub publication requires gh on PATH"
+            for argv in (["gh", "auth", "status"],
+                         ["gh", "repo", "view", "--json", "nameWithOwner,viewerPermission"]):
+                checked = run(list(argv))
+                if checked.returncode:
+                    return False, f"GitHub publication readiness failed at {argv[1]} (exit {checked.returncode})"
+                if argv[1:3] == ["repo", "view"]:
+                    try:
+                        permission = json.loads(checked.stdout).get("viewerPermission")
+                    except (ValueError, AttributeError):
+                        permission = None
+                    if permission not in {"WRITE", "MAINTAIN", "ADMIN"}:
+                        return False, "GitHub account lacks repository push permission"
+        # Do not probe the checked-out branch: cycle workers often start on a
+        # protected base and create their feature branch only after dispatch.
+        pushed = run(["git", "push", "--dry-run", "origin",
+                      "HEAD:refs/heads/cc-cycle-preflight"])
+        if pushed.returncode:
+            return False, f"remote rejected the publication preflight (exit {pushed.returncode})"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"publication preflight could not complete ({type(exc).__name__})"
+    return True, "Git authentication and remote write access passed a no-change preflight"
+
+
 class Adapter:
     """One way of running work. Subclasses implement `probe` and `dispatch`."""
 
@@ -280,6 +333,7 @@ class Adapter:
     #: than remembered at each return, so an adapter cannot report finished work
     #: it only launched by forgetting a keyword.
     completes_work = True
+    requires_publication_preflight = False
 
     def probe(self) -> ProbeResult:  # pragma: no cover - interface
         raise NotImplementedError
@@ -315,6 +369,14 @@ class Adapter:
             and _canonical_path(cwd) == _canonical_path(workspace.path)
         )
 
+    def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
+        """Whether this adapter can grant a stage's declared publish access.
+
+        New adapters fail closed until they declare how publication is
+        permitted. Native adapters use the common host-side remote preflight.
+        """
+        return False, f"{self.name} has no declared publication permission contract"
+
 
 class NativeAdapter(Adapter):
     """Common shape for running a CLI agent directly, without Orca.
@@ -325,6 +387,7 @@ class NativeAdapter(Adapter):
 
     binary = ""
     provable_ceiling = Availability.AUTHENTICATED
+    requires_publication_preflight = True
     #: Substrings that identify an exhausted window in the agent's own output.
     quota_markers: tuple[str, ...] = ()
     #: Substrings that identify a screen only a human can answer.
@@ -346,20 +409,25 @@ class NativeAdapter(Adapter):
             return ProbeResult(self.name, Availability.INSTALLED, "binary present, version check failed",
                                version.stderr.strip()[:200], self.provable_ceiling)
 
+        match = re.search(r"\b(\d+(?:\.\d+){1,3})\b", version.stdout or version.stderr or "")
+        parsed_version = tuple(int(part) for part in match.group(1).split(".")) if match else None
+
         authenticated, evidence = self.auth_evidence()
         if not authenticated:
             return ProbeResult(self.name, Availability.INSTALLED,
-                               "binary runs, no credential found", evidence, self.provable_ceiling)
+                               "binary runs, no credential found", evidence,
+                               self.provable_ceiling, parsed_version)
         # Deliberately stops here. This evidence shows that a credential is
         # configured, not that the session behind it still works or that quota
         # remains: both would cost a request to establish. READY is never
         # claimed from configuration alone.
         return ProbeResult(self.name, Availability.AUTHENTICATED, evidence,
                            "quota is not observable without dispatching",
-                           self.provable_ceiling)
+                           self.provable_ceiling, parsed_version)
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False) -> list[str]:  # pragma: no cover
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:  # pragma: no cover
         raise NotImplementedError
 
     def agent_output(self, stdout: str) -> str:
@@ -409,7 +477,8 @@ class NativeAdapter(Adapter):
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
-                 writes: bool = False) -> DispatchResult:
+                 writes: bool = False, publishes: bool = False,
+                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -422,7 +491,14 @@ class NativeAdapter(Adapter):
         screen blind is not something this layer will do — it reports the
         missing capability and stops.
         """
-        argv = self.argv(target, task, cwd, writes)
+        if publishes and publication_permissions:
+            argv = self.argv(
+                target, task, cwd, writes, True,
+                publication_permissions=publication_permissions,
+            )
+        else:
+            argv = (self.argv(target, task, cwd, writes, True)
+                    if publishes else self.argv(target, task, cwd, writes))
         try:
             completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
@@ -550,8 +626,14 @@ class CodexAdapter(NativeAdapter):
         "sign in": "authenticated_session",
     }
 
+    def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
+        if probe.version is None or probe.version < (0, 138, 0):
+            return False, "Codex permission profiles (required for scoped publication access) need CLI 0.138.0 or later"
+        return True, "Codex permission profile scopes network access to code hosts and preserves the stage filesystem boundary"
+
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False) -> list[str]:
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -559,8 +641,25 @@ class CodexAdapter(NativeAdapter):
         # was given and nothing beyond it; `danger-full-access` stays out of
         # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
-                "-c", f"model_reasoning_effort={target.effort}", "--json",
-                "-s", "workspace-write" if writes else "read-only"]
+                "-c", f"model_reasoning_effort={target.effort}", "--json"]
+        if publishes:
+            profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+            parent = ":workspace" if writes else ":read-only"
+            argv += [
+                "-c", f'default_permissions="{profile}"',
+                "-c", "features.network_proxy=true",
+                "-c", f'permissions.{profile}.extends="{parent}"',
+                "-c", f"permissions.{profile}.network.enabled=true",
+                "-c", (
+                    f'permissions.{profile}.network.domains={{'
+                    '"github.com"="allow",'
+                    '"api.github.com"="allow",'
+                    '"bitbucket.org"="allow",'
+                    '"api.bitbucket.org"="allow"}'
+                ),
+            ]
+        else:
+            argv += ["-s", "workspace-write" if writes else "read-only"]
         if cwd:
             argv += ["-C", cwd]
         return argv + [task]
@@ -610,8 +709,12 @@ class ClaudeAdapter(NativeAdapter):
         "log in": "authenticated_session",
     }
 
+    def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
+        return True, "Claude receives gh and git; the stage's publication policy is stated in its prompt"
+
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False) -> list[str]:
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
         #
@@ -635,6 +738,11 @@ class ClaudeAdapter(NativeAdapter):
                 "--effort", target.effort, "--output-format", "json"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
+        # A publishing stage keeps its ordinary GitHub tooling. Which of those
+        # operations the stage may perform is a behavioural rule stated in its
+        # prompt (`cycle.publication_policy`), not a permission narrowed here.
+        if publishes:
+            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git:*)"]
         return argv
 
     def agent_output(self, stdout: str) -> str:
@@ -706,6 +814,8 @@ class OrcaAdapter(Adapter):
     """
 
     name = "orca"
+    def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
+        return False, "Orca publication permissions are not exposed to the local readiness check"
     # Orca does not provide an OS-enforced read-only permission. It supports a
     # non-writing review only when the explicit isolated-workspace contract is
     # present; `dispatch()` validates it again for direct callers.
@@ -954,6 +1064,26 @@ def dispatch(
     probe = probes.get(target.executor)
     if probe is None:
         raise ExecutorError(f"no probe for executor {target.executor!r}")
+
+    publishes = bool(kw.get("publishes", False))
+    if publishes:
+        can_publish, detail = adapter.publication_access(
+            probe, writes=bool(kw.get("writes", False)),
+        )
+        if not can_publish:
+            return DispatchResult(
+                DispatchOutcome.BLOCKED, target.executor, target,
+                missing_capability="publication_access", detail=detail,
+                readiness_policy=policy, dispatched_from=probe.availability,
+            )
+        if adapter.requires_publication_preflight:
+            ready, detail = _publication_preflight(kw.get("cwd"))
+            if not ready:
+                return DispatchResult(
+                    DispatchOutcome.BLOCKED, target.executor, target,
+                    missing_capability="publication_access", detail=detail,
+                    readiness_policy=policy, dispatched_from=probe.availability,
+                )
 
     effective = registry.availability(policy, probes).get(target.executor, Availability.UNKNOWN)
     if not effective.dispatchable:
