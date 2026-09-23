@@ -545,6 +545,50 @@ or file name reaches the store. The classifiers are heuristics over paths:
 whole word so `processor` is not `sso`, and neither it nor its absence says
 anything about what the code does.
 
+### Cycle outcomes
+
+Schema version 3 records what a run went on to produce, on rows of its own. The
+pre-routing signals above describe a decision; an outcome written beside them
+would leak into any evaluation that reads them, so a `dispatch` row is written
+once, before its stage's result is known, and nothing is ever added to it.
+
+Three payload keys tie a run together, listed in `telemetry.CORRELATION_FIELDS`:
+
+| Field | Meaning |
+|---|---|
+| `cycle_id` | minted once per `CycleRecorder`, so two runs of one work item stay apart; validated before anything is dispatched |
+| `stage_seq` | the number of the `stage()` call; a rerouted attempt shares its stage's number, and a verdict carries the number of the latest dispatch of its role |
+| `record_kind` | `dispatch`, `verdict` or `cycle` |
+
+Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
+
+| Source | Fields | Written when |
+|---|---|---|
+| `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed`, `checks_passed`, `checks_failed` | the stage's structured result is read |
+| `cycle` | `first_review_status`, `first_pass_approved`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
+| `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
+| `cycle` | `tests_passed` | a verdict reported a boolean `tests.passed`; the latest one wins |
+| `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
+| `cycle` | `status`, `iterations` | always |
+
+Unknown is still not a default. A run that stopped before a review reached a
+verdict carries no review outcome at all — not unapproved, not zero rounds —
+and a review that reported `BLOCKED` settles nothing. A `tests` value that is
+not a boolean `passed` is not a test result. `Telemetry.cycle_outcome(repo_id,
+cycle_id)` reassembles a run from these rows and reports `closed: false` for one
+that never wrote its closing row, whose outcome is then unknown rather than
+failed. `resolution_rounds` counts the `resolve` stages the run attempted.
+
+The routing rules' choice is the `profile` on each `dispatch` row. A later
+selector's suggestion can be compared with it, and with the outcome, by
+`(cycle_id, stage_seq)`, without that selector being installed while the run is
+recorded and without the rows it annotates being rewritten. Nothing records such
+a suggestion yet.
+
+Rows from versions 1 and 2 are read as they were written. They carry no
+`cycle_id`, so they group by `repo_id` and `task_id` only and belong to no
+reassembled cycle.
+
 ## What an installation gets
 
 Skills are instructions and can be duplicated harmlessly; the runtime is the

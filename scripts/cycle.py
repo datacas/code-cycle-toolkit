@@ -31,6 +31,7 @@ availability untouched, so the question stays visible.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -52,7 +53,7 @@ from router import (
     route,
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
-from telemetry import Telemetry, routing_decision_fields
+from telemetry import Telemetry, routing_decision_fields, validate_reference
 
 SCHEMA_VERSION = 1
 
@@ -64,6 +65,10 @@ FINDING_FIELDS = (
     "findings_total", "findings_blocking", "findings_critical", "findings_high",
     "findings_medium", "findings_low",
 )
+
+#: Review statuses that settle a round. Anything else leaves the review outcome
+#: unknown rather than failed.
+TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 
 @dataclass(frozen=True)
 class RoleContract:
@@ -136,8 +141,14 @@ class CycleRecorder:
         local_only: bool = False,
         change_observer: Callable[[], ChangeSignals | None] | None = None,
         verification_available: bool | None = None,
+        cycle_id: str | None = None,
     ) -> None:
         self.telemetry = telemetry
+        # One per run, so two runs of the same work item stay apart. Checked
+        # now rather than on the first row: a refused id found after a paid
+        # dispatch leaves a stage nobody can record.
+        self.cycle_id = validate_reference(
+            "cycle_id", cycle_id or f"cycle-{uuid.uuid4().hex}")
         self.repo_id = repo_id
         self.task_id = task_id
         self.signals = signals
@@ -172,6 +183,13 @@ class CycleRecorder:
         self.prior_findings: dict[str, int] = {}
         self.iteration = 0
         self.stages: list[StageOutcome] = []
+        # Correlation and observed outcomes. Kept apart from the pre-routing
+        # state above, and written only on verdict and closing rows.
+        self.stage_seq = 0
+        self._latest_seq: dict[str, int] = {}
+        self.first_review_status: str | None = None
+        self.final_review_status: str | None = None
+        self.tests_passed: bool | None = None
 
     def stage(self, role: str, task: str, **dispatch_kwargs) -> StageOutcome:
         """Route, dispatch and record. One call, no half-done state.
@@ -203,6 +221,8 @@ class CycleRecorder:
                 f"{role!r} stages must use workspace_policy={workspace_policy.value!r}, "
                 f"not {requested_policy!r}")
         dispatch_kwargs["workspace_policy"] = workspace_policy
+        self.stage_seq += 1
+        self._latest_seq[role] = self.stage_seq
 
         # Observed once per stage, before the first routing: the diff does not
         # change between an attempt and its reroute.
@@ -291,12 +311,26 @@ class CycleRecorder:
             f"prior_{key}": fields[key] for key in FINDING_FIELDS
             if fields.get(key) is not None
         }
-        return self.telemetry.record_stage(
+        # A verdict with no dispatch of its role in this run points at none.
+        source = ({"stage_seq": self._latest_seq[role]}
+                  if role in self._latest_seq else {})
+        row = self.telemetry.record_stage(
             self.repo_id, self.task_id, role,
             iteration=self.iteration, status=status,
             routing_strategy=self.routing_strategy.value,
-            local_only=self.local_only, **fields,
+            local_only=self.local_only,
+            cycle_id=self.cycle_id, record_kind="verdict",
+            **source, **fields,
         )
+        # Tracked only after the row was accepted, so a refused verdict cannot
+        # reach the closing row either.
+        if role in REVIEW_ROLES and status in TERMINAL_REVIEW_STATUSES:
+            if role == "review" and self.first_review_status is None:
+                self.first_review_status = status
+            self.final_review_status = status
+        if fields.get("tests_passed") is not None:
+            self.tests_passed = fields["tests_passed"]
+        return row
 
     def next_iteration(self) -> int:
         self.iteration += 1
@@ -309,8 +343,47 @@ class CycleRecorder:
             iteration=self.iteration, status=final_status,
             iterations=self.iteration,
             routing_strategy=self.routing_strategy.value,
-            local_only=self.local_only, **fields,
+            local_only=self.local_only,
+            cycle_id=self.cycle_id, record_kind="cycle",
+            **{**self.observed_outcome(), **fields},
         )
+
+    def observed_outcome(self) -> dict:
+        """What this run showed, and nothing it did not.
+
+        The review outcomes exist only once a review reached a verdict: a cycle
+        that stopped before one has not been approved, has not failed its first
+        pass and has not needed zero rounds — it has not been judged. Fallbacks
+        and contract violations are always known, because every dispatch in the
+        run went through this recorder.
+        """
+        attempts = [result for stage in self.stages for _, result in stage.attempts]
+        outcome = {
+            "fallback_stages": sum(
+                1 for stage in self.stages
+                if stage.decision is not None and stage.decision.used_fallback
+            ),
+            "contract_violations": sum(
+                1 for result in attempts
+                if result.outcome is DispatchOutcome.CONTRACT_VIOLATION
+            ),
+        }
+        first = self.first_review_status
+        if first is not None:
+            outcome.update(
+                first_review_status=first,
+                first_pass_approved=first == "APPROVED",
+                resolution_needed=first == "CHANGES_REQUESTED",
+                resolution_rounds=sum(1 for stage in self.stages if stage.role == "resolve"),
+            )
+        if self.final_review_status is not None:
+            outcome.update(
+                final_review_status=self.final_review_status,
+                final_approved=self.final_review_status == "APPROVED",
+            )
+        if self.tests_passed is not None:
+            outcome["tests_passed"] = self.tests_passed
+        return outcome
 
     def _pre_routing(self, role: str, change: ChangeSignals | None) -> dict:
         """What was known before this routing, with unknown signals left out."""
@@ -338,6 +411,8 @@ class CycleRecorder:
             return self.telemetry.record_stage(
                 self.repo_id, self.task_id, role,
                 iteration=self.iteration,
+                cycle_id=self.cycle_id, stage_seq=self.stage_seq,
+                record_kind="dispatch",
                 profile=decision.profile,
                 used_fallback=decision.used_fallback,
                 outcome=DispatchOutcome.BLOCKED.value,
@@ -350,5 +425,7 @@ class CycleRecorder:
             self.repo_id, self.task_id, role, decision, result,
             iteration=self.iteration,
             local_only=self.local_only,
+            cycle_id=self.cycle_id, stage_seq=self.stage_seq,
+            record_kind="dispatch",
             **signals,
         )

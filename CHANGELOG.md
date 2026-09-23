@@ -7,6 +7,14 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Observed cycle outcomes in telemetry (schema 3), on `verdict` and closing
+  `cycle` rows kept apart from the pre-routing `dispatch` rows: first-pass
+  approval, whether resolution was needed and its rounds, first and final
+  review verdicts, findings by severity, a reported test result, final
+  approval, fallbacks and contract violations. Rows of one run share a
+  `cycle_id`, `stage_seq` ties a verdict to its dispatch, and
+  `Telemetry.cycle_outcome` reassembles a run. An outcome nobody reported is
+  absent, never approved, passing or zero; earlier rows stay readable. (#37)
 - A minimal profile-selection seam in `scripts/router.py`: `route()` asks a
   `ProfileSelector` for a profile name among the role's `ROLE_CANDIDATES` and
   refuses anything else. The existing rules are the default `rule_selector`,

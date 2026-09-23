@@ -380,7 +380,7 @@ class SchemaCompatibilityTests(unittest.TestCase):
             reopened = tm.Telemetry(path)
             reopened.record_stage("repo", "T-2", "review", changed_files_count=3)
             rows = reopened.rows("repo")
-            self.assertEqual([1, 2], [row["schema_version"] for row in rows])
+            self.assertEqual([1, tm.SCHEMA_VERSION], [row["schema_version"] for row in rows])
             self.assertEqual({}, rows[0]["payload"])
             self.assertEqual(3, rows[1]["payload"]["changed_files_count"])
 
