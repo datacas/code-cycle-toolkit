@@ -940,14 +940,12 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(["--allowedTools", "Bash(gh pr comment:*)"], argv[-2:])
 
     def test_claude_implement_publication_scopes_pr_creation_and_branch_push(self) -> None:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"], capture_output=True,
-            text=True, check=True,
-        ).stdout.strip()
-        argv = self.claude(
-            writes=True, publishes=True,
-            publication_permissions=("comment", "create_pr", "push_branch"),
-        )
+        branch = "feature/test-publication"
+        with patch.object(ex.subprocess, "run", return_value=completed(f"{branch}\n")):
+            argv = self.claude(
+                cwd="/repo", writes=True, publishes=True,
+                publication_permissions=("comment", "create_pr", "push_branch"),
+            )
 
         self.assertEqual(
             ["--allowedTools", "Bash(gh pr comment:*)", "Bash(gh pr create:*)",
@@ -956,14 +954,12 @@ class PermissionTests(unittest.TestCase):
         )
 
     def test_claude_resolve_publication_allows_push_and_comment_but_not_create(self) -> None:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"], capture_output=True,
-            text=True, check=True,
-        ).stdout.strip()
-        argv = self.claude(
-            writes=True, publishes=True,
-            publication_permissions=("comment", "push_branch"),
-        )
+        branch = "feature/test-publication"
+        with patch.object(ex.subprocess, "run", return_value=completed(f"{branch}\n")):
+            argv = self.claude(
+                cwd="/repo", writes=True, publishes=True,
+                publication_permissions=("comment", "push_branch"),
+            )
 
         self.assertEqual(
             ["--allowedTools", "Bash(gh pr comment:*)",
