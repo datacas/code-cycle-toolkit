@@ -286,6 +286,12 @@ routing rather than the models.
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
 
+`code_cycle.routing.strategy` names the selection policy: `fixed` or `measured`.
+It defaults to `fixed`. Both values currently select the declared primary, then
+the declared fallback when availability and workspace policy allow it; neither
+reads telemetry to choose a target. `measured` is reserved for a later change.
+Every recorded stage includes the active value as `payload.routing_strategy`.
+
 ## Executor dispatch
 
 `scripts/executors.py` turns a resolved target into a real execution. It adds no
@@ -627,7 +633,8 @@ than copied, because two validators agree until one of them is edited. A
 reference the store will refuse is one no stage should run under: that stage is
 dispatched, paid for, and then its row cannot be written, so the run happens and
 leaves no trace of having happened. Configuration shape is checked with it:
-`code_cycle`, `code_cycle.repository` and `code_cycle.profiles` must be mappings,
+`code_cycle`, `code_cycle.repository`, `code_cycle.profiles` and
+`code_cycle.routing` must be mappings,
 so a valid YAML document with the wrong shape is a stated refusal rather than a
 traceback from whichever reader reached it first. `load_profiles` checks the
 shapes below those names — every declared profile is a mapping, every `primary`

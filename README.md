@@ -341,6 +341,11 @@ cannot be read stops the run instead of falling back to the defaults, because a
 row recorded under the defaults while a file says otherwise describes a policy
 nobody chose. `--no-config` asks for the defaults deliberately.
 
+`code_cycle.routing.strategy` accepts `fixed` or `measured` and defaults to
+`fixed`. Both currently follow the declared primary and fallback targets;
+`measured` is recorded for a later routing change. Each stage row records the
+active value in `payload.routing_strategy`.
+
 It probes the executors once, labels the work before routing anything, and runs
 `implement → review → (resolve → rereview)*` with every stage going through the
 recorder, so no dispatch can happen without leaving a row. It reads each

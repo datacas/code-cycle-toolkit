@@ -94,6 +94,7 @@ class RunCycleTestCase(unittest.TestCase):
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
 
     def run_cycle(self, implementer, reviewer, **kw):
+        telemetry = kw.pop("telemetry", self.store)
         profiles = kw.pop("profiles", router.load_profiles({"code_cycle": {
             # These scripted adapters declare an in-memory non-mutation
             # boundary, so tests of the driver can choose their reviewer while
@@ -101,7 +102,7 @@ class RunCycleTestCase(unittest.TestCase):
             "profiles": {"reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}},
         }}))
         return rc.run_cycle(
-            "owner/api", "API-7", router.TaskSignals(), self.store,
+            "owner/api", "API-7", router.TaskSignals(), telemetry,
             registry=ex.Registry([implementer, reviewer]),
             availability={implementer.name: ex.Availability.READY,
                           reviewer.name: ex.Availability.READY},
@@ -111,6 +112,88 @@ class RunCycleTestCase(unittest.TestCase):
 
     def rows(self):
         return self.store.rows("owner/api")
+
+
+class RoutingStrategyTests(RunCycleTestCase):
+    def test_unknown_strategy_is_rejected_while_loading_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text(
+                "code_cycle:\n  routing:\n    strategy: exploratory\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(rc.CycleDriverError) as raised:
+                rc.load_config(path)
+
+        self.assertIn("code_cycle.routing.strategy", str(raised.exception))
+        self.assertIn("exploratory", str(raised.exception))
+
+    def test_malformed_routing_section_is_rejected_while_loading_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text("code_cycle:\n  routing: not-a-mapping\n", encoding="utf-8")
+
+            with self.assertRaises(rc.CycleDriverError) as raised:
+                rc.load_config(path)
+
+        self.assertIn("code_cycle.routing must be a mapping", str(raised.exception))
+
+    def test_absent_strategy_defaults_to_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text("code_cycle: {}\n", encoding="utf-8")
+
+            config = rc.load_config(path)
+
+        self.assertEqual(router.RoutingStrategy.FIXED,
+                         router.load_routing_strategy(config))
+
+    def test_measured_is_an_accepted_configured_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text(
+                "code_cycle:\n  routing:\n    strategy: measured\n",
+                encoding="utf-8",
+            )
+
+            config = rc.load_config(path)
+
+        self.assertEqual(router.RoutingStrategy.MEASURED,
+                         router.load_routing_strategy(config))
+
+    def test_run_records_the_routing_strategy(self) -> None:
+        self.run_cycle(
+            Talker("codex", block("IMPLEMENTED")), Talker("claude"),
+            routing_strategy=router.RoutingStrategy.MEASURED,
+        )
+
+        self.assertTrue(self.rows())
+        self.assertTrue(all(row["payload"]["routing_strategy"] == "measured"
+                            for row in self.rows()))
+
+    def test_fixed_routing_ignores_existing_telemetry_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            populated = tm.Telemetry(Path(temporary) / "populated.sqlite")
+            for index in range(20):
+                populated.record_stage(
+                    "owner/api", f"history-{index}", "implement",
+                    profile="cheap_coder", status="IMPLEMENTED", tokens_in=index + 1,
+                )
+
+            empty_report = self.run_cycle(Talker("codex", block("IMPLEMENTED")),
+                                          Talker("claude"), telemetry=self.store)
+            populated_report = self.run_cycle(
+                Talker("codex", block("IMPLEMENTED")), Talker("claude"),
+                telemetry=populated,
+            )
+
+        targets = lambda report: [
+            (stage.decision.profile,
+             str(stage.decision.target) if stage.decision.target else None)
+            for stage in report.stages
+        ]
+        self.assertEqual(targets(empty_report), targets(populated_report))
 
 
 class LocalOnlyPolicyTests(RunCycleTestCase):

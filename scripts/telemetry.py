@@ -113,6 +113,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "review_workspace_conflict",
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
+    "routing_strategy": ("token", frozenset({"fixed", "measured"})),
     # numbers and flags
     "iteration": ("count", None),
     "difficulty": ("count", None),
@@ -531,6 +532,9 @@ class Telemetry:
         return self.record_stage(
             repo_id, task_id, role,
             profile=decision.profile,
+            routing_strategy=getattr(
+                getattr(decision, "strategy", None), "value", "fixed",
+            ),
             used_fallback=decision.used_fallback,
             executor=getattr(target, "executor", None),
             provider=getattr(target, "provider", None),

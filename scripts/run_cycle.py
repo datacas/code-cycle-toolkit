@@ -47,7 +47,14 @@ from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from executors import DispatchResult, ReadinessPolicy, Registry
-from router import RouterError, RoutingMode, TaskSignals, load_profiles
+from router import (
+    RouterError,
+    RoutingMode,
+    RoutingStrategy,
+    TaskSignals,
+    load_profiles,
+    load_routing_strategy,
+)
 from telemetry import (
     Telemetry,
     TelemetryError,
@@ -147,7 +154,10 @@ def load_config(path: Path) -> dict:
     # The shape, not only the top level. A valid YAML document can still say
     # `code_cycle: not-a-mapping`, and every reader below would then crash on
     # its own `.get` — a traceback where a stated refusal belongs.
-    for key in ("code_cycle", "code_cycle.repository", "code_cycle.profiles"):
+    for key in (
+        "code_cycle", "code_cycle.repository", "code_cycle.profiles",
+        "code_cycle.routing",
+    ):
         section, value = config, None
         for part in key.split("."):
             if not isinstance(section, dict):
@@ -158,6 +168,10 @@ def load_config(path: Path) -> dict:
             raise CycleDriverError(
                 f"{path}: {key} must be a mapping, not "
                 f"{type(value).__name__}")
+    try:
+        load_routing_strategy(config)
+    except RouterError as error:
+        raise CycleDriverError(str(error)) from error
     return config
 
 
@@ -381,6 +395,7 @@ def run_cycle(
     registry: Registry | None = None,
     availability: dict | None = None,
     mode: RoutingMode = RoutingMode.PRODUCTION,
+    routing_strategy: RoutingStrategy = RoutingStrategy.FIXED,
     policy: ReadinessPolicy | None = None,
     max_iterations: int = 3,
     cwd: str | None = None,
@@ -402,6 +417,7 @@ def run_cycle(
         telemetry, repo_id, task_id, signals,
         availability=availability, registry=registry, mode=mode, policy=policy,
         probes=probes, profiles=profiles, local_only=local_only,
+        routing_strategy=routing_strategy,
     )
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -529,6 +545,12 @@ def _why(outcome: StageOutcome) -> str:
 
 
 def plan(args) -> tuple[str, dict]:
+    """Return the repository and profiles for existing callers."""
+    repo, profiles, _ = plan_with_strategy(args)
+    return repo, profiles
+
+
+def plan_with_strategy(args) -> tuple[str, dict, RoutingStrategy]:
     """Everything the configuration decides, decided before anything runs.
 
     An unknown profile name is refused by `load_profiles`, and learning that
@@ -559,9 +581,10 @@ def plan(args) -> tuple[str, dict]:
 
     try:
         profiles = load_profiles(config)
+        routing_strategy = load_routing_strategy(config)
     except RouterError as error:
         raise CycleDriverError(str(error)) from error
-    return repo, profiles
+    return repo, profiles, routing_strategy
 
 
 def resolve_config(args) -> dict:
@@ -619,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        repo, profiles = plan(args)
+        repo, profiles, routing_strategy = plan_with_strategy(args)
     except CycleDriverError as error:
         parser.error(str(error))
 
@@ -633,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
             telemetry,
             profiles=profiles,
             mode=RoutingMode[args.mode.upper()],
+            routing_strategy=routing_strategy,
             max_iterations=args.max_iterations,
             cwd=args.cwd,
             timeout=args.timeout,
