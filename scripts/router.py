@@ -167,10 +167,25 @@ class RoutingDecision:
     reasons: tuple[str, ...] = ()
     cost: CostEstimate | None = None
     strategy: RoutingStrategy = RoutingStrategy.FIXED
+    rate_value: float | None = None
+    rate_used: float | None = None
+    rate_observations: int | None = None
+    rate_minimum: int | None = None
+    rate_known: bool | None = None
+    rate_source: str = "default"
+    rate_explanation: str | None = None
+    cost_status: str | None = None
 
     def explain(self) -> str:
         head = "BLOCKED" if self.blocked else str(self.target)
-        return f"{self.profile} -> {head}: " + "; ".join(self.reasons)
+        reasons = list(self.reasons)
+        if self.rate_explanation:
+            reasons.append(self.rate_explanation)
+        if self.cost:
+            reasons.append(f"cycle cost estimate: {self.cost.explain()}")
+        elif self.cost_status == "unavailable":
+            reasons.append("cycle cost estimate unavailable")
+        return f"{self.profile} -> {head}: " + "; ".join(reasons)
 
 
 # Conservative defaults. The escalation to a deeper profile happens on declared
@@ -371,6 +386,11 @@ def route(
     profiles: dict[str, Profile] | None = None,
     eligible_executors: frozenset[str] | set[str] | None = None,
     strategy: RoutingStrategy = RoutingStrategy.FIXED,
+    first_pass_rate: float | None = None,
+    rate_observations: int | None = None,
+    rate_minimum: int | None = None,
+    rate_known: bool | None = None,
+    rate_explanation: str | None = None,
 ) -> RoutingDecision:
     """Resolve a role to a concrete target, or block.
 
@@ -381,6 +401,43 @@ def route(
     profiles = profiles or load_profiles()
     name, reasons = profile_for(role, signals)
     profile = profiles[name]
+    implement_profile, _ = profile_for("implement", signals)
+    review_profile, _ = profile_for("review", signals)
+    measured_strategy = strategy is RoutingStrategy.MEASURED
+    measured_value = (
+        first_pass_rate
+        if measured_strategy and rate_known is not False else None
+    )
+    rate_used = (
+        DEFAULT_FIRST_PASS_RATE if measured_value is None else measured_value
+    )
+    try:
+        cost = estimate_cost(
+            implement_profile, review_profile, first_pass_rate=rate_used,
+        )
+        cost_status = "available"
+    except Exception:
+        # Cost is informational. A missing price for a newly added profile or
+        # a bad measurement must never prevent an otherwise valid route.
+        cost = None
+        cost_status = "unavailable"
+    rate_source = (
+        "measured" if measured_value is not None else "conservative_default"
+    ) if measured_strategy else "default"
+    decision_fields = {
+        "cost": cost,
+        "strategy": strategy,
+        "rate_value": measured_value,
+        "rate_used": rate_used,
+        "rate_observations": rate_observations if measured_strategy else None,
+        "rate_minimum": rate_minimum if measured_strategy else None,
+        "rate_known": (
+            measured_value is not None if measured_strategy else None
+        ),
+        "rate_source": rate_source,
+        "rate_explanation": rate_explanation if measured_strategy else None,
+        "cost_status": cost_status,
+    }
 
     primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)
     primary_policy_reason = None
@@ -398,7 +455,7 @@ def route(
         if state.dispatchable:
             if index == 0:
                 return RoutingDecision(
-                    name, target, mode, reasons=reasons, strategy=strategy,
+                    name, target, mode, reasons=reasons, **decision_fields,
                 )
             if mode is RoutingMode.CALIBRATION:
                 break
@@ -419,7 +476,7 @@ def route(
                 used_fallback=True,
                 reasons=reasons
                 + (fallback_reason,),
-                strategy=strategy,
+                **decision_fields,
             )
         reasons = reasons + (f"{target.executor} is {state.value}",)
 
@@ -435,5 +492,5 @@ def route(
         )
     return RoutingDecision(
         name, None, mode, blocked=True, reasons=reasons + (blocked_because,),
-        strategy=strategy,
+        **decision_fields,
     )

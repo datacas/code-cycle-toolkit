@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,7 +96,7 @@ class FullCycleTests(CycleTestCase):
     def test_the_routing_decision_is_on_every_dispatch_row(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
 
-        recorder.stage("implement", "work")
+        outcome = recorder.stage("implement", "work")
 
         row = self.store.rows("owner/repo")[0]
         self.assertEqual("cheap_coder", row["profile"])
@@ -105,6 +106,23 @@ class FullCycleTests(CycleTestCase):
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
         self.assertEqual("succeeded", row["outcome"])
+        self.assertEqual("available", row["payload"]["routing_cost_status"])
+        expected = tm.routing_decision_fields(outcome.decision)
+        actual = {key: row[key] if key in row else row["payload"].get(key)
+                  for key in expected}
+        self.assertEqual(expected, actual)
+
+    def test_cost_estimate_failure_is_recorded_without_stopping_dispatch(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+
+        with patch.object(router, "estimate_cost", side_effect=router.RouterError("bad rate")):
+            outcome = recorder.stage("implement", "work")
+
+        row = self.store.rows("owner/repo")[0]
+        self.assertFalse(outcome.decision.blocked)
+        self.assertIsNone(outcome.decision.cost)
+        self.assertEqual("unavailable", row["payload"]["routing_cost_status"])
+        self.assertIsNone(row["payload"]["routing_cost_total"])
 
     def test_the_task_signals_are_recorded_with_the_dispatch(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
@@ -154,6 +172,113 @@ class FullCycleTests(CycleTestCase):
         self.assertTrue(rate.known)
         self.assertEqual(0.6, rate.value)
         self.assertEqual(10, rate.observations)
+
+
+class MeasuredCostTests(CycleTestCase):
+    def seed_first_passes(self, count=10, passed=6):
+        for index in range(count):
+            task = f"history-{index}"
+            self.store.record_stage(
+                "owner/repo", task, "implement", profile="cheap_coder",
+            )
+            self.store.record_stage(
+                "owner/repo", task, "review",
+                status="APPROVED" if index < passed else "CHANGES_REQUESTED",
+            )
+
+    def make_recorder(self, strategy):
+        return self.recorder(
+            [ScriptedAdapter("codex"), ScriptedAdapter("claude")],
+            routing_strategy=strategy,
+        )
+
+    def test_measured_rate_at_the_minimum_drives_and_explains_the_estimate(self) -> None:
+        self.seed_first_passes()
+
+        outcome = self.make_recorder(router.RoutingStrategy.MEASURED).stage(
+            "implement", "work",
+        )
+
+        decision = outcome.decision
+        self.assertEqual(0.6, decision.rate_value)
+        self.assertIs(True, decision.rate_known)
+        self.assertEqual(10, decision.rate_observations)
+        self.assertEqual(tm.MINIMUM_SAMPLE, decision.rate_minimum)
+        self.assertEqual("0.60 from 10 observations", decision.rate_explanation)
+        self.assertEqual(0.6, decision.rate_used)
+        self.assertEqual(1.6, decision.cost.expected_resolutions)
+        self.assertIn(decision.rate_explanation, decision.explain())
+
+        row = self.store.rows("owner/repo")[-1]
+        self.assertEqual(5.6, row["payload"]["routing_cost_total"])
+        self.assertEqual("measured", row["payload"]["routing_rate_source"])
+        self.assertIs(True, row["payload"]["routing_rate_known"])
+        self.assertEqual(10, row["payload"]["routing_rate_observations"])
+        self.assertEqual(0.6, row["payload"]["routing_rate_value"])
+        self.assertEqual(0.6, row["payload"]["routing_rate_used"])
+
+    def test_unknown_measured_rate_uses_the_default_without_fabricating_a_value(self) -> None:
+        self.seed_first_passes(count=3, passed=2)
+
+        outcome = self.make_recorder(router.RoutingStrategy.MEASURED).stage(
+            "implement", "work",
+        )
+
+        decision = outcome.decision
+        self.assertIsNone(decision.rate_value)
+        self.assertEqual(3, decision.rate_observations)
+        self.assertIs(False, decision.rate_known)
+        self.assertEqual(0.0, decision.rate_used)
+        self.assertEqual(
+            "unknown: 3 observation(s), fewer than the 10 required",
+            decision.rate_explanation,
+        )
+        self.assertIn("unknown", decision.explain())
+
+        row = self.store.rows("owner/repo")[-1]
+        self.assertEqual("conservative_default", row["payload"]["routing_rate_source"])
+        self.assertIsNone(row["payload"]["routing_rate_value"])
+        self.assertEqual(0.0, row["payload"]["routing_rate_used"])
+        self.assertEqual(3, row["payload"]["routing_rate_observations"])
+
+    def test_fixed_strategy_never_reads_the_telemetry_rate(self) -> None:
+        with patch.object(
+            self.store, "first_pass_rate",
+            side_effect=AssertionError("fixed routing queried telemetry"),
+        ) as read_rate:
+            outcome = self.make_recorder(router.RoutingStrategy.FIXED).stage(
+                "implement", "work",
+            )
+
+        read_rate.assert_not_called()
+        self.assertEqual("default", self.store.rows("owner/repo")[-1]
+                         ["payload"]["routing_rate_source"])
+        self.assertEqual(0.0, outcome.decision.rate_used)
+
+    def test_strategy_does_not_change_the_selected_target(self) -> None:
+        self.seed_first_passes()
+        fixed = self.make_recorder(router.RoutingStrategy.FIXED).stage("implement", "work")
+        measured = self.make_recorder(router.RoutingStrategy.MEASURED).stage("implement", "work")
+
+        self.assertEqual(fixed.decision.target, measured.decision.target)
+        self.assertEqual(fixed.decision.profile, measured.decision.profile)
+        self.assertIsNotNone(measured.decision.rate_value)
+
+    def test_switching_back_to_fixed_keeps_existing_telemetry(self) -> None:
+        self.seed_first_passes()
+        measured = self.make_recorder(router.RoutingStrategy.MEASURED)
+        measured.stage("implement", "work")
+        before = self.store.rows("owner/repo")
+
+        with patch.object(
+            self.store, "first_pass_rate",
+            side_effect=AssertionError("fixed routing queried telemetry"),
+        ):
+            self.make_recorder(router.RoutingStrategy.FIXED).stage("implement", "work")
+
+        after = self.store.rows("owner/repo")
+        self.assertEqual(before, after[:len(before)])
+        self.assertGreater(len(after), len(before))
 
 
 class RoleWorkspacePolicyTests(CycleTestCase):
@@ -396,6 +521,11 @@ class BlockedRoutingTests(CycleTestCase):
         self.assertEqual("blocked", rows[0]["outcome"])
         self.assertIsNone(rows[0]["executor"])
         self.assertTrue(outcome.decision.blocked)
+        self.assertEqual("available", rows[0]["payload"]["routing_cost_status"])
+        expected = tm.routing_decision_fields(outcome.decision)
+        actual = {key: rows[0][key] if key in rows[0]
+                  else rows[0]["payload"].get(key) for key in expected}
+        self.assertEqual(expected, actual)
 
 
 class SeparationTests(unittest.TestCase):
