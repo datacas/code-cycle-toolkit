@@ -489,6 +489,53 @@ adapters just proven correct against the live CLIs, beats recording later from a
 larger unexamined pile. Only fields already queried have columns, a short allowlist of counts and flags
 travels in `payload`, and `schema_version` is on every row from the first.
 
+### Pre-routing signals
+
+Schema version 2 adds the signals a stage's router could have known before it
+chose a model. They exist so a later selector can be judged on the information
+it would actually have had, which is only possible if nothing learned after the
+routing leaks into them. All of them live in `payload`, so a version-1 row is
+read exactly as it was written; `schema_version` says which signals its writer
+could have supplied.
+
+| Kind | Fields | Source |
+|---|---|---|
+| declared | `difficulty`, `verifiability`, `security_sensitive` | the operator's labels, `router.TaskSignals` |
+| observed | `changed_files_count`, `has_tests`, `touches_dependencies`, `touches_database`, `touches_auth`, `touches_api`, `touches_migrations`, `touches_ci`, `changed_<language>_files` | the diff against the default branch, `scripts/stage_signals.py` |
+| observed | `prior_findings_total`, `prior_findings_blocking`, `prior_findings_<severity>` | the latest verdict recorded before the stage |
+| observed | `previous_failed_attempts`, `resolution_round`, `verification_available` | the cycle's own state, and `--verification` when given |
+| estimated | `changed_lines_estimate`, `test_count_estimate` | added plus deleted text lines; added lines that look like a test definition |
+
+`telemetry.PRE_ROUTING_SIGNALS` holds the same classification, so a query can
+tell a count read off a diff from a difficulty somebody typed.
+
+The temporal rule is the point. An `implement` stage is routed before any diff
+exists, so it carries no change signals at all rather than an empty change.
+`prior_findings_*` are the counts of the latest verdict before the stage — the
+review's for a resolution, never the one the stage itself goes on to report —
+and a verdict that reported no findings leaves them unknown rather than
+carrying an older count forward. Per-severity counts are recorded only when
+every finding names its severity: a partial breakdown would read as zero for
+the severities it missed. `previous_failed_attempts` counts the dispatches in
+this cycle that did not succeed before this routing, including an attempt
+abandoned for a reroute. `resolution_round` appears only on `resolve` and
+`rereview`.
+
+Unknown is not zero. A diff that could not be read — no worktree, no base that
+resolves, Git missing — leaves every change signal out; a diff that was read and
+was empty records zero files. `--verification` is tri-state: omitted, it is not
+recorded.
+
+Only closed categories are stored. Paths are classified in memory and dropped:
+languages are a fixed list of scalar counters (`python`, `javascript`,
+`typescript`, `go`, `rust`, `java`, `csharp`, `ruby`, `php`, `shell`, `sql`,
+`markdown`, and `other`), never an array or a map, and each area is one flag.
+Counts are bounded by `FIELD_LIMITS` and refused below zero. No path, diff line
+or file name reaches the store. The classifiers are heuristics over paths:
+`touches_auth` says a changed path looks like authentication code, matched by
+whole word so `processor` is not `sso`, and neither it nor its absence says
+anything about what the code does.
+
 ## What an installation gets
 
 Skills are instructions and can be duplicated harmlessly; the runtime is the

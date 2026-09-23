@@ -7,6 +7,14 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Typed pre-routing signals on every stage row (telemetry schema 2): diff
+  counts, area flags and fixed per-language counters from
+  `scripts/stage_signals.py`, prior findings by severity, failed attempts,
+  resolution round, and an optional `--verification` declaration. Each is what
+  the router could have known before choosing — an `implement` stage carries
+  no change signals — and an unknown signal is omitted, never zero. Estimates
+  are named as such and every field is validated by type, bound and name;
+  version-1 rows stay readable. (#35)
 - A README configuration reference listing every `code_cycle` key the toolkit
   reads, with its consumer and the `executor:provider/model effort` target
   format, and a model-update policy separating configuration changes from

@@ -16,3 +16,4 @@ router.py
 telemetry.py
 security_gate.py
 review_contract.py
+stage_signals.py

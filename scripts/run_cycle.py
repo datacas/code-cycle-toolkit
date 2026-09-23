@@ -56,6 +56,7 @@ from router import (
     load_profiles,
     load_routing_strategy,
 )
+from stage_signals import collect_change_signals
 from telemetry import (
     Telemetry,
     TelemetryError,
@@ -218,6 +219,21 @@ def repository_of(config: dict) -> str | None:
     repository = section.get("repository") if isinstance(section, dict) else None
     selector = repository.get("selector") if isinstance(repository, dict) else None
     return selector if isinstance(selector, str) and selector else None
+
+
+def change_bases_of(config: dict) -> tuple[str, ...]:
+    """The refs a change is measured against, most specific first.
+
+    `code_cycle.repository.default_branch` when declared, otherwise the
+    remote's own default. A base that does not resolve is skipped, and when
+    none does the change signals are left out rather than recorded as empty.
+    """
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    branch = repository.get("default_branch") if isinstance(repository, dict) else None
+    if isinstance(branch, str) and branch:
+        return (f"origin/{branch}", branch)
+    return ("origin/HEAD",)
 
 
 @dataclass(frozen=True)
@@ -438,8 +454,15 @@ def run_cycle(
     cwd: str | None = None,
     timeout: int | None = None,
     local_only: bool = False,
+    change_bases: tuple[str, ...] | None = None,
+    verification_available: bool | None = None,
 ) -> CycleReport:
-    """implement -> review -> (resolve -> rereview)*, every stage recorded."""
+    """implement -> review -> (resolve -> rereview)*, every stage recorded.
+
+    With `change_bases`, each stage routed after the implementation is routed
+    knowing the diff against the first base that resolves. Without them, the
+    change signals are unknown and left out of every row.
+    """
     if local_only:
         validate_local_only_cwd(cwd)
     registry = registry or Registry()
@@ -455,6 +478,11 @@ def run_cycle(
         availability=availability, registry=registry, mode=mode, policy=policy,
         probes=probes, profiles=profiles, local_only=local_only,
         routing_strategy=routing_strategy,
+        change_observer=(
+            (lambda: collect_change_signals(cwd, change_bases))
+            if change_bases else None
+        ),
+        verification_available=verification_available,
     )
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -552,6 +580,9 @@ def _elsewhere(outcome: StageOutcome) -> str:
             "finishes elsewhere; this cycle cannot see its result")
 
 
+SEVERITIES = ("critical", "high", "medium", "low")
+
+
 def _findings(payload: dict | None) -> dict:
     """Counts the executor reported. Absent is absent, never zero."""
     if not payload:
@@ -564,6 +595,15 @@ def _findings(payload: dict | None) -> dict:
             1 for finding in unresolved
             if isinstance(finding, dict) and finding.get("blocks_approval")
         )
+        severities = [
+            finding.get("severity") if isinstance(finding, dict) else None
+            for finding in unresolved
+        ]
+        # Per-severity counts only when every finding says which it is: a
+        # partial breakdown would read as zero for the severities it missed.
+        if all(severity in SEVERITIES for severity in severities):
+            for severity in SEVERITIES:
+                out[f"findings_{severity}"] = severities.count(severity)
     return out
 
 
@@ -660,6 +700,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verifiability", choices=("auto", "partial", "human"),
                         default="auto")
     parser.add_argument("--security-sensitive", action="store_true")
+    parser.add_argument("--verification", choices=("available", "unavailable"),
+                        default=None,
+                        help=("whether the change can be verified automatically; "
+                              "recorded as a pre-routing signal, unknown when omitted"))
     parser.add_argument("--mode", choices=("production", "calibration"),
                         default="production")
     parser.add_argument("--max-iterations", type=int, default=3)
@@ -683,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     except CycleDriverError as error:
         parser.error(str(error))
 
+    change_bases = change_bases_of(resolve_config(args))
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
         report = run_cycle(
@@ -698,6 +743,11 @@ def main(argv: list[str] | None = None) -> int:
             cwd=args.cwd,
             timeout=args.timeout,
             local_only=args.local_only,
+            change_bases=change_bases,
+            verification_available=(
+                None if args.verification is None
+                else args.verification == "available"
+            ),
         )
     except CycleDriverError as error:
         parser.error(str(error))

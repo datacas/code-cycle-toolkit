@@ -42,7 +42,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+#: 1: the original stage row. 2: adds the pre-routing signals below, all in
+#: `payload`, so a version-1 row is still read as it was written; the version
+#: only tells a reader which signals the writer could have supplied.
+SCHEMA_VERSION = 2
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -153,6 +156,82 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "security_gate_half": ("token", frozenset({
         "deterministic", "reviewer", "both", "none",
     })),
+    # pre-routing signals, observed before the stage was routed (schema 2)
+    "changed_files_count": ("count", None),
+    "changed_lines_estimate": ("count", None),
+    "has_tests": ("flag", None),
+    "test_count_estimate": ("count", None),
+    "touches_dependencies": ("flag", None),
+    "touches_database": ("flag", None),
+    "touches_auth": ("flag", None),
+    "touches_api": ("flag", None),
+    "touches_migrations": ("flag", None),
+    "touches_ci": ("flag", None),
+    "changed_python_files": ("count", None),
+    "changed_javascript_files": ("count", None),
+    "changed_typescript_files": ("count", None),
+    "changed_go_files": ("count", None),
+    "changed_rust_files": ("count", None),
+    "changed_java_files": ("count", None),
+    "changed_csharp_files": ("count", None),
+    "changed_ruby_files": ("count", None),
+    "changed_php_files": ("count", None),
+    "changed_shell_files": ("count", None),
+    "changed_sql_files": ("count", None),
+    "changed_markdown_files": ("count", None),
+    "changed_other_files": ("count", None),
+    "prior_findings_total": ("count", None),
+    "prior_findings_blocking": ("count", None),
+    "prior_findings_critical": ("count", None),
+    "prior_findings_high": ("count", None),
+    "prior_findings_medium": ("count", None),
+    "prior_findings_low": ("count", None),
+    "verification_available": ("flag", None),
+    "previous_failed_attempts": ("count", None),
+    "resolution_round": ("count", None),
+}
+
+#: Inclusive bounds for counts that have them. A count outside its range is a
+#: caller bug, not an observation, and is refused like a wrong type.
+_UPPER_COUNT = 1_000_000
+FIELD_LIMITS: dict[str, tuple[int, int]] = {
+    "difficulty": (1, 3),
+    **{
+        name: (0, _UPPER_COUNT) for name in (
+            "changed_files_count", "changed_lines_estimate", "test_count_estimate",
+            "changed_python_files", "changed_javascript_files",
+            "changed_typescript_files", "changed_go_files", "changed_rust_files",
+            "changed_java_files", "changed_csharp_files", "changed_ruby_files",
+            "changed_php_files", "changed_shell_files", "changed_sql_files",
+            "changed_markdown_files", "changed_other_files",
+            "prior_findings_total", "prior_findings_blocking",
+            "prior_findings_critical", "prior_findings_high",
+            "prior_findings_medium", "prior_findings_low",
+            "previous_failed_attempts", "resolution_round",
+        )
+    },
+}
+
+#: Where each pre-routing signal comes from. `declared` is a judgement somebody
+#: made about the work, `observed` is read deterministically off the diff or
+#: the cycle's own state, and `estimated` is derived by a heuristic and named as
+#: an estimate. A query that mixes them should know it is doing so.
+PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
+    "declared": frozenset({"difficulty", "verifiability", "security_sensitive"}),
+    "observed": frozenset({
+        "role", "changed_files_count", "has_tests", "touches_dependencies",
+        "touches_database", "touches_auth", "touches_api", "touches_migrations",
+        "touches_ci", "changed_python_files", "changed_javascript_files",
+        "changed_typescript_files", "changed_go_files", "changed_rust_files",
+        "changed_java_files", "changed_csharp_files", "changed_ruby_files",
+        "changed_php_files", "changed_shell_files", "changed_sql_files",
+        "changed_markdown_files", "changed_other_files",
+        "prior_findings_total", "prior_findings_blocking",
+        "prior_findings_critical", "prior_findings_high",
+        "prior_findings_medium", "prior_findings_low",
+        "verification_available", "previous_failed_attempts", "resolution_round",
+    }),
+    "estimated": frozenset({"changed_lines_estimate", "test_count_estimate"}),
 }
 
 #: An identifier is a reference, not a sentence, and not a secret.
@@ -385,6 +464,10 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
     if kind == "count":
         if isinstance(value, bool) or not isinstance(value, int):
             raise TelemetryError(f"{key!r} is a count and must be an integer, got {type(value).__name__}")
+        if key in FIELD_LIMITS:
+            low, high = FIELD_LIMITS[key]
+            if not low <= value <= high:
+                raise TelemetryError(f"{key!r} must be between {low} and {high}, got {value}")
         return value
 
     if kind == "amount":
