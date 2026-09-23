@@ -31,6 +31,7 @@ availability untouched, so the question stays visible.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from executors import (
@@ -50,12 +51,19 @@ from router import (
     models_from_profiles,
     route,
 )
+from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
 from telemetry import Telemetry, routing_decision_fields
 
 SCHEMA_VERSION = 1
 
 #: Roles whose functional verdict is a review outcome rather than a dispatch one.
 REVIEW_ROLES = frozenset({"review", "rereview"})
+
+#: Verdict fields that become the next stage's `prior_*` signals.
+FINDING_FIELDS = (
+    "findings_total", "findings_blocking", "findings_critical", "findings_high",
+    "findings_medium", "findings_low",
+)
 
 @dataclass(frozen=True)
 class RoleContract:
@@ -126,6 +134,8 @@ class CycleRecorder:
         profiles: dict | None = None,
         routing_strategy: RoutingStrategy = RoutingStrategy.FIXED,
         local_only: bool = False,
+        change_observer: Callable[[], ChangeSignals | None] | None = None,
+        verification_available: bool | None = None,
     ) -> None:
         self.telemetry = telemetry
         self.repo_id = repo_id
@@ -153,6 +163,13 @@ class CycleRecorder:
         if profiles is not None:
             telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
+        # Pre-routing state. Each is what the cycle knew before routing the
+        # next stage, never what that stage went on to produce; `None` or an
+        # empty mapping is "not known", which is recorded by omission.
+        self.change_observer = change_observer
+        self.verification_available = verification_available
+        self.failed_attempts = 0
+        self.prior_findings: dict[str, int] = {}
         self.iteration = 0
         self.stages: list[StageOutcome] = []
 
@@ -187,7 +204,15 @@ class CycleRecorder:
                 f"not {requested_policy!r}")
         dispatch_kwargs["workspace_policy"] = workspace_policy
 
+        # Observed once per stage, before the first routing: the diff does not
+        # change between an attempt and its reroute.
+        change = (
+            self.change_observer()
+            if self.change_observer is not None and role in CHANGE_OBSERVED_ROLES
+            else None
+        )
         for attempt in range(2):
+            signals = self._pre_routing(role, change)
             eligible = self.registry.compatible_executors(
                 workspace_policy, **dispatch_kwargs,
             )
@@ -220,7 +245,8 @@ class CycleRecorder:
             )
             if decision.blocked:
                 outcome.decision = decision
-                outcome.rows.append(self._record(role, decision, None))
+                outcome.rows.append(self._record(role, decision, None, signals))
+                self.failed_attempts += 1
                 self.stages.append(outcome)
                 return outcome
 
@@ -230,7 +256,9 @@ class CycleRecorder:
             outcome.decision = decision
             outcome.result = result
             outcome.attempts.append((decision, result))
-            outcome.rows.append(self._record(role, decision, result))
+            outcome.rows.append(self._record(role, decision, result, signals))
+            if result.outcome is not DispatchOutcome.SUCCEEDED:
+                self.failed_attempts += 1
 
             learned = result.learned_availability
             can_retry = (
@@ -257,6 +285,12 @@ class CycleRecorder:
         """
         if role in REVIEW_ROLES and not status:
             raise CycleError(f"a {role} verdict needs a status; an empty one counts as nothing")
+        # The latest verdict is what the next stage is routed knowing. One that
+        # reported no findings leaves them unknown rather than zero.
+        self.prior_findings = {
+            f"prior_{key}": fields[key] for key in FINDING_FIELDS
+            if fields.get(key) is not None
+        }
         return self.telemetry.record_stage(
             self.repo_id, self.task_id, role,
             iteration=self.iteration, status=status,
@@ -278,8 +312,25 @@ class CycleRecorder:
             local_only=self.local_only, **fields,
         )
 
+    def _pre_routing(self, role: str, change: ChangeSignals | None) -> dict:
+        """What was known before this routing, with unknown signals left out."""
+        signals = {
+            "difficulty": self.signals.difficulty,
+            "verifiability": self.signals.verifiability,
+            "security_sensitive": self.signals.security_sensitive,
+            "previous_failed_attempts": self.failed_attempts,
+            **self.prior_findings,
+        }
+        if change is not None:
+            signals.update(change.telemetry_fields())
+        if self.verification_available is not None:
+            signals["verification_available"] = self.verification_available
+        if role in RESOLUTION_ROLES:
+            signals["resolution_round"] = self.iteration
+        return signals
+
     def _record(self, role: str, decision: RoutingDecision,
-                result: DispatchResult | None) -> int:
+                result: DispatchResult | None, signals: dict) -> int:
         if result is None:
             # A blocked routing decision never reached an executor, so there is
             # no dispatch to describe — but the decision still happened, and a
@@ -293,12 +344,11 @@ class CycleRecorder:
                 routing_reason_count=len(decision.reasons or ()),
                 **routing_decision_fields(decision),
                 local_only=self.local_only,
+                **signals,
             )
         return self.telemetry.record_dispatch(
             self.repo_id, self.task_id, role, decision, result,
             iteration=self.iteration,
-            difficulty=self.signals.difficulty,
-            verifiability=self.signals.verifiability,
-            security_sensitive=self.signals.security_sensitive,
             local_only=self.local_only,
+            **signals,
         )

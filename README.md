@@ -384,6 +384,15 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
 
+Each stage row also records the signals its router could have known before
+choosing a model: the declared difficulty, verifiability and security flag; for
+stages routed after the implementation, counts and area flags read off the diff
+against `code_cycle.repository.default_branch`; the findings and failed
+attempts reported earlier in the cycle; and, when `--verification available` or
+`--verification unavailable` is given, whether the change can be verified
+automatically. An unknown signal is left out, never recorded as zero. See
+[Pre-routing signals](docs/instrumentation.md#pre-routing-signals).
+
 For a rehearsal that must stay in a disposable linked Git worktree, pass both
 `--cwd /path/to/worktree` and `--local-only`. The driver refuses to enable this
 mode for the live repository, runs implementation only, records the resulting
