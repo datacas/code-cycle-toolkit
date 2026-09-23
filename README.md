@@ -391,6 +391,8 @@ python3 ~/.code-cycle/runtime/run_cycle.py \
 `cc-stats` uses the installed runtime's `stats.py` component. It accepts
 `--days N` for a different lookback window and `--all-time` for all available
 history; `--format json` returns the same aggregate report as structured data.
+Pass `--cwd <repository root>` to select the repository whose configured
+telemetry should be reported.
 The component uses the same configured repository identity and telemetry
 database location as the cycle runtime, opens the database read-only, and
 returns aggregates only. It never prints task identifiers, comments, prompts,

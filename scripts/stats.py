@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from run_cycle import CycleDriverError, load_config, repository_of
-from telemetry import MINIMUM_SAMPLE, default_database_path
+from telemetry import MINIMUM_SAMPLE, TelemetryError, default_database_path, validate_reference
 
 
 CONFIDENCE_BUCKETS = (
@@ -299,6 +299,8 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
             "through": now.isoformat(),
         },
         "sample_minimum": minimum,
+        "recorded_rows": len(rows),
+        "period_rows": len(current),
         "summary": {
             "tasks": len(tasks),
             "stages": len(stages),
@@ -366,6 +368,41 @@ def _bar(value: int, maximum: int, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(daily: dict, first: str | None, last: str) -> tuple[str, str]:
+    """One character per day, or per week beyond 45 days; `·` marks none."""
+    if not first:
+        return "", "day"
+    start = datetime.fromisoformat(first).date()
+    end = datetime.fromisoformat(last).date()
+    span_days = (end - start).days + 1
+    unit = "day"
+    if span_days > 45:
+        unit = "week"
+        first_week_days = span_days % 7 or 7
+        counts = [0] * ((span_days + 6) // 7)
+        for day, count in daily.items():
+            offset = (datetime.fromisoformat(day).date() - start).days
+            if 0 <= offset < span_days:
+                index = (0 if offset < first_week_days
+                         else 1 + (offset - first_week_days) // 7)
+                counts[index] += count
+    else:
+        counts = [
+            daily.get((start + timedelta(days=offset)).isoformat(), 0)
+            for offset in range(span_days)
+        ]
+    maximum = max(counts, default=0)
+    marks = "".join(
+        "·" if not count
+        else SPARK_LEVELS[min(len(SPARK_LEVELS) - 1, (count * len(SPARK_LEVELS) - 1) // maximum)]
+        for count in counts
+    )
+    return marks, unit
+
+
 def _count_table(label: str, unit: str, counts: dict, *, empty: str | None = None) -> list[str]:
     """A small ranked table with exact counts beside proportional bars."""
     if not counts:
@@ -387,22 +424,35 @@ def render_markdown(report: dict) -> str:
     rate = summary["first_pass"]
     rate_text = _format_rate(rate)
     lines = [
-        f"## Code Cycle stats · {report['period']['label']}",
+        f"## Code Cycle stats · {report['repository']} · {report['period']['label']}",
         "",
+    ]
+    if not report["recorded_rows"]:
+        lines += ["No telemetry has been recorded for this repository yet; "
+                  "every metric below is unknown.", ""]
+    elif not report["period_rows"]:
+        lines += ["No telemetry was recorded in this period; "
+                  "ask for a longer window or all recorded history.", ""]
+    lines += [
         f"**{summary['tasks']} tasks** · {summary['stages']} stages · first-pass approval **{rate_text}**",
         "",
         "### Activity",
         "",
-        "| Day (UTC) | Stages | Activity |",
-        "|---|---:|---|",
     ]
     daily = report["trend_daily"]
-    recent_days = list(daily.items())[-14:]
-    maximum = max((count for _, count in recent_days), default=0)
-    if recent_days:
-        lines.extend(f"| {day} | {count} | {_bar(count, maximum)} |" for day, count in recent_days)
+    if daily:
+        first = (report["period"]["from"] or min(daily))[:10]
+        last = report["period"]["through"][:10]
+        marks, unit = _sparkline(daily, first, last)
+        busiest = max(daily.items(), key=lambda item: (item[1], item[0]))
+        lines += [
+            f"`{marks}`",
+            "",
+            f"Stages per {unit} (UTC), {first} → {last}; busiest day {busiest[0]} "
+            f"with {busiest[1]}; {len(daily)} active day(s).",
+        ]
     else:
-        lines.append("| No recorded activity | 0 | — |")
+        lines.append("No recorded activity.")
     lines += ["", "### By role and profile", ""]
     lines += _count_table("Role", "Stages", summary["roles"], empty="No stages recorded.")
     if report["profiles_by_role"]:
@@ -437,7 +487,8 @@ def render_markdown(report: dict) -> str:
     )
     drift = summary["model_drift"]
     lines.append(
-        f"- Model drift: **{drift['mismatches']}/{drift['measured']} measured**; {drift['unreported']} unreported"
+        f"- Model drift: **{drift['mismatches']} of {drift['measured']}** dispatches that reported "
+        f"their model ran a different one; {drift['unreported']} did not report a model"
         if drift["measured"] else "- Model drift: not measured"
     )
     verification = summary["verification"]
@@ -517,7 +568,12 @@ def _report_config(cwd: Path) -> str:
         raise StatsError(
             "no repository identity: set code_cycle.repository.selector in .code-cycle.yml"
         )
-    return repo_id
+    if repo_id != repo_id.strip():
+        raise StatsError("invalid repository identity in repository configuration")
+    try:
+        return validate_reference("repo_id", repo_id)
+    except TelemetryError as error:
+        raise StatsError("invalid repository identity in repository configuration") from error
 
 
 def main(argv: list[str] | None = None) -> int:
