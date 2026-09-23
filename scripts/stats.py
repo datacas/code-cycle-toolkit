@@ -22,6 +22,10 @@ CONFIDENCE_BUCKETS = (
 )
 FINDING_FIELDS = ("findings_critical", "findings_high", "findings_medium", "findings_low")
 PASSING_REVIEW_STATUSES = frozenset({"APPROVED"})
+#: Columns only a dispatch writes. Before schema 3 no row carried a
+#: `record_kind`, and verdicts and the closing row were already separate rows,
+#: so these are what tell a historical dispatch from its verdict or close.
+DISPATCH_EVIDENCE = ("outcome", "executor", "profile")
 TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 
 
@@ -40,7 +44,7 @@ def _read_rows(database: Path, repo_id: str) -> list[dict]:
         try:
             result = []
             for raw in connection.execute(
-                "SELECT repo_id, task_id, role, profile, status, missing_capability, "
+                "SELECT repo_id, task_id, role, profile, executor, outcome, status, missing_capability, "
                 "used_fallback, duration_ms, model_requested, model_resolved, recorded_at, payload "
                 "FROM stages WHERE repo_id = ? ORDER BY recorded_at, id",
                 (repo_id,),
@@ -115,9 +119,18 @@ def _period_rows(rows: list[dict], start: datetime | None, end: datetime) -> lis
     return selected
 
 
+def _is_dispatch(row: dict) -> bool:
+    """Whether a row records a dispatch attempt, in any schema version."""
+    kind = row["payload"].get("record_kind")
+    if kind:
+        return kind == "dispatch"
+    return any(row.get(column) for column in DISPATCH_EVIDENCE)
+
+
 def _stage_rows(rows: list[dict]) -> list[dict]:
     """Return one row per stage, retaining compatibility with older schemas."""
-    stages = [row for row in rows if not row["payload"].get("record_kind")]
+    stages = [row for row in rows
+              if not row["payload"].get("record_kind") and _is_dispatch(row)]
     dispatches: dict[tuple, dict] = {}
     for index, row in enumerate(rows):
         payload = row["payload"]
@@ -197,11 +210,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
 
     stages = _stage_rows(current)
     stage_row_ids = {id(row) for row in stages}
-    stage_event_row_ids = {
-        id(row) for row in current
-        if not row["payload"].get("record_kind")
-        or row["payload"].get("record_kind") == "dispatch"
-    }
+    stage_event_row_ids = {id(row) for row in current if _is_dispatch(row)}
     roles = Counter(row["role"] for row in stages)
     profiles: dict[str, Counter] = defaultdict(Counter)
     verdicts, blockages = Counter(), Counter()
@@ -357,6 +366,16 @@ def _bar(value: int, maximum: int, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _count_table(label: str, unit: str, counts: dict, *, empty: str | None = None) -> list[str]:
+    """A small ranked table with exact counts beside proportional bars."""
+    if not counts:
+        return [empty] if empty else []
+    maximum = max(counts.values())
+    rows = [f"| {label} | {unit} | |", "|---|---:|---|"]
+    rows.extend(f"| {name} | {count} | {_bar(count, maximum)} |" for name, count in counts.items())
+    return rows
+
+
 def _format_rate(rate: dict) -> str:
     if rate["value"] is None:
         return f"unknown ({rate['passed']}/{rate['total']}; need {rate['minimum']})"
@@ -385,25 +404,42 @@ def render_markdown(report: dict) -> str:
     else:
         lines.append("| No recorded activity | 0 | — |")
     lines += ["", "### By role and profile", ""]
+    lines += _count_table("Role", "Stages", summary["roles"], empty="No stages recorded.")
     if report["profiles_by_role"]:
-        lines += ["| Role | Profile | Stages |", "|---|---|---:|"]
+        lines += ["", "| Role | Profile | Stages |", "|---|---|---:|"]
         for role, profiles in report["profiles_by_role"].items():
             lines.extend(f"| {role} | {profile} | {count} |" for profile, count in profiles.items())
     else:
-        lines.append("No profile breakdown is available yet.")
-    lines += ["", "### Outcomes and operations", ""]
+        lines += ["", "No profile breakdown is available yet."]
+
+    lines += ["", "### Review verdicts", ""]
+    lines += _count_table("Verdict", "Reviews", summary["verdicts"], empty="No review verdicts recorded.")
+
+    lines += ["", "### Findings by severity", ""]
+    findings = summary["findings"]
+    if any(item["measured"] for item in findings.values()):
+        known = [item["count"] for item in findings.values() if item["count"] is not None]
+        maximum = max(known, default=0)
+        lines += ["| Severity | Findings | Reports | |", "|---|---:|---:|---|"]
+        for name in ("critical", "high", "medium", "low"):
+            item = findings[name]
+            if item["count"] is None:
+                lines.append(f"| {name} | unknown | 0 | — |")
+            else:
+                lines.append(f"| {name} | {item['count']} | {item['measured']} | {_bar(item['count'], maximum)} |")
+    else:
+        lines.append("No review reported finding counts; severities are unknown.")
+
+    lines += ["", "### Operations", ""]
     lines.append(
         f"- Fallback stages: **{summary['fallback_stages']}**"
         if summary["fallback_stages"] is not None else "- Fallback stages: not measured"
     )
-    lines.append(f"- Dispatch blockages: `{json.dumps(summary['dispatch_blockages'], sort_keys=True)}`")
     drift = summary["model_drift"]
     lines.append(
         f"- Model drift: **{drift['mismatches']}/{drift['measured']} measured**; {drift['unreported']} unreported"
         if drift["measured"] else "- Model drift: not measured"
     )
-    lines.append(f"- Verdicts: `{json.dumps(summary['verdicts'], sort_keys=True)}`")
-    lines.append(f"- Findings by severity: `{json.dumps(summary['findings'], sort_keys=True)}`")
     verification = summary["verification"]
     if verification["measured"]:
         lines.append(
@@ -421,27 +457,48 @@ def render_markdown(report: dict) -> str:
         f"- Recorded cost: **${cost['total']:.6f}** across {cost['measured']} measured stages"
         if cost["total"] is not None else "- Cost: not measured"
     )
+    lines += ["", "Dispatch blockages:", ""]
+    lines += _count_table("Missing capability", "Dispatches", summary["dispatch_blockages"],
+                          empty="None recorded.")
+
     jev = report["jev"]
     lines += ["", "### Rules vs. Jev", ""]
     if jev["shadow_rows"]:
-        lines.append(f"- Shadow records by status: `{json.dumps(jev['status'], sort_keys=True)}`")
+        lines += _count_table("Shadow status", "Records", jev["status"])
     if jev["observations"]:
-        lines.append(f"- Agreement: `{json.dumps(jev['agreement'], sort_keys=True)}` ({jev['observations']} observations)")
-        lines.append(f"- Confidence buckets: `{json.dumps(jev['confidence_buckets']['counts'], sort_keys=True)}`; ranges: low 0–<0.50, medium 0.50–<0.75, high 0.75–1.00")
-        lines.append(f"- First-pass outcomes by suggested profile: `{json.dumps(jev['first_pass_by_suggested_profile'], sort_keys=True)}`")
+        lines += ["", f"Agreement across {jev['observations']} observations:", ""]
+        lines += _count_table("Rules vs. Jev", "Observations", jev["agreement"])
+        lines += ["", "| Confidence | Range | Suggestions | |", "|---|---|---:|---|"]
+        counts = jev["confidence_buckets"]["counts"]
+        ranges = jev["confidence_buckets"]["ranges"]
+        maximum = max(counts.values(), default=0)
+        lines.extend(
+            f"| {name} | {ranges[name]} | {count} | {_bar(count, maximum)} |"
+            for name, count in counts.items()
+        )
+        outcomes = jev["first_pass_by_suggested_profile"]
+        lines += [""]
+        if outcomes:
+            lines += ["| Suggested profile | First-pass approval |", "|---|---|"]
+            lines.extend(f"| {profile} | {_format_rate(rate)} |" for profile, rate in outcomes.items())
+        else:
+            lines.append("No suggestion could be joined to a first-review outcome yet.")
     elif jev["shadow_rows"]:
-        lines.append("No Jev suggestions could be compared; recorded statuses are shown above.")
+        lines += ["", "No Jev suggestions could be compared; recorded statuses are shown above."]
     else:
         lines.append("No Jev shadow observations in this period; these metrics are not applicable.")
+
     comparison = report["comparison"]
     lines += ["", "### Period comparison", ""]
     if comparison["available"]:
-        lines.append(
-            f"Tasks: {comparison['current_tasks']} vs {comparison['previous_tasks']} "
-            f"({comparison['task_change']:+d}); first pass "
-            f"{_format_rate(comparison['current_first_pass'])} vs "
-            f"{_format_rate(comparison['previous_first_pass'])}"
-        )
+        lines += [
+            "| | This period | Previous period |",
+            "|---|---:|---:|",
+            f"| Tasks | {comparison['current_tasks']} | {comparison['previous_tasks']} "
+            f"({comparison['task_change']:+d}) |",
+            f"| First-pass approval | {_format_rate(comparison['current_first_pass'])} | "
+            f"{_format_rate(comparison['previous_first_pass'])} |",
+        ]
     else:
         lines.append(f"Not compared: {comparison['reason']}.")
     lines += ["", "Rates and suggested-profile outcomes need at least "
