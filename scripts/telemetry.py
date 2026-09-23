@@ -47,13 +47,23 @@ from pathlib import Path
 #: only tells a reader which signals the writer could have supplied. 3: adds the
 #: cycle correlation keys and the observed outcomes below, again only in
 #: `payload`; a row from an earlier version simply has no cycle to belong to.
-SCHEMA_VERSION = 3
+#: 4: adds `shadow` rows holding an optional selector's suggestion, whose
+#: fields below are payload-only and appear on no other kind of row.
+SCHEMA_VERSION = 4
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
 #: Below this many observations a rate is reported as unknown. Not a
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
+
+#: The Jev model identifiers a shadow suggestion may request or report. Closed,
+#: like every other token: a model name and a credential share a shape.
+JEV_MODELS = frozenset({"typesafe-ai/jev"})
+
+#: The profiles a shadow selector compares, which are the `implement` and
+#: `resolve` candidates in `router.ROLE_CANDIDATES`.
+SHADOW_PROFILES = frozenset({"cheap_coder", "deep_coder"})
 
 #: Every field this store accepts, column or payload, and the shape it may hold.
 #:
@@ -194,7 +204,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     # cycle correlation (schema 3)
     "cycle_id": ("identifier", None),
     "stage_seq": ("count", None),
-    "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle"})),
+    "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle", "shadow"})),
     # observed outcomes, written only once they are known (schema 3)
     "tests_passed": ("flag", None),
     "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
@@ -205,6 +215,23 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "final_approved": ("flag", None),
     "fallback_stages": ("count", None),
     "contract_violations": ("count", None),
+    # a shadow selector's suggestion, on `shadow` rows only (schema 4)
+    "jev_status": ("token", frozenset({
+        "suggested", "unavailable", "timeout", "rate_limited", "http_error",
+        "invalid_response",
+    })),
+    "jev_rule_profile": ("token", SHADOW_PROFILES),
+    "jev_suggested_profile": ("token", SHADOW_PROFILES),
+    "jev_agreement": ("flag", None),
+    "jev_confidence": ("amount", None),
+    "jev_probability_cheap_coder": ("amount", None),
+    "jev_probability_deep_coder": ("amount", None),
+    "jev_model_requested": ("token", JEV_MODELS),
+    "jev_model_resolved": ("token", JEV_MODELS),
+    "jev_model_resolution": ("token", frozenset({
+        "matched", "mismatch_known", "mismatch_unrecognized", "unreported",
+    })),
+    "jev_duration_ms": ("count", None),
 }
 
 #: Inclusive bounds for counts that have them. A count outside its range is a
@@ -225,10 +252,16 @@ FIELD_LIMITS: dict[str, tuple[int, int]] = {
             "prior_findings_medium", "prior_findings_low",
             "previous_failed_attempts", "resolution_round",
             "stage_seq", "resolution_rounds", "fallback_stages",
-            "contract_violations",
+            "contract_violations", "jev_duration_ms",
         )
     },
 }
+
+#: Amounts that are probabilities. Refused outside [0, 1] like a count out of
+#: its range: a confidence of 7 is a parsing bug, not an observation.
+PROBABILITY_FIELDS = frozenset({
+    "jev_confidence", "jev_probability_cheap_coder", "jev_probability_deep_coder",
+})
 
 #: Where each pre-routing signal comes from. `declared` is a judgement somebody
 #: made about the work, `observed` is read deterministically off the diff or
@@ -258,6 +291,17 @@ PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
 #: number of the dispatch it reports on. A later suggestion from another selector
 #: can point at the same pair without the rows it annotates being rewritten.
 CORRELATION_FIELDS = frozenset({"cycle_id", "stage_seq", "record_kind"})
+
+#: What a `shadow` row may say about a suggestion: the rules' profile, the
+#: suggested one and the evidence beside it. It holds no pre-routing signal and
+#: no outcome — both are read from their own rows by `(cycle_id, stage_seq)` —
+#: so a comparison can never be fitted on a field the suggestion did not have.
+SHADOW_FIELDS = frozenset({
+    "jev_status", "jev_rule_profile", "jev_suggested_profile", "jev_agreement",
+    "jev_confidence", "jev_probability_cheap_coder", "jev_probability_deep_coder",
+    "jev_model_requested", "jev_model_resolved", "jev_model_resolution",
+    "jev_duration_ms",
+})
 
 #: What was learned after a routing, by the row that is its source. None of it
 #: is ever written onto a `dispatch` row: those carry the pre-routing signals,
@@ -517,6 +561,8 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
     if kind == "amount":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TelemetryError(f"{key!r} is an amount and must be a number, got {type(value).__name__}")
+        if key in PROBABILITY_FIELDS and not 0.0 <= value <= 1.0:
+            raise TelemetryError(f"{key!r} is a probability and must be between 0 and 1, got {value}")
         return float(value)
     if kind == "flag":
         if not isinstance(value, bool):
@@ -751,6 +797,9 @@ class Telemetry:
         """
         implementers = {}
         for row in self.rows(repo_id):
+            # A shadow row is a suggestion, not the implementation that ran.
+            if row["payload"].get("record_kind") == "shadow":
+                continue
             if row["role"] == "implement" and row["task_id"] not in implementers:
                 implementers[row["task_id"]] = row["profile"]
 
@@ -858,6 +907,11 @@ class Telemetry:
                 {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
                  **fields(row, OUTCOME_FIELDS["verdict"])}
                 for row in rows if row["payload"].get("record_kind") == "verdict"
+            ],
+            "shadows": [
+                {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
+                 **fields(row, SHADOW_FIELDS)}
+                for row in rows if row["payload"].get("record_kind") == "shadow"
             ],
         }
 

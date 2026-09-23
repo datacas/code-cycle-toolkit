@@ -7,6 +7,17 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Jev as an opt-in shadow profile selector (`code_cycle.routing.jev.mode:
+  shadow`, default `disabled`). `implement` and `resolve` stages ask Jev to
+  choose between `cheap_coder` and `deep_coder` from allowlisted scalar
+  pre-routing signals only, and a new `shadow` telemetry row (schema 4)
+  records the rules' profile, the suggestion, agreement, confidence,
+  probabilities and models when reported, correlated by `cycle_id` and
+  `stage_seq`. The suggestion never selects a profile, target or dispatch.
+  Failures are closed categories and never stop the cycle; disabled mode
+  builds no client and makes no request; the key comes only from
+  `JEV_API_KEY`. `code_cycle.routing` now refuses unknown keys. No new
+  dependency. (#39)
 - Observed cycle outcomes in telemetry (schema 3), on `verdict` and closing
   `cycle` rows kept apart from the pre-routing `dispatch` rows: first-pass
   approval, whether resolution was needed and its rounds, first and final
