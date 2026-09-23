@@ -44,6 +44,7 @@ from executors import (
     WorkspacePolicy,
     dispatch,
 )
+from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
     RoutingDecision,
     RoutingMode,
@@ -142,6 +143,7 @@ class CycleRecorder:
         change_observer: Callable[[], ChangeSignals | None] | None = None,
         verification_available: bool | None = None,
         cycle_id: str | None = None,
+        shadow: JevShadow | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -190,6 +192,10 @@ class CycleRecorder:
         self.first_review_status: str | None = None
         self.final_review_status: str | None = None
         self.tests_passed: bool | None = None
+        # An observer of the rules' choice, never a selector: nothing it
+        # returns reaches `route()` or a dispatch. `None` means no shadow at
+        # all, so a disabled one costs no client, no key read and no I/O.
+        self.shadow = shadow
 
     def stage(self, role: str, task: str, **dispatch_kwargs) -> StageOutcome:
         """Route, dispatch and record. One call, no half-done state.
@@ -263,11 +269,14 @@ class CycleRecorder:
                     if self.first_pass_rate is not None else None
                 ),
             )
+            if attempt == 0:
+                first = (decision, signals)
             if decision.blocked:
                 outcome.decision = decision
                 outcome.rows.append(self._record(role, decision, None, signals))
                 self.failed_attempts += 1
                 self.stages.append(outcome)
+                self._observe_shadow(role, *first)
                 return outcome
 
             result = dispatch(decision, task, self.registry,
@@ -294,7 +303,34 @@ class CycleRecorder:
             self.availability[result.executor] = learned
 
         self.stages.append(outcome)
+        self._observe_shadow(role, *first)
         return outcome
+
+    def _observe_shadow(self, role: str, decision: RoutingDecision,
+                        signals: dict) -> None:
+        """Ask the shadow about the stage's first routing, and only record it.
+
+        The first routing, because it is the one the rules made from the
+        pre-routing signals alone; a reroute is availability, not selection.
+        Written after the stage's own rows so no reader can take the suggestion
+        for the dispatch. Nothing here may stop the cycle: the adapter turns
+        failures into categories, and a row this store refuses is dropped.
+        """
+        if self.shadow is None or not self.shadow.applies_to(role):
+            return
+        try:
+            suggestion = self.shadow.suggest(role, signals)
+            self.telemetry.record_stage(
+                self.repo_id, self.task_id, role,
+                iteration=self.iteration,
+                cycle_id=self.cycle_id, stage_seq=self.stage_seq,
+                record_kind="shadow",
+                routing_strategy=self.routing_strategy.value,
+                local_only=self.local_only,
+                **shadow_fields(self.shadow.config, decision.profile, suggestion),
+            )
+        except Exception:
+            return
 
     def record_verdict(self, role: str, status: str, **fields) -> int:
         """Record a functional outcome that is not itself a dispatch.

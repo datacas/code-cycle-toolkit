@@ -298,7 +298,8 @@ returns a profile name with its reasons. `route()` refuses any name outside the
 candidates, and keeps everything else — workspace policy, the availability
 gate, fallback, the calibration block and target resolution — so a selector can
 never return a model or skip a gate. Nothing in the cycle passes another
-selector yet.
+selector yet; the optional Jev shadow (see [Shadow suggestions](#shadow-suggestions))
+observes the rules' choice and is deliberately not a selector.
 
 Profiles resolve through `code_cycle.profiles` in `.code-cycle.yml`, the only
 place a role maps to a model.
@@ -585,12 +586,83 @@ outcome; CI state stays in the published review comment.
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
 `(cycle_id, stage_seq)`, without that selector being installed while the run is
-recorded and without the rows it annotates being rewritten. Nothing records such
-a suggestion yet.
+recorded and without the rows it annotates being rewritten. The Jev shadow
+below is the first such suggestion.
 
 Rows from versions 1 and 2 are read as they were written. They carry no
 `cycle_id`, so they group by `repo_id` and `task_id` only and belong to no
 reassembled cycle.
+
+### Shadow suggestions
+
+Schema version 4 adds `shadow` rows: an optional second opinion about a
+profile, recorded beside the rules' choice and never used in its place. The
+only one today is [Jev](https://www.jevai.org/docs), enabled per repository:
+
+```yaml
+code_cycle:
+  routing:
+    jev:
+      mode: shadow            # disabled (default) | shadow
+      model: typesafe-ai/jev  # the only accepted identifier
+      timeout_seconds: 3      # above 0, at most 10
+```
+
+`scripts/jev_shadow.py` is an observer, not a `ProfileSelector`. After an
+`implement` or `resolve` stage has been routed, dispatched and recorded,
+`CycleRecorder` describes its first routing to Jev and writes the answer on a
+row of its own. Nothing the adapter returns reaches `route()`, target
+resolution, fallback or dispatch, so a suggestion that disagrees changes no
+profile. The first routing is the one asked about because a reroute is
+availability, not selection.
+
+**Disabled is absent.** With no block, or `mode: disabled`, no adapter is built,
+no key is read and no connection is opened. An unknown key under
+`code_cycle.routing` or `code_cycle.routing.jev`, an unknown mode, a model
+other than the accepted identifiers and a timeout out of range are refused by
+`run_cycle.py` before any stage runs.
+
+**What is sent.** One `POST https://www.jevai.org/api/v1/decisions` per
+eligible stage, with the model, a fixed `choice` question between `cheap_coder`
+and `deep_coder` whose wording is the adapter's own, and a `state` built only
+from the fields in `telemetry.PRE_ROUTING_SIGNALS` plus the role. Each value
+must be a count, a flag or a closed token (`verifiability`); anything else is
+dropped before sending. No prose, path, diff, repository name, work-item id,
+cycle id or outcome is sent. The endpoint is not configurable. The key is read
+from `JEV_API_KEY` at the moment of the call and placed only in the
+`Authorization` header: it is never written to `.code-cycle.yml`, a row, or a
+log.
+
+**Failure is a category.** Every outcome is one `jev_status` token:
+`suggested`, `unavailable` (no key, connection failure or HTTP 5xx), `timeout`,
+`rate_limited` (HTTP 429), `http_error` (another non-200 status) or
+`invalid_response` (anything that is not a `code: 0` envelope whose
+`data.answers.profile.choice` is one of the two options, with a confidence and
+probabilities between 0 and 1 over those options only). No response body or
+exception text is kept. None of them stops or changes the stage, and the
+call itself is bounded by `timeout_seconds`.
+
+A `shadow` row carries the correlation keys, `routing_strategy`, `local_only`
+and only the fields in `telemetry.SHADOW_FIELDS`:
+
+| Field | Meaning |
+|---|---|
+| `jev_status` | the category above |
+| `jev_rule_profile` | the profile the rules chose for that routing |
+| `jev_suggested_profile`, `jev_agreement` | Jev's choice and whether it matched, only when `suggested` |
+| `jev_confidence`, `jev_probability_cheap_coder`, `jev_probability_deep_coder` | only when the service reported them |
+| `jev_model_requested` | the configured model |
+| `jev_model_resolved`, `jev_model_resolution` | the model the service reported, by name only when it is a known identifier; `unreported` when it named none |
+| `jev_duration_ms` | how long the call took |
+
+It holds no pre-routing signal and no outcome. The features are on the
+`dispatch` row with the same `(cycle_id, stage_seq)`, the outcomes on the
+`verdict` and `cycle` rows, and `Telemetry.cycle_outcome()` lists the
+suggestions under `shadows`, so rules and Jev can be compared against the
+outcome without either being mixed into the features. A shadow row is written
+after its stage's own rows and is never read as the implementation by
+`first_pass_rate`. Confidence and probabilities are exploratory evidence, not
+permission: nothing in the toolkit acts on them.
 
 ## What an installation gets
 

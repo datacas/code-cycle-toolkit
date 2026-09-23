@@ -48,6 +48,7 @@ from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from executors import DispatchResult, ReadinessPolicy, Registry
+from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from router import (
     RouterError,
     RoutingMode,
@@ -87,6 +88,9 @@ FOREIGN_KEYS = frozenset({
 #: version does not know, and either way a run under it would follow a policy
 #: nobody declared.
 KNOWN_KEYS = DRIVER_KEYS | FOREIGN_KEYS
+
+#: The keys under `code_cycle.routing`, all read by this driver.
+ROUTING_KEYS = frozenset({"strategy", "jev"})
 
 #: The skill each role runs, as the executor is told to invoke it.
 SKILL_FOR_ROLE = {
@@ -206,9 +210,17 @@ def load_config(path: Path) -> dict:
             f"{path}: unknown key under code_cycle: " + ", ".join(described)
             + "; known keys are " + ", ".join(sorted(KNOWN_KEYS)))
 
+    routing = (config.get("code_cycle") or {}).get("routing") or {}
+    unknown = sorted(str(key) for key in set(routing) - ROUTING_KEYS)
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.routing: " + ", ".join(unknown)
+            + "; known keys are " + ", ".join(sorted(ROUTING_KEYS)))
+
     try:
         load_routing_strategy(config)
-    except RouterError as error:
+        load_jev_config(config)
+    except (RouterError, JevConfigError) as error:
         raise CycleDriverError(str(error)) from error
     return config
 
@@ -456,13 +468,21 @@ def run_cycle(
     local_only: bool = False,
     change_bases: tuple[str, ...] | None = None,
     verification_available: bool | None = None,
+    jev: JevConfig | None = None,
+    shadow: JevShadow | None = None,
 ) -> CycleReport:
     """implement -> review -> (resolve -> rereview)*, every stage recorded.
 
     With `change_bases`, each stage routed after the implementation is routed
     knowing the diff against the first base that resolves. Without them, the
     change signals are unknown and left out of every row.
+
+    With `jev` in shadow mode, `implement` and `resolve` stages also record
+    Jev's suggestion beside the rules' choice; the rules still route every
+    stage. `shadow` injects an already-built observer instead, for tests.
     """
+    if shadow is None and jev is not None and jev.enabled:
+        shadow = JevShadow(jev)
     if local_only:
         validate_local_only_cwd(cwd)
     registry = registry or Registry()
@@ -483,6 +503,7 @@ def run_cycle(
             if change_bases else None
         ),
         verification_available=verification_available,
+        shadow=shadow,
     )
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -740,7 +761,10 @@ def main(argv: list[str] | None = None) -> int:
     except CycleDriverError as error:
         parser.error(str(error))
 
-    change_bases = change_bases_of(resolve_config(args))
+    config = resolve_config(args)
+    change_bases = change_bases_of(config)
+    # Already validated by `load_config`; read here so the run carries it.
+    jev = load_jev_config(config)
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
         report = run_cycle(
@@ -761,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
                 None if args.verification is None
                 else args.verification == "available"
             ),
+            jev=jev,
         )
     except CycleDriverError as error:
         parser.error(str(error))
