@@ -162,6 +162,39 @@ class StatsTests(unittest.TestCase):
         self.assertIn("| medium | 0.50–<0.75 | 10 |", markdown)
         self.assertIn("| cheap_coder | 8/10 (80%) |", markdown)
 
+    def test_markdown_says_when_no_telemetry_exists_or_the_period_is_empty(self) -> None:
+        empty = stats.render_markdown(stats.aggregate([], repo_id="owner/repo", now=self.as_of()))
+        self.assertIn("No telemetry has been recorded for this repository yet", empty)
+        self.assertIn("owner/repo", empty)
+
+        self.add_task("OLD-TASK", "APPROVED")
+        quiet = stats.render_markdown(stats.aggregate(
+            stats._read_rows(self.database, "owner/repo"), repo_id="owner/repo",
+            now=self.as_of() + timedelta(days=60)))
+        self.assertIn("No telemetry was recorded in this period", quiet)
+
+    def test_markdown_states_model_drift_as_mismatches_out_of_reported(self) -> None:
+        for index, resolved in enumerate(("gpt-5.6-luna", "gpt-5.6-luna", "claude-sonnet-5")):
+            self.store.record_stage("owner/repo", f"task-{index}", "implement",
+                                    profile="cheap_coder", outcome="succeeded",
+                                    model_requested="gpt-5.6-luna", model_resolved=resolved)
+        self.store.record_stage("owner/repo", "task-9", "implement", profile="cheap_coder",
+                                outcome="succeeded", model_requested="gpt-5.6-luna")
+
+        markdown = stats.render_markdown(stats.aggregate(
+            stats._read_rows(self.database, "owner/repo"), repo_id="owner/repo", now=self.as_of()))
+
+        self.assertIn("**1 of 3** dispatches that reported their model ran a different one; "
+                      "1 did not report a model", markdown)
+
+    def test_activity_is_a_daily_sparkline_that_marks_idle_days(self) -> None:
+        marks, unit = stats._sparkline({"2026-09-01": 4, "2026-09-03": 1}, "2026-09-01", "2026-09-04")
+        self.assertEqual(("█·▂·", "day"), (marks, unit))
+
+        long_marks, long_unit = stats._sparkline({"2026-07-01": 1}, "2026-07-01", "2026-09-01")
+        self.assertEqual("week", long_unit)
+        self.assertEqual(9, len(long_marks))  # 63 days
+
     def test_jev_summary_uses_correlated_observations_and_sample_gate(self) -> None:
         for index in range(10):
             cycle_id = f"cycle-{index}"

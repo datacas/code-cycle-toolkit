@@ -15,7 +15,15 @@ All notable changes to this project are documented here. This project follows
   `executor` or `profile`). All-time reports leave the previous-period
   comparison unset. The Markdown report renders roles, verdicts, findings,
   dispatch blockages and the Jev comparison as tables with exact counts beside
-  proportional bars. (#42)
+  proportional bars. The report names the repository, says at the top when no
+  telemetry exists or the period is empty, and states model drift as how many
+  dispatches that reported their model ran a different one. The skill
+  description now matches natural requests for toolkit stats in any language
+  and tells the agent to reply with the report verbatim rather than paraphrase
+  it, to look for the runtime only in the project, user, or toolkit-checkout
+  locations, and to run it for the current repository with an explicit `--cwd`.
+  Daily activity is a one-line sparkline (weekly beyond 45 days) with the
+  busiest day and active-day count. (#42)
 - Jev as an opt-in shadow profile selector (`code_cycle.routing.jev.mode:
   shadow`, default `disabled`). `implement` and `resolve` stages ask Jev to
   choose between `cheap_coder` and `deep_coder` from allowlisted scalar

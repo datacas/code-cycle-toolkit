@@ -299,6 +299,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
             "through": now.isoformat(),
         },
         "sample_minimum": minimum,
+        "recorded_rows": len(rows),
         "summary": {
             "tasks": len(tasks),
             "stages": len(stages),
@@ -366,6 +367,31 @@ def _bar(value: int, maximum: int, width: int = 12) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(daily: dict, first: str | None, last: str) -> tuple[str, str]:
+    """One character per day, or per week beyond 45 days; `·` marks none."""
+    if not first:
+        return "", "day"
+    start = datetime.fromisoformat(first).date()
+    end = datetime.fromisoformat(last).date()
+    days = [(start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)]
+    unit = "day"
+    counts = [daily.get(day, 0) for day in days]
+    if len(counts) > 45:
+        unit = "week"
+        counts = [sum(counts[index:index + 7]) for index in range(0, len(counts), 7)]
+    maximum = max(counts, default=0)
+    marks = "".join(
+        "·" if not count
+        else SPARK_LEVELS[min(len(SPARK_LEVELS) - 1, (count * len(SPARK_LEVELS) - 1) // maximum)]
+        for count in counts
+    )
+    return marks, unit
+
+
 def _count_table(label: str, unit: str, counts: dict, *, empty: str | None = None) -> list[str]:
     """A small ranked table with exact counts beside proportional bars."""
     if not counts:
@@ -387,22 +413,35 @@ def render_markdown(report: dict) -> str:
     rate = summary["first_pass"]
     rate_text = _format_rate(rate)
     lines = [
-        f"## Code Cycle stats · {report['period']['label']}",
+        f"## Code Cycle stats · {report['repository']} · {report['period']['label']}",
         "",
+    ]
+    if not report["recorded_rows"]:
+        lines += ["No telemetry has been recorded for this repository yet; "
+                  "every metric below is unknown.", ""]
+    elif not summary["stages"] and not report["jev"]["shadow_rows"]:
+        lines += ["No telemetry was recorded in this period; "
+                  "ask for a longer window or all recorded history.", ""]
+    lines += [
         f"**{summary['tasks']} tasks** · {summary['stages']} stages · first-pass approval **{rate_text}**",
         "",
         "### Activity",
         "",
-        "| Day (UTC) | Stages | Activity |",
-        "|---|---:|---|",
     ]
     daily = report["trend_daily"]
-    recent_days = list(daily.items())[-14:]
-    maximum = max((count for _, count in recent_days), default=0)
-    if recent_days:
-        lines.extend(f"| {day} | {count} | {_bar(count, maximum)} |" for day, count in recent_days)
+    if daily:
+        first = (report["period"]["from"] or min(daily))[:10]
+        last = report["period"]["through"][:10]
+        marks, unit = _sparkline(daily, first, last)
+        busiest = max(daily.items(), key=lambda item: (item[1], item[0]))
+        lines += [
+            f"`{marks}`",
+            "",
+            f"Stages per {unit} (UTC), {first} → {last}; busiest day {busiest[0]} "
+            f"with {busiest[1]}; {len(daily)} active day(s).",
+        ]
     else:
-        lines.append("| No recorded activity | 0 | — |")
+        lines.append("No recorded activity.")
     lines += ["", "### By role and profile", ""]
     lines += _count_table("Role", "Stages", summary["roles"], empty="No stages recorded.")
     if report["profiles_by_role"]:
@@ -437,7 +476,8 @@ def render_markdown(report: dict) -> str:
     )
     drift = summary["model_drift"]
     lines.append(
-        f"- Model drift: **{drift['mismatches']}/{drift['measured']} measured**; {drift['unreported']} unreported"
+        f"- Model drift: **{drift['mismatches']} of {drift['measured']}** dispatches that reported "
+        f"their model ran a different one; {drift['unreported']} did not report a model"
         if drift["measured"] else "- Model drift: not measured"
     )
     verification = summary["verification"]

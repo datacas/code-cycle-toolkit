@@ -1,12 +1,16 @@
 ---
 name: cc-stats
-description: Summarize local Code Cycle telemetry for the configured repository, with clear trends and honest sample sizes.
+description: Show the Code Cycle Toolkit stats report for this repository from local telemetry - cycles, stages, first-pass approval, review verdicts, findings, fallbacks, model drift, and rules-vs-Jev comparisons. Use whenever someone asks, in any language, for toolkit or Code Cycle stats, statistics, metrics, telemetry, or cycle performance (for example "show me the toolkit stats" or "muéstrame las estadísticas del toolkit"), for a period such as the last 7 days or all history, or invokes /cc-stats. Not for token-savings or CLI-proxy analytics.
 ---
 
 # Code Cycle Stats
 
 Use this skill when someone asks for Code Cycle telemetry, cycle performance,
-review outcomes, routing or Jev comparisons, or invokes `/cc-stats`.
+review outcomes, routing or Jev comparisons, or invokes `/cc-stats`. A request
+for "the toolkit's stats" or "statistics" in a repository that has a
+`.code-cycle.yml` means this report, in whatever language it is asked. Token
+savings, CLI-proxy analytics, and other tools' dashboards are different reports
+and are not answered by this skill.
 
 ## Repository conventions
 
@@ -50,33 +54,50 @@ Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-te
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
 
+## Reply with the report itself
+
+The person does not see command output; they see only the text of your final
+reply. Your final reply must therefore start with the report's own first line,
+`## Code Cycle stats · …`, and continue with every heading, table, and bar the
+component printed, copied verbatim. Check this before you answer: a final reply
+that does not begin with that heading, or that describes the report in a
+sentence instead of containing it, has not shown the report and is wrong.
+
 ## Run the report
 
 1. Use the current repository's `.code-cycle.yml` and read
    `code_cycle.repository.selector`. Do not guess the repository from a Git
    remote or use telemetry from another repository.
-2. Locate the installed runtime component `stats.py`. Check the project runtime
-   at `<repository>/.code-cycle/runtime/stats.py`, then the user's global
-   runtime at `<user home>/.code-cycle/runtime/stats.py`. In a toolkit checkout,
-   `scripts/stats.py` is the same component.
-3. Run the component with Python 3 and the repository root as the working
-   directory. It reads the default telemetry database itself and prints a
-   Markdown report:
+2. Locate the installed runtime component `stats.py` by checking exactly these
+   paths, in order: `<repository>/.code-cycle/runtime/stats.py`, then
+   `<user home>/.code-cycle/runtime/stats.py`, then — only when the current
+   repository is the toolkit itself — `<repository>/scripts/stats.py`. Never
+   search the filesystem for another copy: a `stats.py` found elsewhere belongs
+   to another checkout. If none of these exists, say that the Code Cycle
+   runtime is not installed and stop.
+3. Run the component with Python 3 from the current repository root, and pass
+   that root explicitly. Never change into another directory to run it; the
+   report must describe the repository the person is in. It reads the default
+   telemetry database itself and prints a Markdown report:
 
    ```sh
-   python3 /resolved/path/to/stats.py
+   python3 /resolved/path/to/stats.py --cwd /current/repository/root
    ```
 
-   Substitute the actual component path you located. Use `python` or `py -3`
+   Substitute the actual component path and repository root. Use `python` or `py -3`
    on Windows if needed. For machine-readable aggregates, add `--format json`.
 
 4. Use the default last 30 days unless the person asks for a different window.
    Pass `--days N` for a requested number of days, or `--all-time` for the full
    recorded history. For example, “show me the last 7 days” maps to
    `--days 7`.
-5. Present the returned summary directly. Do not recalculate rates, rank a
-   profile with insufficient evidence, or turn unknown and not-applicable data
-   into zeroes or failures.
+5. Reply with the complete report, as *Reply with the report itself* says.
+   Do not recalculate rates, rank a profile with insufficient evidence, or
+   turn unknown and not-applicable data into zeroes or failures. Only after
+   the full report may you add at most two sentences of reading, in the
+   selected language, pointing at what the report already shows. With
+   `--format json`, keep every count beside its denominator and sample
+   minimum.
 
 ## What the report means
 
@@ -97,5 +118,5 @@ measured; routing cost estimates are not presented as actual cost.
 
 If the repository identity is not configured, explain that
 `code_cycle.repository.selector` in `.code-cycle.yml` is required. If the
-database is absent or has no rows for this repository, report that no telemetry
-is available yet. Do not create a database or configuration file.
+database is absent or has no rows for this repository, the report says so at
+the top; relay that no telemetry is available yet. Do not create a database or configuration file.
