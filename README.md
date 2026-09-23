@@ -37,7 +37,7 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Skills
 
-Twelve skills in two layers. The **cycle skills** own the provider-neutral workflow: the change request, finding identifiers, published comments, and merge boundary. The **supporting skills** provide provider bootstrap, focused review, security, verification, and runtime capabilities. Cycle skills delegate to supporting skills; delegated review and verification passes never publish on their own.
+Thirteen skills in two layers. The **cycle skills** own the provider-neutral workflow: the change request, finding identifiers, published comments, and merge boundary. The **supporting skills** provide provider bootstrap, focused review, security, verification, runtime, and telemetry capabilities. Cycle skills delegate to supporting skills; delegated review and verification passes never publish on their own.
 
 ### Cycle skills
 
@@ -60,8 +60,9 @@ Twelve skills in two layers. The **cycle skills** own the provider-neutral workf
 | `cc-verify` | Execution-backed verification: static checks, tests, real application validation. | Any cycle skill, or directly |
 | `cc-run` | Detect how the project starts, bring services up in order, confirm they respond. | `cc-verify`, or directly |
 | `cc-provider-bootstrap` | Resolve provider configuration and validate cached provider access at cycle startup. | `cc-implement-issue`, `cc-orchestrator`, or `cc-orca-orchestrator` |
+| `cc-stats` | Summarize local, repository-scoped telemetry with sample-aware rates and compact trends. | Natural language or `/cc-stats` |
 
-Each supporting skill is also useful on its own — `cc-code-review` on a working tree, `cc-verify` after a fix, `cc-run` to bring an unfamiliar project up.
+Each supporting skill is also useful on its own — `cc-code-review` on a working tree, `cc-verify` after a fix, `cc-run` to bring an unfamiliar project up, and `cc-stats` for a telemetry report.
 
 Review skills do not approve or merge code. The orchestrators stop at a validated `READY_FOR_MANUAL_MERGE` state.
 
@@ -221,10 +222,10 @@ npx skills add datacas/code-cycle-toolkit
 When no `--global` flag is provided, the default scope is the current project. In an interactive terminal, `skills` can ask which skills and agents to use. To install the complete toolkit without prompts:
 
 ```bash
-# All twelve skills, all agents supported by the CLI, project scope
+# All thirteen skills, all agents supported by the CLI, project scope
 npx skills add datacas/code-cycle-toolkit --all --copy
 
-# All twelve skills, all supported agents, global scope
+# All thirteen skills, all supported agents, global scope
 npx skills add datacas/code-cycle-toolkit --all --global --copy
 ```
 
@@ -249,6 +250,8 @@ npx skills add datacas/code-cycle-toolkit \
 A cycle skill delegates to the supporting review and verification skills, so install `cc-pr-review`, `cc-code-review`, `cc-security-review`, and `cc-verify` alongside it. Without them the cycle skills still run, but they report the affected pass as degraded rather than passed.
 
 Omit `--global` for project scope, or add it for global installation. Use `npx skills list` to inspect installed project skills and `npx skills list --global` for global skills.
+
+Ask an agent for a telemetry summary in natural language, or invoke `cc-stats` directly (for example, `/cc-stats` on hosts that support skill commands). The default report covers the last 30 days. Ask for a different period such as the last 7 days, or for all recorded history. The report reads the local SQLite store in read-only mode and uses `code_cycle.repository.selector` from `.code-cycle.yml` to scope results. It shows measured values and sample sizes; unavailable metrics remain unknown.
 
 The included Bash and PowerShell installers remain available when explicit destinations or only the three native host layouts in this repository are required. They copy files and do not use symlinks, so they also work on Windows without developer-mode or administrator privileges. Clone the toolkit before using them:
 
@@ -384,6 +387,14 @@ directory:
 python3 ~/.code-cycle/runtime/run_cycle.py \
   --repo owner/name --task API-7 --difficulty 2 --verifiability auto
 ```
+
+`cc-stats` uses the installed runtime's `stats.py` component. It accepts
+`--days N` for a different lookback window and `--all-time` for all available
+history; `--format json` returns the same aggregate report as structured data.
+The component uses the same configured repository identity and telemetry
+database location as the cycle runtime, opens the database read-only, and
+returns aggregates only. It never prints task identifiers, comments, prompts,
+paths, diffs, or raw telemetry rows.
 
 Each stage row also records the signals its router could have known before
 choosing a model: the declared difficulty, verifiability and security flag; for
@@ -660,7 +671,7 @@ On Windows, use:
 py -3 .\scripts\validate-package.py
 ```
 
-The validator checks all twelve skills, portable frontmatter, names and description limits, that the sections duplicated across skills have not drifted apart, known fixed-language output mistakes and literal-output directives, manifest name and version agreement, JSONC parsing, README coverage, and possible private data. Its negative-path tests exercise these failure modes:
+The validator checks all thirteen skills, portable frontmatter, names and description limits, that the sections duplicated across skills have not drifted apart, known fixed-language output mistakes and literal-output directives, manifest name and version agreement, JSONC parsing, README coverage, and possible private data. Its negative-path tests exercise these failure modes:
 
 ```bash
 python3 -m unittest discover -s tests -v

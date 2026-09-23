@@ -10,6 +10,7 @@ checkout a real installation does not have.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import shutil
 import subprocess
@@ -112,6 +113,25 @@ class InstalledRuntimeTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("recorded 3 rows", result.stdout)
+
+    def test_the_installed_stats_component_reads_scope_without_creating_a_database(self) -> None:
+        (self.project / ".code-cycle.yml").write_text(
+            "code_cycle:\n  repository:\n    selector: owner/repo\n",
+            encoding="utf-8",
+        )
+        database_home = self.project / "state"
+        environment = dict(os.environ, CODE_CYCLE_HOME=str(database_home))
+
+        result = subprocess.run(
+            [sys.executable, str(self.runtime / "stats.py"), "--format", "json"],
+            cwd=self.project, env=environment, capture_output=True, text=True,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual("owner/repo", report["repository"])
+        self.assertIsNone(report["summary"]["first_pass"]["value"])
+        self.assertFalse((database_home / "telemetry.sqlite").exists())
 
     def test_the_check_fails_when_the_runtime_is_incomplete(self) -> None:
         """Its own premise: it must be able to detect a missing module."""

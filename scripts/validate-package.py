@@ -31,6 +31,7 @@ SUPPORT_SKILLS = {
     "cc-security-review",
     "cc-verify",
     "cc-run",
+    "cc-stats",
 }
 REQUIRED_SKILLS = CYCLE_SKILLS | SUPPORT_SKILLS
 CLAUDE_CODEX_REFERENCE = Path(
