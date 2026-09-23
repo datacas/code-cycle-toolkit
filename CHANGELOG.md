@@ -5,6 +5,12 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Correct `cc-stats` weekly sparkline alignment, report period emptiness from
+  all telemetry row types, bound long-range sparkline allocation, reject unsafe
+  repository selectors, and clarify Markdown versus JSON reply instructions.
+
 ### Added
 
 - A privacy-safe `cc-stats` report for local telemetry, with repository-scoped

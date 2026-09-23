@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from run_cycle import CycleDriverError, load_config, repository_of
-from telemetry import MINIMUM_SAMPLE, default_database_path
+from telemetry import MINIMUM_SAMPLE, TelemetryError, default_database_path, validate_reference
 
 
 CONFIDENCE_BUCKETS = (
@@ -300,6 +300,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         },
         "sample_minimum": minimum,
         "recorded_rows": len(rows),
+        "period_rows": len(current),
         "summary": {
             "tasks": len(tasks),
             "stages": len(stages),
@@ -376,13 +377,23 @@ def _sparkline(daily: dict, first: str | None, last: str) -> tuple[str, str]:
         return "", "day"
     start = datetime.fromisoformat(first).date()
     end = datetime.fromisoformat(last).date()
-    days = [(start + timedelta(days=offset)).isoformat()
-            for offset in range((end - start).days + 1)]
+    span_days = (end - start).days + 1
     unit = "day"
-    counts = [daily.get(day, 0) for day in days]
-    if len(counts) > 45:
+    if span_days > 45:
         unit = "week"
-        counts = [sum(counts[index:index + 7]) for index in range(0, len(counts), 7)]
+        first_week_days = span_days % 7 or 7
+        counts = [0] * ((span_days + 6) // 7)
+        for day, count in daily.items():
+            offset = (datetime.fromisoformat(day).date() - start).days
+            if 0 <= offset < span_days:
+                index = (0 if offset < first_week_days
+                         else 1 + (offset - first_week_days) // 7)
+                counts[index] += count
+    else:
+        counts = [
+            daily.get((start + timedelta(days=offset)).isoformat(), 0)
+            for offset in range(span_days)
+        ]
     maximum = max(counts, default=0)
     marks = "".join(
         "·" if not count
@@ -419,7 +430,7 @@ def render_markdown(report: dict) -> str:
     if not report["recorded_rows"]:
         lines += ["No telemetry has been recorded for this repository yet; "
                   "every metric below is unknown.", ""]
-    elif not summary["stages"] and not report["jev"]["shadow_rows"]:
+    elif not report["period_rows"]:
         lines += ["No telemetry was recorded in this period; "
                   "ask for a longer window or all recorded history.", ""]
     lines += [
@@ -557,7 +568,12 @@ def _report_config(cwd: Path) -> str:
         raise StatsError(
             "no repository identity: set code_cycle.repository.selector in .code-cycle.yml"
         )
-    return repo_id
+    if repo_id != repo_id.strip():
+        raise StatsError("invalid repository identity in repository configuration")
+    try:
+        return validate_reference("repo_id", repo_id)
+    except TelemetryError as error:
+        raise StatsError("invalid repository identity in repository configuration") from error
 
 
 def main(argv: list[str] | None = None) -> int:
