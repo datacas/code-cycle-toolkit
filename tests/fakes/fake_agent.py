@@ -92,7 +92,9 @@ def speak(model: str, message: str) -> None:
 
 def main(argv: list[str]) -> int:
     if "--version" in argv:
-        print(f"{NAME} 0.0.0-fake")
+        # Exercise the current Codex permission-profile path in installed-cycle
+        # tests, without installing either real agent.
+        print(f"{NAME} 0.138.0-fake")
         return 0
 
     if os.environ.get("FAKE_QUOTA") == NAME:

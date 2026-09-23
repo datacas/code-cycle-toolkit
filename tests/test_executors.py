@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,6 +96,14 @@ class ProbeHonestyTests(unittest.TestCase):
         self.assertEqual(ex.Availability.AUTHENTICATED, result.availability)
         self.assertIn("quota is not observable", result.detail)
         self.assertTrue(result.honest_ceiling_reached)
+
+    def test_codex_probe_records_the_cli_version_for_permission_readiness(self) -> None:
+        adapter = ex.CodexAdapter()
+        adapter.auth_evidence = lambda: (True, "credential file present")
+
+        result = adapter.probe(runner=lambda *a, **k: completed("codex-cli 0.138.2"), which=present)
+
+        self.assertEqual((0, 138, 2), result.version)
 
     def test_no_credential_stops_at_installed(self) -> None:
         adapter = ex.CodexAdapter()
@@ -201,6 +210,68 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("operating_availability", result.missing_capability)
         self.assertIn("no credential", result.detail)
+
+    def test_missing_publication_permission_blocks_before_invoking_the_agent(self) -> None:
+        adapter = ex.CodexAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("an unsupported publication profile must not dispatch")
+
+        result = ex.dispatch(
+            decision(), "publish", ex.Registry([adapter]), publishes=True, writes=True,
+            probes={"codex": ex.ProbeResult(
+                "codex", ex.Availability.AUTHENTICATED, "credential present",
+                provable_ceiling=ex.Availability.AUTHENTICATED, version=(0, 137, 0),
+            )},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("publication_access", result.missing_capability)
+        self.assertIn("0.138.0", result.detail)
+
+    def test_failed_remote_preflight_is_recorded_before_agent_dispatch(self) -> None:
+        adapter = ex.ClaudeAdapter()
+
+        def runner(*args, **kwargs):
+            raise AssertionError("the agent must not run without remote write access")
+
+        with patch.object(ex, "_publication_preflight",
+                          return_value=(False, "remote write permission is missing")):
+            result = ex.dispatch(
+                decision(target=router.parse_target(
+                    "claude:anthropic/claude-sonnet-5 high")),
+                "publish", ex.Registry([adapter]), publishes=True, writes=True,
+                runner=runner,
+                probes={"claude": ex.ProbeResult(
+                    "claude", ex.Availability.AUTHENTICATED, "credential present",
+                    provable_ceiling=ex.Availability.AUTHENTICATED,
+                )},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("publication_access", result.missing_capability)
+        self.assertIn("remote write", result.detail)
+
+    def test_codex_publish_dispatch_uses_verified_scoped_permissions(self) -> None:
+        seen = {}
+        adapter = ex.CodexAdapter()
+        ready_probe = ex.ProbeResult(
+            "codex", ex.Availability.AUTHENTICATED, "credential present",
+            provable_ceiling=ex.Availability.AUTHENTICATED, version=(0, 138, 0),
+        )
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("done")
+
+        with patch.object(ex, "_publication_preflight", return_value=(True, "verified")):
+            result = ex.dispatch(
+                decision(), "publish", ex.Registry([adapter]), publishes=True, writes=True,
+                runner=runner, probes={"codex": ready_probe},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
 
     def test_a_blocked_decision_is_never_re_routed_here(self) -> None:
         """The router already decided; substituting now would falsify the record."""
@@ -809,6 +880,22 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("-s", argv)
         self.assertEqual("workspace-write", argv[argv.index("-s") + 1])
 
+    def test_codex_publish_profile_keeps_review_read_only_and_limits_network(self) -> None:
+        argv = ex.CodexAdapter().argv(TARGET, "review", writes=False, publishes=True)
+
+        self.assertIn('default_permissions="code_cycle_publish_read"', argv)
+        self.assertIn('permissions.code_cycle_publish_read.extends=":read-only"', argv)
+        self.assertIn("permissions.code_cycle_publish_read.network.enabled=true", argv)
+        self.assertIn('permissions.code_cycle_publish_read.network.domains."api.github.com"="allow"', argv)
+        self.assertNotIn("-s", argv)
+
+    def test_codex_publish_profile_preserves_workspace_write_for_implementers(self) -> None:
+        argv = ex.CodexAdapter().argv(TARGET, "implement", writes=True, publishes=True)
+
+        self.assertIn('default_permissions="code_cycle_publish_write"', argv)
+        self.assertIn('permissions.code_cycle_publish_write.extends=":workspace"', argv)
+        self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
+
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""
         argv = self.codex(writes=False)
@@ -838,6 +925,14 @@ class PermissionTests(unittest.TestCase):
 
         self.assertIn("--permission-mode", argv)
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
+
+    def test_claude_publish_access_is_limited_to_gh_and_git_push(self) -> None:
+        argv = self.claude(writes=False, publishes=True)
+
+        self.assertEqual(
+            ["--allowedTools", "Bash(gh:*)", "Bash(git push:*)"],
+            argv[-3:],
+        )
 
     def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
         """A live probe wrote the file anyway with the edit tools disallowed,

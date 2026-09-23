@@ -28,6 +28,7 @@ class ScriptedAdapter(ex.Adapter):
         self._availability = availability
         self._outcomes = list(outcomes or [])
         self.dispatched = []
+        self.dispatch_kwargs = []
         self.probes = 0
 
     def probe(self):
@@ -37,6 +38,7 @@ class ScriptedAdapter(ex.Adapter):
 
     def dispatch(self, target, task, **kw):
         self.dispatched.append(task)
+        self.dispatch_kwargs.append(kw)
         if self._outcomes:
             outcome, capability = self._outcomes.pop(0)
         else:
@@ -48,6 +50,9 @@ class ScriptedAdapter(ex.Adapter):
             readiness_policy=ex.ReadinessPolicy.ATTEMPT,
             dispatched_from=self._availability,
         )
+
+    def publication_access(self, probe, *, writes):
+        return True, "test publication permission"
 
 
 class CycleTestCase(unittest.TestCase):
@@ -282,6 +287,38 @@ class MeasuredCostTests(CycleTestCase):
 
 
 class RoleWorkspacePolicyTests(CycleTestCase):
+    def test_only_change_and_review_roles_receive_publication_access(self) -> None:
+        expected = {
+            "implement": True, "resolve": True, "review": True, "rereview": True,
+            "security": False, "bootstrap": False, "verify": False, "run": False,
+        }
+
+        for role, publishes in expected.items():
+            with self.subTest(role=role):
+                self.assertEqual(publishes, cy.role_contract(role).publishes)
+
+    def test_local_only_implementation_does_not_receive_publication_access(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter], local_only=True)
+
+        recorder.stage("implement", "implement locally")
+
+        self.assertFalse(adapter.dispatch_kwargs[0]["publishes"])
+
+    def test_missing_publication_access_is_recorded_without_running_the_adapter(self) -> None:
+        class DeniedPublicationAdapter(ScriptedAdapter):
+            def publication_access(self, probe, *, writes):
+                return False, "permission is not configured"
+
+        adapter = DeniedPublicationAdapter("codex")
+        recorder = self.recorder([adapter])
+
+        outcome = recorder.stage("implement", "implement and publish")
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, outcome.result.outcome)
+        self.assertEqual([], adapter.dispatched)
+        self.assertEqual("publication_access", self.store.rows("owner/repo")[0]["missing_capability"])
+
     def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:
         self.assertEqual(
             cy.WorkspacePolicy.READ_ONLY,

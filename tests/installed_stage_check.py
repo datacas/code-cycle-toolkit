@@ -51,6 +51,9 @@ def main(argv: list[str]) -> int:
             return ex.ProbeResult(self.name, ex.Availability.AUTHENTICATED,
                                   "scripted", provable_ceiling=self.provable_ceiling)
 
+        def publication_access(self, probe, *, writes):
+            return True, "scripted adapter permission contract"
+
         def dispatch(self, target, task, **kw):
             return ex.DispatchResult(
                 ex.DispatchOutcome.SUCCEEDED, self.name, target,

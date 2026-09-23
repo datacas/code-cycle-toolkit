@@ -41,6 +41,20 @@ class InstalledCycleTests(unittest.TestCase):
         for directory in (self.home, self.project, self.binaries):
             directory.mkdir(parents=True)
 
+        self.remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(self.remote)],
+                       capture_output=True, text=True, check=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.project,
+                       capture_output=True, text=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Cycle Test"], cwd=self.project, check=True)
+        subprocess.run(["git", "config", "user.email", "cycle@example.test"], cwd=self.project, check=True)
+        (self.project / "tracked.txt").write_text("ready\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.project, check=True)
+        subprocess.run(["git", "commit", "-m", "seed"], cwd=self.project,
+                       capture_output=True, text=True, check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(self.remote)],
+                       cwd=self.project, check=True)
+
         self.install()
         self.make_agents()
         self.make_credentials()
@@ -88,6 +102,7 @@ class InstalledCycleTests(unittest.TestCase):
             [sys.executable, str(self.runtime / "run_cycle.py"),
              "--repo", "owner/api", "--task", "API-7",
              "--difficulty", "2", "--verifiability", "auto",
+             "--cwd", str(self.project),
              "--database", str(self.database)],
             env=env, capture_output=True, text=True,
         )

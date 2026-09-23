@@ -76,12 +76,13 @@ class RoleContract:
     """The workspace boundary a role must receive before it can run."""
 
     workspace_policy: WorkspacePolicy
+    publishes: bool = False
 
 ROLE_CONTRACTS = {
-    "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
-    "resolve": RoleContract(WorkspacePolicy.WORKSPACE_WRITE),
-    "review": RoleContract(WorkspacePolicy.READ_ONLY),
-    "rereview": RoleContract(WorkspacePolicy.READ_ONLY),
+    "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE, publishes=True),
+    "resolve": RoleContract(WorkspacePolicy.WORKSPACE_WRITE, publishes=True),
+    "review": RoleContract(WorkspacePolicy.READ_ONLY, publishes=True),
+    "rereview": RoleContract(WorkspacePolicy.READ_ONLY, publishes=True),
     "security": RoleContract(WorkspacePolicy.READ_ONLY),
     "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
     "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
@@ -215,6 +216,12 @@ class CycleRecorder:
             raise CycleError(
                 f"{role!r} stages must use writes={writes}, not {requested_writes!r}")
         dispatch_kwargs["writes"] = writes
+        publishes = contract.publishes and not self.local_only
+        requested_publishes = dispatch_kwargs.pop("publishes", publishes)
+        if requested_publishes is not publishes:
+            raise CycleError(
+                f"{role!r} stages must use publishes={publishes}, not {requested_publishes!r}")
+        dispatch_kwargs["publishes"] = publishes
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)
