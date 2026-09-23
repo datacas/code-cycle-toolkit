@@ -27,6 +27,7 @@ carries at least one resolution pass unless a repository has measured otherwise.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -316,39 +317,108 @@ def models_from_profiles(profiles: dict[str, Profile]) -> frozenset[str]:
     )
 
 
-def profile_for(role: str, signals: TaskSignals) -> tuple[str, tuple[str, ...]]:
-    """Choose the profile name for a role, and say why.
+#: The profiles a role may resolve to. A selector chooses among these and
+#: nothing else, so which profiles a role can ever reach stays a property of
+#: the router rather than of whichever selector is plugged in.
+ROLE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "implement": ("cheap_coder", "deep_coder"),
+    # Resolving findings is implementation work: it edits code and is judged by
+    # tests, so it routes where implementation routes rather than to a reviewer
+    # profile.
+    "resolve": ("cheap_coder", "deep_coder"),
+    "review": ("reviewer", "senior_reviewer"),
+    "rereview": ("reviewer", "senior_reviewer"),
+    "security": ("security",),
+    "coordinate": ("coordinator",),
+    "verify": ("auxiliary_tool",),
+    "run": ("auxiliary_tool",),
+    "bootstrap": ("auxiliary_tool",),
+}
+
+#: `selector(role, candidates, signals) -> (profile name, reasons)`.
+#:
+#: The seam where profile choice can be swapped without touching anything else
+#: `route()` does. A selector returns a profile name only — never a target, a
+#: model or an executor — and `route()` refuses a name outside `candidates`.
+#: Availability, workspace policy, fallback, target resolution and dispatch all
+#: stay in `route()` and its callers, so no selector can skip a gate.
+ProfileSelector = Callable[
+    [str, tuple[str, ...], TaskSignals], tuple[str, tuple[str, ...]]
+]
+
+
+def candidates_for(role: str) -> tuple[str, ...]:
+    """The profiles a role is allowed to resolve to."""
+    try:
+        return ROLE_CANDIDATES[role]
+    except KeyError:
+        raise RouterError(f"unknown role: {role!r}") from None
+
+
+def rule_selector(
+    role: str, candidates: tuple[str, ...], signals: TaskSignals,
+) -> tuple[str, tuple[str, ...]]:
+    """The default selector: choose the profile name for a role, and say why.
 
     Only two rules escalate, and both come from declared signals rather than
     from a model's opinion about its own work:
 
-    - a security-sensitive change goes to the security profile for its audit;
+    - a security-sensitive change goes to the senior reviewer;
     - difficulty 3 implementation work goes to the deeper coder.
 
     Everything else stays where the plan put it. There is no evidence for finer
     rules, and inventing them would make the router look calibrated when it is
     not.
     """
-    reasons = []
     if role == "security":
         return "security", ("a security audit always uses the security profile",)
     if role in ("implement", "resolve"):
-        # Resolving findings is implementation work: it edits code and is judged
-        # by tests, so it routes where implementation routes rather than to a
-        # reviewer profile.
         if signals.difficulty >= 3:
             return "deep_coder", ("declared difficulty 3 escalates to the deeper coder",)
         return "cheap_coder", ("difficulty below 3 starts on the cheap coder",)
     if role in ("review", "rereview"):
         if signals.security_sensitive:
-            reasons.append("security-sensitive change reviewed by the senior profile")
-            return "senior_reviewer", tuple(reasons)
+            return "senior_reviewer", (
+                "security-sensitive change reviewed by the senior profile",
+            )
         return "reviewer", ("ordinary change uses the standard reviewer",)
     if role in ("coordinate", "verify", "run", "bootstrap"):
         return ("coordinator" if role == "coordinate" else "auxiliary_tool"), (
             "a step whose result is judged by execution, not by judgement",
         )
     raise RouterError(f"unknown role: {role!r}")
+
+
+def select_profile(
+    role: str,
+    signals: TaskSignals,
+    selector: ProfileSelector = rule_selector,
+) -> tuple[str, tuple[str, ...]]:
+    """Ask `selector` for a profile, and refuse anything outside the candidates.
+
+    The check lives here, not in the selector, so a selector cannot invent a
+    profile a role was never allowed to reach.
+    """
+    candidates = candidates_for(role)
+    choice = selector(role, candidates, signals)
+    if not (isinstance(choice, tuple) and len(choice) == 2):
+        raise RouterError(
+            f"a profile selector returns (profile, reasons), not {choice!r}")
+    name, reasons = choice
+    if not isinstance(name, str) or name not in candidates:
+        raise RouterError(
+            f"selector chose {name!r} for {role!r}, outside the candidates "
+            f"{', '.join(candidates)}")
+    if not (isinstance(reasons, tuple)
+            and all(isinstance(reason, str) for reason in reasons)):
+        raise RouterError(
+            f"a profile selector's reasons are a tuple of strings: {reasons!r}")
+    return name, reasons
+
+
+def profile_for(role: str, signals: TaskSignals) -> tuple[str, tuple[str, ...]]:
+    """Choose the profile name for a role with the default rules, and say why."""
+    return select_profile(role, signals)
 
 
 def estimate_cost(
@@ -391,18 +461,21 @@ def route(
     rate_minimum: int | None = None,
     rate_known: bool | None = None,
     rate_explanation: str | None = None,
+    selector: ProfileSelector = rule_selector,
 ) -> RoutingDecision:
     """Resolve a role to a concrete target, or block.
 
     The gate runs before the choice: an executor that is merely installed or
     authenticated is not dispatchable, and one with exhausted quota is not a
     candidate whatever its profile scores.
+
+    `selector` only names a profile among the role's candidates. Everything
+    after that — policy, availability, fallback and the blocking rules — is
+    decided here the same way whichever selector named it.
     """
     profiles = profiles or load_profiles()
-    name, reasons = profile_for(role, signals)
+    name, reasons = select_profile(role, signals, selector)
     profile = profiles[name]
-    implement_profile, _ = profile_for("implement", signals)
-    review_profile, _ = profile_for("review", signals)
     measured_strategy = strategy is RoutingStrategy.MEASURED
     measured_value = (
         first_pass_rate
@@ -412,6 +485,10 @@ def route(
         DEFAULT_FIRST_PASS_RATE if measured_value is None else measured_value
     )
     try:
+        # Priced with the same selector, so the estimate describes the cycle
+        # this selector would actually run.
+        implement_profile, _ = select_profile("implement", signals, selector)
+        review_profile, _ = select_profile("review", signals, selector)
         cost = estimate_cost(
             implement_profile, review_profile, first_pass_rate=rate_used,
         )

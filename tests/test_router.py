@@ -182,6 +182,154 @@ class RoleRoutingTests(unittest.TestCase):
             router.route("whatever", signals(), READY)
 
 
+def choose(profile, reasons=("chosen by a test selector",)):
+    """A selector that always names `profile`, recording what it was asked."""
+    calls = []
+
+    def selector(role, candidates, task_signals):
+        calls.append((role, candidates, task_signals))
+        return profile, reasons
+
+    selector.calls = calls
+    return selector
+
+
+class ProfileSelectorTests(unittest.TestCase):
+    """The selector names a profile; everything else stays in `route()`."""
+
+    def test_every_candidate_is_a_known_profile(self) -> None:
+        for role, candidates in router.ROLE_CANDIDATES.items():
+            with self.subTest(role=role):
+                self.assertTrue(candidates)
+                self.assertLessEqual(set(candidates), set(router.DEFAULT_PROFILES))
+
+    def test_the_rule_selector_is_the_default(self) -> None:
+        for role in router.ROLE_CANDIDATES:
+            for task in (signals(), signals(difficulty=3), signals(security_sensitive=True)):
+                with self.subTest(role=role, signals=task):
+                    self.assertEqual(
+                        router.route(role, task, NO_CODEX),
+                        router.route(role, task, NO_CODEX, selector=router.rule_selector),
+                    )
+
+    def test_the_rule_selector_stays_within_the_candidates(self) -> None:
+        for role, candidates in router.ROLE_CANDIDATES.items():
+            for difficulty in (1, 2, 3):
+                for sensitive in (False, True):
+                    task = signals(difficulty=difficulty, security_sensitive=sensitive)
+                    with self.subTest(role=role, signals=task):
+                        name, _ = router.rule_selector(role, candidates, task)
+                        self.assertIn(name, candidates)
+
+    def test_the_selector_receives_the_role_candidates_and_signals(self) -> None:
+        selector = choose("deep_coder")
+        task = signals(difficulty=1)
+
+        decision = router.route("implement", task, READY, selector=selector)
+
+        self.assertEqual("deep_coder", decision.profile)
+        self.assertEqual(("implement", ("cheap_coder", "deep_coder"), task),
+                         selector.calls[0])
+        self.assertEqual(("chosen by a test selector",), decision.reasons)
+
+    def test_a_selector_cannot_invent_a_profile_outside_the_candidates(self) -> None:
+        for bad in ("senior_reviewer", "no_such_profile", None):
+            with self.subTest(profile=bad):
+                with self.assertRaises(router.RouterError) as refused:
+                    router.route("implement", signals(), READY, selector=choose(bad))
+
+                self.assertIn("outside the candidates", str(refused.exception))
+
+    def test_a_selector_cannot_return_a_target_instead_of_a_profile(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        with self.assertRaises(router.RouterError):
+            router.route("implement", signals(), READY, selector=choose(target))
+
+    def test_a_malformed_selector_result_is_refused(self) -> None:
+        for bad in ("cheap_coder", ("cheap_coder",), ("cheap_coder", "why"),
+                    ("cheap_coder", (3,))):
+            with self.subTest(result=bad):
+                with self.assertRaises(router.RouterError):
+                    router.route("implement", signals(), READY,
+                                 selector=lambda role, candidates, task: bad)
+
+    def test_an_unknown_role_is_refused_before_the_selector_runs(self) -> None:
+        selector = choose("cheap_coder")
+
+        with self.assertRaises(router.RouterError):
+            router.route("whatever", signals(), READY, selector=selector)
+
+        self.assertEqual([], selector.calls)
+
+    def test_the_availability_gate_still_blocks_the_selected_profile(self) -> None:
+        d = router.route(
+            "review", signals(), {"codex": router.Availability.QUOTA_EXHAUSTED},
+            selector=choose("senior_reviewer"),
+        )
+
+        self.assertTrue(d.blocked)
+        self.assertEqual("senior_reviewer", d.profile)
+        self.assertIsNone(d.target)
+
+    def test_the_workspace_policy_still_blocks_the_selected_profile(self) -> None:
+        d = router.route(
+            "implement", signals(), READY,
+            eligible_executors=frozenset(), selector=choose("deep_coder"),
+        )
+
+        self.assertTrue(d.blocked)
+        self.assertIn("no executor for this profile satisfies the workspace policy",
+                      d.reasons)
+
+    def test_fallback_and_calibration_rules_do_not_depend_on_the_selector(self) -> None:
+        selector = choose("deep_coder")
+
+        production = router.route("implement", signals(), NO_CODEX, selector=selector)
+        calibration = router.route("implement", signals(), NO_CODEX, selector=selector,
+                                   mode=router.RoutingMode.CALIBRATION)
+
+        self.assertTrue(production.used_fallback)
+        self.assertEqual("claude", production.target.executor)
+        self.assertTrue(calibration.blocked)
+        self.assertIn("blocks and waits", calibration.explain())
+
+    def test_the_target_comes_from_the_configured_profile_not_the_selector(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "deep_coder": {"primary": "claude:anthropic/claude-sonnet-5 high"},
+        }}})
+
+        d = router.route("implement", signals(), READY, profiles=profiles,
+                         selector=choose("deep_coder"))
+
+        self.assertEqual(profiles["deep_coder"].primary, d.target)
+
+    def test_the_cost_estimate_prices_what_the_selector_chose(self) -> None:
+        def deep(role, candidates, task):
+            return candidates[-1], ()
+
+        d = router.route("implement", signals(), READY, selector=deep)
+
+        self.assertEqual(router.PROFILE_COST["deep_coder"], d.cost.implementation)
+        self.assertEqual(router.PROFILE_COST["senior_reviewer"], d.cost.review)
+
+    def test_a_selector_that_fails_only_for_pricing_does_not_block_routing(self) -> None:
+        def only_security(role, candidates, task):
+            if role != "security":
+                raise router.RouterError("not priced")
+            return "security", ()
+
+        d = router.route("security", signals(), READY, selector=only_security)
+
+        self.assertFalse(d.blocked)
+        self.assertEqual("unavailable", d.cost_status)
+
+    def test_profile_for_keeps_its_rule_based_answers(self) -> None:
+        self.assertEqual("deep_coder", router.profile_for("resolve", signals(difficulty=3))[0])
+        with self.assertRaises(router.RouterError):
+            router.profile_for("whatever", signals())
+
+
 class TaskSignalTests(unittest.TestCase):
     def test_difficulty_outside_the_scale_is_refused(self) -> None:
         for bad in (0, 4, -1):
