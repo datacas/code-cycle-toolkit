@@ -341,6 +341,24 @@ cannot be read stops the run instead of falling back to the defaults, because a
 row recorded under the defaults while a file says otherwise describes a policy
 nobody chose. `--no-config` asks for the defaults deliberately.
 
+Every key under `code_cycle` must be one the toolkit knows, and an unknown one
+stops the run by name before anything is dispatched — so a typo such as
+`profles` is refused rather than silently running the built-in profiles. The
+driver itself reads `repository`, `profiles` and `routing`. It recognises, and
+deliberately does not interpret, the keys that belong elsewhere:
+`issue_provider`, `code_host`, `issue` and `verification` (provider bootstrap),
+`review` (the review skills), `security_review` (`scripts/security_gate.py`),
+`orchestration` (`cc-orchestrator`) and `calibration` (`cc-orca-orchestrator`'s
+paired review).
+
+There is no `calibration.enabled` flag, and that is a decision rather than an
+omission. A production run cannot enter a calibration by accident: the only way
+in is the explicit `--mode calibration` argument, a calibration never
+substitutes an arm, and a calibration dispatch demands proven readiness. A
+`calibration` block in `.code-cycle.yml` never changes the mode; it only names
+the reviewer candidates a paired review dispatches, and a test asserts that a
+production run under it stays in production.
+
 `code_cycle.routing.strategy` accepts `fixed` or `measured` and defaults to
 `fixed`. Both currently follow the declared primary and fallback targets;
 `measured` also uses the repository's first-pass rate for its recorded cost

@@ -39,6 +39,7 @@ exactly like a finished one.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -64,6 +65,27 @@ from telemetry import (
 
 #: The repository's own declaration of how it wants to be run.
 CONFIG_NAME = ".code-cycle.yml"
+
+#: The keys under `code_cycle` this driver reads itself.
+DRIVER_KEYS = frozenset({"repository", "profiles", "routing"})
+
+#: The keys under `code_cycle` that belong to a skill or another module. They
+#: are legitimate here and deliberately not interpreted: recognising a key is
+#: not the same as consuming it, and this driver consumes none of these.
+#: `calibration` is read by `cc-orca-orchestrator`'s paired review only; an
+#: explicitly launched `--mode calibration` does not take its arms from it.
+FOREIGN_KEYS = frozenset({
+    "issue_provider", "code_host", "issue", "verification",  # provider bootstrap
+    "review",            # review skills: trusted_authors
+    "security_review",   # security_gate.py
+    "orchestration",     # cc-orchestrator
+    "calibration",       # cc-orca-orchestrator paired review
+})
+
+#: Every key `code_cycle` may carry. Anything else is a typo or a key this
+#: version does not know, and either way a run under it would follow a policy
+#: nobody declared.
+KNOWN_KEYS = DRIVER_KEYS | FOREIGN_KEYS
 
 #: The skill each role runs, as the executor is told to invoke it.
 SKILL_FOR_ROLE = {
@@ -156,7 +178,7 @@ def load_config(path: Path) -> dict:
     # its own `.get` — a traceback where a stated refusal belongs.
     for key in (
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
-        "code_cycle.routing",
+        "code_cycle.routing", "code_cycle.calibration",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -168,6 +190,21 @@ def load_config(path: Path) -> dict:
             raise CycleDriverError(
                 f"{path}: {key} must be a mapping, not "
                 f"{type(value).__name__}")
+
+    # A misspelt key used to pass through unread, so `profles` ran the built-in
+    # profiles while the file on disk declared others. Named here, before a
+    # stage is dispatched, with the nearest known key when there is one.
+    unknown = sorted(set(config.get("code_cycle") or {}) - KNOWN_KEYS)
+    if unknown:
+        described = []
+        for key in unknown:
+            near = difflib.get_close_matches(str(key), sorted(KNOWN_KEYS), n=1)
+            described.append(
+                f"{key!r} (did you mean {near[0]!r}?)" if near else repr(key))
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle: " + ", ".join(described)
+            + "; known keys are " + ", ".join(sorted(KNOWN_KEYS)))
+
     try:
         load_routing_strategy(config)
     except RouterError as error:

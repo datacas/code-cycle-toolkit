@@ -183,6 +183,14 @@ default reviewer and nothing presumes which is better. This file is the only
 place an alias maps to a provider and model, so a candidate can be swapped
 without editing a review skill.
 
+`scripts/run_cycle.py` recognises the block and does not read it: its
+`--mode calibration` takes its arms from the ordinary profiles, not from these
+aliases. Declaring the block therefore never turns an experiment on. There is
+deliberately no `calibration.enabled` flag, because it would restate a guarantee
+the entry point already gives — a calibration is entered only by the explicit
+`--mode calibration` argument or an explicit `paired_review=true` invocation,
+never by configuration alone.
+
 `cc-orca-orchestrator` with `paired_review=true` dispatches both over the same
 commit, keeps them blind to each other, and merges their findings before triage.
 While a campaign runs, the map from opaque `CAL-xxx` candidates back to review
