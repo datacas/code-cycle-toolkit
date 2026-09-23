@@ -140,6 +140,70 @@ issue provider or repository remains ambiguous, the skill stops before making
 remote changes. See [docs/provider-contract.md](docs/provider-contract.md) for
 the full contract, capability rules, identifier mapping, and migration details.
 
+## Configuration reference
+
+`.code-cycle.yml` is optional. Every key lives under `code_cycle`, holds no
+secrets, and is never edited automatically. `run_cycle.py` refuses any key not
+listed here, by name and before a stage is dispatched (see
+[The runtime](#the-runtime)); the skills read the keys that belong to them.
+
+| Key | Consumer | What it declares |
+|---|---|---|
+| `issue_provider` | `cc-provider-bootstrap` | `github`, `plane`, or `jira`. |
+| `code_host` | `cc-provider-bootstrap` | `github` or `bitbucket`. |
+| `issue.project`, `issue.selector` | `cc-provider-bootstrap` | The project scope and work item a provider check reads. |
+| `repository.selector` | `cc-provider-bootstrap`, `run_cycle.py` | The repository on the code host; `run_cycle.py` uses it when `--repo` is not given. |
+| `repository.default_branch` | `cc-provider-bootstrap` | The base branch for scoped reads. |
+| `verification.cache_ttl`, `verification.recheck_on_failure` | `cc-provider-bootstrap` | How long a provider health check stays fresh (default `7d`). `recheck_on_failure` appears in the documented shape, but no component reads it: a live provider failure always forces a recheck. |
+| `profiles.<name>.primary`, `profiles.<name>.fallback` | `run_cycle.py` via `router.load_profiles()`; `cc-orchestrator` | Where each of the eight profiles resolves. Only the profiles you declare change; the rest keep `DEFAULT_PROFILES` in `scripts/router.py`. An unknown profile name is refused. The models declared here are added to telemetry's accepted model set for that repository. |
+| `routing.strategy` | `run_cycle.py` via `router.load_routing_strategy()` | `fixed` (default) or `measured`. Neither changes which target is selected; `measured` only feeds the repository's first-pass rate into the recorded cost estimate. |
+| `review.trusted_authors` | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` | The provider logins whose comments may advance recovered findings. An absent or empty list blocks recovery. |
+| `security_review.always_when.paths`, `.files`, `.labels` | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments`; implemented as a library in `scripts/security_gate.py` | When the security audit always runs. A declared list replaces its default; an absent block keeps the defaults, so configuration cannot switch the gate off. |
+| `orchestration.mode` | `cc-orchestrator` | `auto` (default), `single_agent`, or `claude_codex`. |
+| `calibration.profiles.<alias>` | `cc-orca-orchestrator` paired review | The `provider`, `model` and `effort` of each reviewer candidate, such as `reviewer_a` and `reviewer_b`. It never changes the routing mode; see [The runtime](#the-runtime). |
+
+A profile target is one string, `executor:provider/model effort`:
+
+```yaml
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: "codex:openai/gpt-5.6-luna high"
+      fallback: "claude:anthropic/claude-sonnet-5 high"
+```
+
+The executors with an adapter today are `codex`, `claude` and `orca`. The toolkit
+passes `model` and `effort` to the executor's CLI as written; it does not keep
+its own list of permitted models or efforts, so the executor is what accepts or
+rejects them. `calibration.profiles` uses separate `provider`, `model` and
+`effort` fields rather than a target string, as in
+[`cc-provider-bootstrap`](skills/cc-provider-bootstrap/SKILL.md).
+
+## Model-update policy
+
+**`DEFAULT_PROFILES` are the defaults for a new installation, not a restriction
+on which models a repository may declare.**
+
+A change is configuration, and needs no new release of this toolkit, when it:
+
+- switches to another model already supported by the same executor and provider;
+- changes effort, where the executor already supports that effort;
+- changes `primary` or `fallback` on any profile;
+- tries a candidate model through configuration.
+
+A change may require a new release when it introduces:
+
+- a new executor;
+- a new provider;
+- a changed CLI or output format;
+- new authentication;
+- new workspace or sandbox guarantees;
+- a new capability type — `missing_capability` is a closed token set in
+  `telemetry.FIELD_SPECS`, so a genuinely new capability is a code change by
+  construction;
+- an effort level the adapter does not yet understand;
+- a change to the dispatch contract.
+
 ## Install from GitHub
 
 For the recommended `npx skills` method, no clone is needed. Run it from the repository where you want to install the skills.

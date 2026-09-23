@@ -7,6 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- A README configuration reference listing every `code_cycle` key the toolkit
+  reads, with its consumer and the `executor:provider/model effort` target
+  format, and a model-update policy separating configuration changes from
+  changes that may need a release. `DEFAULT_PROFILES` are documented as the
+  defaults for a new installation, not an allowlist. (#30)
 - `run_cycle` refuses an unknown key under `code_cycle` by name, with the
   nearest known key, before anything is dispatched. Keys consumed by skills —
   including `calibration`, read only by paired review — are recognised and
