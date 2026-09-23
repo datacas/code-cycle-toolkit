@@ -174,6 +174,7 @@ class RoutingDecision:
     rate_known: bool | None = None
     rate_source: str = "default"
     rate_explanation: str | None = None
+    cost_status: str | None = None
 
     def explain(self) -> str:
         head = "BLOCKED" if self.blocked else str(self.target)
@@ -182,6 +183,8 @@ class RoutingDecision:
             reasons.append(self.rate_explanation)
         if self.cost:
             reasons.append(f"cycle cost estimate: {self.cost.explain()}")
+        elif self.cost_status == "unavailable":
+            reasons.append("cycle cost estimate unavailable")
         return f"{self.profile} -> {head}: " + "; ".join(reasons)
 
 
@@ -408,9 +411,16 @@ def route(
     rate_used = (
         DEFAULT_FIRST_PASS_RATE if measured_value is None else measured_value
     )
-    cost = estimate_cost(
-        implement_profile, review_profile, first_pass_rate=rate_used,
-    )
+    try:
+        cost = estimate_cost(
+            implement_profile, review_profile, first_pass_rate=rate_used,
+        )
+        cost_status = "available"
+    except Exception:
+        # Cost is informational. A missing price for a newly added profile or
+        # a bad measurement must never prevent an otherwise valid route.
+        cost = None
+        cost_status = "unavailable"
     rate_source = (
         "measured" if measured_value is not None else "conservative_default"
     ) if measured_strategy else "default"
@@ -426,6 +436,7 @@ def route(
         ),
         "rate_source": rate_source,
         "rate_explanation": rate_explanation if measured_strategy else None,
+        "cost_status": cost_status,
     }
 
     primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)

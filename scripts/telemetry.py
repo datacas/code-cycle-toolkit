@@ -114,6 +114,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
     "routing_strategy": ("token", frozenset({"fixed", "measured"})),
+    "routing_cost_status": ("token", frozenset({"available", "unavailable"})),
     "routing_rate_source": ("token", frozenset({
         "default", "measured", "conservative_default",
     })),
@@ -385,6 +386,7 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
         if isinstance(value, bool) or not isinstance(value, int):
             raise TelemetryError(f"{key!r} is a count and must be an integer, got {type(value).__name__}")
         return value
+
     if kind == "amount":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TelemetryError(f"{key!r} is an amount and must be a number, got {type(value).__name__}")
@@ -432,6 +434,29 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
                 )
         return value
     raise TelemetryError(f"{key!r} declares an unknown field kind {kind!r}")
+
+
+def routing_decision_fields(decision) -> dict:
+    """Return the persisted routing fields shared by every stage row."""
+    cost = getattr(decision, "cost", None)
+    strategy = getattr(decision, "strategy", None)
+    return {
+        "routing_strategy": getattr(strategy, "value", "fixed"),
+        "routing_cost_status": getattr(decision, "cost_status", None)
+        or ("available" if cost is not None else "unavailable"),
+        "routing_cost_implementation": getattr(cost, "implementation", None),
+        "routing_cost_expected_resolutions": getattr(
+            cost, "expected_resolutions", None,
+        ),
+        "routing_cost_review": getattr(cost, "review", None),
+        "routing_cost_total": getattr(cost, "total", None),
+        "routing_rate_source": getattr(decision, "rate_source", "default"),
+        "routing_rate_value": getattr(decision, "rate_value", None),
+        "routing_rate_used": getattr(decision, "rate_used", None),
+        "routing_rate_observations": getattr(decision, "rate_observations", None),
+        "routing_rate_minimum": getattr(decision, "rate_minimum", None),
+        "routing_rate_known": getattr(decision, "rate_known", None),
+    }
 
 
 class Telemetry:
@@ -541,13 +566,9 @@ class Telemetry:
         disagree with what actually happened.
         """
         target = decision.target
-        cost = getattr(decision, "cost", None)
         return self.record_stage(
             repo_id, task_id, role,
             profile=decision.profile,
-            routing_strategy=getattr(
-                getattr(decision, "strategy", None), "value", "fixed",
-            ),
             used_fallback=decision.used_fallback,
             executor=getattr(target, "executor", None),
             provider=getattr(target, "provider", None),
@@ -563,18 +584,7 @@ class Telemetry:
             # were is still useful for spotting a decision that needed
             # explaining.
             routing_reason_count=len(getattr(decision, "reasons", ()) or ()),
-            routing_cost_implementation=getattr(cost, "implementation", None),
-            routing_cost_expected_resolutions=getattr(
-                cost, "expected_resolutions", None,
-            ),
-            routing_cost_review=getattr(cost, "review", None),
-            routing_cost_total=getattr(cost, "total", None),
-            routing_rate_source=getattr(decision, "rate_source", "default"),
-            routing_rate_value=getattr(decision, "rate_value", None),
-            routing_rate_used=getattr(decision, "rate_used", None),
-            routing_rate_observations=getattr(decision, "rate_observations", None),
-            routing_rate_minimum=getattr(decision, "rate_minimum", None),
-            routing_rate_known=getattr(decision, "rate_known", None),
+            **routing_decision_fields(decision),
             **extra,
         )
 

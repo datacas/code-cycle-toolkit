@@ -7,6 +7,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Explicit fixed and measured routing strategies, with a measured first-pass
+  rate feeding the informational cycle-cost estimate when enough telemetry is
+  available. Cost estimation is best effort and is recorded as unavailable if
+  it cannot be calculated; routing remains unaffected. (#27, #28)
 - Effective repository profile models are injected into telemetry per repository;
   requested models remain a closed policy set, while resolved observations use
   `matched`, `mismatch_known`, `mismatch_unrecognized` and `unreported` without

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,28 @@ class AvailabilityGateTests(unittest.TestCase):
         self.assertFalse(d.blocked)
         self.assertEqual("cheap_coder", d.profile)
         self.assertEqual("codex", d.target.executor)
+
+    def test_an_unavailable_cost_estimate_does_not_prevent_fixed_routing(self) -> None:
+        with patch.object(router, "estimate_cost", side_effect=router.RouterError("missing price")):
+            decision = router.route("implement", signals(), READY)
+
+        self.assertFalse(decision.blocked)
+        self.assertEqual("codex", decision.target.executor)
+        self.assertIsNone(decision.cost)
+        self.assertEqual("unavailable", decision.cost_status)
+        self.assertIn("cycle cost estimate unavailable", decision.explain())
+
+    def test_an_invalid_measured_rate_only_disables_the_estimate(self) -> None:
+        decision = router.route(
+            "implement", signals(), READY,
+            strategy=router.RoutingStrategy.MEASURED,
+            first_pass_rate=1.1,
+        )
+
+        self.assertFalse(decision.blocked)
+        self.assertEqual("codex", decision.target.executor)
+        self.assertIsNone(decision.cost)
+        self.assertEqual("unavailable", decision.cost_status)
 
     def test_installed_is_not_dispatchable(self) -> None:
         """A binary on PATH proves no session, no repo access and no quota."""

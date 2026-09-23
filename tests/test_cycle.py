@@ -96,7 +96,7 @@ class FullCycleTests(CycleTestCase):
     def test_the_routing_decision_is_on_every_dispatch_row(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
 
-        recorder.stage("implement", "work")
+        outcome = recorder.stage("implement", "work")
 
         row = self.store.rows("owner/repo")[0]
         self.assertEqual("cheap_coder", row["profile"])
@@ -106,6 +106,23 @@ class FullCycleTests(CycleTestCase):
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
         self.assertEqual("succeeded", row["outcome"])
+        self.assertEqual("available", row["payload"]["routing_cost_status"])
+        expected = tm.routing_decision_fields(outcome.decision)
+        actual = {key: row[key] if key in row else row["payload"].get(key)
+                  for key in expected}
+        self.assertEqual(expected, actual)
+
+    def test_cost_estimate_failure_is_recorded_without_stopping_dispatch(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+
+        with patch.object(router, "estimate_cost", side_effect=router.RouterError("bad rate")):
+            outcome = recorder.stage("implement", "work")
+
+        row = self.store.rows("owner/repo")[0]
+        self.assertFalse(outcome.decision.blocked)
+        self.assertIsNone(outcome.decision.cost)
+        self.assertEqual("unavailable", row["payload"]["routing_cost_status"])
+        self.assertIsNone(row["payload"]["routing_cost_total"])
 
     def test_the_task_signals_are_recorded_with_the_dispatch(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
@@ -504,6 +521,11 @@ class BlockedRoutingTests(CycleTestCase):
         self.assertEqual("blocked", rows[0]["outcome"])
         self.assertIsNone(rows[0]["executor"])
         self.assertTrue(outcome.decision.blocked)
+        self.assertEqual("available", rows[0]["payload"]["routing_cost_status"])
+        expected = tm.routing_decision_fields(outcome.decision)
+        actual = {key: rows[0][key] if key in rows[0]
+                  else rows[0]["payload"].get(key) for key in expected}
+        self.assertEqual(expected, actual)
 
 
 class SeparationTests(unittest.TestCase):

@@ -50,7 +50,7 @@ from router import (
     models_from_profiles,
     route,
 )
-from telemetry import Telemetry
+from telemetry import Telemetry, routing_decision_fields
 
 SCHEMA_VERSION = 1
 
@@ -291,8 +291,7 @@ class CycleRecorder:
                 used_fallback=decision.used_fallback,
                 outcome=DispatchOutcome.BLOCKED.value,
                 routing_reason_count=len(decision.reasons or ()),
-                routing_strategy=decision.strategy.value,
-                **self._cost_record(decision),
+                **routing_decision_fields(decision),
                 local_only=self.local_only,
             )
         return self.telemetry.record_dispatch(
@@ -303,21 +302,3 @@ class CycleRecorder:
             security_sensitive=self.signals.security_sensitive,
             local_only=self.local_only,
         )
-
-    @staticmethod
-    def _cost_record(decision: RoutingDecision) -> dict:
-        cost = decision.cost
-        return {
-            "routing_cost_implementation": getattr(cost, "implementation", None),
-            "routing_cost_expected_resolutions": getattr(
-                cost, "expected_resolutions", None,
-            ),
-            "routing_cost_review": getattr(cost, "review", None),
-            "routing_cost_total": getattr(cost, "total", None),
-            "routing_rate_source": decision.rate_source,
-            "routing_rate_value": decision.rate_value,
-            "routing_rate_used": decision.rate_used,
-            "routing_rate_observations": decision.rate_observations,
-            "routing_rate_minimum": decision.rate_minimum,
-            "routing_rate_known": decision.rate_known,
-        }
