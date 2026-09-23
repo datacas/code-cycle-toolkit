@@ -77,12 +77,25 @@ class RoleContract:
 
     workspace_policy: WorkspacePolicy
     publishes: bool = False
+    publication_permissions: tuple[str, ...] = ()
 
 ROLE_CONTRACTS = {
-    "implement": RoleContract(WorkspacePolicy.WORKSPACE_WRITE, publishes=True),
-    "resolve": RoleContract(WorkspacePolicy.WORKSPACE_WRITE, publishes=True),
-    "review": RoleContract(WorkspacePolicy.READ_ONLY, publishes=True),
-    "rereview": RoleContract(WorkspacePolicy.READ_ONLY, publishes=True),
+    "implement": RoleContract(
+        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
+        publication_permissions=("comment", "create_pr", "push_branch"),
+    ),
+    "resolve": RoleContract(
+        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
+        publication_permissions=("comment", "push_branch"),
+    ),
+    "review": RoleContract(
+        WorkspacePolicy.READ_ONLY, publishes=True,
+        publication_permissions=("comment",),
+    ),
+    "rereview": RoleContract(
+        WorkspacePolicy.READ_ONLY, publishes=True,
+        publication_permissions=("comment",),
+    ),
     "security": RoleContract(WorkspacePolicy.READ_ONLY),
     "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
     "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
@@ -222,6 +235,18 @@ class CycleRecorder:
             raise CycleError(
                 f"{role!r} stages must use publishes={publishes}, not {requested_publishes!r}")
         dispatch_kwargs["publishes"] = publishes
+        publication_permissions = (
+            contract.publication_permissions if publishes else ()
+        )
+        requested_publication_permissions = dispatch_kwargs.pop(
+            "publication_permissions", publication_permissions,
+        )
+        if requested_publication_permissions != publication_permissions:
+            raise CycleError(
+                f"{role!r} stages must use publication_permissions="
+                f"{publication_permissions!r}, not {requested_publication_permissions!r}"
+            )
+        dispatch_kwargs["publication_permissions"] = publication_permissions
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)

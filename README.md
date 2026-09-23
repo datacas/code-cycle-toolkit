@@ -435,10 +435,12 @@ Codex publication uses a CLI permission profile: its filesystem boundary
 matches the stage (read-only for review, workspace write for implementation),
 and network access is limited to GitHub and Bitbucket hosts. This requires
 Codex CLI 0.138.0 or newer; older versions record `publication_access` and do
-not dispatch. Claude publication allows only `gh` and `git push` command
-prefixes, alongside its existing stage-specific file permission. Local-only
-implementation never receives publication access. Orca and new adapters fail
-closed until they expose a publication permission contract.
+not dispatch. Claude receives stage-specific publication commands alongside
+its existing file permission: implement can create a PR, comment, and push its
+current branch; resolve can comment and push that branch; review and rereview
+can only comment on a PR. Local-only implementation never receives
+publication access. Orca and new adapters fail closed until they expose a
+publication permission contract.
 
 Reading `.code-cycle.yml` needs PyYAML, the runtime's one optional dependency
 (`pip install pyyaml`). Nothing else in the toolkit needs it: a repository with

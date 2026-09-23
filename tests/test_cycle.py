@@ -304,6 +304,20 @@ class RoleWorkspacePolicyTests(CycleTestCase):
         recorder.stage("implement", "implement locally")
 
         self.assertFalse(adapter.dispatch_kwargs[0]["publishes"])
+        self.assertEqual((), adapter.dispatch_kwargs[0]["publication_permissions"])
+
+    def test_publication_permissions_follow_each_role(self) -> None:
+        expected = {
+            "implement": ("comment", "create_pr", "push_branch"),
+            "resolve": ("comment", "push_branch"),
+            "review": ("comment",),
+            "rereview": ("comment",),
+            "security": (), "bootstrap": (), "verify": (), "run": (),
+        }
+
+        for role, permissions in expected.items():
+            with self.subTest(role=role):
+                self.assertEqual(permissions, cy.role_contract(role).publication_permissions)
 
     def test_missing_publication_access_is_recorded_without_running_the_adapter(self) -> None:
         class DeniedPublicationAdapter(ScriptedAdapter):

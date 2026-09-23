@@ -886,7 +886,13 @@ class PermissionTests(unittest.TestCase):
         self.assertIn('default_permissions="code_cycle_publish_read"', argv)
         self.assertIn('permissions.code_cycle_publish_read.extends=":read-only"', argv)
         self.assertIn("permissions.code_cycle_publish_read.network.enabled=true", argv)
-        self.assertIn('permissions.code_cycle_publish_read.network.domains."api.github.com"="allow"', argv)
+        self.assertIn(
+            'permissions.code_cycle_publish_read.network.domains={"github.com"="allow",'
+            '"api.github.com"="allow","bitbucket.org"="allow",'
+            '"api.bitbucket.org"="allow"}',
+            argv,
+        )
+        self.assertFalse(any('network.domains."' in arg for arg in argv))
         self.assertNotIn("-s", argv)
 
     def test_codex_publish_profile_preserves_workspace_write_for_implementers(self) -> None:
@@ -926,13 +932,72 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("--permission-mode", argv)
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
 
-    def test_claude_publish_access_is_limited_to_gh_and_git_push(self) -> None:
-        argv = self.claude(writes=False, publishes=True)
+    def test_claude_review_publication_only_allows_pr_comments(self) -> None:
+        argv = self.claude(
+            writes=False, publishes=True, publication_permissions=("comment",),
+        )
+
+        self.assertEqual(["--allowedTools", "Bash(gh pr comment:*)"], argv[-2:])
+
+    def test_claude_implement_publication_scopes_pr_creation_and_branch_push(self) -> None:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], capture_output=True,
+            text=True, check=True,
+        ).stdout.strip()
+        argv = self.claude(
+            writes=True, publishes=True,
+            publication_permissions=("comment", "create_pr", "push_branch"),
+        )
 
         self.assertEqual(
-            ["--allowedTools", "Bash(gh:*)", "Bash(git push:*)"],
+            ["--allowedTools", "Bash(gh pr comment:*)", "Bash(gh pr create:*)",
+             f"Bash(git push origin HEAD:refs/heads/{branch})"],
+            argv[-4:],
+        )
+
+    def test_claude_resolve_publication_allows_push_and_comment_but_not_create(self) -> None:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], capture_output=True,
+            text=True, check=True,
+        ).stdout.strip()
+        argv = self.claude(
+            writes=True, publishes=True,
+            publication_permissions=("comment", "push_branch"),
+        )
+
+        self.assertEqual(
+            ["--allowedTools", "Bash(gh pr comment:*)",
+             f"Bash(git push origin HEAD:refs/heads/{branch})"],
             argv[-3:],
         )
+        self.assertNotIn("Bash(gh pr create:*)", argv)
+
+    def test_claude_never_allows_general_gh_or_git_push_prefixes(self) -> None:
+        for permissions in (("comment",), ("comment", "push_branch"),
+                            ("comment", "create_pr", "push_branch")):
+            argv = self.claude(
+                writes="push_branch" in permissions, publishes=True,
+                publication_permissions=permissions,
+            )
+            allowed = argv[argv.index("--allowedTools") + 1:]
+            self.assertFalse(any(tool in {"Bash(gh:*)", "Bash(git push:*)"}
+                                 for tool in allowed))
+
+    def test_claude_does_not_allow_push_for_shell_syntax_in_branch_name(self) -> None:
+        def branch_result(argv, **_kwargs):
+            self.assertEqual(
+                ["git", "-C", "/repo", "branch", "--show-current"], argv,
+            )
+            return completed("feature/fix;touch /tmp/unwanted\n")
+
+        with patch.object(ex.subprocess, "run", side_effect=branch_result):
+            argv = self.claude(
+                cwd="/repo", writes=True, publishes=True,
+                publication_permissions=("comment", "push_branch"),
+            )
+
+        self.assertNotIn("Bash(git push origin HEAD:refs/heads/feature/fix;touch /tmp/unwanted)", argv)
+        self.assertNotIn("Bash(git push:*)", argv)
 
     def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
         """A live probe wrote the file anyway with the edit tools disallowed,
@@ -942,6 +1007,32 @@ class PermissionTests(unittest.TestCase):
 
         self.assertNotIn("--permission-mode", argv)
         self.assertNotIn("--disallowedTools", argv)
+
+
+class PublicationPreflightTests(unittest.TestCase):
+    def test_github_write_permission_uses_repository_permission_write_value(self) -> None:
+        def run(argv, **_kwargs):
+            if argv == ["git", "rev-parse", "--show-toplevel"]:
+                return completed("/repo\n")
+            if argv == ["git", "branch", "--show-current"]:
+                return completed("feature\n")
+            if argv == ["git", "remote", "get-url", "origin"]:
+                return completed("https://github.com/owner/repo.git\n")
+            if argv == ["gh", "repo", "view", "--json", "nameWithOwner,viewerPermission"]:
+                return completed('{"nameWithOwner":"owner/repo","viewerPermission":"WRITE"}')
+            if argv == ["gh", "auth", "status"]:
+                return completed()
+            if argv == ["git", "push", "--dry-run", "origin",
+                        "HEAD:refs/heads/cc-cycle-preflight"]:
+                return completed()
+            self.fail(f"unexpected preflight command: {argv!r}")
+
+        with patch.object(ex.subprocess, "run", side_effect=run), \
+             patch.object(ex.shutil, "which", return_value="/usr/bin/gh"):
+            ready, detail = ex._publication_preflight("/repo")
+
+        self.assertTrue(ready)
+        self.assertIn("passed", detail)
 
     def test_a_reading_dispatch_fails_closed_for_an_unconfined_adapter(self) -> None:
         """A configured Claude review cannot silently share the writable tree."""

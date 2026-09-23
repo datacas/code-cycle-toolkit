@@ -303,7 +303,7 @@ def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
                         permission = json.loads(checked.stdout).get("viewerPermission")
                     except (ValueError, AttributeError):
                         permission = None
-                    if permission not in {"PUSH", "MAINTAIN", "ADMIN"}:
+                    if permission not in {"WRITE", "MAINTAIN", "ADMIN"}:
                         return False, "GitHub account lacks repository push permission"
         # Do not probe the checked-out branch: cycle workers often start on a
         # protected base and create their feature branch only after dispatch.
@@ -426,7 +426,8 @@ class NativeAdapter(Adapter):
                            self.provable_ceiling, parsed_version)
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False, publishes: bool = False) -> list[str]:  # pragma: no cover
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:  # pragma: no cover
         raise NotImplementedError
 
     def agent_output(self, stdout: str) -> str:
@@ -476,7 +477,8 @@ class NativeAdapter(Adapter):
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
-                 writes: bool = False, publishes: bool = False) -> DispatchResult:
+                 writes: bool = False, publishes: bool = False,
+                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -489,8 +491,14 @@ class NativeAdapter(Adapter):
         screen blind is not something this layer will do — it reports the
         missing capability and stops.
         """
-        argv = (self.argv(target, task, cwd, writes, publishes=True)
-                if publishes else self.argv(target, task, cwd, writes))
+        if publishes and publication_permissions:
+            argv = self.argv(
+                target, task, cwd, writes, True,
+                publication_permissions=publication_permissions,
+            )
+        else:
+            argv = (self.argv(target, task, cwd, writes, True)
+                    if publishes else self.argv(target, task, cwd, writes))
         try:
             completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
@@ -624,7 +632,8 @@ class CodexAdapter(NativeAdapter):
         return True, "Codex permission profile scopes network access to code hosts and preserves the stage filesystem boundary"
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False, publishes: bool = False) -> list[str]:
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -641,10 +650,13 @@ class CodexAdapter(NativeAdapter):
                 "-c", "features.network_proxy=true",
                 "-c", f'permissions.{profile}.extends="{parent}"',
                 "-c", f"permissions.{profile}.network.enabled=true",
-                "-c", f'permissions.{profile}.network.domains."github.com"="allow"',
-                "-c", f'permissions.{profile}.network.domains."api.github.com"="allow"',
-                "-c", f'permissions.{profile}.network.domains."bitbucket.org"="allow"',
-                "-c", f'permissions.{profile}.network.domains."api.bitbucket.org"="allow"',
+                "-c", (
+                    f'permissions.{profile}.network.domains={{'
+                    '"github.com"="allow",'
+                    '"api.github.com"="allow",'
+                    '"bitbucket.org"="allow",'
+                    '"api.bitbucket.org"="allow"}'
+                ),
             ]
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
@@ -698,10 +710,11 @@ class ClaudeAdapter(NativeAdapter):
     }
 
     def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
-        return True, "Claude receives only the GitHub CLI and git push command prefixes for publication"
+        return True, "Claude receives stage-specific GitHub comment, pull-request creation, and working-branch push commands"
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
-             writes: bool = False, publishes: bool = False) -> list[str]:
+             writes: bool = False, publishes: bool = False,
+             publication_permissions: tuple[str, ...] = ()) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
         #
@@ -726,7 +739,28 @@ class ClaudeAdapter(NativeAdapter):
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
         if publishes:
-            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git push:*)"]
+            allowed_tools = []
+            if "comment" in publication_permissions:
+                allowed_tools.append("Bash(gh pr comment:*)")
+            if "create_pr" in publication_permissions:
+                allowed_tools.append("Bash(gh pr create:*)")
+            if "push_branch" in publication_permissions:
+                directory = cwd or os.getcwd()
+                branch = subprocess.run(
+                    ["git", "-C", directory, "branch", "--show-current"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                branch_name = branch.stdout.strip() if branch.returncode == 0 else ""
+                # The ref is inserted into a Claude Bash permission pattern.
+                # Only admit a shell-metacharacter-free spelling so a crafted
+                # branch name cannot turn that permission into another command.
+                if (branch_name and not branch_name.startswith("-")
+                        and re.fullmatch(r"[A-Za-z0-9._/-]+", branch_name)):
+                    allowed_tools.append(
+                        f"Bash(git push origin HEAD:refs/heads/{branch_name})"
+                    )
+            if allowed_tools:
+                argv += ["--allowedTools", *allowed_tools]
         return argv
 
     def agent_output(self, stdout: str) -> str:
