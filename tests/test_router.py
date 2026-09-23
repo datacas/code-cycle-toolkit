@@ -401,7 +401,7 @@ class ProfileConfigTests(unittest.TestCase):
         profiles = router.load_profiles({"code_cycle": {"profiles": {
             "reviewer": {
                 "primary": "claude:anthropic/claude-sonnet-5 high",
-                "fallback": "codex:openai/gpt-5.6-terra high",
+                "fallback": "codex:openai/gpt-6-sol high",
             },
         }}})
         decision = router.route(
@@ -428,8 +428,8 @@ class ProfileConfigTests(unittest.TestCase):
 
     def test_a_target_round_trips_readably(self) -> None:
         self.assertEqual(
-            "codex:openai/gpt-5.6-luna high",
-            str(router.parse_target("codex:openai/gpt-5.6-luna high")),
+            "codex:openai/gpt-6-luna high",
+            str(router.parse_target("codex:openai/gpt-6-luna high")),
         )
 
     def test_effective_profiles_expose_declared_models(self) -> None:
@@ -442,7 +442,7 @@ class ProfileConfigTests(unittest.TestCase):
         models = router.models_from_profiles(profiles)
 
         self.assertIn("gpt-fictional-9", models)
-        self.assertIn("gpt-5.6-terra", models)
+        self.assertIn("gpt-6-sol", models)
 
 
 
@@ -465,7 +465,7 @@ class DeclaredProfileShapeTests(unittest.TestCase):
                            ("primary", {"model": "x"})):
             with self.subTest(key=key, value=value):
                 with self.assertRaises(router.RouterError) as refused:
-                    self.load({"cheap_coder": {"primary": "codex:openai/gpt-5.6-luna high",
+                    self.load({"cheap_coder": {"primary": "codex:openai/gpt-6-luna high",
                                                key: value}})
 
                 self.assertIn("not a target string", str(refused.exception))
@@ -483,10 +483,10 @@ class DeclaredProfileShapeTests(unittest.TestCase):
     def test_a_well_formed_declaration_still_loads(self) -> None:
         profiles = self.load({"cheap_coder": {
             "primary": "claude:anthropic/claude-sonnet-5 high",
-            "fallback": "codex:openai/gpt-5.6-luna high"}})
+            "fallback": "codex:openai/gpt-6-luna high"}})
 
         self.assertEqual("claude-sonnet-5", profiles["cheap_coder"].primary.model)
-        self.assertEqual("gpt-5.6-luna", profiles["cheap_coder"].fallback.model)
+        self.assertEqual("gpt-6-luna", profiles["cheap_coder"].fallback.model)
 
     def test_a_section_that_is_not_a_mapping_does_not_raise_its_own_error(self) -> None:
         """`code_cycle: not-a-mapping` reached `.get` on a string."""

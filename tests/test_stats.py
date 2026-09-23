@@ -185,12 +185,12 @@ class StatsTests(unittest.TestCase):
         self.assertNotIn("No telemetry was recorded in this period", markdown)
 
     def test_markdown_states_model_drift_as_mismatches_out_of_reported(self) -> None:
-        for index, resolved in enumerate(("gpt-5.6-luna", "gpt-5.6-luna", "claude-sonnet-5")):
+        for index, resolved in enumerate(("gpt-6-luna", "gpt-6-luna", "claude-sonnet-5")):
             self.store.record_stage("owner/repo", f"task-{index}", "implement",
                                     profile="cheap_coder", outcome="succeeded",
-                                    model_requested="gpt-5.6-luna", model_resolved=resolved)
+                                    model_requested="gpt-6-luna", model_resolved=resolved)
         self.store.record_stage("owner/repo", "task-9", "implement", profile="cheap_coder",
-                                outcome="succeeded", model_requested="gpt-5.6-luna")
+                                outcome="succeeded", model_requested="gpt-6-luna")
 
         markdown = stats.render_markdown(stats.aggregate(
             stats._read_rows(self.database, "owner/repo"), repo_id="owner/repo", now=self.as_of()))

@@ -195,21 +195,21 @@ class RoutingDecision:
 # though the calibration could not measure one.
 DEFAULT_PROFILES: dict[str, dict] = {
     "cheap_tool":     {"primary": "claude:anthropic/claude-haiku-4-5-20251001 low"},
-    "auxiliary_tool": {"primary": "codex:openai/gpt-5.6-luna medium"},
-    "coordinator":    {"primary": "codex:openai/gpt-5.6-luna medium",
+    "auxiliary_tool": {"primary": "codex:openai/gpt-6-luna medium"},
+    "coordinator":    {"primary": "codex:openai/gpt-6-luna medium",
                        "fallback": "claude:anthropic/claude-sonnet-5 low"},
-    "cheap_coder":    {"primary": "codex:openai/gpt-5.6-luna high",
+    "cheap_coder":    {"primary": "codex:openai/gpt-6-luna high",
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
-    "deep_coder":     {"primary": "codex:openai/gpt-5.6-luna max",
+    "deep_coder":     {"primary": "codex:openai/gpt-6-luna max",
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
-    "reviewer":       {"primary": "codex:openai/gpt-5.6-terra high"},
-    "senior_reviewer": {"primary": "codex:openai/gpt-5.6-terra max"},
+    "reviewer":       {"primary": "codex:openai/gpt-6-sol high"},
+    "senior_reviewer": {"primary": "codex:openai/gpt-6-sol max"},
     # Security audits are strict read-only stages. Claude remains available
     # for write-capable roles, but its adapter cannot enforce this boundary.
-    "security":       {"primary": "codex:openai/gpt-5.6-terra high",
+    "security":       {"primary": "codex:openai/gpt-6-sol high",
                        # Compatibility-only registry entry: the read-only
                        # eligibility filter deliberately never selects Claude.
-                       "fallback": "claude:anthropic/claude-opus-5 high"},
+                       "fallback": "claude:anthropic/claude-opus-5-5 high"},
 }
 
 # Relative cost per profile, same unit as CostEstimate.

@@ -97,10 +97,10 @@ keeps the toolkit default:
 code_cycle:
   profiles:
     cheap_coder:
-      primary: "codex:openai/gpt-5.6-luna high"
+      primary: "codex:openai/gpt-6-luna high"
       fallback: "claude:anthropic/claude-sonnet-5 high"
     senior_reviewer:
-      primary: "claude:anthropic/claude-opus-5 high"
+      primary: "claude:anthropic/claude-opus-5-5 high"
 ```
 
 This is the only place a role resolves to a model, so a candidate changes here

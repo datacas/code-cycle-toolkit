@@ -768,7 +768,7 @@ code_cycle:
 
         implement = report.stages[0]
         self.assertEqual("codex", implement.result.executor)
-        self.assertEqual("gpt-5.6-luna", implement.decision.target.model)
+        self.assertEqual("gpt-6-luna", implement.decision.target.model)
 
     def test_the_fallback_is_the_configured_one_not_the_built_in_one(self) -> None:
         """A reroute must stay inside the policy the repository declared."""
@@ -776,8 +776,8 @@ code_cycle:
 code_cycle:
   profiles:
     cheap_coder:
-      primary: codex:openai/gpt-5.6-luna high
-      fallback: claude:anthropic/claude-opus-5 high
+      primary: codex:openai/gpt-6-luna high
+      fallback: claude:anthropic/claude-opus-5-5 high
 """)
         codex = ScriptedAdapter(
             "codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])
@@ -792,7 +792,7 @@ code_cycle:
         )
 
         fallback = report.stages[0].attempts[1][0]
-        self.assertEqual("claude-opus-5", fallback.target.model)
+        self.assertEqual("claude-opus-5-5", fallback.target.model)
         self.assertTrue(fallback.used_fallback)
 
     def test_an_explicit_repository_wins_over_the_declared_one(self) -> None:
@@ -826,7 +826,7 @@ code_cycle:
 code_cycle:
   profiles:
     cheep_coder:
-      primary: codex:openai/gpt-5.6-luna high
+      primary: codex:openai/gpt-6-luna high
 """)
         with self.assertRaises(rc.CycleDriverError) as refused:
             rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
@@ -931,7 +931,7 @@ code_cycle:
         for body in ("code_cycle:\n  profiles:\n    cheap_coder: nope\n",
                      "code_cycle:\n  profiles:\n    cheap_coder:\n      primary: 3\n",
                      ("code_cycle:\n  profiles:\n    cheap_coder:\n"
-                      "      primary: codex:openai/gpt-5.6-luna high\n"
+                      "      primary: codex:openai/gpt-6-luna high\n"
                       "      fallback: [a, b]\n")):
             with self.subTest(body=body):
                 self.write(body)

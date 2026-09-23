@@ -24,7 +24,7 @@ def completed(stdout="", returncode=0, stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
-TARGET = router.parse_target("codex:openai/gpt-5.6-luna high")
+TARGET = router.parse_target("codex:openai/gpt-6-luna high")
 
 
 class FakeAdapter(ex.Adapter):
@@ -461,12 +461,12 @@ class NativeDispatchTests(unittest.TestCase):
 
         def runner(argv, timeout=None, cwd=None):
             seen["argv"] = argv
-            return completed('{"model": "gpt-5.6-luna"}')
+            return completed('{"model": "gpt-6-luna"}')
 
         result = ex.CodexAdapter().dispatch(TARGET, "do the thing", cwd="/tmp/x", runner=runner)
 
         self.assertIn("exec", seen["argv"])
-        self.assertIn("gpt-5.6-luna", seen["argv"])
+        self.assertIn("gpt-6-luna", seen["argv"])
         self.assertIn("model_reasoning_effort=high", seen["argv"])
         self.assertIn("/tmp/x", seen["argv"])
         self.assertEqual("do the thing", seen["argv"][-1])
@@ -481,18 +481,18 @@ class NativeDispatchTests(unittest.TestCase):
             seen["argv"] = argv
             return completed("{}")
 
-        target = router.parse_target("claude:anthropic/claude-opus-5 high")
+        target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
         ex.ClaudeAdapter().dispatch(target, "review it", runner=runner)
 
         self.assertIn("-p", seen["argv"])
-        self.assertIn("claude-opus-5", seen["argv"])
+        self.assertIn("claude-opus-5-5", seen["argv"])
         self.assertNotIn("--dangerously-skip-permissions", seen["argv"])
 
     def test_an_interactive_screen_blocks_instead_of_being_answered(self) -> None:
         runner = lambda argv, timeout=None, cwd=None: completed(
             returncode=1, stderr="WARNING: Claude Code running in Bypass Permissions mode"
         )
-        target = router.parse_target("claude:anthropic/claude-opus-5 high")
+        target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
 
         result = ex.ClaudeAdapter().dispatch(target, "work", runner=runner)
 
@@ -538,15 +538,15 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertIsNone(result.model_matches_request)
 
     def test_a_reported_mismatch_is_visible(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed('{"model": "gpt-5.6-terra"}')
+        runner = lambda argv, timeout=None, cwd=None: completed('{"model": "gpt-6-sol"}')
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
         self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
-        self.assertEqual("gpt-5.6-terra", result.model_resolved)
-        self.assertEqual("gpt-5.6-luna", result.requested.model)
+        self.assertEqual("gpt-6-sol", result.model_resolved)
+        self.assertEqual("gpt-6-luna", result.requested.model)
         self.assertFalse(result.model_matches_request)
-        self.assertIn("requested gpt-5.6-luna", result.detail)
+        self.assertIn("requested gpt-6-luna", result.detail)
 
 
 class WorkingDirectoryTests(unittest.TestCase):
@@ -572,7 +572,7 @@ class WorkingDirectoryTests(unittest.TestCase):
             seen.update(argv=argv, cwd=cwd)
             return completed("{}")
 
-        target = router.parse_target("claude:anthropic/claude-opus-5 high")
+        target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
         ex.ClaudeAdapter().dispatch(target, "work", cwd="/repo/api", runner=runner)
 
         self.assertEqual("/repo/api", seen["cwd"])
@@ -593,9 +593,9 @@ class WorkingDirectoryTests(unittest.TestCase):
 class OrcaDispatchTests(unittest.TestCase):
     """The backend that can actually report which model it launched."""
 
-    TARGET = router.parse_target("orca:openai/gpt-5.6-luna high")
+    TARGET = router.parse_target("orca:openai/gpt-6-luna high")
 
-    def receipt(self, model="gpt-5.6-luna", state="ready", ok=True, error=None):
+    def receipt(self, model="gpt-6-luna", state="ready", ok=True, error=None):
         if not ok:
             return completed(json.dumps({"ok": False, "error": error or {"message": "nope"}}))
         return completed(json.dumps({"ok": True, "result": {
@@ -616,10 +616,10 @@ class OrcaDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
-        self.assertEqual("gpt-5.6-luna", result.model_resolved)
+        self.assertEqual("gpt-6-luna", result.model_resolved)
         self.assertTrue(result.model_matches_request)
         self.assertIn("worker-start", seen["argv"])
-        self.assertIn("gpt-5.6-luna", seen["argv"])
+        self.assertIn("gpt-6-luna", seen["argv"])
 
     def test_it_refuses_to_invent_a_coordinator_or_a_run(self) -> None:
         """A dispatcher that quietly spawns terminals is one nobody can reason about."""
@@ -632,11 +632,11 @@ class OrcaDispatchTests(unittest.TestCase):
         result = ex.OrcaAdapter().dispatch(
             self.TARGET, "ignored-prompt", cwd="/repo/implementer",
             context=orca_context(),
-            runner=lambda *a, **k: self.receipt(model="gpt-5.6-terra"),
+            runner=lambda *a, **k: self.receipt(model="gpt-6-sol"),
         )
 
         self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
-        self.assertEqual("gpt-5.6-terra", result.model_resolved)
+        self.assertEqual("gpt-6-sol", result.model_resolved)
 
     def test_a_worker_that_did_not_reach_ready_is_a_failure(self) -> None:
         result = ex.OrcaAdapter().dispatch(
@@ -698,8 +698,8 @@ class OrcaDispatchTests(unittest.TestCase):
 class OrcaContractTests(unittest.TestCase):
     """The Orca command has to say what it means."""
 
-    OPENAI = router.parse_target("orca:openai/gpt-5.6-luna high")
-    ANTHROPIC = router.parse_target("orca:anthropic/claude-opus-5 high")
+    OPENAI = router.parse_target("orca:openai/gpt-6-luna high")
+    ANTHROPIC = router.parse_target("orca:anthropic/claude-opus-5-5 high")
 
     def argv_for(self, target, **ctx):
         seen = {}
@@ -741,7 +741,7 @@ class OrcaContractTests(unittest.TestCase):
         self.assertEqual("codex", self.argv_for(self.OPENAI)[self.argv_for(self.OPENAI).index("--agent") + 1])
         anthropic = self.argv_for(self.ANTHROPIC)
         self.assertEqual("claude", anthropic[anthropic.index("--agent") + 1])
-        self.assertEqual("claude-opus-5", anthropic[anthropic.index("--model") + 1])
+        self.assertEqual("claude-opus-5-5", anthropic[anthropic.index("--model") + 1])
 
     def test_an_explicit_agent_overrides_the_mapping(self) -> None:
         argv = self.argv_for(self.OPENAI, worker_agent="cursor")
@@ -847,14 +847,14 @@ class OrcaContractTests(unittest.TestCase):
 class OrcaExitStatusTests(unittest.TestCase):
     """The CLI exits 0 only for ready; the body alone is not the answer."""
 
-    TARGET = router.parse_target("orca:openai/gpt-5.6-luna high")
+    TARGET = router.parse_target("orca:openai/gpt-6-luna high")
     CONTEXT = None
 
     def setUp(self) -> None:
         self.CONTEXT = orca_context(coordinator="t", run_id="r", task_id="k")
         self.ready_receipt = json.dumps({"ok": True, "result": {
             "state": "ready", "stage": "dispatch_input",
-            "launch": {"effective": {"model": "gpt-5.6-luna"}}}})
+            "launch": {"effective": {"model": "gpt-6-luna"}}}})
         self.ready_status = json.dumps({"result": {"runtime": {"state": "ready", "reachable": True}}})
 
     def dispatch(self, returncode):
@@ -1063,7 +1063,7 @@ class PublicationPreflightTests(unittest.TestCase):
         self.assertEqual("read_only_enforcement", result.missing_capability)
 
     def test_a_reading_dispatch_reaches_an_adapter_with_enforced_sandboxing(self) -> None:
-        target = router.parse_target("codex:openai/gpt-5.6-terra high")
+        target = router.parse_target("codex:openai/gpt-6-sol high")
         decision = router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION)
         adapter = ex.CodexAdapter()
         seen = {}
@@ -1081,7 +1081,7 @@ class PublicationPreflightTests(unittest.TestCase):
         self.assertEqual("read-only", seen["argv"][seen["argv"].index("-s") + 1])
 
     def test_disposable_dispatch_requires_an_isolated_workspace(self) -> None:
-        target = router.parse_target("codex:openai/gpt-5.6-terra high")
+        target = router.parse_target("codex:openai/gpt-6-sol high")
         decision = router.RoutingDecision("cheap_tool", target, router.RoutingMode.PRODUCTION)
         adapter = ex.CodexAdapter()
 
@@ -1114,7 +1114,7 @@ class PublicationPreflightTests(unittest.TestCase):
         self.assertIn("cannot confine writes", result.detail)
 
     def test_disposable_dispatch_uses_the_declared_workspace(self) -> None:
-        target = router.parse_target("codex:openai/gpt-5.6-terra high")
+        target = router.parse_target("codex:openai/gpt-6-sol high")
         decision = router.RoutingDecision("cheap_tool", target, router.RoutingMode.PRODUCTION)
         adapter = ex.CodexAdapter()
         seen = {}
@@ -1255,9 +1255,9 @@ class AsynchronousDispatchTests(unittest.TestCase):
     def orca_receipt(self):
         payload = json.dumps({"ok": True, "result": {
             "dispatchId": "D-1", "state": "ready",
-            "launch": {"effective": {"model": "gpt-5.6-luna"}}}})
+            "launch": {"effective": {"model": "gpt-6-luna"}}}})
         return ex.OrcaAdapter().dispatch(
-            router.parse_target("orca:openai/gpt-5.6-luna high"), "work",
+            router.parse_target("orca:openai/gpt-6-luna high"), "work",
             runner=lambda *a, **k: completed(payload),
             cwd="/repo/implementer",
             context=orca_context(coordinator="C", run_id="R", task_id="T"),
@@ -1299,7 +1299,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
                                 {"orca": ex.Availability.READY},
                                 profiles=router.load_profiles(
                                     {"code_cycle": {"profiles": {"cheap_coder": {
-                                        "primary": "orca:openai/gpt-5.6-luna high"}}}}))
+                                        "primary": "orca:openai/gpt-6-luna high"}}}}))
         result = ex.dispatch(decision, "work", ex.Registry([adapter]),
                              policy=ex.ReadinessPolicy.PROVEN, writes=True)
 
@@ -1324,7 +1324,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
                                 {"orca": ex.Availability.READY},
                                 profiles=router.load_profiles(
                                     {"code_cycle": {"profiles": {"cheap_coder": {
-                                        "primary": "orca:openai/gpt-5.6-luna high"}}}}))
+                                        "primary": "orca:openai/gpt-6-luna high"}}}}))
         result = ex.dispatch(decision, "work", ex.Registry([Refuses()]),
                              policy=ex.ReadinessPolicy.PROVEN)
 
@@ -1353,7 +1353,7 @@ class AsynchronousDispatchTests(unittest.TestCase):
 
         self.assertEqual("all good", result.detail)
         self.assertEqual({"stdout": "hello"}, result.artifacts)
-        self.assertEqual("gpt-5.6-luna", result.model_resolved)
+        self.assertEqual("gpt-6-luna", result.model_resolved)
         self.assertIs(ex.ReadinessPolicy.ATTEMPT, result.readiness_policy)
 
 
@@ -1468,14 +1468,14 @@ class LiveObservationTests(unittest.TestCase):
 
     def test_a_claude_run_now_verifies_its_model_against_the_request(self) -> None:
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
-        stdout = json.dumps({"result": "OK", "modelUsage": {"claude-opus-5": {}}})
+        stdout = json.dumps({"result": "OK", "modelUsage": {"claude-opus-5-5": {}}})
 
         result = ex.ClaudeAdapter().dispatch(
             target, "work", runner=lambda *a, **k: completed(stdout)
         )
 
         self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
-        self.assertEqual("claude-opus-5", result.model_resolved)
+        self.assertEqual("claude-opus-5-5", result.model_resolved)
 
     def test_codex_refusing_an_untrusted_directory_is_a_capability(self) -> None:
         """Observed live: this exited non-zero with no structured event and was
@@ -1494,14 +1494,14 @@ class LiveObservationTests(unittest.TestCase):
 class ModelVerificationTests(unittest.TestCase):
     def test_a_matching_model_is_confirmed(self) -> None:
         result = ex.DispatchResult(
-            ex.DispatchOutcome.SUCCEEDED, "codex", TARGET, model_resolved="gpt-5.6-luna"
+            ex.DispatchOutcome.SUCCEEDED, "codex", TARGET, model_resolved="gpt-6-luna"
         )
 
         self.assertTrue(result.model_matches_request)
 
     def test_a_different_model_is_a_mismatch(self) -> None:
         result = ex.DispatchResult(
-            ex.DispatchOutcome.SUCCEEDED, "codex", TARGET, model_resolved="gpt-5.6-terra"
+            ex.DispatchOutcome.SUCCEEDED, "codex", TARGET, model_resolved="gpt-6-sol"
         )
 
         self.assertFalse(result.model_matches_request)
@@ -1523,7 +1523,7 @@ class EndToEndTests(unittest.TestCase):
         result = ex.dispatch(d, "implement issue 1", registry, writes=True)
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
-        self.assertEqual("gpt-5.6-luna", result.model_resolved)
+        self.assertEqual("gpt-6-luna", result.model_resolved)
         self.assertEqual(1, len(adapter.dispatched))
 
     def test_a_production_fallback_is_executed_on_the_fallback_executor(self) -> None:

@@ -170,7 +170,7 @@ A profile target is one string, `executor:provider/model effort`:
 code_cycle:
   profiles:
     cheap_coder:
-      primary: "codex:openai/gpt-5.6-luna high"
+      primary: "codex:openai/gpt-6-luna high"
       fallback: "claude:anthropic/claude-sonnet-5 high"
 ```
 

@@ -75,7 +75,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_unknown_keys_models_and_timeouts_are_refused(self) -> None:
         for jev in ({"mode": "shadow", "api_key": "x"},
-                    {"mode": "shadow", "model": "gpt-5.6-luna"},
+                    {"mode": "shadow", "model": "gpt-6-luna"},
                     {"mode": "shadow", "timeout_seconds": 0},
                     {"mode": "shadow", "timeout_seconds": 60},
                     {"mode": "shadow", "timeout_seconds": True},

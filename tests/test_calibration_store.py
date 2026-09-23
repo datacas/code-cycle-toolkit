@@ -214,7 +214,7 @@ class SampleCapabilityTests(unittest.TestCase):
         return contract.RunLine(
             id="CCT-20260918-001",
             profile="cheap_coder",
-            model=contract.ModelSpec("openai", "gpt-5.6-luna", "gpt-5.6-luna"),
+            model=contract.ModelSpec("openai", "gpt-6-luna", "gpt-6-luna"),
             effort="high",
             triaged_sha=sha or self.HEAD,
         )
@@ -275,7 +275,7 @@ class SampleCapabilityTests(unittest.TestCase):
 
         triage = self.campaign.pairs()[self.key]["triage"]
         self.assertEqual("cheap_coder", triage["profile"])
-        self.assertEqual("gpt-5.6-luna", triage["model_resolved"])
+        self.assertEqual("gpt-6-luna", triage["model_resolved"])
         self.assertEqual(self.HEAD, triage["triaged_sha"])
 
     def test_triage_anchored_to_another_commit_is_refused(self) -> None:
@@ -432,7 +432,7 @@ class PairManifestTests(unittest.TestCase):
             "174", head_sha=self.HEAD,
             run=contract.RunLine(
                 id="CCT-1", profile="senior_reviewer",
-                model=contract.ModelSpec("anthropic", "claude-opus-5", "claude-opus-5"),
+                model=contract.ModelSpec("anthropic", "claude-opus-5-5", "claude-opus-5-5"),
                 effort="high", triaged_sha=self.HEAD),
             dispositions={d: "valid" for d in self.minted.values()},
             triage_mode="blind_pure",
@@ -452,7 +452,7 @@ class PairManifestTests(unittest.TestCase):
         self.assertEqual("external_project", m["target_relation"])
         self.assertEqual("mechanism_validation", m["purpose"])
         self.assertEqual("blind_pure", m["triage_mode"])
-        self.assertEqual("claude-opus-5", m["resolver"]["model_resolved"])
+        self.assertEqual("claude-opus-5-5", m["resolver"]["model_resolved"])
         self.assertTrue(m["usable"])
         arms = sorted(f["arm"] for f in m["findings"])
         self.assertEqual(["reviewer_a", "reviewer_b"], arms)
