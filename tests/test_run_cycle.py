@@ -590,6 +590,29 @@ code_cycle:
         self.assertEqual("claude-sonnet-5", implement.decision.target.model)
         self.assertEqual(1, len(codex.dispatched))
 
+    def test_a_declared_fictional_model_is_recorded(self) -> None:
+        self.write("""
+code_cycle:
+  profiles:
+    cheap_coder:
+      primary: codex:openai/gpt-fictional-9 high
+""")
+        profiles = self.profiles_from("")
+        codex = Talker("codex")
+
+        report = rc.run_cycle(
+            "owner/api", "API-7", router.TaskSignals(), self.store,
+            profiles=profiles,
+            registry=ex.Registry([codex]),
+            availability={"codex": ex.Availability.READY},
+        )
+
+        self.assertEqual("gpt-fictional-9", report.stages[0].decision.target.model)
+        row = self.rows()[0]
+        self.assertEqual("gpt-fictional-9", row["model_requested"])
+        self.assertEqual("gpt-fictional-9", row["model_resolved"])
+        self.assertEqual("matched", row["payload"]["model_resolution"])
+
     def test_without_a_declaration_the_defaults_are_untouched(self) -> None:
         report = rc.run_cycle(
             "owner/api", "API-7", router.TaskSignals(), self.store,

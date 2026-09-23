@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -70,6 +71,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "task_id": ("identifier", None),
     "model_requested": ("identifier", None),
     "model_resolved": ("identifier", None),
+    "model_resolution": ("token", frozenset({
+        "matched", "mismatch_known", "mismatch_unrecognized", "unreported",
+    })),
     # closed vocabularies
     "role": ("token", frozenset({
         "implement", "review", "rereview", "resolve", "verify", "run",
@@ -323,7 +327,7 @@ _COLUMNS = (
 )
 
 
-def validate_reference(field: str, value):
+def validate_reference(field: str, value, *, model_names: Iterable[str] | None = None):
     """Apply this store's rule for a field, before anything is spent on it.
 
     The same check `record_stage` would make, exported so a caller can make it
@@ -331,13 +335,18 @@ def validate_reference(field: str, value):
     refusing before a stage is dispatched under it: the alternative is an
     executor run, paid for, whose row cannot be written.
 
+    Model names from repository configuration must be supplied through
+    `model_names`; this function never reads configuration itself. When omitted,
+    only the built-in model policy is used.
+
     It is deliberately the same function rather than a second copy of the
     rules. Two validators agree until one of them is edited.
     """
-    return _checked(field, value)
+    permitted = frozenset(model_names) if model_names is not None else None
+    return _checked(field, value, model_names=permitted)
 
 
-def _checked(key: str, value):
+def _checked(key: str, value, *, model_names: frozenset | None = None):
     """Return the value if its shape matches what the field may hold.
 
     Typed rather than length-limited, and applied to every field. A string is
@@ -397,11 +406,12 @@ def _checked(key: str, value):
                     f"{key!r} starts with {prefix!r}, a published credential "
                     "prefix. Telemetry stores references, never secrets."
                 )
-        if key in ("model_requested", "model_resolved"):
+        if key == "model_requested":
             # No `and known_models()` guard: an unavailable set raises rather
             # than waving the value through. A check that switches itself off
             # when it cannot run is not a check.
-            if value not in known_models():
+            permitted = model_names if model_names is not None else known_models()
+            if value not in permitted:
                 raise TelemetryError(
                     f"{key!r} must name a model this toolkit knows, not {value!r}. "
                     "A closed set is the only real guarantee here: a model name "
@@ -414,12 +424,42 @@ def _checked(key: str, value):
 class Telemetry:
     """Append-only record of what each stage did."""
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(self, path: Path | str | None = None,
+                 known_models: Iterable[str] | None = None) -> None:
         self.path = Path(path) if path is not None else default_database_path()
+        # These are the names supplied by the component that already parsed
+        # repository configuration. They are deliberately per instance: two
+        # repositories in one process must not share their additions.
+        self._configured_models = frozenset(known_models or ())
+        self._configured_models_by_repo: dict[str, frozenset[str]] = {}
+        self._effective_models: frozenset | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
             connection.commit()
+
+    def _model_names(self, repo_id: str | None = None) -> frozenset:
+        """Build this instance's closed model set, raising if defaults fail."""
+        if self._effective_models is None:
+            self._effective_models = _known_models() | self._configured_models
+        return self._effective_models | self._configured_models_by_repo.get(
+            repo_id, frozenset()
+        )
+
+    def add_known_models(self, repo_id: str, models: Iterable[str]) -> None:
+        """Inject resolved configuration models without crossing repository scopes."""
+        current = self._configured_models_by_repo.get(repo_id, frozenset())
+        self._configured_models_by_repo[repo_id] = current | frozenset(models)
+
+    def _model_observation(self, repo_id: str, requested, resolved) -> tuple[str | None, str]:
+        """Keep unknown executor observations out of the store without losing the row."""
+        if resolved is None:
+            return None, "unreported"
+        if isinstance(resolved, str) and requested is not None and resolved == requested:
+            return resolved, "matched"
+        if isinstance(resolved, str) and resolved in self._model_names(repo_id):
+            return resolved, "mismatch_known"
+        return None, "mismatch_unrecognized"
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -437,14 +477,24 @@ class Telemetry:
         if not repo_id or not task_id or not role:
             raise TelemetryError("a stage needs repo_id, task_id and role")
 
+        fields = dict(fields)
+        if "model_resolved" in fields:
+            stored, resolution = self._model_observation(
+                repo_id, fields.get("model_requested"), fields["model_resolved"]
+            )
+            fields["model_resolved"] = stored
+            fields["model_resolution"] = resolution
+        elif "model_requested" in fields:
+            fields["model_resolution"] = "unreported"
+
         row = {
-            "repo_id": _checked("repo_id", repo_id),
-            "task_id": _checked("task_id", task_id),
-            "role": _checked("role", role),
+            "repo_id": self._checked("repo_id", repo_id, repo_id=repo_id),
+            "task_id": self._checked("task_id", task_id, repo_id=repo_id),
+            "role": self._checked("role", role, repo_id=repo_id),
         }
         payload = {}
         for key, value in fields.items():
-            checked = _checked(key, value)
+            checked = self._checked(key, value, repo_id=repo_id)
             if key in _COLUMNS:
                 row[key] = checked
             else:
@@ -465,6 +515,10 @@ class Telemetry:
             )
             connection.commit()
             return int(cursor.lastrowid)
+
+    def _checked(self, key: str, value, *, repo_id: str | None = None):
+        model_names = self._model_names(repo_id) if key == "model_requested" else None
+        return _checked(key, value, model_names=model_names)
 
     def record_dispatch(self, repo_id: str, task_id: str, role: str, decision, result,
                         **extra) -> int:
@@ -579,13 +633,27 @@ class Telemetry:
         matching: Codex reports none at all, and treating that silence as
         agreement would hide exactly what this is for.
         """
-        return [
-            {"task_id": row["task_id"], "role": row["role"],
-             "requested": row["model_requested"], "resolved": row["model_resolved"]}
-            for row in self.rows(repo_id)
-            if row["model_resolved"] and row["model_requested"]
-            and row["model_resolved"] != row["model_requested"]
-        ]
+        drift = []
+        for row in self.rows(repo_id):
+            resolution = row["payload"].get("model_resolution")
+            if resolution is None:
+                # Rows written before model_resolution existed still carry the
+                # two columns that established drift. Keep that history
+                # visible rather than treating an absent token as agreement.
+                is_drift = (
+                    row["model_resolved"]
+                    and row["model_requested"]
+                    and row["model_resolved"] != row["model_requested"]
+                )
+            else:
+                is_drift = resolution in {"mismatch_known", "mismatch_unrecognized"}
+            if is_drift:
+                drift.append({
+                    "task_id": row["task_id"], "role": row["role"],
+                    "requested": row["model_requested"],
+                    "resolved": row["model_resolved"],
+                })
+        return drift
 
     def summary(self, repo_id: str) -> dict:
         rows = self.rows(repo_id)

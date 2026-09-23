@@ -7,6 +7,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Effective repository profile models are injected into telemetry per repository;
+  requested models remain a closed policy set, while resolved observations use
+  `matched`, `mismatch_known`, `mismatch_unrecognized` and `unreported` without
+  discarding rows or historical model drift.
 - Explicit workspace contracts for cycle roles: security and bootstrap are
   strictly read-only, verify and run use a confined disposable workspace, and
   incompatible adapters are excluded before dispatch. The security profile

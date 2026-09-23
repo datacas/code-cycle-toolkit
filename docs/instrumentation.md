@@ -95,9 +95,15 @@ mixes two anchors.
 
 ## Requested and resolved models
 
-`provider/model_requested→model_resolved` always writes both sides, including
-when they match, and writes `?` for the resolved side when the host does not
-report which model ran.
+`model_requested` is policy: the closed set accepted by telemetry is the union
+of the toolkit defaults and the models in the already-resolved repository
+profiles. The caller injects the latter into each `Telemetry` instance; the
+store never reads `.code-cycle.yml` itself.
+
+`provider/model_requested→model_resolved` records both sides, including when
+they match, and writes `?` for the resolved side when the host does not report
+which model ran. The payload also carries the closed `model_resolution` token:
+`matched`, `mismatch_known`, `mismatch_unrecognized`, or `unreported`.
 
 `model_resolved` comes from the executor's dispatch receipt, never from the agent.
 An agent asked which model it is answers from its own configuration — the very
@@ -110,6 +116,11 @@ different facts: `sonnet-5→sonnet-5` states that nothing drifted, while
 `sonnet-5→?` states that we cannot know. Aliases are updated behind the scenes,
 so if rates move months from now without anything having changed, this is what
 distinguishes a change in the work from a change in the instrument.
+
+An executor-reported model that is not in the permitted set is never written to
+the store. The row is retained with `model_resolved: null` and
+`model_resolution: mismatch_unrecognized`, so an unexpected observation cannot
+make the observation disappear.
 
 ## Legacy compatibility
 
@@ -445,9 +456,11 @@ count, so "we do not know yet" and "it is genuinely zero" never look the same.
 Two other questions are already answered from the same rows. `dispatch_failures`
 counts blocked dispatches by the capability that blocked them, keeping an
 exhausted window distinct from a trust dialog — conflating those cost a
-campaign. `model_drift` lists rows where the executor ran something other than
-what was requested, excluding rows with no reported model rather than counting
-silence as agreement, because Codex reports none at all.
+campaign. `model_drift` reads `model_resolution` and includes both known and
+unrecognised mismatches, while excluding `unreported` rows rather than counting
+silence as agreement, because Codex reports none at all. Rows written before
+the token existed fall back to the two model columns, so historical drift is
+not erased by the new representation.
 
 The schema will change. A schema designed before its questions are known is one
 that gets migrated, and that was accepted deliberately: recording now, with

@@ -42,7 +42,13 @@ from executors import (
     WorkspacePolicy,
     dispatch,
 )
-from router import RoutingDecision, RoutingMode, TaskSignals, route
+from router import (
+    RoutingDecision,
+    RoutingMode,
+    TaskSignals,
+    models_from_profiles,
+    route,
+)
 from telemetry import Telemetry
 
 SCHEMA_VERSION = 1
@@ -137,6 +143,8 @@ class CycleRecorder:
         # configuration on its own is one that can disagree with the caller
         # about what the configuration says.
         self.profiles = profiles
+        if profiles is not None:
+            telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
         self.iteration = 0
         self.stages: list[StageOutcome] = []

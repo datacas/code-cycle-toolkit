@@ -259,6 +259,20 @@ def load_profiles(config: dict | None = None) -> dict[str, Profile]:
     return profiles
 
 
+def models_from_profiles(profiles: dict[str, Profile]) -> frozenset[str]:
+    """Return the model names in an already-resolved profile set.
+
+    Configuration belongs to the caller that loaded it. This small projection
+    lets that caller inject the effective model vocabulary into the observer
+    without making it read `.code-cycle.yml` itself.
+    """
+    return frozenset(
+        target.model
+        for profile in profiles.values()
+        for target in profile.targets()
+    )
+
+
 def profile_for(role: str, signals: TaskSignals) -> tuple[str, tuple[str, ...]]:
     """Choose the profile name for a role, and say why.
 
