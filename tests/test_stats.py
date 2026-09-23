@@ -67,6 +67,44 @@ class StatsTests(unittest.TestCase):
         self.assertIn("unknown (9/9; need 10)", markdown)
         self.assertIn("Not compared", markdown)
 
+    def test_aggregate_counts_dispatch_stages_once_and_excludes_other_row_kinds(self) -> None:
+        cycle_id = "cycle-private"
+        for role, seq, profile in (
+            ("implement", 1, "cheap_coder"),
+            ("implement", 1, "deep_coder"),  # rerouted attempt for the same stage
+            ("review", 2, "senior_reviewer"),
+        ):
+            self.store.record_stage(
+                "owner/repo", "task-private", role, profile=profile,
+                cycle_id=cycle_id, stage_seq=seq, record_kind="dispatch",
+                used_fallback=True, duration_ms=100, cost_usd=0.05,
+            )
+        self.store.record_stage(
+            "owner/repo", "task-private", "implement", cycle_id=cycle_id,
+            stage_seq=1, record_kind="shadow", jev_status="suggested",
+        )
+        self.store.record_stage(
+            "owner/repo", "task-private", "review", cycle_id=cycle_id,
+            stage_seq=2, record_kind="verdict", status="APPROVED",
+        )
+        self.store.record_stage(
+            "owner/repo", "task-private", "coordinate", cycle_id=cycle_id,
+            record_kind="cycle", first_pass_approved=True, fallback_stages=1,
+        )
+
+        rows = stats._read_rows(self.database, "owner/repo")
+        report = stats.aggregate(rows, repo_id="owner/repo", now=self.as_of(), days=None)
+
+        self.assertEqual(2, report["summary"]["stages"])
+        self.assertEqual({"implement": 1, "review": 1}, report["summary"]["roles"])
+        self.assertEqual({"deep_coder": 1}, report["profiles_by_role"]["implement"])
+        self.assertEqual(1, report["summary"]["fallback_stages"])
+        self.assertEqual(3, report["summary"]["duration_ms"]["measured"])
+        self.assertAlmostEqual(0.15, report["summary"]["cost_usd"]["total"])
+        self.assertEqual(2, sum(report["trend_daily"].values()))
+        self.assertNotIn("coordinate", report["summary"]["roles"])
+        self.assertIsNone(report["comparison"]["previous_first_pass"])
+
     def test_jev_summary_uses_correlated_observations_and_sample_gate(self) -> None:
         for index in range(10):
             cycle_id = f"cycle-{index}"

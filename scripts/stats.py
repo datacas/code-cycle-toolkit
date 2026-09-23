@@ -115,6 +115,42 @@ def _period_rows(rows: list[dict], start: datetime | None, end: datetime) -> lis
     return selected
 
 
+def _stage_rows(rows: list[dict]) -> list[dict]:
+    """Return one row per stage, retaining compatibility with older schemas."""
+    stages = [row for row in rows if not row["payload"].get("record_kind")]
+    dispatches: dict[tuple, dict] = {}
+    for index, row in enumerate(rows):
+        payload = row["payload"]
+        if payload.get("record_kind") != "dispatch":
+            continue
+        cycle_id, stage_seq = payload.get("cycle_id"), payload.get("stage_seq")
+        key = ("stage", cycle_id, stage_seq) if cycle_id and isinstance(stage_seq, int) else ("row", index)
+        # Rows are read in recorded order; keep the final attempt's profile and
+        # timestamp as the representative values for this stage.
+        dispatches[key] = row
+    stages.extend(dispatches.values())
+    return stages
+
+
+def _fallback_stage_count(rows: list[dict], stages: list[dict]) -> int:
+    """Prefer closing cycle totals; otherwise count fallback stages once each."""
+    cycle_fallbacks = {}
+    for row in rows:
+        payload = row["payload"]
+        cycle_id, value = payload.get("cycle_id"), payload.get("fallback_stages")
+        if (payload.get("record_kind") == "cycle" and cycle_id
+                and isinstance(value, int) and not isinstance(value, bool)):
+            cycle_fallbacks[cycle_id] = value
+
+    total = sum(cycle_fallbacks.values())
+    for row in stages:
+        cycle_id = row["payload"].get("cycle_id")
+        if cycle_id in cycle_fallbacks:
+            continue
+        total += bool(row.get("used_fallback"))
+    return total
+
+
 def _profile_outcomes(rows: list[dict], minimum: int) -> dict:
     """Join implement-stage suggestions to that cycle's observed first review."""
     shadow_by_cycle: dict[tuple[str, int], dict] = {}
@@ -159,11 +195,18 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         if start is not None else []
     )
 
-    roles = Counter(row["role"] for row in current)
+    stages = _stage_rows(current)
+    stage_row_ids = {id(row) for row in stages}
+    stage_event_row_ids = {
+        id(row) for row in current
+        if not row["payload"].get("record_kind")
+        or row["payload"].get("record_kind") == "dispatch"
+    }
+    roles = Counter(row["role"] for row in stages)
     profiles: dict[str, Counter] = defaultdict(Counter)
     verdicts, blockages = Counter(), Counter()
     findings, findings_measured = Counter(), Counter()
-    fallbacks = 0
+    fallbacks = _fallback_stage_count(current, stages)
     model_resolutions = Counter()
     verification_by_cycle: dict[str, bool] = {}
     confidence = Counter()
@@ -174,13 +217,12 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
     durations, costs = [], []
     for row in current:
         role, profile = row.get("role"), row.get("profile")
-        if profile:
+        if profile and id(row) in stage_row_ids:
             profiles[role][profile] += 1
         if role in {"review", "rereview"} and row.get("status"):
             verdicts[str(row["status"]).upper()] += 1
         if row.get("missing_capability"):
             blockages[row["missing_capability"]] += 1
-        fallbacks += bool(row.get("used_fallback"))
         payload = row["payload"]
         tests_passed = payload.get("tests_passed")
         cycle_key = payload.get("cycle_id") or row["task_id"]
@@ -212,11 +254,12 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                     if lower <= value < upper:
                         confidence[name] += 1
                         break
-        if isinstance(row.get("duration_ms"), int) and row["duration_ms"] >= 0:
+        if id(row) in stage_event_row_ids and isinstance(row.get("duration_ms"), int) and row["duration_ms"] >= 0:
             durations.append(row["duration_ms"])
         cost = payload.get("cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        if id(row) in stage_event_row_ids and isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
             costs.append(float(cost))
+    for row in stages:
         stamp = _timestamp(row)
         if stamp:
             daily[stamp.astimezone(timezone.utc).date().isoformat()] += 1
@@ -249,10 +292,10 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         "sample_minimum": minimum,
         "summary": {
             "tasks": len(tasks),
-            "stages": len(current),
+            "stages": len(stages),
             "roles": _counter(roles),
             "first_pass": _first_pass(rows, start, now),
-            "fallback_stages": fallbacks if current else None,
+            "fallback_stages": fallbacks if stages else None,
             "dispatch_blockages": _counter(blockages),
             "model_drift": {
                 "mismatches": drift_count if drift_measured else None,
@@ -291,7 +334,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
             "task_change": len(tasks) - len(prev_tasks) if comparison_ready else None,
             "current_first_pass": _first_pass(rows, start, now),
             "previous_first_pass": _first_pass(rows, start - timedelta(days=days), start)
-            if start is not None else _first_pass(rows),
+            if start is not None else None,
         },
         "jev": {
             "shadow_rows": jev_shadow_rows,
