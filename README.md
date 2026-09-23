@@ -393,6 +393,15 @@ attempts reported earlier in the cycle; and, when `--verification available` or
 automatically. An unknown signal is left out, never recorded as zero. See
 [Pre-routing signals](docs/instrumentation.md#pre-routing-signals).
 
+What the run went on to produce is recorded on separate rows, never on the
+dispatch rows that hold those signals: each verdict row carries the status,
+findings by severity and a reported test result, and the closing row carries
+first-pass approval, whether resolution was needed and how many rounds it took,
+the first and final review verdicts, fallbacks and contract violations. Every
+row of one run shares a `cycle_id`, and `stage_seq` ties a verdict to the
+dispatch it reports on. An outcome nobody reported is absent, not approved,
+passing or zero. See [Cycle outcomes](docs/instrumentation.md#cycle-outcomes).
+
 For a rehearsal that must stay in a disposable linked Git worktree, pass both
 `--cwd /path/to/worktree` and `--local-only`. The driver refuses to enable this
 mode for the live repository, runs implementation only, records the resulting

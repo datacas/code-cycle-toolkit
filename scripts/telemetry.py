@@ -44,8 +44,10 @@ from pathlib import Path
 
 #: 1: the original stage row. 2: adds the pre-routing signals below, all in
 #: `payload`, so a version-1 row is still read as it was written; the version
-#: only tells a reader which signals the writer could have supplied.
-SCHEMA_VERSION = 2
+#: only tells a reader which signals the writer could have supplied. 3: adds the
+#: cycle correlation keys and the observed outcomes below, again only in
+#: `payload`; a row from an earlier version simply has no cycle to belong to.
+SCHEMA_VERSION = 3
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -189,6 +191,20 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "verification_available": ("flag", None),
     "previous_failed_attempts": ("count", None),
     "resolution_round": ("count", None),
+    # cycle correlation (schema 3)
+    "cycle_id": ("identifier", None),
+    "stage_seq": ("count", None),
+    "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle"})),
+    # observed outcomes, written only once they are known (schema 3)
+    "tests_passed": ("flag", None),
+    "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
+    "final_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
+    "first_pass_approved": ("flag", None),
+    "resolution_needed": ("flag", None),
+    "resolution_rounds": ("count", None),
+    "final_approved": ("flag", None),
+    "fallback_stages": ("count", None),
+    "contract_violations": ("count", None),
 }
 
 #: Inclusive bounds for counts that have them. A count outside its range is a
@@ -208,6 +224,8 @@ FIELD_LIMITS: dict[str, tuple[int, int]] = {
             "prior_findings_critical", "prior_findings_high",
             "prior_findings_medium", "prior_findings_low",
             "previous_failed_attempts", "resolution_round",
+            "stage_seq", "resolution_rounds", "fallback_stages",
+            "contract_violations",
         )
     },
 }
@@ -232,6 +250,32 @@ PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
         "verification_available", "previous_failed_attempts", "resolution_round",
     }),
     "estimated": frozenset({"changed_lines_estimate", "test_count_estimate"}),
+}
+
+#: What ties a row to one run of one cycle. `cycle_id` is minted once per
+#: `CycleRecorder`; `stage_seq` numbers its `stage()` calls, so a rerouted
+#: attempt shares the number of the stage it belongs to and a verdict carries the
+#: number of the dispatch it reports on. A later suggestion from another selector
+#: can point at the same pair without the rows it annotates being rewritten.
+CORRELATION_FIELDS = frozenset({"cycle_id", "stage_seq", "record_kind"})
+
+#: What was learned after a routing, by the row that is its source. None of it
+#: is ever written onto a `dispatch` row: those carry the pre-routing signals,
+#: and an outcome beside them would leak into any evaluation that reads them.
+#: A field that was not observed is absent, never a default. Only what the
+#: driver can read off a structured result is listed: `checks_passed` and
+#: `checks_failed` stay accepted fields, but no skill reports check counts, so
+#: promising them here would describe an outcome nothing records.
+OUTCOME_FIELDS: dict[str, frozenset[str]] = {
+    "verdict": frozenset({
+        "status", "findings_total", "findings_blocking", "findings_critical",
+        "findings_high", "findings_medium", "findings_low", "tests_passed",
+    }),
+    "cycle": frozenset({
+        "status", "iterations", "first_review_status", "final_review_status",
+        "first_pass_approved", "resolution_needed", "resolution_rounds",
+        "final_approved", "tests_passed", "fallback_stages", "contract_violations",
+    }),
 }
 
 #: An identifier is a reference, not a sentence, and not a secret.
@@ -776,6 +820,46 @@ class Telemetry:
                     "resolved": row["model_resolved"],
                 })
         return drift
+
+    def cycle_outcome(self, repo_id: str, cycle_id: str) -> dict | None:
+        """One run of a cycle, reassembled from its rows.
+
+        Returns `None` for a cycle this store has no rows for — including any
+        written before schema 3, which carry no `cycle_id`. Otherwise the
+        outcome holds only what the closing row observed, with `closed` saying
+        whether there was one: a run that never closed has an unknown outcome,
+        not an unapproved one. Dispatches and verdicts are listed by
+        `stage_seq`, the verdicts with the fields they reported and nothing
+        filled in.
+        """
+        rows = [row for row in self.rows(repo_id)
+                if row["payload"].get("cycle_id") == cycle_id]
+        if not rows:
+            return None
+
+        def fields(row: dict, names: frozenset) -> dict:
+            merged = {**row["payload"], **{key: row[key] for key in _COLUMNS}}
+            return {key: merged[key] for key in sorted(names)
+                    if merged.get(key) is not None}
+
+        closing_rows = [row for row in rows if row["payload"].get("record_kind") == "cycle"]
+        return {
+            "cycle_id": cycle_id,
+            "task_id": rows[0]["task_id"],
+            "closed": bool(closing_rows),
+            "outcome": fields(closing_rows[-1], OUTCOME_FIELDS["cycle"]) if closing_rows else {},
+            "dispatches": [
+                {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
+                 "profile": row["profile"], "outcome": row["outcome"],
+                 "used_fallback": bool(row["used_fallback"])}
+                for row in rows if row["payload"].get("record_kind") == "dispatch"
+            ],
+            "verdicts": [
+                {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
+                 **fields(row, OUTCOME_FIELDS["verdict"])}
+                for row in rows if row["payload"].get("record_kind") == "verdict"
+            ],
+        }
 
     def summary(self, repo_id: str) -> dict:
         rows = self.rows(repo_id)

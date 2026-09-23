@@ -524,7 +524,8 @@ def run_cycle(
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
-            recorder.record_verdict(role, reported.status, **_findings(reported.payload))
+            recorder.record_verdict(role, reported.status, **_findings(reported.payload),
+                                    **_tests(reported.payload))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
         return reported, None
@@ -605,6 +606,18 @@ def _findings(payload: dict | None) -> dict:
             for severity in SEVERITIES:
                 out[f"findings_{severity}"] = severities.count(severity)
     return out
+
+
+def _tests(payload: dict | None) -> dict:
+    """Whether the stage reported its tests passing. Absent is not passing.
+
+    Only a boolean `tests.passed` counts: anything else is a report nobody can
+    read as a result, and recording it as one would invent a test outcome.
+    """
+    tests = payload.get("tests") if payload else None
+    if isinstance(tests, dict) and isinstance(tests.get("passed"), bool):
+        return {"tests_passed": tests["passed"]}
+    return {}
 
 
 def _why(outcome: StageOutcome) -> str:
