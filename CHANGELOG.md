@@ -7,6 +7,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `run_cycle` refuses an unknown key under `code_cycle` by name, with the
+  nearest known key, before anything is dispatched. Keys consumed by skills —
+  including `calibration`, read only by paired review — are recognised and
+  left uninterpreted. The absence of a `calibration.enabled` flag is documented
+  as a decision: a calibration is entered only by the explicit mode. (#29)
+
 - Explicit fixed and measured routing strategies, with a measured first-pass
   rate feeding the informational cycle-cost estimate when enough telemetry is
   available. Cost estimation is best effort and is recorded as unavailable if

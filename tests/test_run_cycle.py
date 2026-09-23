@@ -854,7 +854,8 @@ code_cycle:
         """Valid YAML, wrong shape. It used to reach a `.get` and traceback."""
         for body in ("code_cycle: not-a-mapping\n",
                      "code_cycle:\n  repository: nope\n",
-                     "code_cycle:\n  profiles: nope\n"):
+                     "code_cycle:\n  profiles: nope\n",
+                     "code_cycle:\n  calibration: nope\n"):
             with self.subTest(body=body):
                 self.write(body)
 
@@ -892,6 +893,117 @@ code_cycle:
         with self.assertRaises(rc.CycleDriverError):
             rc.plan(Args(config=str(self.write("code_cycle: {}")),
                          no_config=True, repo="owner/api"))
+
+
+@unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
+class KnownKeyTests(unittest.TestCase):
+    """Every key under `code_cycle` is known, or the run does not start."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+
+    def write(self, body: str) -> Path:
+        path = self.directory / ".code-cycle.yml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_an_unknown_key_is_refused_by_name(self) -> None:
+        path = self.write("code_cycle:\n  experiments:\n    on: true\n")
+
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.load_config(path)
+
+        self.assertIn("unknown key under code_cycle", str(refused.exception))
+        self.assertIn("'experiments'", str(refused.exception))
+
+    def test_a_typo_of_a_known_key_is_refused_not_routed_on_defaults(self) -> None:
+        """`profles` used to pass through unread and run the built-in profiles."""
+        self.write("""
+code_cycle:
+  profles:
+    cheap_coder:
+      primary: claude:anthropic/claude-sonnet-5 high
+""")
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.plan(Args(cwd=str(self.directory), repo="owner/api"))
+
+        self.assertIn("'profles'", str(refused.exception))
+        self.assertIn("did you mean 'profiles'", str(refused.exception))
+
+    def test_keys_consumed_by_skills_are_recognised(self) -> None:
+        """Legitimate for the skills, and deliberately not read by the driver."""
+        path = self.write("""
+code_cycle:
+  issue_provider: github
+  code_host: github
+  issue:
+    project: ENG
+  verification:
+    cache_ttl: 7d
+  review:
+    trusted_authors: [someone]
+  security_review:
+    always_when:
+      paths: ["auth/**"]
+  orchestration:
+    mode: auto
+  calibration:
+    profiles:
+      reviewer_a: {provider: anthropic, model: claude-sonnet-5, effort: high}
+""")
+        config = rc.load_config(path)
+
+        self.assertEqual(rc.KNOWN_KEYS, frozenset(config["code_cycle"]) | rc.DRIVER_KEYS)
+
+    def test_this_repositorys_own_configuration_loads(self) -> None:
+        config = rc.load_config(ROOT / rc.CONFIG_NAME)
+
+        self.assertIn("calibration", config["code_cycle"])
+
+
+class ExplicitCalibrationTests(unittest.TestCase):
+    """A calibration is entered by `--mode calibration` and by nothing else."""
+
+    def modes(self, body: str, *extra: str) -> list:
+        seen = []
+
+        class Report:
+            status = rc.APPROVED_END
+
+            def explain(self) -> str:
+                return "scripted"
+
+        def run_cycle(*args, **kw):
+            seen.append(kw["mode"])
+            return Report()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".code-cycle.yml"
+            config.write_text(body, encoding="utf-8")
+            original = rc.run_cycle
+            rc.run_cycle = run_cycle
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc.main(["--repo", "owner/api", "--task", "API-7",
+                             "--config", str(config),
+                             "--database", str(Path(temporary) / "t.sqlite"),
+                             *extra])
+            finally:
+                rc.run_cycle = original
+        return seen
+
+    @unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
+    def test_a_calibration_block_does_not_put_production_into_calibration(self) -> None:
+        body = (ROOT / rc.CONFIG_NAME).read_text(encoding="utf-8")
+
+        self.assertEqual([router.RoutingMode.PRODUCTION], self.modes(body))
+
+    @unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
+    def test_only_the_explicit_mode_enters_calibration(self) -> None:
+        self.assertEqual([router.RoutingMode.CALIBRATION],
+                         self.modes("code_cycle: {}\n", "--mode", "calibration"))
 
 
 if __name__ == "__main__":
