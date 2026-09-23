@@ -113,6 +113,8 @@ def main(argv: list[str]) -> int:
 
     status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)
     payload = {"skill": "fake", "status": status}
+    if status == "IMPLEMENTED":
+        payload["change_request_id"] = "4"
     if status == "CHANGES_REQUESTED":
         payload["unresolved_findings"] = [
             {"id": "REV-001", "severity": "high", "status": "open",
