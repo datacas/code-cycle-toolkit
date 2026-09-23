@@ -7,6 +7,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Fixed
 
+- Move Jev shadow to TypeSafe's official API, preserve `typesafe-ai/jev` as a
+  `jev-latest` compatibility alias, record concrete model versions resolved by
+  the rolling alias without treating them as drift, and refuse HTTP redirects
+  that could forward the bearer key to another host. (#51)
 - Correct `cc-stats` weekly sparkline alignment, report period emptiness from
   all telemetry row types, bound long-range sparkline allocation, reject unsafe
   repository selectors, and clarify Markdown versus JSON reply instructions.
@@ -53,9 +57,9 @@ All notable changes to this project are documented here. This project follows
   probabilities and models when reported, correlated by `cycle_id` and
   `stage_seq`. The suggestion never selects a profile, target or dispatch.
   Failures are closed categories and never stop the cycle; disabled mode
-  builds no client and makes no request; the key comes only from
-  `JEV_API_KEY`. `code_cycle.routing` now refuses unknown keys. No new
-  dependency. (#39)
+  builds no client and makes no request; the key uses `TYPESAFE_API_KEY` with
+  `JEV_API_KEY` as a compatibility fallback. `code_cycle.routing` now refuses
+  unknown keys. No new dependency. (#39)
 - Observed cycle outcomes in telemetry (schema 3), on `verdict` and closing
   `cycle` rows kept apart from the pre-routing `dispatch` rows: first-pass
   approval, whether resolution was needed and its rounds, first and final

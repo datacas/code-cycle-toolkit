@@ -32,7 +32,7 @@ def answer(choice="cheap_coder", *, confidence=0.8, probabilities=None,
     if probabilities is not None:
         profile["probabilities"] = probabilities
     return json.dumps({
-        "model": model or "jev-latest",
+        "model": model or "jev-1.13.0",
         "answers": {"profile": profile},
         "usage": {"input_tokens": 10, "output_tokens": 2},
     }).encode()
@@ -84,9 +84,14 @@ class ConfigTests(unittest.TestCase):
                 js.load_jev_config({"code_cycle": {"routing": {"jev": jev}}})
 
         configured = js.load_jev_config({"code_cycle": {"routing": {"jev": {
-            "mode": "shadow", "model": "jev-1.13.0",
+            "mode": "shadow", "model": "jev-1.14.0",
         }}}})
-        self.assertEqual("jev-1.13.0", configured.model)
+        self.assertEqual("jev-1.14.0", configured.model)
+
+        legacy = js.load_jev_config({"code_cycle": {"routing": {"jev": {
+            "mode": "shadow", "model": "typesafe-ai/jev",
+        }}}})
+        self.assertEqual(js.DEFAULT_MODEL, legacy.model)
 
     def test_the_driver_refuses_a_bad_block_before_anything_runs(self) -> None:
         for text, named in (
@@ -166,21 +171,21 @@ class PayloadTests(unittest.TestCase):
 
 
 class ResponseTests(unittest.TestCase):
-    def parse(self, status=200, body=None):
+    def parse(self, status=200, body=None, model="jev-latest"):
         return js.parse_response(status, answer() if body is None else body,
-                                 "jev-latest")
+                                 model)
 
     def test_a_typed_choice_is_read_with_its_evidence(self) -> None:
         suggestion = self.parse(body=answer(
             "deep_coder", confidence=0.7,
             probabilities={"cheap_coder": 0.3, "deep_coder": 0.7},
-            model="jev-latest"))
+            model="jev-1.13.0"))
 
         self.assertEqual("suggested", suggestion.status)
         self.assertEqual("deep_coder", suggestion.profile)
         self.assertEqual(0.7, suggestion.confidence)
         self.assertEqual({"cheap_coder": 0.3, "deep_coder": 0.7}, suggestion.probabilities)
-        self.assertEqual(("jev-latest", "matched"),
+        self.assertEqual(("jev-1.13.0", "matched"),
                          (suggestion.model_resolved, suggestion.model_resolution))
 
     def test_what_the_service_does_not_report_stays_unknown(self) -> None:
@@ -200,10 +205,16 @@ class ResponseTests(unittest.TestCase):
         self.assertIsNone(suggestion.model_resolved)
         self.assertEqual("mismatch_unrecognized", suggestion.model_resolution)
 
-    def test_the_reported_model_version_is_recognized(self) -> None:
-        suggestion = self.parse(body=answer(model="jev-1.13.0"))
+    def test_latest_alias_matches_any_concrete_reported_version(self) -> None:
+        suggestion = self.parse(body=answer(model="jev-1.14.0"))
 
-        self.assertEqual(("jev-1.13.0", "mismatch_known"),
+        self.assertEqual(("jev-1.14.0", "matched"),
+                         (suggestion.model_resolved, suggestion.model_resolution))
+
+    def test_a_concrete_request_reports_version_drift(self) -> None:
+        suggestion = self.parse(body=answer(model="jev-1.14.0"), model="jev-1.13.0")
+
+        self.assertEqual(("jev-1.14.0", "mismatch_known"),
                          (suggestion.model_resolved, suggestion.model_resolution))
 
     def test_failures_become_closed_categories(self) -> None:
@@ -260,17 +271,29 @@ class SuggestTests(unittest.TestCase):
         import urllib.error
 
         def fails(reason):
-            def urlopen(*args, **kwargs):
-                raise urllib.error.URLError(reason)
-            return urlopen
+            opener = unittest.mock.Mock()
+            opener.open.side_effect = urllib.error.URLError(reason)
+            return opener
 
-        with unittest.mock.patch("urllib.request.urlopen", fails(socket.timeout())):
+        with unittest.mock.patch("urllib.request.build_opener",
+                                 return_value=fails(socket.timeout())) as build_opener:
             with self.assertRaises(TimeoutError):
                 js.urllib_transport(js.JEV_URL, b"{}", {}, 1)
-        with unittest.mock.patch("urllib.request.urlopen", fails("refused")):
+            self.assertIsInstance(build_opener.call_args.args[0], js._NoRedirectHandler)
+        with unittest.mock.patch("urllib.request.build_opener",
+                                 return_value=fails("refused")):
             with self.assertRaises(OSError) as raised:
                 js.urllib_transport(js.JEV_URL, b"{}", {}, 1)
         self.assertEqual((), raised.exception.args)
+
+    def test_redirects_are_not_followed_to_another_host(self) -> None:
+        import urllib.request
+
+        request = urllib.request.Request(js.JEV_URL, data=b"{}", method="POST")
+        redirect = js._NoRedirectHandler().redirect_request(
+            request, None, 302, "Found", {}, "https://attacker.example/collect")
+
+        self.assertIsNone(redirect)
 
 
 class RecorderShadowTests(CycleTestCase):
@@ -324,7 +347,7 @@ class RecorderShadowTests(CycleTestCase):
             "jev_status": "suggested", "jev_rule_profile": "deep_coder",
             "jev_suggested_profile": "cheap_coder", "jev_agreement": False,
             "jev_confidence": 0.99, "jev_model_requested": "jev-latest",
-            "jev_model_resolved": "jev-latest", "jev_model_resolution": "matched",
+            "jev_model_resolved": "jev-1.13.0", "jev_model_resolution": "matched",
         }, {key: value for key, value in suggestion["payload"].items()
             if key.startswith("jev_") and key != "jev_duration_ms"})
         self.assertIsNone(suggestion["profile"])
@@ -448,6 +471,11 @@ class TelemetryShapeTests(unittest.TestCase):
             tm.validate_reference("jev_suggested_profile", "reviewer")
         with self.assertRaises(tm.TelemetryError):
             tm.validate_reference("jev_model_requested", "gpt-5.6-luna")
+        self.assertEqual("jev-1.14.0",
+                         tm.validate_reference("jev_model_resolved", "jev-1.14.0"))
+        with self.assertRaises(tm.TelemetryError):
+            tm.validate_reference("jev_model_resolved", "sk-live-secret")
+        self.assertFalse(tm.is_jev_model("typesafe-ai/jev"))
         self.assertEqual(js.STATUSES, tm.FIELD_SPECS["jev_status"][1])
         self.assertEqual(set(js.OPTIONS), set(router.ROLE_CANDIDATES["implement"]))
         self.assertEqual(set(js.OPTIONS), set(router.ROLE_CANDIDATES["resolve"]))

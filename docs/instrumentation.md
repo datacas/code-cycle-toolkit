@@ -604,7 +604,7 @@ code_cycle:
   routing:
     jev:
       mode: shadow            # disabled (default) | shadow
-      model: jev-latest      # jev-latest (default) or jev-1.13.0
+      model: jev-latest      # alias (default) or concrete version, e.g. jev-1.13.0
       timeout_seconds: 3      # above 0, at most 10
 ```
 
@@ -622,6 +622,12 @@ no key is read and no connection is opened. An unknown key under
 other than the accepted identifiers and a timeout out of range are refused by
 `run_cycle.py` before any stage runs.
 
+The old `typesafe-ai/jev` model setting remains accepted and is normalized to
+`jev-latest`. A concrete version such as `jev-1.13.0` may also be configured.
+When `jev-latest` reports a concrete version, telemetry records that version
+and treats it as a match; new versions matching TypeSafe's `jev-x.y.z` form do
+not require a toolkit update.
+
 **What is sent.** One `POST https://api.typesafe.ai/v1/systemone` per
 eligible stage, with the model, a fixed `choice` question between `cheap_coder`
 and `deep_coder` whose wording is the adapter's own, and a `state` built only
@@ -632,7 +638,8 @@ cycle id or outcome is sent. The endpoint is not configurable. The key is read
 from `TYPESAFE_API_KEY` at the moment of the call, falling back to
 `JEV_API_KEY` for compatibility, and placed only in the `Authorization`
 header. A `code-cycle-toolkit` User-Agent accompanies the request. The key is
-never written to `.code-cycle.yml`, a row, or a log.
+never written to `.code-cycle.yml`, a row, or a log. Redirects are not followed,
+so the bearer key cannot be forwarded to another host.
 
 **Failure is a category.** Every outcome is one `jev_status` token:
 `suggested`, `unavailable` (no key, connection failure or HTTP 5xx), `timeout`,
