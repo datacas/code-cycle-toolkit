@@ -24,7 +24,8 @@ exception text is never kept, so nothing the service says can reach the store.
 
 **Disabled means absent.** With the mode unset or `disabled`, no `JevShadow`
 is built, no key is read and no socket is opened. In `shadow` without
-`JEV_API_KEY`, the stage records `unavailable` and the cycle carries on.
+`TYPESAFE_API_KEY` or the legacy `JEV_API_KEY`, the stage records `unavailable`
+and the cycle carries on.
 
 The key is read from the environment at the moment of the call, placed in one
 request header, and held nowhere else.
@@ -47,9 +48,11 @@ from telemetry import JEV_MODELS, PRE_ROUTING_SIGNALS
 
 #: The only host the adapter talks to. Not configurable: a configurable
 #: endpoint is a place to send pre-routing data that nobody reviewed.
-JEV_URL = "https://www.jevai.org/api/v1/decisions"
-API_KEY_ENV = "JEV_API_KEY"
-DEFAULT_MODEL = "typesafe-ai/jev"
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+API_KEY_ENV = "TYPESAFE_API_KEY"
+LEGACY_API_KEY_ENV = "JEV_API_KEY"
+USER_AGENT = "code-cycle-toolkit"
+DEFAULT_MODEL = "jev-latest"
 DEFAULT_TIMEOUT_SECONDS = 3.0
 MAX_TIMEOUT_SECONDS = 10.0
 #: A decision is a few hundred bytes; anything much larger is not one.
@@ -234,12 +237,12 @@ def parse_response(status: int, body: bytes, model: str) -> Suggestion:
         envelope = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return Suggestion("invalid_response")
-    if not isinstance(envelope, dict) or envelope.get("code") != 0:
+    if not isinstance(envelope, dict):
         return Suggestion("invalid_response")
-    data = envelope.get("data")
-    answers = data.get("answers") if isinstance(data, dict) else None
+    answers = envelope.get("answers")
     answer = answers.get(QUESTION) if isinstance(answers, dict) else None
-    if not isinstance(answer, dict) or answer.get("choice") not in OPTIONS:
+    if (not isinstance(answer, dict) or answer.get("type") != "choice"
+            or answer.get("choice") not in OPTIONS):
         return Suggestion("invalid_response")
 
     confidence = answer.get("confidence")
@@ -258,7 +261,7 @@ def parse_response(status: int, body: bytes, model: str) -> Suggestion:
         probabilities = checked
 
     # Only a model the service names is recorded, and only a known one by name.
-    reported = data.get("model")
+    reported = envelope.get("model")
     if reported is None:
         resolved, resolution = None, "unreported"
     elif reported == model:
@@ -291,11 +294,12 @@ class JevShadow:
         return role in SHADOW_ROLES
 
     def suggest(self, role: str, signals: Mapping) -> Suggestion:
-        key = self._environ.get(API_KEY_ENV)
+        key = self._environ.get(API_KEY_ENV) or self._environ.get(LEGACY_API_KEY_ENV)
         if not key:
             return Suggestion("unavailable")
         body = json.dumps(build_request(self.config.model, role, signals)).encode("utf-8")
         headers = {"Content-Type": "application/json",
+                   "User-Agent": USER_AGENT,
                    "Authorization": f"Bearer {key}"}
         started = self._clock()
         try:

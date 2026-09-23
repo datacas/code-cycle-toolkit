@@ -57,9 +57,9 @@ DATABASE_NAME = "telemetry.sqlite"
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
 
-#: The Jev model identifiers a shadow suggestion may request or report. Closed,
-#: like every other token: a model name and a credential share a shape.
-JEV_MODELS = frozenset({"typesafe-ai/jev"})
+#: The TypeSafe model aliases/versions this adapter may request or report. Keep
+#: this closed: model names and credentials can share a shape.
+JEV_MODELS = frozenset({"jev-latest", "jev-1.13.0"})
 
 #: The profiles a shadow selector compares, which are the `implement` and
 #: `resolve` candidates in `router.ROLE_CANDIDATES`.

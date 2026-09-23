@@ -25,16 +25,17 @@ SHADOW = js.JevConfig(js.JevMode.SHADOW)
 
 
 def answer(choice="cheap_coder", *, confidence=0.8, probabilities=None,
-           model=None, code=0) -> bytes:
-    profile = {"choice": choice}
+           model=None) -> bytes:
+    profile = {"type": "choice", "choice": choice}
     if confidence is not None:
         profile["confidence"] = confidence
     if probabilities is not None:
         profile["probabilities"] = probabilities
-    data = {"answers": {"profile": profile}}
-    if model is not None:
-        data["model"] = model
-    return json.dumps({"code": code, "message": "ok", "data": data}).encode()
+    return json.dumps({
+        "model": model or "jev-latest",
+        "answers": {"profile": profile},
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+    }).encode()
 
 
 class FakeTransport:
@@ -82,6 +83,11 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(jev=jev), self.assertRaises(js.JevConfigError):
                 js.load_jev_config({"code_cycle": {"routing": {"jev": jev}}})
 
+        configured = js.load_jev_config({"code_cycle": {"routing": {"jev": {
+            "mode": "shadow", "model": "jev-1.13.0",
+        }}}})
+        self.assertEqual("jev-1.13.0", configured.model)
+
     def test_the_driver_refuses_a_bad_block_before_anything_runs(self) -> None:
         for text, named in (
             ("code_cycle:\n  routing:\n    jev:\n      mod: shadow\n", "mod"),
@@ -128,7 +134,7 @@ class PayloadTests(unittest.TestCase):
         shadow(transport).suggest("resolve", {"verifiability": "free text"})
 
         request = transport.calls[0]["body"]
-        self.assertEqual("typesafe-ai/jev", request["model"])
+        self.assertEqual("jev-latest", request["model"])
         self.assertEqual({"role": "resolve"}, request["state"])
         question = request["questions"]["profile"]
         self.assertEqual("choice", question["type"])
@@ -142,30 +148,45 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(js.JEV_URL, call["url"])
         self.assertTrue(call["url"].startswith("https://"))
         self.assertEqual(f"Bearer {KEY}", call["headers"]["Authorization"])
+        self.assertEqual(js.USER_AGENT, call["headers"]["User-Agent"])
         self.assertNotIn(KEY.encode(), call["raw"])
         self.assertEqual(3.0, call["timeout"])
+
+    def test_typesafe_key_wins_and_legacy_key_is_a_fallback(self) -> None:
+        for environ, expected in (
+            ({js.API_KEY_ENV: "typesafe-key", js.LEGACY_API_KEY_ENV: "legacy-key"},
+             "Bearer typesafe-key"),
+            ({js.LEGACY_API_KEY_ENV: "legacy-key"}, "Bearer legacy-key"),
+        ):
+            with self.subTest(expected=expected):
+                transport = FakeTransport()
+                js.JevShadow(SHADOW, transport=transport, environ=environ).suggest(
+                    "implement", {"difficulty": 2})
+                self.assertEqual(expected, transport.calls[0]["headers"]["Authorization"])
 
 
 class ResponseTests(unittest.TestCase):
     def parse(self, status=200, body=None):
         return js.parse_response(status, answer() if body is None else body,
-                                 "typesafe-ai/jev")
+                                 "jev-latest")
 
     def test_a_typed_choice_is_read_with_its_evidence(self) -> None:
         suggestion = self.parse(body=answer(
             "deep_coder", confidence=0.7,
             probabilities={"cheap_coder": 0.3, "deep_coder": 0.7},
-            model="typesafe-ai/jev"))
+            model="jev-latest"))
 
         self.assertEqual("suggested", suggestion.status)
         self.assertEqual("deep_coder", suggestion.profile)
         self.assertEqual(0.7, suggestion.confidence)
         self.assertEqual({"cheap_coder": 0.3, "deep_coder": 0.7}, suggestion.probabilities)
-        self.assertEqual(("typesafe-ai/jev", "matched"),
+        self.assertEqual(("jev-latest", "matched"),
                          (suggestion.model_resolved, suggestion.model_resolution))
 
     def test_what_the_service_does_not_report_stays_unknown(self) -> None:
-        suggestion = self.parse(body=answer(confidence=None))
+        body = json.loads(answer(confidence=None))
+        body.pop("model")
+        suggestion = self.parse(body=json.dumps(body).encode())
 
         self.assertEqual("suggested", suggestion.status)
         self.assertIsNone(suggestion.confidence)
@@ -179,27 +200,37 @@ class ResponseTests(unittest.TestCase):
         self.assertIsNone(suggestion.model_resolved)
         self.assertEqual("mismatch_unrecognized", suggestion.model_resolution)
 
+    def test_the_reported_model_version_is_recognized(self) -> None:
+        suggestion = self.parse(body=answer(model="jev-1.13.0"))
+
+        self.assertEqual(("jev-1.13.0", "mismatch_known"),
+                         (suggestion.model_resolved, suggestion.model_resolution))
+
     def test_failures_become_closed_categories(self) -> None:
-        cases = {
-            "rate_limited": (429, b"slow down"),
-            "unavailable": (503, b"<html>maintenance</html>"),
-            "http_error": (401, b"bad key"),
-        }
-        for expected, (status, body) in cases.items():
+        cases = (
+            ("rate_limited", 429, b"slow down"),
+            ("unavailable", 503, b"<html>maintenance</html>"),
+            ("http_error", 401, b"bad key"),
+            ("http_error", 403, b"forbidden"),
+        )
+        for expected, status, body in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(expected, self.parse(status, body).status)
 
     def test_anything_but_a_valid_choice_is_an_invalid_response(self) -> None:
         for body in (
             b"not json", b"\xff\xfe", b"[]",
-            answer(code=1),
             answer("senior_reviewer"),
             answer("Use the cheap coder, it is fine"),
             answer(confidence=1.5),
             answer(confidence="high"),
             answer(probabilities={"cheap_coder": 0.4, "reviewer": 0.6}),
             answer(probabilities={"cheap_coder": 2}),
-            json.dumps({"code": 0, "data": {"decision": "cheap_coder"}}).encode(),
+            json.dumps({"model": "jev-latest", "answers": {
+                "profile": {"type": "noul", "noul": 0.7}},
+                "usage": {"input_tokens": 1, "output_tokens": 1}}).encode(),
+            json.dumps({"code": 0, "data": {"answers": {
+                "profile": {"choice": "cheap_coder"}}}}).encode(),
             b" " * (js.MAX_RESPONSE_BYTES + 1),
         ):
             with self.subTest(body=body[:40]):
@@ -292,8 +323,8 @@ class RecorderShadowTests(CycleTestCase):
         self.assertEqual({
             "jev_status": "suggested", "jev_rule_profile": "deep_coder",
             "jev_suggested_profile": "cheap_coder", "jev_agreement": False,
-            "jev_confidence": 0.99, "jev_model_requested": "typesafe-ai/jev",
-            "jev_model_resolution": "unreported",
+            "jev_confidence": 0.99, "jev_model_requested": "jev-latest",
+            "jev_model_resolved": "jev-latest", "jev_model_resolution": "matched",
         }, {key: value for key, value in suggestion["payload"].items()
             if key.startswith("jev_") and key != "jev_duration_ms"})
         self.assertIsNone(suggestion["profile"])
@@ -320,7 +351,7 @@ class RecorderShadowTests(CycleTestCase):
     def test_the_shadow_row_holds_no_signal_and_no_outcome(self) -> None:
         recorder = self.run_stages(FakeTransport(body=answer(
             "deep_coder", probabilities={"cheap_coder": 0.2, "deep_coder": 0.8},
-            model="typesafe-ai/jev")))
+            model="jev-latest")))
 
         allowed = tm.SHADOW_FIELDS | tm.CORRELATION_FIELDS | {
             "routing_strategy", "local_only"}
