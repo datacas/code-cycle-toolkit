@@ -91,7 +91,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.mode` | `disabled` · `shadow` | `disabled` | `run_cycle.py` |
 | `routing.jev.model` | `jev-latest` · `jev-x.y.z` (`typesafe-ai/jev` → `jev-latest`) | `jev-latest` | `run_cycle.py` |
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
-| `review.trusted_authors` | list of provider logins | empty (recovery blocks) | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
+| `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
 | `security_review.always_when.files` | filename glob list | built-in defaults | same |
 | `security_review.always_when.labels` | label terms, matched by meaning | built-in defaults | same |
@@ -118,7 +118,7 @@ Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [
 
 ### Review
 
-`review.trusted_authors` controls which comments can create or advance recovered findings. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
+`review.trusted_authors` controls which comments can create or advance recovered findings. When it is absent, `cc-provider-bootstrap` adds the authenticated code-host login to the configuration it proposes, and writes it only on confirmation. An existing list is never changed. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
 
 ### Security review rule
 

@@ -139,7 +139,7 @@ The toolkit uses tooling you already authenticated and never stores credentials.
 
 ## Configure (optional)
 
-Nothing is required. When values are missing, `cc-provider-bootstrap` infers what is unambiguous from the `origin` remote. It asks you one grouped question for the rest and offers to save the answer to `.code-cycle.yml`. It shows you the file before writing it.
+Nothing is required. When values are missing, `cc-provider-bootstrap` infers what is unambiguous from the `origin` remote. It asks you one grouped question for the rest, then shows you the proposed `.code-cycle.yml` and writes it only if you confirm. If you decline, the values are used for this run only.
 
 A typical starting file:
 
@@ -156,7 +156,7 @@ code_cycle:
 ```
 
 > [!TIP]
-> Add `review.trusted_authors` from the start. A later review round can only recover the findings from earlier rounds when their comments were published by a trusted author. Without it, recovery stops with `BLOCKED`. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
+> Keep `review.trusted_authors` in the file. When it is missing, the bootstrap proposes the login your code-host tooling is authenticated as (on GitHub, `gh api user --jq .login`), since the stages publish with that identity. Add any other reviewer or bot whose comments should count. A later review round can only recover the findings from earlier rounds when their comments were published by a trusted author. Without it, recovery stops with `BLOCKED`. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
 
 Every other key (models, routing, security rules, orchestration mode) is covered in [Configuration](configuration.md).
 

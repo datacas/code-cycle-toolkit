@@ -5,6 +5,17 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- `cc-provider-bootstrap` now proposes `review.trusted_authors` when it is
+  absent, set to the login the code-host tooling is authenticated as (the
+  identity the cycle's stages publish with). Before, no skill proposed it, so
+  a first cycle could open and review a PR and then stop with `BLOCKED` at the
+  first round that recovered findings. The value is written only on
+  confirmation, a login is never guessed, and an existing list is never
+  changed. The README quick start no longer implies the key is set up without
+  asking. (#67)
+
 ## [0.3.0] - 2026-09-24
 
 ### Added
