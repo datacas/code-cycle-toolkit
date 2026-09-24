@@ -132,7 +132,7 @@ Use cc-orchestrator for issue 123. Stop at READY_FOR_MANUAL_MERGE.
 | [`run_cycle.py`](docs/workflows.md#runtime-driver-run_cyclepy) | a shell command | recorded, routed cycles across executors | runtime, Codex and/or Claude CLIs |
 
 Read-only roles can use Codex's enforced sandbox or Claude's isolated,
-verified review worktree. See [workspace policy](docs/role-workspace-policy.md)
+verified review checkout. See [workspace policy](docs/role-workspace-policy.md)
 for the branch protection contract.
 
 ## Skills

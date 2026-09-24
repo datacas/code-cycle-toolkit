@@ -1038,8 +1038,33 @@ class PermissionTests(unittest.TestCase):
         self._git(repo, "commit", "-qm", "initial")
         return repo
 
-    def test_claude_review_uses_a_detached_disposable_worktree(self) -> None:
+    def test_remote_ref_errors_do_not_expose_embedded_credentials(self) -> None:
+        remote_url = "https://user:secret@example.invalid/repo.git"
+        with patch.object(
+            ex, "_git_output",
+            side_effect=[
+                "origin", remote_url, remote_url,
+                ex.ExecutorError(f"authentication failed for {remote_url}"),
+            ],
+        ):
+            with self.assertRaises(ex.ExecutorError) as raised:
+                ex._remote_ref_fingerprint("/repo")
+
+        self.assertIn("could not inspect configured remote refs", str(raised.exception))
+        self.assertNotIn("secret", str(raised.exception))
+
+    def test_git_verification_commands_are_bounded_and_noninteractive(self) -> None:
+        with patch.object(ex.subprocess, "run", return_value=completed("head" + chr(10))) as run:
+            self.assertEqual("head", ex._git_output("/repo", "rev-parse", "HEAD"))
+
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(10, run.call_args.kwargs["timeout"])
+
+    def test_claude_review_uses_an_independent_disposable_clone(self) -> None:
         repo = self._git_repo()
+        (repo / ".git" / "info" / "exclude").write_text(".cache/", encoding="utf-8")
+        (repo / ".cache").mkdir()
+        (repo / ".cache" / "artifact").write_text("ignored", encoding="utf-8")
         reviewed_head = self._git(repo, "rev-parse", "HEAD")
         seen = {}
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
@@ -1049,10 +1074,15 @@ class PermissionTests(unittest.TestCase):
             self.assertNotEqual(str(repo), cwd)
             self.assertFalse(ex._paths_overlap(cwd, str(repo)))
             self.assertEqual(reviewed_head, self._git(cwd, "rev-parse", "HEAD"))
+            self.assertTrue((Path(cwd) / ".git").is_dir())
+            self.assertFalse((Path(cwd) / ".git" / "objects" / "info" / "alternates").exists())
+            self.assertEqual("", self._git(cwd, "remote"))
+            self._git(cwd, "branch", "reviewer-local", reviewed_head)
+            self._git(cwd, "config", "cycle.shared-test", "changed")
             self.assertIn("Do not modify files, commit, or push", argv[argv.index("-p") + 1])
             (Path(cwd) / "reviewer-created.txt").write_text("discard me", encoding="utf-8")
             self._git(cwd, "add", "reviewer-created.txt")
-            self._git(cwd, "commit", "-qm", "agent edit in isolated worktree")
+            self._git(cwd, "commit", "-qm", "agent edit in isolated clone")
             return completed("{}")
 
         result = ex.dispatch(
@@ -1069,6 +1099,12 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("warning", result.detail)
         self.assertFalse(Path(seen["cwd"]).exists())
         self.assertFalse((repo / "reviewer-created.txt").exists())
+        self.assertEqual("", self._git(repo, "branch", "--list", "reviewer-local"))
+        shared_config = subprocess.run(
+            ["git", "-C", str(repo), "config", "--local", "--get", "cycle.shared-test"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(0, shared_config.returncode)
         self.assertIn("--disallowedTools", seen["argv"])
         self.assertNotIn("--permission-mode", seen["argv"])
 
@@ -1093,6 +1129,70 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
         self.assertIn("implementer branch, HEAD", result.detail)
         self.assertNotEqual(before, self._git(repo, "rev-parse", "HEAD"))
+    def test_claude_review_rejects_a_dirty_implementer_checkout(self) -> None:
+        repo = self._git_repo()
+        (repo / "tracked.txt").write_text("dirty before review\\n", encoding="utf-8")
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+            runner=lambda *args, **kwargs: self.fail("a dirty checkout must not be reviewed"),
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("review_workspace_isolation", result.missing_capability)
+        self.assertNotIn("read_only_mode", result.artifacts)
+
+    def test_claude_review_detects_a_remote_branch_push(self) -> None:
+        repo = self._git_repo()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        remote = Path(temporary.name) / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self._git(repo, "remote", "add", "origin", str(remote))
+        self._git(repo, "push", "origin", "HEAD")
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        def runner(argv, timeout=None, cwd=None):
+            (Path(cwd) / "reviewer.txt").write_text("review result\\n", encoding="utf-8")
+            self._git(cwd, "add", "reviewer.txt")
+            self._git(cwd, "commit", "-qm", "reviewer change")
+            self._git(cwd, "push", str(remote), "HEAD:refs/heads/review")
+            return completed("{}")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+            runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertIn("configured remote refs changed", result.detail)
+        self.assertNotIn("read_only_mode", result.artifacts)
+        self.assertNotEqual(
+            result.artifacts["remote_refs_fingerprint_before"],
+            result.artifacts["remote_refs_fingerprint_after"],
+        )
+        self.assertIn("reviewer.txt", self._git(remote, "ls-tree", "-r", "--name-only", "refs/heads/review"))
+
+    def test_failed_isolation_does_not_claim_verified_mode(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=temporary.name,
+            runner=lambda *args, **kwargs: self.fail("isolation setup must fail first"),
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertNotIn("read_only_mode", result.artifacts)
+
 
 class PublicationPreflightTests(unittest.TestCase):
     def test_github_write_permission_uses_repository_permission_write_value(self) -> None:

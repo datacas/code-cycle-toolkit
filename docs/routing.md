@@ -94,10 +94,10 @@ Each role has a fixed write permission. Only an executor that can **enforce** it
 | Role | Policy | Eligible executors |
 |---|---|---|
 | `implement`, `resolve` | `workspace_write` | Codex (`-s workspace-write`), Claude (`acceptEdits`), Orca |
-| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (isolated and verified worktree), Orca (explicit review workspace) |
+| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (independent isolated clone, verified), Orca (explicit review workspace) |
 | `verify`, `run` | `disposable` | Codex, confined to a disposable workspace |
 
-Codex records `read_only_mode = enforced`: its sandbox prevents workspace writes. Claude records `read_only_mode = isolated_verified`: the harness checks out the reviewed HEAD in a detached disposable worktree, verifies that the implementer's HEAD and working-tree fingerprint did not change, and discards local edits. A Claude reviewer cannot write to the branch. Reviews may still be configured without a fallback; that is a profile choice. Publication access remains role-specific, and a reviewer may publish only the comment its role permits. Details are in [Role workspace policy](role-workspace-policy.md).
+Codex records `read_only_mode = enforced`: its sandbox prevents workspace writes. Claude records `read_only_mode = isolated_verified`: the harness creates an independent detached clone with its own Git object store at the reviewed HEAD, removes its remotes, and discards local edits. The harness requires a clean implementer checkout and checks its HEAD, working-tree fingerprint, and configured remote refs before and after review; a detected change fails the stage as a contract violation. Publication access remains role-specific, and a reviewer may publish only the comment its role permits. Details are in [Role workspace policy](role-workspace-policy.md).
 
 ## Publication boundary
 

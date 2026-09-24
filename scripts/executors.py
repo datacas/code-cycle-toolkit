@@ -709,9 +709,10 @@ class CodexAdapter(NativeAdapter):
         return False, f"no credential at {auth}"
 
 
-def _git_output(cwd: str, *args: str) -> str:
+def _git_output(cwd: str, *args: str, timeout: int = 10) -> str:
     completed = subprocess.run(
         ["git", "-C", cwd, *args], capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=timeout,
     )
     if completed.returncode:
         detail = (completed.stderr or completed.stdout or "git command failed").strip()
@@ -719,8 +720,28 @@ def _git_output(cwd: str, *args: str) -> str:
     return completed.stdout.rstrip("\n")
 
 
+def _remote_ref_fingerprint(root: str) -> str:
+    """Fingerprint every advertised ref at each configured fetch/push URL."""
+    snapshot = []
+    for remote in _git_output(root, "remote").splitlines():
+        urls = set()
+        for args in (("remote", "get-url", "--all", remote),
+                     ("remote", "get-url", "--push", "--all", remote)):
+            urls.update(filter(None, _git_output(root, *args).splitlines()))
+        for url in sorted(urls):
+            try:
+                refs = _git_output(root, "ls-remote", "--refs", url)
+            except Exception as exc:
+                raise ExecutorError(
+                    f"could not inspect configured remote refs ({type(exc).__name__})"
+                ) from None
+            snapshot.extend((remote, url, line) for line in refs.splitlines())
+    encoded = json.dumps(sorted(snapshot), separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
-    """Run a reviewer in a detached worktree and verify its source checkout."""
+    """Run a reviewer in an independent detached clone and verify its source checkout."""
     if not isinstance(cwd, str) or not cwd:
         return adapter._blocked(
             target, "review_workspace_isolation",
@@ -728,60 +749,66 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
         )
     worktree = None
     root = None
-    before_head = before_status = before_branch = None
+    before_head = before_status = before_branch = before_remote_refs = None
     try:
         root = _git_output(cwd, "rev-parse", "--show-toplevel")
         before_head = _git_output(root, "rev-parse", "HEAD")
         before_branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
         before_status = _git_output(
-            root, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+            root, "status", "--porcelain", "--untracked-files=all",
         )
+        if before_status:
+            raise ExecutorError(
+                "the implementer checkout must be clean before an isolated review"
+            )
+        before_remote_refs = _remote_ref_fingerprint(root)
         worktree = tempfile.mkdtemp(prefix="code-cycle-review-")
         Path(worktree).rmdir()
         if _paths_overlap(worktree, root):
-            raise ExecutorError("the disposable review worktree overlaps the implementer checkout")
-        _git_output(root, "worktree", "add", "--detach", worktree, before_head)
+            raise ExecutorError("the disposable review workspace overlaps the implementer checkout")
+        _git_output(
+            root, "clone", "--no-hardlinks", "--no-checkout", root, worktree,
+            timeout=300,
+        )
+        for remote in _git_output(worktree, "remote").splitlines():
+            _git_output(worktree, "remote", "remove", remote)
+        _git_output(worktree, "checkout", "--detach", before_head)
         review_head = _git_output(worktree, "rev-parse", "HEAD")
         if review_head != before_head:
-            raise ExecutorError("the disposable worktree is not at the reviewed HEAD")
+            raise ExecutorError("the disposable clone is not at the reviewed HEAD")
     except Exception as exc:
-        if worktree and root:
-            subprocess.run(
-                ["git", "-C", root, "worktree", "remove", "--force", worktree],
-                capture_output=True, text=True,
-            )
-            subprocess.run(["git", "-C", root, "worktree", "prune"],
-                           capture_output=True, text=True)
         if worktree:
             shutil.rmtree(worktree, ignore_errors=True)
         return adapter._blocked(
             target, "review_workspace_isolation",
-            f"could not prepare an isolated review worktree: {exc}",
+            f"could not prepare an isolated review workspace: {exc}",
         )
 
     prompt = (
         f"{task}\n\nREAD-ONLY HARNESS CONTRACT: Do not modify files, commit, or push. "
-        "This stage runs in a disposable detached worktree; any local edits will "
+        "This stage runs in an independent disposable clone; any local edits will "
         "be discarded. Any change to the implementer's branch or working tree "
         "fails this stage."
     )
     result = None
     workspace_changed = False
-    source_error = "the implementer branch, HEAD, or working-tree fingerprint changed during review"
+    source_error = "the implementer branch, HEAD, working tree, or configured remote refs changed during review"
     cleanup_warning = None
-    after_head = after_status_fingerprint = None
+    after_head = after_status_fingerprint = after_remote_refs = None
     try:
         result = dispatch_call(prompt, worktree)
         try:
             after_head = _git_output(root, "rev-parse", "HEAD")
             after_branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
             after_status = _git_output(
-                root, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+                root, "status", "--porcelain", "--untracked-files=all",
             )
             after_status_fingerprint = hashlib.sha256(after_status.encode("utf-8")).hexdigest()
+            after_remote_refs = _remote_ref_fingerprint(root)
             source_changed = (
                 after_head != before_head or after_branch != before_branch
                 or after_status != before_status
+                or after_remote_refs != before_remote_refs
             )
         except Exception as exc:
             source_changed = True
@@ -789,23 +816,16 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
         try:
             workspace_head = _git_output(worktree, "rev-parse", "HEAD")
             workspace_status = _git_output(
-                worktree, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+                worktree, "status", "--porcelain", "--untracked-files=all",
             )
             workspace_changed = workspace_head != review_head or bool(workspace_status)
         except Exception:
             workspace_changed = True
     finally:
         try:
-            removed = subprocess.run(
-                ["git", "-C", root, "worktree", "remove", "--force", worktree],
-                capture_output=True, text=True,
-            )
-            if removed.returncode:
-                shutil.rmtree(worktree, ignore_errors=True)
-                subprocess.run(["git", "-C", root, "worktree", "prune"],
-                               capture_output=True, text=True)
-                if Path(worktree).exists():
-                    cleanup_warning = "the disposable review workspace could not be removed"
+            shutil.rmtree(worktree)
+            if Path(worktree).exists():
+                cleanup_warning = "the disposable review workspace could not be removed"
         except Exception as exc:
             shutil.rmtree(worktree, ignore_errors=True)
             cleanup_warning = f"could not remove the disposable review workspace: {exc}"
@@ -821,13 +841,17 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
     artifacts["implementer_status_fingerprint_before"] = hashlib.sha256(
         before_status.encode("utf-8"),
     ).hexdigest()
+    artifacts["remote_refs_fingerprint_before"] = before_remote_refs
     if after_head is not None:
         artifacts["implementer_head_after"] = after_head
     if after_status_fingerprint is not None:
         artifacts["implementer_status_fingerprint_after"] = after_status_fingerprint
+    if after_remote_refs is not None:
+        artifacts["remote_refs_fingerprint_after"] = after_remote_refs
     if warnings:
         artifacts["warnings"] = warnings
     if source_changed:
+        artifacts.pop("read_only_mode", None)
         return replace(
             result, outcome=DispatchOutcome.CONTRACT_VIOLATION,
             missing_capability=None,
@@ -1330,10 +1354,8 @@ def dispatch(
     elapsed = max(0, round((clock() - started) * 1000))
     if workspace_policy is WorkspacePolicy.READ_ONLY:
         artifacts = dict(result.artifacts)
-        artifacts.setdefault(
-            "read_only_mode",
-            "enforced" if adapter.enforces_read_only else "isolated_verified",
-        )
+        if adapter.enforces_read_only:
+            artifacts.setdefault("read_only_mode", "enforced")
         result = replace(result, artifacts=artifacts)
     # From what the adapter is, not from what this result remembered to say.
     asynchronous = (result.asynchronous
