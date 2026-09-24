@@ -269,7 +269,8 @@ class DispatchResult:
 
 
 def _run(argv: list[str], timeout: int = 30, cwd: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                          stdin=subprocess.DEVNULL)
 
 
 def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
@@ -277,7 +278,8 @@ def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
     directory = cwd or os.getcwd()
 
     def run(argv: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=directory)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=directory,
+                              stdin=subprocess.DEVNULL)
 
     try:
         root = run(["git", "rev-parse", "--show-toplevel"])
