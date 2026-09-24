@@ -1069,7 +1069,7 @@ class PermissionTests(unittest.TestCase):
         seen = {}
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"], seen["cwd"] = argv, cwd
             self.assertNotEqual(str(repo), cwd)
             self.assertFalse(ex._paths_overlap(cwd, str(repo)))
@@ -1115,7 +1115,7 @@ class PermissionTests(unittest.TestCase):
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
         before = self._git(repo, "rev-parse", "HEAD")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             (repo / "branch-change.txt").write_text("changed", encoding="utf-8")
             self._git(repo, "add", "branch-change.txt")
             self._git(repo, "commit", "-qm", "unexpected branch change")
@@ -1157,7 +1157,7 @@ class PermissionTests(unittest.TestCase):
         self._git(repo, "push", "origin", "HEAD")
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             (Path(cwd) / "reviewer.txt").write_text("review result\\n", encoding="utf-8")
             self._git(cwd, "add", "reviewer.txt")
             self._git(cwd, "config", "user.name", "Reviewer Test")
@@ -1196,6 +1196,133 @@ class PermissionTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertNotIn("read_only_mode", result.artifacts)
+
+    def test_claude_review_runs_without_github_or_git_credentials(self) -> None:
+        repo = self._git_repo()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        real_home = Path(temporary.name) / "real-home"
+        (real_home / ".claude").mkdir(parents=True)
+        (real_home / ".claude" / "credentials").write_text("claude login", encoding="utf-8")
+        (real_home / ".claude.json").write_text("{}", encoding="utf-8")
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None, env=None):
+            seen["env"] = env
+            home = Path(env["HOME"])
+            self.assertFalse(ex._paths_overlap(str(home), str(real_home)))
+            self.assertEqual(
+                "claude login",
+                (home / ".claude" / "credentials").read_text(encoding="utf-8"),
+            )
+            self.assertEqual([], list(Path(env["GH_CONFIG_DIR"]).iterdir()))
+            self.assertEqual("", Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8"))
+            configured = subprocess.run(
+                ["git", "-C", cwd, "config", "--global", "--list"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual("", configured.stdout)
+            self.assertIn("no GitHub or Git credentials", argv[argv.index("-p") + 1])
+            return completed("{}")
+
+        environment = {
+            "GH_TOKEN": "gh-secret", "GITHUB_TOKEN": "github-secret",
+            "SSH_AUTH_SOCK": "/agent.sock", "GIT_ASKPASS": "/askpass",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "store", "BITBUCKET_APP_PASSWORD": "bb-secret",
+            "PLANE_API_KEY": "plane-secret", "ANTHROPIC_API_KEY": "model-key",
+        }
+        with patch.dict(ex.os.environ, environment), \
+             patch.object(ex.Path, "home", return_value=real_home):
+            ex.os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            result = ex.dispatch(
+                router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+                "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+                runner=runner,
+                probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("isolated_verified", result.artifacts["read_only_mode"])
+        env = seen["env"]
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "GIT_ASKPASS",
+                     "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+                     "BITBUCKET_APP_PASSWORD", "PLANE_API_KEY"):
+            self.assertNotIn(name, env)
+        self.assertEqual("model-key", env["ANTHROPIC_API_KEY"])
+        self.assertEqual("1", env["GIT_CONFIG_NOSYSTEM"])
+        self.assertEqual("0", env["GIT_TERMINAL_PROMPT"])
+        self.assertIn("IdentityAgent=none", env["GIT_SSH_COMMAND"])
+        # The temporary home and its links are gone; what they linked to is not.
+        self.assertFalse(Path(env["HOME"]).exists())
+        self.assertEqual(
+            "claude login",
+            (real_home / ".claude" / "credentials").read_text(encoding="utf-8"),
+        )
+
+    def test_claude_is_not_offered_for_a_publishing_read_only_stage(self) -> None:
+        repo = self._git_repo()
+        registry = ex.Registry([ex.ClaudeAdapter()])
+
+        self.assertEqual(frozenset(), registry.compatible_executors(
+            ex.WorkspacePolicy.READ_ONLY, cwd=str(repo), publishes=True,
+            publication_permissions=("comment",),
+        ))
+        self.assertEqual(frozenset({"claude"}), registry.compatible_executors(
+            ex.WorkspacePolicy.READ_ONLY, cwd=str(repo), publishes=False,
+        ))
+
+    def test_a_publishing_claude_review_is_blocked_before_it_runs(self) -> None:
+        repo = self._git_repo()
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        with patch.object(ex, "_publication_preflight", return_value=(True, "passed")):
+            result = ex.dispatch(
+                router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+                "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+                publishes=True, publication_permissions=("comment",),
+                runner=lambda *args, **kwargs: self.fail("a publishing review must not run"),
+                probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+            )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("harness_publication", result.missing_capability)
+        self.assertIn("without GitHub or Git credentials", result.detail)
+        self.assertNotIn("read_only_mode", result.artifacts)
+
+    def test_a_review_clone_that_cannot_be_removed_fails_without_verified_mode(self) -> None:
+        repo = self._git_repo()
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        seen = {}
+        real_rmtree = ex.shutil.rmtree
+
+        def runner(argv, timeout=None, cwd=None, env=None):
+            seen["cwd"] = cwd
+            (Path(cwd) / "reviewer-created.txt").write_text("left", encoding="utf-8")
+            return completed("{}")
+
+        def locked_rmtree(path, *args, **kwargs):
+            if str(path) == seen.get("cwd"):
+                if kwargs.get("ignore_errors"):
+                    return None
+                raise PermissionError("locked")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(ex.shutil, "rmtree", side_effect=locked_rmtree):
+            result = ex.dispatch(
+                router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+                "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+                runner=runner,
+                probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+            )
+        self.addCleanup(real_rmtree, seen["cwd"], ignore_errors=True)
+
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertNotIn("read_only_mode", result.artifacts)
+        self.assertIn("could not be removed", result.detail)
+        self.assertIn(seen["cwd"], result.detail)
+        self.assertTrue(Path(seen["cwd"]).exists())
 
 
 class PublicationPreflightTests(unittest.TestCase):

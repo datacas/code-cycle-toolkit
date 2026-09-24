@@ -512,6 +512,13 @@ class DispatchRecordingTests(TelemetryTestCase):
         self.assertEqual({"operating_quota": 2, "folder_trust": 1},
                          self.store.dispatch_failures("repo"))
 
+    def test_a_refused_credential_free_publisher_is_recordable(self) -> None:
+        decision, result = self.decision_and_result(blocked_capability="harness_publication")
+
+        self.store.record_dispatch("repo", "t1", "review", decision, result)
+
+        self.assertEqual({"harness_publication": 1}, self.store.dispatch_failures("repo"))
+
 
 class ModelDriftTests(TelemetryTestCase):
     def test_a_different_model_is_reported(self) -> None:
