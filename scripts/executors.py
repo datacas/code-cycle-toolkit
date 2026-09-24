@@ -740,6 +740,14 @@ def _remote_ref_fingerprint(root: str) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _remove_read_only_path(function, path, exc_info) -> None:
+    try:
+        os.chmod(path, 0o700)
+        function(path)
+    except OSError:
+        raise exc_info[1]
+
+
 def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
     """Run a reviewer in an independent detached clone and verify its source checkout."""
     if not isinstance(cwd, str) or not cwd:
@@ -777,11 +785,17 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
         if review_head != before_head:
             raise ExecutorError("the disposable clone is not at the reviewed HEAD")
     except Exception as exc:
+        cleanup_error = None
         if worktree:
-            shutil.rmtree(worktree, ignore_errors=True)
+            try:
+                shutil.rmtree(worktree, onerror=_remove_read_only_path)
+            except Exception as cleanup_exc:
+                cleanup_error = f"; cleanup failed ({type(cleanup_exc).__name__})"
+        detail = f"could not prepare an isolated review workspace: {exc}"
+        if cleanup_error:
+            detail += cleanup_error
         return adapter._blocked(
-            target, "review_workspace_isolation",
-            f"could not prepare an isolated review workspace: {exc}",
+            target, "review_workspace_isolation", detail,
         )
 
     prompt = (
@@ -823,7 +837,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
             workspace_changed = True
     finally:
         try:
-            shutil.rmtree(worktree)
+            shutil.rmtree(worktree, onerror=_remove_read_only_path)
             if Path(worktree).exists():
                 cleanup_warning = "the disposable review workspace could not be removed"
         except Exception as exc:
