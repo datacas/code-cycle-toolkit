@@ -81,6 +81,7 @@ code_cycle:
 
 - Logins compare case-insensitively. Author identity comes from provider metadata, never from comment text.
 - **No list, or an empty list, means no trusted authors.** A round that needs to recover history then stops with `BLOCKED`.
+- `cc-provider-bootstrap` proposes the authenticated code-host login when the list is absent, and adds it only on confirmation. It never edits an existing list.
 - The whole history is read in order. Other authors are ignored (and noted), and a malformed trusted comment is skipped rather than halting recovery.
 - Ordinary discussion without contract headings starts an empty record.
 - A later comment updates findings; it doesn't replace them. Leaving out an ID never deletes it. Two different titles under one ID are a collision, and recovery stops with `BLOCKED` rather than guessing.

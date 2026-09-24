@@ -202,7 +202,7 @@ Use cc-run to bring this project up and tell me the URLs.
 
 ### `cc-provider-bootstrap`
 
-Resolves `issue_provider`, `issue_id`, `code_host`, and `repository` from explicit values, then `.code-cycle.yml`, then safe inference. It asks one grouped question for what is missing. Before writing `.code-cycle.yml`, it shows the proposed file and asks for confirmation. It runs read-only access checks per provider and caches them for 7 days, then returns `PROVIDER_BOOTSTRAP_RESULT` with status `READY`, `BLOCKED`, or `FAILED`. See [Providers](provider-contract.md#setting-up-each-provider).
+Resolves `issue_provider`, `issue_id`, `code_host`, and `repository` from explicit values, then `.code-cycle.yml`, then safe inference. It asks one grouped question for what is missing. Before writing `.code-cycle.yml`, it shows the proposed file and asks for confirmation. When `review.trusted_authors` is absent, the proposal includes the authenticated code-host login. It runs read-only access checks per provider and caches them for 7 days, then returns `PROVIDER_BOOTSTRAP_RESULT` with status `READY`, `BLOCKED`, or `FAILED`. See [Providers](provider-contract.md#setting-up-each-provider).
 
 ```text
 Use cc-provider-bootstrap for issue 123.
