@@ -75,6 +75,12 @@ def orca_context(**kwargs):
 class ProbeHonestyTests(unittest.TestCase):
     """A probe reports what it demonstrated, never what it hopes."""
 
+    def test_executor_runner_detaches_stdin(self) -> None:
+        with patch.object(ex.subprocess, "run", return_value=completed()) as run:
+            ex._run(["codex", "exec"])
+
+        self.assertIs(subprocess.DEVNULL, run.call_args.kwargs["stdin"])
+
     def test_a_missing_binary_is_unknown_not_installed(self) -> None:
         result = ex.CodexAdapter().probe(which=lambda _name: None)
 
@@ -1007,7 +1013,10 @@ class PermissionTests(unittest.TestCase):
 
 class PublicationPreflightTests(unittest.TestCase):
     def test_github_write_permission_uses_repository_permission_write_value(self) -> None:
+        observed_stdin = []
+
         def run(argv, **_kwargs):
+            observed_stdin.append(_kwargs.get("stdin"))
             if argv == ["git", "rev-parse", "--show-toplevel"]:
                 return completed("/repo\n")
             if argv == ["git", "branch", "--show-current"]:
@@ -1029,6 +1038,8 @@ class PublicationPreflightTests(unittest.TestCase):
 
         self.assertTrue(ready)
         self.assertIn("passed", detail)
+        self.assertTrue(observed_stdin)
+        self.assertTrue(all(value is subprocess.DEVNULL for value in observed_stdin))
 
     def test_a_reading_dispatch_fails_closed_for_an_unconfined_adapter(self) -> None:
         """A configured Claude review cannot silently share the writable tree."""
