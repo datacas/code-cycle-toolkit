@@ -1,0 +1,92 @@
+name: Release
+
+# Publishes a GitHub release when a merge to main carries a version that has
+# no tag yet. It runs only after "Validate package" succeeded for that same
+# push, so a release never points at a commit CI did not pass.
+#
+# To release: bump "version" in both plugin manifests, move the CHANGELOG's
+# [Unreleased] entries under "## [X.Y.Z] - YYYY-MM-DD", and merge. Merges that
+# leave the version unchanged find the tag already present and do nothing.
+
+on:
+  workflow_run:
+    workflows: ["Validate package"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Tag and publish
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - name: Read the version
+        id: version
+        run: |
+          set -euo pipefail
+          claude_version=$(python3 -c 'import json; print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+          codex_version=$(python3 -c 'import json; print(json.load(open(".codex-plugin/plugin.json"))["version"])')
+          if [ "$claude_version" != "$codex_version" ]; then
+            echo "::error::Manifest versions disagree: claude=$claude_version codex=$codex_version"
+            exit 1
+          fi
+          echo "version=$claude_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$claude_version" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when the tag already exists
+        id: existing
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "Tag ${{ steps.version.outputs.tag }} already exists; nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > section.md
+          if ! grep -q '[^[:space:]]' section.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section; refusing to release without notes."
+            exit 1
+          fi
+          {
+            cat section.md
+            echo
+            echo "Full details are in [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${version}/CHANGELOG.md)."
+          } > notes.md
+
+      - name: Tag and publish the release
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          gh release create '${{ steps.version.outputs.tag }}' \
+            --target "$TARGET_SHA" \
+            --title 'Code Cycle Toolkit ${{ steps.version.outputs.tag }}' \
+            --notes-file notes.md
