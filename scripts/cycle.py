@@ -146,6 +146,23 @@ def publication_policy(role: str, publication_permissions: tuple[str, ...]) -> s
     return f"{rule} {PUBLICATION_PROHIBITIONS}"
 
 
+def routing_context(decision: RoutingDecision) -> str:
+    """The routing decision this attempt runs under, stated to the agent.
+
+    A run line records the profile, the requested model and the effort. An
+    agent left to name them answers from its own configuration, which is the
+    very thing a run line exists to audit, so the runtime supplies them. The
+    resolved model is not stated: only the executor can report it, afterwards.
+    """
+    target = decision.target
+    return (f"Routing for this stage, decided by the runtime: profile "
+            f"`{decision.profile}`, requested model "
+            f"`{target.provider}/{target.model}`, effort `{target.effort}`. "
+            "Copy these values verbatim into any run line you write; do not "
+            "infer them from your own configuration. Write the resolved model "
+            "as `?`, because the executor has not reported it to you.")
+
+
 class CycleError(ValueError):
     """The recorder was asked for something inconsistent."""
 
@@ -349,7 +366,10 @@ class CycleRecorder:
                 self._observe_shadow(role, *first)
                 return outcome
 
-            result = dispatch(decision, task, self.registry,
+            # Per attempt: a reroute runs under the fallback's target, and its
+            # run line has to name that one.
+            result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
+                              self.registry,
                               policy=self.policy, probes=self.probes,
                               **dispatch_kwargs)
             outcome.decision = decision

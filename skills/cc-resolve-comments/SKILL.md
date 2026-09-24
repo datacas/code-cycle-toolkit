@@ -206,6 +206,9 @@ produced the findings below it:
 Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
 the effort, and the schema version. Both sides of the arrow are always written,
 including when they match. `model_requested` is what the profile asked for.
+When the runtime states the routed profile, requested model, and effort in
+the task, copy those values verbatim into the line; never substitute the
+agent's own configuration for them.
 `model_resolved` is what the executor reports having launched, and nothing else:
 an agent asked to name its own model answers from its own configuration, which is
 the very thing under suspicion when an alias is repointed. When the executor

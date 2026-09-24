@@ -7,6 +7,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Fixed
 
+- Tell every stage the routing decision it runs under — profile, requested
+  `provider/model` and effort — so the review run line copies the values
+  telemetry records instead of the agent inferring them from its own
+  configuration. A rerouted attempt is told the fallback's target, and the
+  resolved model stays `?` when the executor does not report it. (#56)
+
 - Record `duration_ms` for every dispatch that reached an executor, measured
   with a monotonic clock, and stop counting `tests.passed: false` from a stage
   that never ran its tests as a failure: `tests.ran: false`, or a `BLOCKED`
