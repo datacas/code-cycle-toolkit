@@ -204,12 +204,12 @@ DEFAULT_PROFILES: dict[str, dict] = {
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
     "reviewer":       {"primary": "codex:openai/gpt-6-sol high"},
     "senior_reviewer": {"primary": "codex:openai/gpt-6-sol max"},
-    # Claude is an eligible security fallback through the isolated and verified
-    # read-only worktree harness; profile defaults still express the chosen
-    # order.
+    # Claude is an eligible security fallback through the disposable review
+    # clone, where writes are detected rather than prevented; profile defaults
+    # still express the chosen order.
     "security":       {"primary": "codex:openai/gpt-6-sol high",
-                       # Selected only when the isolated review harness is
-                       # available.
+                       # Runs in the disposable, change-detecting review
+                       # clone.
                        "fallback": "claude:anthropic/claude-opus-5-5 high"},
 }
 

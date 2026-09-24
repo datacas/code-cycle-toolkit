@@ -489,11 +489,11 @@ class DispatchRecordingTests(TelemetryTestCase):
         self.assertEqual(1, row["payload"]["routing_reason_count"])
 
     def test_read_only_mode_is_recorded_in_dispatch_payload(self) -> None:
-        decision, result = self.decision_and_result(read_only_mode="isolated_verified")
+        decision, result = self.decision_and_result(read_only_mode="detected")
 
         self.store.record_dispatch("repo", "t-review", "review", decision, result)
 
-        self.assertEqual("isolated_verified", self.store.rows()[0]["payload"]["read_only_mode"])
+        self.assertEqual("detected", self.store.rows()[0]["payload"]["read_only_mode"])
 
     def test_a_fallback_is_visible_in_the_row(self) -> None:
         decision, result = self.decision_and_result(used_fallback=True)
@@ -511,13 +511,6 @@ class DispatchRecordingTests(TelemetryTestCase):
 
         self.assertEqual({"operating_quota": 2, "folder_trust": 1},
                          self.store.dispatch_failures("repo"))
-
-    def test_a_refused_credential_free_publisher_is_recordable(self) -> None:
-        decision, result = self.decision_and_result(blocked_capability="harness_publication")
-
-        self.store.record_dispatch("repo", "t1", "review", decision, result)
-
-        self.assertEqual({"harness_publication": 1}, self.store.dispatch_failures("repo"))
 
 
 class ModelDriftTests(TelemetryTestCase):

@@ -270,10 +270,9 @@ class DispatchResult:
         return f"{self.executor}: {self.outcome.value} as {self.model_resolved or '?'}{suffix}"
 
 
-def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
-         env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run(argv: list[str], timeout: int = 30, cwd: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-                          stdin=subprocess.DEVNULL, env=env)
+                          stdin=subprocess.DEVNULL)
 
 
 def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
@@ -361,10 +360,6 @@ class Adapter:
     def supports_non_writing(self, **dispatch_kwargs) -> bool:
         """Whether this adapter can keep this non-writing dispatch isolated."""
         return self.enforces_read_only
-
-    def read_only_refusal(self, **dispatch_kwargs) -> tuple[str, str] | None:
-        """A specific (capability, detail) for refusing this non-writing dispatch."""
-        return None
 
     def supports_workspace_policy(self, policy: WorkspacePolicy | str,
                                   **dispatch_kwargs) -> bool:
@@ -493,8 +488,7 @@ class NativeAdapter(Adapter):
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
                  writes: bool = False, publishes: bool = False,
-                 publication_permissions: tuple[str, ...] = (),
-                 env: dict[str, str] | None = None) -> DispatchResult:
+                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -515,11 +509,8 @@ class NativeAdapter(Adapter):
         else:
             argv = (self.argv(target, task, cwd, writes, True)
                     if publishes else self.argv(target, task, cwd, writes))
-        # `env` is passed only when a caller replaced the environment, so a
-        # runner that never needed one keeps its narrower signature.
-        extra = {"env": env} if env is not None else {}
         try:
-            completed = runner(argv, timeout=timeout, cwd=cwd, **extra)
+            completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -751,90 +742,14 @@ def _remote_ref_fingerprint(root: str) -> str:
 
 def _remove_read_only_path(function, path, exc_info) -> None:
     try:
-        # chmod follows a link; the linked Claude configuration is not ours.
-        if not os.path.islink(path):
-            os.chmod(path, 0o700)
+        os.chmod(path, 0o700)
         function(path)
     except OSError:
         raise exc_info[1]
 
 
-#: Variables that carry a GitHub token, an SSH agent, or Git configuration
-#: into a child process. A credential-free reviewer inherits none of them.
-_CREDENTIAL_ENVIRONMENT = frozenset({
-    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-    "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_ASKPASS", "GIT_ASKPASS", "GIT_SSH",
-    "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_SYSTEM",
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-})
-
-#: Any other variable named like a secret is dropped too, so a Bitbucket or
-#: issue-provider token exported for another tool does not reach the reviewer.
-#: Claude's own model-provider credentials are the exception: it has to run.
-_SECRET_NAME = re.compile(r"TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|APP_KEY|API_KEY")
-_REVIEWER_OWN_CREDENTIALS = (
-    "ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_", "GCLOUD_", "CLOUD_ML_",
-    "VERTEX_", "AZURE_", "FOUNDRY_",
-)
-
-
-def _reviewer_keeps(name: str) -> bool:
-    upper = name.upper()
-    if upper in _CREDENTIAL_ENVIRONMENT or re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", upper):
-        return False
-    if _SECRET_NAME.search(upper):
-        return upper.startswith(_REVIEWER_OWN_CREDENTIALS)
-    return True
-
-
-def _credential_free_environment(base: str) -> dict[str, str]:
-    """The environment of a reviewer that must not be able to write to a remote.
-
-    `base` is an empty directory the caller owns and removes. It becomes the
-    reviewer's HOME, with an unauthenticated `gh` configuration, an empty
-    global Git configuration and no system one, so no credential helper, token
-    or SSH agent is reachable through the ordinary tools. Claude's own login is
-    linked in, because the reviewer still has to run.
-
-    This removes the credentials the process is handed. It is not an operating
-    system sandbox: a credential kept in a readable file elsewhere on disk is
-    outside what an environment can take away.
-    """
-    root = Path(base)
-    home = root / "home"
-    gh_config = root / "gh"
-    git_config = root / "gitconfig"
-    home.mkdir()
-    gh_config.mkdir()
-    git_config.write_text("", encoding="utf-8")
-    env = {key: value for key, value in os.environ.items() if _reviewer_keeps(key)}
-    if not env.get("CLAUDE_CONFIG_DIR"):
-        real_home = Path.home()
-        for name in (".claude", ".claude.json"):
-            if (real_home / name).exists():
-                os.symlink(real_home / name, home / name,
-                           target_is_directory=(real_home / name).is_dir())
-    null = os.devnull
-    env.update({
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        "XDG_CONFIG_HOME": str(home / ".config"),
-        "GH_CONFIG_DIR": str(gh_config),
-        "GH_PROMPT_DISABLED": "1",
-        "GIT_CONFIG_GLOBAL": str(git_config),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GCM_INTERACTIVE": "never",
-        "GIT_SSH_COMMAND": (
-            f"ssh -F {null} -o BatchMode=yes -o IdentitiesOnly=yes "
-            f"-o IdentityAgent=none -o IdentityFile={null}"
-        ),
-    })
-    return env
-
-
 def _remove_workspace(path: str) -> str | None:
-    """Remove a disposable directory; return why it could not be, or None."""
+    """Remove a disposable directory; return what is left on disk, or None."""
     try:
         shutil.rmtree(path, onerror=_remove_read_only_path)
     except FileNotFoundError:
@@ -857,7 +772,6 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
             "a Claude read-only stage needs an implementer Git checkout to verify",
         )
     worktree = None
-    credential_home = None
     root = None
     before_head = before_status = before_branch = before_remote_refs = None
     try:
@@ -886,17 +800,11 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
         review_head = _git_output(worktree, "rev-parse", "HEAD")
         if review_head != before_head:
             raise ExecutorError("the disposable clone is not at the reviewed HEAD")
-        credential_home = tempfile.mkdtemp(prefix="code-cycle-review-env-")
-        reviewer_env = _credential_free_environment(credential_home)
     except Exception as exc:
-        leftovers = [
-            left for left in (
-                _remove_workspace(path) for path in (worktree, credential_home) if path
-            ) if left
-        ]
+        left = _remove_workspace(worktree) if worktree else None
         detail = f"could not prepare an isolated review workspace: {exc}"
-        if leftovers:
-            detail += f"; cleanup failed, left on disk: {', '.join(leftovers)}"
+        if left:
+            detail += f"; cleanup failed, left on disk: {left}"
         return adapter._blocked(
             target, "review_workspace_isolation", detail,
         )
@@ -904,17 +812,19 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
     prompt = (
         f"{task}\n\nREAD-ONLY HARNESS CONTRACT: Do not modify files, commit, or push. "
         "This stage runs in an independent disposable clone; any local edits will "
-        "be discarded. It has no GitHub or Git credentials, so it cannot publish "
-        "or push. Any change to the implementer's branch or working tree "
-        "fails this stage."
+        "be discarded. You keep your normal gh and git access; use it only to "
+        "read and to publish the comment this stage allows. A push, merge, or edit to the "
+        "change request cannot be undone by the harness and invalidates the "
+        "review it is judging. Any change to the implementer's branch or "
+        "working tree fails this stage."
     )
     result = None
     workspace_changed = False
     source_error = "the implementer branch, HEAD, working tree, or configured remote refs changed during review"
-    leftovers: list[str] = []
+    left = None
     after_head = after_status_fingerprint = after_remote_refs = None
     try:
-        result = dispatch_call(prompt, worktree, reviewer_env)
+        result = dispatch_call(prompt, worktree)
         try:
             after_head = _git_output(root, "rev-parse", "HEAD")
             after_branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
@@ -940,17 +850,13 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
         except Exception:
             workspace_changed = True
     finally:
-        leftovers = [
-            left for left in (
-                _remove_workspace(path) for path in (worktree, credential_home)
-            ) if left
-        ]
+        left = _remove_workspace(worktree)
 
     warnings = []
     if workspace_changed:
         warnings.append("the reviewer changed its disposable workspace; those edits were discarded")
     artifacts = dict(result.artifacts)
-    artifacts["read_only_mode"] = "isolated_verified"
+    artifacts["read_only_mode"] = "detected"
     artifacts["implementer_head_before"] = before_head
     artifacts["implementer_status_fingerprint_before"] = hashlib.sha256(
         before_status.encode("utf-8"),
@@ -965,9 +871,9 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
     if warnings:
         artifacts["warnings"] = warnings
     cleanup_error = (
-        "the disposable review workspace could not be removed; left on disk: "
-        + ", ".join(leftovers)
-    ) if leftovers else None
+        f"the disposable review workspace could not be removed; left on disk: {left}"
+        if left else None
+    )
     if source_changed:
         artifacts.pop("read_only_mode", None)
         detail = "read-only contract violation: " + source_error
@@ -978,10 +884,9 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
             missing_capability=None, detail=detail, artifacts=artifacts,
         )
     if cleanup_error:
-        # A workspace that outlives its stage is not disposable, whatever the
-        # reviewer did inside it, so the isolation is not claimed as verified.
-        # Only a success is downgraded: a failure the run already reported,
-        # such as model drift, stays the stated outcome.
+        # A workspace that outlives its stage is not disposable, so the stage
+        # does not report its read-only mode. Only a success is downgraded: a
+        # failure the run already reported, such as model drift, stays.
         artifacts.pop("read_only_mode", None)
         outcome = (DispatchOutcome.FAILED
                    if result.outcome is DispatchOutcome.SUCCEEDED else result.outcome)
@@ -1007,33 +912,17 @@ class ClaudeAdapter(NativeAdapter):
         return True, "Claude uses gh for comments and git for writing stages; publication policy stays in its prompt"
 
     def supports_non_writing(self, **dispatch_kwargs) -> bool:
-        # The isolated harness runs Claude without GitHub or Git credentials,
-        # so a read-only stage that publishes cannot run here until the
-        # harness publishes on the stage's behalf.
-        if dispatch_kwargs.get("publishes"):
-            return False
         cwd = dispatch_kwargs.get("cwd")
         return isinstance(cwd, str) and bool(cwd) and Path(cwd).is_dir()
-
-    def read_only_refusal(self, **dispatch_kwargs) -> tuple[str, str] | None:
-        if dispatch_kwargs.get("publishes"):
-            return ("harness_publication", (
-                "claude runs read-only stages without GitHub or Git credentials, "
-                "so it cannot publish this stage's comment; harness-side "
-                "publication is not implemented yet. Route this stage to an "
-                "executor that enforces read-only access, or run it local-only"
-            ))
-        return None
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run, writes: bool = False,
                  publishes: bool = False,
-                 publication_permissions: tuple[str, ...] = (),
-                 env: dict[str, str] | None = None) -> DispatchResult:
+                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
-            publication_permissions=publication_permissions, env=env,
+            publication_permissions=publication_permissions,
         )
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
@@ -1062,16 +951,14 @@ class ClaudeAdapter(NativeAdapter):
                 "--effort", target.effort, "--output-format", "json"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
-        else:
-            # Defence in depth. Read-only safety comes from the disposable
-            # worktree and the source-checkout verification in dispatch().
-            argv += ["--disallowedTools", "Edit", "Write", "NotebookEdit"]
-        # Publication remains behavioural. `dispatch()` refuses a read-only
-        # publisher, which would run without credentials; the read-only shape
-        # below is what a direct caller of argv() gets.
+        # A reading stage keeps its full tooling on purpose. It is told not to
+        # write, runs in a disposable clone, and dispatch() detects a change to
+        # the implementer's checkout or remote refs; nothing here narrows it.
+        # A publishing stage keeps its ordinary GitHub tooling. Which of those
+        # operations the stage may perform is a behavioural rule stated in its
+        # prompt (`cycle.publication_policy`), not a permission narrowed here.
         if publishes:
-            argv += (["--allowedTools", "Bash(gh:*)", "Bash(git:*)"] if writes
-                     else ["--allowedTools", "Bash(gh:*)"])
+            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git:*)"]
         return argv
 
     def agent_output(self, stdout: str) -> str:
@@ -1475,10 +1362,6 @@ def dispatch(
                 )
             ),
         }.get(workspace_policy, "the adapter cannot satisfy the workspace policy")
-        refusal = (adapter.read_only_refusal(**kw)
-                   if workspace_policy is WorkspacePolicy.READ_ONLY else None)
-        if refusal is not None:
-            capability, detail = refusal
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability=capability,
@@ -1495,9 +1378,8 @@ def dispatch(
             and target.executor == "claude" and not adapter.enforces_read_only):
         result = _isolated_review_dispatch(
             adapter, target, task, cwd=kw.get("cwd"),
-            dispatch_call=lambda prompt, isolated_cwd, env: adapter.dispatch(
-                target, prompt,
-                **{**kw, "cwd": isolated_cwd, "writes": False, "env": env},
+            dispatch_call=lambda prompt, isolated_cwd: adapter.dispatch(
+                target, prompt, **{**kw, "cwd": isolated_cwd, "writes": False},
             ),
         )
     else:

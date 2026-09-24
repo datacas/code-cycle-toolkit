@@ -116,7 +116,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "provider": ("token", frozenset({"openai", "anthropic"})),
     "effort": ("token", frozenset({"low", "medium", "high", "max"})),
     "readiness_policy": ("token", frozenset({"proven", "attempt"})),
-    "read_only_mode": ("token", frozenset({"enforced", "isolated_verified"})),
+    "read_only_mode": ("token", frozenset({"enforced", "detected"})),
     "dispatched_from": ("token", frozenset({
         "unknown", "installed", "authenticated", "quota_exhausted", "ready",
     })),
@@ -134,7 +134,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "bypass_acknowledgement", "trusted_directory", "orchestration_context",
         "provider_agent_mapping", "read_only_enforcement", "disposable_workspace",
         "review_workspace_isolation", "review_workspace_mismatch",
-        "review_workspace_conflict", "publication_access", "harness_publication",
+        "review_workspace_conflict", "publication_access",
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
     "routing_strategy": ("token", frozenset({"fixed", "measured"})),

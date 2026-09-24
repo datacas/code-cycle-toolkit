@@ -131,10 +131,10 @@ Use cc-orchestrator for issue 123. Stop at READY_FOR_MANUAL_MERGE.
 | [`cc-orca-orchestrator`](docs/workflows.md#cc-orca-orchestrator) | one prompt | supervised workers, paired-review calibration | Orca |
 | [`run_cycle.py`](docs/workflows.md#runtime-driver-run_cyclepy) | a shell command | recorded, routed cycles across executors | runtime, Codex and/or Claude CLIs |
 
-Read-only roles can use Codex's enforced sandbox or Claude's isolated,
-verified, credential-free review checkout; Claude does not yet serve the
-read-only stages that publish a comment. See [workspace policy](docs/role-workspace-policy.md)
-for the branch protection contract.
+Read-only roles can use Codex, whose sandbox enforces read-only, or Claude,
+which reviews in a disposable clone where writes are detected but not
+prevented. See [workspace policy](docs/role-workspace-policy.md) for what
+that does and does not guarantee.
 
 ## Skills
 
