@@ -84,10 +84,26 @@ code_cycle:
   repository:
     selector: workspace/repository
     default_branch: main
+  review:
+    trusted_authors:
+      - reviewer-login
   verification:
     cache_ttl: 7d
     recheck_on_failure: true
 ```
+
+`review.trusted_authors` lists the code-host logins whose comments may create or
+advance recovered review findings. The review and resolution skills read it;
+when it is absent or empty, any round that recovers findings from the change
+request's comments returns `BLOCKED`. So when it is absent, include it in the
+configuration you propose, with the login the configured code-host tooling is
+authenticated as. That is the identity this cycle's stages publish with. On
+GitHub, read it with `gh api user --jq .login`. On Bitbucket, use the account
+the configured connector or API tooling reports. Propose it; never write it
+without the confirmation below. If no authenticated identity can be read, ask
+for the login rather than guessing one. When a list already exists, leave it
+exactly as it is, even when it omits the current login, and only point out that
+comments from this login will not be trusted.
 
 An optional `profiles` key maps a role to an executor, provider, model and
 effort. A repository declares only what it wants to change; everything it omits
@@ -178,7 +194,10 @@ that it was not persisted; do not silently create the file.
    orchestrated run, use the host's coordinator question mechanism. Do not ask
    again for values already resolved and validated in the same run.
 4. Present the completed non-secret configuration and request confirmation
-   before writing or updating `.code-cycle.yml`.
+   before writing or updating `.code-cycle.yml`. When `review.trusted_authors`
+   is absent, the proposal includes it with the authenticated code-host login,
+   as described in *Configuration*. If the user declines it, report that rounds
+   which recover earlier findings will stop with `BLOCKED` until it is set.
 5. Determine whether each required provider check is fresh. Reuse a valid cache
    entry only when its provider instance, repository/project scope, capabilities,
    and configuration fingerprint still match. The default cache lifetime is

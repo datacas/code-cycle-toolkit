@@ -89,7 +89,7 @@ export PYTHONPATH="$HOME/.code-cycle/runtime:${PYTHONPATH:-}"   # add to your sh
 
 If you only need the skills, `npx skills add datacas/code-cycle-toolkit --all --global --copy` works without a clone. It doesn't install the runtime. See [what the runtime adds](docs/getting-started.md#skills-and-runtime).
 
-**3. Optional configuration.** In the repository you want to work on, a `.code-cycle.yml` stores non-secret defaults. `cc-provider-bootstrap` offers to write it the first time, so you can skip this step:
+**3. Optional configuration.** In the repository you want to work on, a `.code-cycle.yml` stores non-secret defaults. On the first run, `cc-provider-bootstrap` proposes this file, including `review.trusted_authors` set to your authenticated login, and writes it only if you confirm. You can skip this step, or write it yourself:
 
 ```yaml
 code_cycle:
