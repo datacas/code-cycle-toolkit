@@ -28,3 +28,9 @@ This deliberately separates useful generated output from unauthorized source
 tree changes: verification reports, caches, build output, and runtime state
 belong in the disposable workspace and must not be used to justify granting a
 write-capable role access to the implementer's tree.
+
+See also [Routing and models → Workspace policy](routing.md#workspace-policy) for how this constrains which executor each profile may use.
+
+---
+
+[← Telemetry](telemetry.md) · [↑ Documentation index](README.md) · [Instrumentation internals →](instrumentation.md)

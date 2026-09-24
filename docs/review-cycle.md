@@ -1,0 +1,126 @@
+# Review lifecycle
+
+How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
+
+**On this page:** [The loop](#the-loop) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
+
+## The loop
+
+```mermaid
+sequenceDiagram
+    participant R as cc-initial-review
+    participant PR as Pull request comments
+    participant X as cc-resolve-comments
+    participant RR as cc-rereview
+    R->>PR: CCR-001 · REV-001 high · REV-002 medium · REV-003 low
+    X->>PR: CCT-001 triaged at head SHA · dispositions frozen
+    Note over X: fix valid findings, verify each, push
+    X->>PR: REV-001 resolved · REV-002 not_applicable (incorrect) · REV-003 open
+    RR->>PR: CCR-002 · re-verify fixes · REV-004 new
+    Note over RR: APPROVED → ready for manual merge<br/>CHANGES_REQUESTED → resolve again
+```
+
+1. **Initial review** reads the whole diff from the merge base, runs its delegated passes, and publishes one comment with findings `REV-001`, `REV-002`, and so on.
+2. **Resolution** first classifies *every* finding against one commit, then edits. Valid findings are fixed and verified. Rejected ones get a reasoned reply.
+3. **Rereview** reads the whole accumulated diff again and reproduces each claimed fix. It classifies each previous finding and numbers new ones after the highest existing ID.
+4. Repeat until approved, or until an orchestrator's iteration limit or no-progress guard stops it.
+
+Reviews always cover the **accumulated diff from the merge base to the current head**, never only the latest commit.
+
+## Anatomy of a review comment
+
+A published comment carries three kinds of machine-readable line. Their tokens stay in English whatever language the prose uses.
+
+```text
+#### [CCR-20260918-001] · senior_reviewer · anthropic/claude-sonnet-5→claude-sonnet-5 · high · schema:1
+#### [CCT-20260918-001] · cheap_coder · openai/gpt-6-luna→? · high · triaged:0123…4567 · schema:1
+#### [REV-004] · medium · resolved · valid · blocks:yes — Short title
+```
+
+| Line | Written by | Tokens |
+|---|---|---|
+| **Review run** `CCR-…` | each review or rereview, once per run | run ID · profile · `provider/requested→resolved` model · effort · schema |
+| **Triage run** `CCT-…` | each resolver, once, before editing | run ID · profile · model · effort · `triaged:<sha>` (the commit every disposition was judged against) · schema |
+| **Finding** `REV-…` | every publication of a finding | ID · severity · status · disposition · blocks — title |
+
+`model_resolved` is what the **executor** reported having launched, never what the agent believes it is. When the executor doesn't report a model (Codex never does), the line shows `?`, which means "can't know" rather than "matched". When the runtime routed the stage, the profile, requested model, and effort are copied verbatim from the routing decision.
+
+A skill that republishes a comment keeps every run line it didn't write.
+
+## Finding fields
+
+| Field | Values | Answers |
+|---|---|---|
+| ID | `REV-001`, `REV-002`, … | Stable for the life of the PR. Never renumbered or reused. New IDs continue after the highest one ever seen. |
+| Severity | `critical` · `high` · `medium` · `low` | How bad the impact is. Delegated passes report P0–P3, and the cycle skill maps them. |
+| Status | `open` · `resolved` · `not_applicable` | What happened to the code. It keeps moving between rounds. |
+| Disposition | `valid` · `debatable` · `incorrect` · `obsolete` · `needs_clarification` · `-` | What the first resolver made of the finding. `-` means not triaged yet, and reviewers always publish `-`. |
+| Blocks | `blocks:yes` · `blocks:no` | Whether it prevents approval. It is set independently of severity. |
+
+**Status and disposition are orthogonal.** `resolved` + `valid` is an accepted finding that was fixed. `not_applicable` + `incorrect` is one the resolver rejected with reasons. `open` + `debatable` is still under discussion.
+
+**Dispositions are frozen.** The first resolver assigns them, before editing and against the triage commit. They are never recomputed later. That way a disposition measures whether the finding was right when it was written, not what the code looks like after the fix. See [Instrumentation → Dispositions are frozen](instrumentation.md#dispositions-are-frozen).
+
+**Rereview outcomes** for a previous finding: `resolved` (verified by running it), `still_open` (still reproducible, or fixed but unverified), `not_applicable` (its scope was removed or changed). A fix that is present but can't be verified is **not** `resolved`.
+
+**Legacy headers** with four tokens (no disposition) predate this contract and read as `-`. They never block an open PR.
+
+Other tokens that never translate: the functional statuses (`APPROVED`, `CHANGES_REQUESTED`, `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`, `READY_FOR_MANUAL_MERGE`, `HUMAN_INTERVENTION`) and every JSON key.
+
+## Trusted authors
+
+Later rounds recover findings from the PR's comment history, and a comment can be written by anyone. So recovery only folds in comments from logins listed in `review.trusted_authors`:
+
+```yaml
+code_cycle:
+  review:
+    trusted_authors:
+      - your-login
+      - your-review-bot
+```
+
+- Logins compare case-insensitively. Author identity comes from provider metadata, never from comment text.
+- **No list, or an empty list, means no trusted authors.** A round that needs to recover history then stops with `BLOCKED`.
+- The whole history is read in order. Other authors are ignored (and noted), and a malformed trusted comment is skipped rather than halting recovery.
+- Ordinary discussion without contract headings starts an empty record.
+- A later comment updates findings; it doesn't replace them. Leaving out an ID never deletes it. Two different titles under one ID are a collision, and recovery stops with `BLOCKED` rather than guessing.
+
+## Security triage
+
+Every review and resolution round decides whether `cc-security-review` runs:
+
+```text
+security_required = deterministic_rule OR reviewer_requests_security
+```
+
+- **The rule** matches changed paths, filenames, and PR labels against `security_review.always_when` (or the built-in defaults: auth, middleware, migrations, routes, and policies directories; lockfiles; Dockerfiles; `*.env.example`; labels meaning security, auth, privacy, data, secrets, or dependencies). See [Configuration → Security review rule](configuration.md#security-review-rule).
+- **The reviewer** may add an audit for anything touching sessions, tokens, validation, public APIs, uploads, personal data, CORS, cookies, headers, deployment configuration, or dependencies. It can **never remove** one the rule fired.
+- Declaring the rule replaces the defaults. Leaving it out keeps them, so a missing configuration can never switch the gate off.
+- The comment always says whether the audit ran and which half fired. When nothing fired, it says the audit was skipped after triage. Silence is not a triage result.
+
+`scripts/security_gate.py` is the reference implementation.
+
+## The structured result is opt-in
+
+`ORCHESTRATION_RESULT`, a strict JSON block with IDs, statuses, and SHAs, is emitted only when:
+
+- you ask for it (`--json`, `--orchestration-result`, "with the structured result");
+- a worker contract requires it;
+- the status is `BLOCKED` or `FAILED`, or no comment could be published.
+
+When it is emitted alongside a published comment, it is collapsed in a `<details>` element there, not repeated in the response. Otherwise the published comment, with the headers above, is the record. See [Instrumentation → The comment is the record](instrumentation.md#the-comment-is-the-record).
+
+## Exit conditions
+
+An orchestrator reports `READY_FOR_MANUAL_MERGE` only when **all** of these hold on the code host:
+
+- the last review status is `APPROVED`;
+- `reviewed_head_sha` equals the current head;
+- no open finding has `blocks:yes`;
+- required checks passed. Pending, skipped, failed, or missing checks are not success.
+
+A human still owns the merge.
+
+---
+
+[← Skills reference](skills.md) · [↑ Documentation index](README.md) · [Verification →](verification.md)

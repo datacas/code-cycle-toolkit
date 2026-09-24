@@ -12,7 +12,20 @@ python3 -m unittest discover -s tests -v
 ```
 
 It must pass before a pull request is opened. CI runs it on Linux and Windows,
-plus a real installation of every skill into every host layout.
+plus a real installation of every skill into every host layout. On Windows, use
+`py -3 .\scripts\validate-package.py`.
+
+The validator checks every skill's frontmatter, name, and description limits.
+It checks that the duplicated sections are identical, and it catches
+fixed-language output mistakes and literal-output directives. It checks that the
+manifest names and versions agree, that the JSONC parses, that every skill
+appears in `README.md` and the README links the Claude-to-Codex adapter
+contract, and that no private data is present. Native manifest validation is
+also available: `claude plugin validate .`.
+
+Documentation lives in `docs/`, indexed by [docs/README.md](docs/README.md).
+Each concept has one main page. `README.md` summarises and links rather than
+repeating. When a change alters behaviour, update the page that owns that topic.
 
 ## Skill-authoring rules
 
@@ -80,3 +93,15 @@ define a state-recovery contract that breaks silently when the copies disagree.
 Keep a change focused on one concern. Describe what changed in the skills'
 behaviour, not only which files moved: these files are instructions, so a
 wording change can be a behaviour change.
+
+## Release checklist
+
+- Confirm that no repository-specific names, local paths, credentials, or customer data are present.
+- Run the package validator and `claude plugin validate .`.
+- Confirm both plugin manifests carry the version being released.
+- Add the release to `CHANGELOG.md`.
+- Test Bash installation on Linux, macOS, and WSL.
+- Test PowerShell installation on Windows.
+- Test global and repository-level installation for each host.
+- Test one manual skill and one complete cycle in each supported host.
+- Publish versioned Git tags and release archives.
