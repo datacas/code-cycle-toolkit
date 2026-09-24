@@ -78,16 +78,17 @@ Not sure? Read [Choosing a workflow](docs/workflows.md#choosing-a-workflow).
 gh auth status
 ```
 
-**2. Install the skills and the runtime.** Clone the toolkit and run the installer. It installs the skills for every host plus the runtime (routing and telemetry):
+**2. Install the skills and the runtime.** One command downloads the latest release and installs the skills for every host, plus the runtime (routing and telemetry). Run it again later to update:
 
 ```bash
-git clone https://github.com/datacas/code-cycle-toolkit.git
-cd code-cycle-toolkit
-bash scripts/install.sh --agent all --scope global
-export PYTHONPATH="$HOME/.code-cycle/runtime:${PYTHONPATH:-}"   # add to your shell profile
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash
 ```
 
-If you only need the skills, `npx skills add datacas/code-cycle-toolkit --all --global --copy` works without a clone. It doesn't install the runtime. See [what the runtime adds](docs/getting-started.md#skills-and-runtime).
+```powershell
+irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1 | iex
+```
+
+`npx skills add datacas/code-cycle-toolkit --all --global --copy` installs the skills **without** the runtime, so `cc-stats` and recorded cycles won't work. See [what the runtime adds](docs/getting-started.md#skills-and-runtime) and [other install options](docs/getting-started.md#install).
 
 **3. Optional configuration.** In the repository you want to work on, a `.code-cycle.yml` stores non-secret defaults. On the first run, `cc-provider-bootstrap` proposes this file, including `review.trusted_authors` set to your authenticated login, and writes it only if you confirm. You can skip this step, or write it yourself:
 

@@ -61,13 +61,32 @@ jobs:
           python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 
       - name: Check Bash installer syntax
-        run: bash -n scripts/install.sh
+        run: |
+          bash -n scripts/install.sh
+          bash -n scripts/get.sh
 
       - name: Lint Bash installer
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y shellcheck
-          shellcheck scripts/install.sh
+          shellcheck scripts/install.sh scripts/get.sh
+
+      - name: Install through the one-command installer
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/get-home"
+          mkdir -p "$home"
+          HOME="$home" bash scripts/get.sh --version main
+          for skill in $EXPECTED_SKILLS; do
+            [ -f "$home/.claude/skills/$skill/SKILL.md" ] \
+              || { echo "get.sh did not install $skill" >&2; exit 1; }
+          done
+          [ -f "$home/.code-cycle/runtime/run_cycle.py" ] \
+            || { echo "get.sh did not install the runtime" >&2; exit 1; }
+          if HOME="$home" bash scripts/get.sh --version not-a-tag 2>/dev/null; then
+            echo "get.sh accepted an invalid version" >&2
+            exit 1
+          fi
 
       - name: Test project installation for all hosts
         run: |
@@ -153,6 +172,23 @@ jobs:
                       throw "Missing installed skill: $skillFile"
                   }
               }
+          }
+
+      - name: Install through the one-command installer
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-get-target'
+          New-Item -ItemType Directory -Path $project -Force | Out-Null
+          & .\scripts\get.ps1 -Version main -Agent claude -Scope project -ProjectDir $project
+          $skills = $env:EXPECTED_SKILLS -split '\s+' | Where-Object { $_ }
+          foreach ($skill in $skills) {
+              $skillFile = Join-Path $project ".claude\skills\$skill\SKILL.md"
+              if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
+                  throw "get.ps1 did not install $skill"
+              }
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $project '.code-cycle\runtime\run_cycle.py') -PathType Leaf)) {
+              throw 'get.ps1 did not install the runtime'
           }
 
       - name: Run a stage from the installed runtime

@@ -144,7 +144,7 @@ function Install-Runtime {
     }
 
     Write-Host "Installed runtime -> $Destination"
-    Write-Host "Add it to PYTHONPATH to record a cycle: $Destination"
+    Write-Host "Runtime installed at $Destination. run_cycle.py and cc-stats use it as-is; add it to PYTHONPATH only to import its modules from other code."
 }
 
 switch ($Agent) {

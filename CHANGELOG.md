@@ -7,6 +7,14 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- One-command installers, `scripts/get.sh` (`curl … | bash`) and
+  `scripts/get.ps1` (`irm … | iex`). They download a release (latest by
+  default, or `--version main|vX.Y.Z`), run the bundled installer with
+  `--force`, and so install or update both the skills and the runtime without
+  a clone. Before, `npx skills` was the only clone-free path, and it installs
+  no runtime, so `cc-orchestrator` and `cc-stats` found nothing to run. CI
+  installs through both scripts.
+
 - A `Release` workflow publishes the GitHub release automatically. After
   `Validate package` passes on `main`, it reads the version from the plugin
   manifests (which must agree). If that version has no tag, it tags the
@@ -16,6 +24,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- The installers no longer tell you to add the runtime to `PYTHONPATH` as if it
+  were required. `run_cycle.py` and `cc-stats` run by path and don't need it.
+  The documentation marks it as optional, for code that imports the runtime's
+  modules.
 - `cc-provider-bootstrap` now proposes `review.trusted_authors` when it is
   absent, set to the login the code-host tooling is authenticated as (the
   identity the cycle's stages publish with). Before, no skill proposed it, so

@@ -31,11 +31,34 @@ An installation has two parts:
 | **Skills** | Markdown instructions in `skills/` that the agent host loads | `npx skills`, `install.sh`, `install.ps1` | Nothing works. |
 | **Runtime** | Python modules for routing, dispatch, telemetry, and stats (listed in `scripts/runtime.manifest`) | `install.sh` / `install.ps1` only | Skills still run. Nothing is recorded, `cc-stats` has no data, and `run_cycle.py` isn't available. |
 
-`npx skills` installs skills only. To get both, use the bundled installer, or run `npx skills` and then add the runtime with the installer.
+`npx skills` installs skills only. To get both, use the one-command installer (Option A), or the installer from a clone.
 
 ## Install
 
-### Option A: bundled installer (skills + runtime)
+### Option A: one command (skills + runtime)
+
+Downloads a release and runs the bundled installer for you. No clone needed. It always passes `--force`, so running it again updates an existing installation.
+
+```bash
+# latest release, every host, for your user
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash
+
+# a specific version, or other installer options
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash -s -- --agent claude --scope project --project-dir .
+```
+
+```powershell
+# latest release, every host, for your user
+irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1 | iex
+
+# with parameters
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1))) -Version v0.3.0 -Agent claude
+```
+
+`--version` / `-Version` accepts `latest` (the default), `main`, or a tag such as `v0.3.0`. `CODE_CYCLE_VERSION` sets the same default. It needs `curl` and `tar` on Unix. As with any piped installer, you can download [`scripts/get.sh`](../scripts/get.sh) and read it first.
+
+### Option B: installer from a clone (skills + runtime)
 
 Clone once:
 
@@ -64,17 +87,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Agent all -Scope
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Agent all -Scope project -ProjectDir C:\path\to\repository
 ```
 
-Then put the runtime on `PYTHONPATH` (add it to your shell profile):
+**`PYTHONPATH` is optional.** `run_cycle.py` and `cc-stats` run the runtime's scripts by path and find its modules without it. Add the runtime to `PYTHONPATH` only if other Python code (for example an agent composing stages with `CycleRecorder`) has to `import` its modules:
 
 ```bash
 export PYTHONPATH="$HOME/.code-cycle/runtime:${PYTHONPATH:-}"
 ```
-
-```powershell
-$env:PYTHONPATH = "$HOME\.code-cycle\runtime;$env:PYTHONPATH"
-```
-
-For a project-scope install, use `<repository>/.code-cycle/runtime` instead.
 
 Where files land:
 
@@ -95,7 +112,7 @@ Installer behaviour:
 
 All installer flags are listed in [Configuration → Command-line flags](configuration.md#command-line-flags).
 
-### Option B: `npx skills` (skills only, no clone)
+### Option C: `npx skills` (skills only, no clone)
 
 ```bash
 # interactive: choose skills, agents, and scope
@@ -118,7 +135,7 @@ npx skills add datacas/code-cycle-toolkit \
 > [!IMPORTANT]
 > A cycle skill delegates to `cc-pr-review`, `cc-code-review`, `cc-security-review`, and `cc-verify`. Install them alongside it. Without them the cycle still runs, but it reports those passes as **degraded**, not passed.
 
-### Option C: load the checkout directly
+### Option D: load the checkout directly
 
 - **Claude Code:** `claude --plugin-dir .` from the toolkit clone loads the bundled `.claude-plugin/plugin.json`.
 - **Codex:** plugin-aware environments can use `.codex-plugin/plugin.json`.
@@ -219,7 +236,7 @@ It never merges, never force-pushes, never deletes remote refs, and never closes
 | `BLOCKED` before any branch is created | The provider pair or repository is ambiguous, or a provider check failed. Pass `issue_provider=`, `code_host=`, `repository=` explicitly. |
 | Rereview says it can't recover findings | `review.trusted_authors` is missing or doesn't include the account that published the review. |
 | A review pass is reported as degraded | The supporting skill it delegates to isn't installed. |
-| `cc-stats` says the runtime isn't installed | You installed with `npx skills` or `--no-runtime`. Run the bundled installer. |
+| `cc-stats` or `cc-orchestrator` says the runtime isn't installed | You installed with `npx skills` or `--no-runtime`. Run the one-command installer. |
 | `run_cycle.py` stops with `publication_access` | `gh` isn't authenticated, the account can't push, Codex CLI is older than 0.138.0, or the working tree isn't on a named branch. |
 | `run_cycle.py` refuses a key in `.code-cycle.yml` | Unknown keys are refused by name to catch typos. See [Configuration](configuration.md). |
 
