@@ -192,7 +192,7 @@ install_runtime() {
   done < "$RUNTIME_MANIFEST"
 
   printf 'Installed runtime -> %s\n' "$destination"
-  printf 'Add it to PYTHONPATH to record a cycle: %s\n' "$destination"
+  printf 'Runtime installed at %s. run_cycle.py and cc-stats use it as-is; add it to PYTHONPATH only to import its modules from other code.\n' "$destination"
 }
 
 # The directory holds installed code, never anything a project should carry, so

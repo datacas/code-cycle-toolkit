@@ -177,7 +177,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 | Variable | Used by | Effect |
 |---|---|---|
-| `PYTHONPATH` | runtime | Must include `~/.code-cycle/runtime` (or the project's `.code-cycle/runtime`) |
+| `PYTHONPATH` | code that imports runtime modules | Optional. Add `~/.code-cycle/runtime` only when other Python code must `import` them. `run_cycle.py` and `stats.py` don't need it. |
 | `CODE_CYCLE_HOME` | telemetry, calibration store | Overrides the directory holding `telemetry.sqlite` and `calibration/` |
 | `XDG_CONFIG_HOME` | telemetry, calibration store (Unix) | Base for `code-cycle-toolkit/` when `CODE_CYCLE_HOME` is unset |
 | `APPDATA` | same (Windows) | Base for `code-cycle-toolkit\` when `CODE_CYCLE_HOME` is unset |
@@ -196,6 +196,8 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 | `--project-dir <path>` | `-ProjectDir` | current directory | Repository for project scope |
 | `--force` | `-Force` | off | Replace existing installed skills |
 | `--no-runtime` | `-NoRuntime` | off | Skills only |
+
+`get.sh` and `get.ps1` take `--version` / `-Version` (`latest`, `main`, or `vX.Y.Z`; also `CODE_CYCLE_VERSION`), pass the options above to the installer, and always add `--force`.
 
 ### `run_cycle.py`
 
