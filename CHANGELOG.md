@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- A `Release` workflow publishes the GitHub release automatically. After
+  `Validate package` passes on `main`, it reads the version from the plugin
+  manifests (which must agree). If that version has no tag, it tags the
+  validated commit and publishes a release with the version's `CHANGELOG.md`
+  section as notes. It refuses to release when that section is missing, and
+  does nothing when the tag already exists.
+
 ## [0.3.0] - 2026-09-24
 
 ### Added

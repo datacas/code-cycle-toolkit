@@ -104,4 +104,8 @@ wording change can be a behaviour change.
 - Test PowerShell installation on Windows.
 - Test global and repository-level installation for each host.
 - Test one manual skill and one complete cycle in each supported host.
-- Publish versioned Git tags and release archives.
+- Merge. `.github/workflows/release.yml` runs after `Validate package` passes on
+  `main`. When the manifest version has no tag yet, it creates `vX.Y.Z` on that
+  commit and publishes a GitHub release whose notes are the version's
+  `CHANGELOG.md` section. A merge that leaves the version unchanged releases
+  nothing. It can also be started by hand from the Actions tab.
