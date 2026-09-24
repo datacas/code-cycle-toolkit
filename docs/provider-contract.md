@@ -77,6 +77,32 @@ metadata; missing metadata or contract headings published only by untrusted
 authors also returns `BLOCKED`. Ordinary discussion without contract headings
 starts an empty record. Compare provider login identities case-insensitively.
 
+## Setting up each provider
+
+The toolkit uses the tooling you already authenticated. It installs no MCP
+server, creates no credentials, and changes no remote state during a check.
+
+| Provider | Role | Tooling | `cc-provider-bootstrap` checks |
+|---|---|---|---|
+| GitHub | issue provider, code host | `gh` (or a configured GitHub connector) | authenticated, can read the repository, and can read the issue when GitHub is also the issue provider |
+| Bitbucket | code host | a configured Bitbucket connector, CLI, or API tooling | can read the repository and its pull requests. GitHub access proves nothing here. |
+| Plane | issue provider | a configured Plane MCP server or connector | authenticated, can read the workspace/project or work item |
+| Jira | issue provider | a configured Jira connector, CLI, or API tooling | can read the project and work item. Plane or GitHub access proves nothing here. |
+
+A shared GitHub connection can satisfy both the issue-provider and code-host
+checks, but both scopes are recorded. A check without a selected project, work
+item, or repository is account-level only and is never reported as scoped
+access.
+
+Successful checks are cached outside the repository, under
+`~/.config/code-cycle-toolkit/provider-health/` (the application-data directory
+on Windows), for `verification.cache_ttl` (default `7d`). The cache stores facts
+such as provider, scope, status, time, and capabilities, never tokens or
+response bodies. A later authentication, permission, or connectivity failure
+invalidates that provider's entry and forces a recheck. A failed recheck
+returns `BLOCKED` and names the missing connector, authentication, permission,
+or scope.
+
 ## Provider responsibilities
 
 An issue-provider adapter must expose, or explicitly report that it cannot
@@ -143,3 +169,7 @@ GitHub-specific field.
 - A failed provider publication, inaccessible review thread, or unavailable
   required check is `BLOCKED` or an explicitly degraded verification result;
   it is never silently treated as success.
+
+---
+
+[← Configuration](configuration.md) · [↑ Documentation index](README.md) · [Telemetry →](telemetry.md)

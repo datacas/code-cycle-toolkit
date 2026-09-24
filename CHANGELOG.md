@@ -7,6 +7,16 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- Restructure the documentation. `README.md` is now a landing page with a
+  workflow chooser, a quick start, and a configuration map. New guides in
+  `docs/` cover getting started, workflows, skills, the review lifecycle,
+  verification, routing, configuration, and telemetry, indexed by
+  `docs/README.md`. The existing provider, workspace-policy, and
+  instrumentation documents now link into that index. `SECURITY.md` now
+  describes the runtime and the opt-in Jev request, which the previous scope
+  statement omitted. The release checklist moved to `CONTRIBUTING.md`. The
+  configuration reference now documents `CODE_CYCLE_HOME`, `CODEX_HOME`, the
+  built-in security-review defaults, and every CLI flag.
 - `DEFAULT_PROFILES` now target the `gpt-6` Codex family and Claude Opus 5.5:
   `auxiliary_tool`, `coordinator`, `cheap_coder` and `deep_coder` use
   `gpt-6-luna` (was `gpt-5.6-luna`); `reviewer`, `senior_reviewer` and

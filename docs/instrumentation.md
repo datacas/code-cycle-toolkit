@@ -1,5 +1,10 @@
 # Instrumentation
 
+> [!NOTE]
+> This is the design reference: why each rule exists and how it is enforced.
+> For how to use these features, start with [Review lifecycle](review-cycle.md),
+> [Routing and models](routing.md), and [Telemetry](telemetry.md).
+
 What a Code Cycle run records about itself, and why. This documents what is
 implemented today. It is deliberately narrow: it makes runs measurable, and it
 chooses nothing.
@@ -875,3 +880,7 @@ itself from an outcome, and the router's two escalation rules stay where they
 were written until a person moves them. Analysis of what this records is done today by
 reading published comments — `gh api` plus `scripts/review_contract.py` — not by
 a persistence layer.
+
+---
+
+[← Role workspace policy](role-workspace-policy.md) · [↑ Documentation index](README.md)
