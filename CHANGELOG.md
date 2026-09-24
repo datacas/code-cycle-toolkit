@@ -14,6 +14,11 @@ All notable changes to this project are documented here. This project follows
 - Correct `cc-stats` weekly sparkline alignment, report period emptiness from
   all telemetry row types, bound long-range sparkline allocation, reject unsafe
   repository selectors, and clarify Markdown versus JSON reply instructions.
+- Show in `cc-stats` how cycles ended: a "Cycle outcomes" table counts each
+  closed cycle by final status, keeps cycles without a closing record as
+  unknown, and reports resolution rounds when measured. Unmeasured model drift
+  now names how many dispatches did not report a model, and test verification
+  is labelled as counted per cycle. (#52)
 
 ### Added
 
