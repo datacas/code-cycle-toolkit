@@ -278,7 +278,63 @@ class StatsTests(unittest.TestCase):
         self.assertIn("Cost: not measured", stats.render_markdown(report))
         self.assertIsNone(report["summary"]["findings"]["critical"]["count"])
         self.assertIsNone(report["summary"]["verification"]["passed"])
-        self.assertIn("Test verification: not reported", stats.render_markdown(report))
+        self.assertIn("Test verification, per cycle: not reported for 1 cycle(s)",
+                      stats.render_markdown(report))
+
+    def record_cycle(self, index: int, *, closed: bool = True,
+                     status: str = "HUMAN_INTERVENTION") -> None:
+        cycle_id = f"cycle-private-{index}"
+        for seq, role in enumerate(("implement", "review"), start=1):
+            self.store.record_stage(
+                "owner/repo", f"task-private-{index}", role, profile="cheap_coder",
+                executor="codex", outcome="succeeded", model_requested="gpt-5.6-luna",
+                cycle_id=cycle_id, stage_seq=seq, record_kind="dispatch",
+            )
+        if closed:
+            self.store.record_stage(
+                "owner/repo", f"task-private-{index}", "coordinate", status=status,
+                cycle_id=cycle_id, record_kind="cycle", final_review_status="CHANGES_REQUESTED",
+                final_approved=False, resolution_rounds=index,
+            )
+
+    def test_cycle_outcomes_count_final_status_per_cycle(self) -> None:
+        for index in range(4):
+            self.record_cycle(index)
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        outcomes = report["summary"]["cycle_outcomes"]
+        markdown = stats.render_markdown(report)
+
+        self.assertEqual({"HUMAN_INTERVENTION": 4}, outcomes["status"])
+        self.assertEqual((4, 4, 0), (outcomes["cycles"], outcomes["closed"], outcomes["unknown"]))
+        self.assertEqual({"measured": 4, "total": 6, "mean": 1.5}, outcomes["resolution_rounds"])
+        self.assertIn("| HUMAN_INTERVENTION | 4 |", markdown)
+        self.assertIn("Resolution rounds: **6** across 4 closed cycle(s)", markdown)
+        self.assertNotIn("cycle-private", json.dumps(report))
+
+    def test_cycle_without_closing_row_is_neither_finished_nor_failed(self) -> None:
+        self.record_cycle(0, status="READY_FOR_MANUAL_MERGE")
+        self.record_cycle(1, closed=False)
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        outcomes = report["summary"]["cycle_outcomes"]
+
+        self.assertEqual({"READY_FOR_MANUAL_MERGE": 1}, outcomes["status"])
+        self.assertEqual((2, 1, 1), (outcomes["cycles"], outcomes["closed"], outcomes["unknown"]))
+        self.assertIn("1 of 2 cycle(s) have no closing record", stats.render_markdown(report))
+
+    def test_unmeasured_model_drift_names_dispatches_without_a_model(self) -> None:
+        for index in range(3):
+            self.record_cycle(index)
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        self.assertEqual(0, report["summary"]["model_drift"]["measured"])
+        self.assertIn("Model drift: not measured — 6 dispatches did not report a model",
+                      stats.render_markdown(report))
 
 
 if __name__ == "__main__":

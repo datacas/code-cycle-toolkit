@@ -196,6 +196,47 @@ def _profile_outcomes(rows: list[dict], minimum: int) -> dict:
     }
 
 
+def _cycle_outcomes(rows: list[dict]) -> dict:
+    """How each correlated cycle ended, keyed by `cycle_id` rather than task.
+
+    A cycle whose closing row is not in the period is still open, or ended
+    without recording one: it counts as unknown, neither finished nor failed.
+    Rows without a `cycle_id` predate correlation and are not cycles.
+    """
+    seen: set[str] = set()
+    closing: dict[str, dict] = {}
+    for row in rows:
+        payload = row["payload"]
+        cycle_id = payload.get("cycle_id")
+        if not cycle_id:
+            continue
+        seen.add(cycle_id)
+        if payload.get("record_kind") == "cycle":
+            # Rows are read in recorded order; the last close is authoritative.
+            closing[cycle_id] = row
+
+    statuses = Counter()
+    rounds = []
+    for row in closing.values():
+        status = str(row.get("status") or "").upper()
+        statuses[status or "UNKNOWN"] += 1
+        value = row["payload"].get("resolution_rounds")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            rounds.append(value)
+    unknown = len(seen) - len(closing) + statuses.pop("UNKNOWN", 0)
+    return {
+        "cycles": len(seen),
+        "closed": sum(statuses.values()),
+        "unknown": unknown,
+        "status": _counter(statuses),
+        "resolution_rounds": {
+            "measured": len(rounds),
+            "total": sum(rounds) if rounds else None,
+            "mean": sum(rounds) / len(rounds) if rounds else None,
+        },
+    }
+
+
 def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
               now: datetime | None = None, minimum: int = MINIMUM_SAMPLE) -> dict:
     """Build a JSON-safe report without returning raw telemetry rows."""
@@ -314,6 +355,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                 "unreported": model_resolutions["unreported"],
             },
             "verdicts": _counter(verdicts),
+            "cycle_outcomes": _cycle_outcomes(current),
             "findings": {
                 name: {"count": findings[name] if findings_measured[name] else None,
                        "measured": findings_measured[name]}
@@ -465,6 +507,18 @@ def render_markdown(report: dict) -> str:
     lines += ["", "### Review verdicts", ""]
     lines += _count_table("Verdict", "Reviews", summary["verdicts"], empty="No review verdicts recorded.")
 
+    lines += ["", "### Cycle outcomes", ""]
+    outcomes = summary["cycle_outcomes"]
+    lines += _count_table("Final status", "Cycles", outcomes["status"],
+                          empty="No cycle recorded how it ended.")
+    if outcomes["unknown"]:
+        lines += ["", f"{outcomes['unknown']} of {outcomes['cycles']} cycle(s) have no closing "
+                      "record; their outcome is unknown, neither finished nor failed."]
+    rounds = outcomes["resolution_rounds"]
+    if rounds["measured"]:
+        lines += ["", f"Resolution rounds: **{rounds['total']}** across {rounds['measured']} "
+                      f"closed cycle(s) (mean {rounds['mean']:.1f})."]
+
     lines += ["", "### Findings by severity", ""]
     findings = summary["findings"]
     if any(item["measured"] for item in findings.values()):
@@ -489,16 +543,20 @@ def render_markdown(report: dict) -> str:
     lines.append(
         f"- Model drift: **{drift['mismatches']} of {drift['measured']}** dispatches that reported "
         f"their model ran a different one; {drift['unreported']} did not report a model"
-        if drift["measured"] else "- Model drift: not measured"
+        if drift["measured"]
+        else f"- Model drift: not measured — {drift['unreported']} dispatches did not report a model"
+        if drift["unreported"] else "- Model drift: not measured"
     )
     verification = summary["verification"]
     if verification["measured"]:
         lines.append(
-            f"- Test verification: **{verification['passed']} passed, {verification['failed']} failed**; "
-            f"{verification['measured']} reported, {verification['not_reported']} not reported"
+            f"- Test verification, per cycle: **{verification['passed']} passed, "
+            f"{verification['failed']} failed**; {verification['measured']} reported, "
+            f"{verification['not_reported']} not reported"
         )
     else:
-        lines.append(f"- Test verification: not reported for {verification['not_reported']} task(s)")
+        lines.append(f"- Test verification, per cycle: not reported for "
+                     f"{verification['not_reported']} cycle(s)")
     duration, cost = summary["duration_ms"], summary["cost_usd"]
     lines.append(
         f"- Duration: **{duration['total'] / 1000:.1f}s total** across {duration['measured']} measured stages"
