@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -203,6 +204,11 @@ class DispatchResult:
     #: caller that reads `SUCCEEDED` as "finished" would review work still being
     #: written. Native executors run to completion, so they leave this False.
     asynchronous: bool = False
+    #: Wall time of the executor call, from a monotonic clock. None when the
+    #: attempt was refused before an executor ran, and when the call only
+    #: started work that finishes elsewhere: timing the launch would report a
+    #: stage as fast because nobody watched it finish.
+    duration_ms: int | None = None
 
     @property
     def learned_availability(self) -> Availability | None:
@@ -1039,6 +1045,7 @@ def dispatch(
     *,
     policy: ReadinessPolicy | None = None,
     probes: dict[str, ProbeResult] | None = None,
+    clock=time.monotonic,
     **kw,
 ) -> DispatchResult:
     """Execute a routing decision, or refuse and say exactly what is missing.
@@ -1156,16 +1163,20 @@ def dispatch(
     # execution arguments, never an unrecognised policy keyword.
     kw.pop("workspace", None)
 
+    started = clock()
     result = adapter.dispatch(target, task, **kw)
-    # `replace` rather than a rebuild by hand: the two fields below are what
-    # this layer knows and the adapter does not, and everything else is the
+    elapsed = max(0, round((clock() - started) * 1000))
+    # From what the adapter is, not from what this result remembered to say.
+    asynchronous = (result.asynchronous
+                    or (not adapter.completes_work
+                        and result.outcome is DispatchOutcome.SUCCEEDED))
+    # `replace` rather than a rebuild by hand: the fields below are what this
+    # layer knows and the adapter does not, and everything else is the
     # adapter's answer. Listing the rest again would mean every new field on a
     # result has to be remembered here too, and the one that is forgotten is
     # silently dropped on its way out.
     return replace(
         result, readiness_policy=policy, dispatched_from=probe.availability,
-        # From what the adapter is, not from what this result remembered to say.
-        asynchronous=(result.asynchronous
-                      or (not adapter.completes_work
-                          and result.outcome is DispatchOutcome.SUCCEEDED)),
+        asynchronous=asynchronous,
+        duration_ms=None if asynchronous else elapsed,
     )

@@ -7,6 +7,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Fixed
 
+- Record `duration_ms` for every dispatch that reached an executor, measured
+  with a monotonic clock, and stop counting `tests.passed: false` from a stage
+  that never ran its tests as a failure: `tests.ran: false`, or a `BLOCKED`
+  result without `ran: true`, now records no test outcome. `cc-implement-issue`
+  and `cc-resolve-comments` document the distinction. (#53)
+
 - Move Jev shadow to TypeSafe's official API, preserve `typesafe-ai/jev` as a
   `jev-latest` compatibility alias, record concrete model versions resolved by
   the rolling alias without treating them as drift, and refuse HTTP redirects
