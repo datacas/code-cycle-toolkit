@@ -73,13 +73,17 @@ def speak(model: str, message: str) -> None:
     """Print the message the way this agent's real CLI prints one.
 
     Codex emits NDJSON events and puts the reply in an `agent_message` item; it
-    reports no model anywhere, which is what a live run showed. Claude emits one
-    JSON object whose `result` holds the reply, alongside `modelUsage`.
+    reports no model anywhere, which is what a live run showed. Claude emits
+    verbose JSONL events and puts the reply in its final `result` event.
     """
     if NAME == "claude":
         print(json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": message}]},
+        }))
+        print(json.dumps({
             "type": "result", "subtype": "success", "is_error": False,
-            "modelUsage": {model: {"inputTokens": 1}},
+            "modelUsage": {model: {"inputTokens": 1, "outputTokens": 1}},
             "result": message,
         }))
         return

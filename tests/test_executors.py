@@ -988,6 +988,12 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("--permission-mode", argv)
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
 
+    def test_claude_uses_verbose_jsonl_output(self) -> None:
+        argv = self.claude()
+
+        self.assertEqual("stream-json", argv[argv.index("--output-format") + 1])
+        self.assertIn("--verbose", argv)
+
     def test_claude_publishing_stage_keeps_its_github_tooling(self) -> None:
         """The publication boundary is behavioural: gh and git stay available,
         and the stage's prompt says which operations it may perform."""
@@ -1443,6 +1449,50 @@ class AgentOutputTests(unittest.TestCase):
 
         self.assertIn("ORCHESTRATION_RESULT", spoken)
         self.assertNotIn("modelUsage", spoken)
+
+    def test_claude_speaks_through_the_final_jsonl_result_event(self) -> None:
+        message = json.dumps({"status": "APPROVED"})
+        stdout = chr(10).join((
+            json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": "progress"}],
+            }}),
+            json.dumps({"type": "result", "result": message,
+                        "modelUsage": {"claude-sonnet-5": {}}}),
+        ))
+
+        self.assertEqual(message, ex.ClaudeAdapter().agent_output(stdout))
+
+    def test_native_json_events_update_activity_and_tool_count(self) -> None:
+        codex_events = []
+        claude_events = []
+        ex.CodexAdapter()._stream_activity(json.dumps({
+            "type": "item.started", "item": {"type": "command_execution"},
+        }), lambda **event: codex_events.append(event))
+        ex.CodexAdapter()._stream_activity(json.dumps({
+            "type": "item.updated",
+            "item": {"type": "agent_message", "text": "Codex is working"},
+        }), lambda **event: codex_events.append(event))
+        ex.ClaudeAdapter()._stream_activity(json.dumps({
+            "type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "text", "text": "Claude is working"},
+            ]},
+        }), lambda **event: claude_events.append(event))
+
+        self.assertIn({"text": "command execution started", "tool": True}, codex_events)
+        self.assertIn({"text": "Codex is working"}, codex_events)
+        self.assertIn({"text": "Using Bash", "tool": True}, claude_events)
+        self.assertIn({"text": "Claude is working"}, claude_events)
+
+    def test_native_runner_streams_stdout_to_its_callback(self) -> None:
+        output = []
+        script = "import time; print('first', flush=True); time.sleep(.02); print('second', flush=True)"
+        completed = ex._run([__import__("sys").executable, "-c", script],
+                            timeout=2, on_output=output.append)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual(["first" + chr(10), "second" + chr(10)], output)
+        self.assertEqual("first" + chr(10) + "second" + chr(10), completed.stdout)
 
     def test_the_block_survives_the_envelope_intact(self) -> None:
         """The whole point: escaped in the envelope, parseable once unwrapped."""

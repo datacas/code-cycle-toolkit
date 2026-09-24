@@ -761,9 +761,9 @@ executor for — a documented opt-in in every review skill — and never from an
 exit code or from prose.
 
 **What the agent said is not what the CLI printed.** Every one of these tools
-prints a machine envelope and puts the reply inside it, JSON-encoded: Claude one
-object whose `result` holds the text, Codex a stream of NDJSON events whose
-`agent_message` items hold it. Each adapter unwraps its own format into
+prints a machine envelope and puts the reply inside it, JSON-encoded: Claude a
+verbose JSONL stream whose final `result` event holds the reply, Codex a stream
+of NDJSON events whose `agent_message` items hold it. Each adapter unwraps its own format into
 `agent_output`, and the driver reads that. Reading the envelope instead finds
 the right words with the wrong escapes — a canary run located
 `ORCHESTRATION_RESULT` in Claude's output and then failed to parse the block,
@@ -778,6 +778,14 @@ already keeps them in separate columns: `outcome` says the call returned,
 `status` says what the agent reported doing. Both stay true; what changed is
 that a stage whose own report is not a completion stops the cycle. The dispatch
 row still says `succeeded`, because it did.
+
+The runtime also writes one atomic status snapshot per cycle beside the
+telemetry database. `cycle_status.py` reads those snapshots from any terminal;
+the snapshot is updated while a dispatch runs and retained after the cycle
+finishes. `run_cycle.py --verbose` prints the same routing and activity fields
+to the launching terminal, with periodic updates controlled by
+`--progress-interval`. This output is opt-in; without `--verbose`, the normal
+terminal output is unchanged.
 
 **What the agent said about it is shown, and believed by nobody.** A stage that
 stops reports a reason in its own block, and that reason is printed beside the

@@ -35,6 +35,7 @@ def main(argv: list[str]) -> int:
     sys.path[:] = [str(runtime)] + [p for p in sys.path if p and not _is_repo(p)]
 
     import cycle as cy
+    import cycle_status as cs
     import executors as ex
     import router
     import telemetry as tm
@@ -71,6 +72,13 @@ def main(argv: list[str]) -> int:
     )
 
     outcome = recorder.stage("implement", "a task that runs nowhere")
+    status = cs.CycleStatusWriter(database, "cycle-installed-check",
+                                  "owner/example", "INSTALL-1")
+    status.start()
+    status.stage_started("implement", outcome.decision)
+    status.activity(text="installed runtime status")
+    status.stage_finished(outcome.result, "IMPLEMENTED")
+    status.finish("READY_FOR_MANUAL_MERGE")
     recorder.record_verdict("review", "APPROVED", findings_total=0)
     recorder.close("READY_FOR_MANUAL_MERGE")
 
@@ -85,6 +93,9 @@ def main(argv: list[str]) -> int:
         return 1
     if rows[0]["executor"] != "codex" or rows[0]["outcome"] != "succeeded":
         print(f"the dispatch row is wrong: {rows[0]}", file=sys.stderr)
+        return 1
+    if not status.path.is_file():
+        print("the installed runtime did not write a cycle status file", file=sys.stderr)
         return 1
 
     print(f"installed runtime recorded {len(rows)} rows from {runtime}")

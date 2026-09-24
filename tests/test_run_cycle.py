@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,34 @@ class Starter(ScriptedAdapter):
             ex.DispatchOutcome.SUCCEEDED, self.name, target,
             model_resolved=target.model, artifacts={"dispatchId": "D-7"},
             asynchronous=True,
+        )
+
+
+class StreamingNative(ex.NativeAdapter):
+    """Native-shaped scripted executor that emits progress during a stage."""
+
+    enforces_read_only = True
+
+    def __init__(self, name: str, body: str) -> None:
+        self.name = name
+        self.body = body
+
+    def probe(self):
+        return ex.ProbeResult(self.name, ex.Availability.READY, "scripted")
+
+    def publication_access(self, probe, *, writes):
+        return True, "scripted publication access"
+
+    def dispatch(self, target, task, **kw):
+        callback = kw.get("on_progress")
+        if callback:
+            callback(text="The scripted executor is working")
+            callback(tool=True)
+        time.sleep(0.04)
+        return ex.DispatchResult(
+            ex.DispatchOutcome.SUCCEEDED, self.name, target,
+            model_resolved=target.model,
+            artifacts={"stdout": self.body}, agent_output=self.body,
         )
 
 

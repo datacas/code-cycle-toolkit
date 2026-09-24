@@ -212,6 +212,8 @@ class CycleRecorder:
         verification_available: bool | None = None,
         cycle_id: str | None = None,
         shadow: JevShadow | None = None,
+        stage_started: Callable[[str, RoutingDecision], None] | None = None,
+        on_progress: Callable[..., None] | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -264,6 +266,8 @@ class CycleRecorder:
         # returns reaches `route()` or a dispatch. `None` means no shadow at
         # all, so a disabled one costs no client, no key read and no I/O.
         self.shadow = shadow
+        self.stage_started = stage_started
+        self.on_progress = on_progress
 
     def stage(self, role: str, task: str, **dispatch_kwargs) -> StageOutcome:
         """Route, dispatch and record. One call, no half-done state.
@@ -366,11 +370,15 @@ class CycleRecorder:
                 self._observe_shadow(role, *first)
                 return outcome
 
+            if self.stage_started is not None:
+                self.stage_started(role, decision)
+
             # Per attempt: a reroute runs under the fallback's target, and its
             # run line has to name that one.
             result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
                               self.registry,
                               policy=self.policy, probes=self.probes,
+                              on_progress=self.on_progress,
                               **dispatch_kwargs)
             outcome.decision = decision
             outcome.result = result
