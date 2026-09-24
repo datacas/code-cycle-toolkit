@@ -11,9 +11,11 @@ code_cycle:
     trusted_authors:
       - datacas
   # Experimental candidates for a reviewer comparison that has not run yet.
-  # Neither is the default reviewer and nothing presumes which is better; the
-  # calibration decides that. This is the only place an alias maps to a
-  # provider and model, so a candidate can be swapped without editing a skill.
+  # `reviewer_b` matches the default `reviewer` profile (gpt-6-sol high), so
+  # the comparison asks whether `reviewer_a` could replace it; nothing presumes
+  # which is better, the calibration decides that. This is the only place an
+  # alias maps to a provider and model, so a candidate can be swapped without
+  # editing a skill.
   calibration:
     profiles:
       reviewer_a:
@@ -22,5 +24,5 @@ code_cycle:
         effort: high
       reviewer_b:
         provider: openai
-        model: gpt-5.6-terra
+        model: gpt-6-sol
         effort: high
