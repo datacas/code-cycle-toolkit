@@ -1190,6 +1190,42 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertNotIn("read_only_mode", result.artifacts)
 
+    @unittest.skipUnless(hasattr(ex.os, "geteuid") and ex.os.geteuid() != 0,
+                         "needs POSIX permissions enforced for a non-root user")
+    def test_cleanup_never_follows_a_reviewer_symlink_out_of_the_clone(self) -> None:
+        repo = self._git_repo()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        external = Path(temporary.name) / "external-secret"
+        external.write_text("keep me", encoding="utf-8")
+        external.chmod(0o600)
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["cwd"] = cwd
+            locked = Path(cwd) / "locked"
+            locked.mkdir()
+            (locked / "link").symlink_to(external)
+            locked.chmod(0o500)
+            return completed("{}")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+            runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+        locked = Path(seen["cwd"]) / "locked"
+        if locked.exists():
+            self.addCleanup(ex.shutil.rmtree, seen["cwd"], ignore_errors=True)
+            self.addCleanup(locked.chmod, 0o700)
+
+        self.assertEqual(0o600, external.stat().st_mode & 0o777)
+        self.assertEqual("keep me", external.read_text(encoding="utf-8"))
+        self.assertFalse(Path(seen["cwd"]).exists())
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+
     def test_a_review_clone_that_cannot_be_removed_fails_without_a_read_only_mode(self) -> None:
         repo = self._git_repo()
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")

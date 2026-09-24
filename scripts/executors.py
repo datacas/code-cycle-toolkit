@@ -740,9 +740,19 @@ def _remote_ref_fingerprint(root: str) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _remove_read_only_path(function, path, exc_info) -> None:
+def _remove_read_only_path(function, path, exc_info, root=None) -> None:
+    # Removal needs a writable parent, and on Windows a writable entry. chmod
+    # follows links, and a reviewer can point one anywhere, so a link is never
+    # chmodded, and a parent is made writable only inside `root`, the
+    # workspace being removed; rmtree does not descend through links.
     try:
-        os.chmod(path, 0o700)
+        parent = os.path.dirname(path)
+        if (root is not None and parent and not os.path.islink(parent)
+                and os.path.commonpath([os.path.abspath(root), os.path.abspath(parent)])
+                == os.path.abspath(root)):
+            os.chmod(parent, 0o700)
+        if not os.path.islink(path):
+            os.chmod(path, 0o700)
         function(path)
     except OSError:
         raise exc_info[1]
@@ -751,7 +761,8 @@ def _remove_read_only_path(function, path, exc_info) -> None:
 def _remove_workspace(path: str) -> str | None:
     """Remove a disposable directory; return what is left on disk, or None."""
     try:
-        shutil.rmtree(path, onerror=_remove_read_only_path)
+        shutil.rmtree(path, onerror=lambda function, failed, exc_info:
+                      _remove_read_only_path(function, failed, exc_info, root=path))
     except FileNotFoundError:
         return None
     except Exception as exc:
