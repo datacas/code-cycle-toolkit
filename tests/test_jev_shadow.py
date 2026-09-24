@@ -75,7 +75,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_unknown_keys_models_and_timeouts_are_refused(self) -> None:
         for jev in ({"mode": "shadow", "api_key": "x"},
-                    {"mode": "shadow", "model": "gpt-5.6-luna"},
+                    {"mode": "shadow", "model": "gpt-6-luna"},
                     {"mode": "shadow", "timeout_seconds": 0},
                     {"mode": "shadow", "timeout_seconds": 60},
                     {"mode": "shadow", "timeout_seconds": True},
@@ -470,7 +470,7 @@ class TelemetryShapeTests(unittest.TestCase):
         with self.assertRaises(tm.TelemetryError):
             tm.validate_reference("jev_suggested_profile", "reviewer")
         with self.assertRaises(tm.TelemetryError):
-            tm.validate_reference("jev_model_requested", "gpt-5.6-luna")
+            tm.validate_reference("jev_model_requested", "gpt-6-luna")
         self.assertEqual("jev-1.14.0",
                          tm.validate_reference("jev_model_resolved", "jev-1.14.0"))
         with self.assertRaises(tm.TelemetryError):

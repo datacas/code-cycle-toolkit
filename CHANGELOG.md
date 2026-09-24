@@ -5,6 +5,17 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- `DEFAULT_PROFILES` now target the `gpt-6` Codex family and Claude Opus 5.5:
+  `auxiliary_tool`, `coordinator`, `cheap_coder` and `deep_coder` use
+  `gpt-6-luna` (was `gpt-5.6-luna`); `reviewer`, `senior_reviewer` and
+  `security` use `gpt-6-sol` (was `gpt-5.6-terra`); the `security` fallback is
+  `claude-opus-5-5` (was `claude-opus-5`). Efforts and Claude Sonnet/Haiku
+  targets are unchanged. Telemetry's built-in accepted model set follows the
+  profiles, so recording one of the old names now needs it declared in
+  `.code-cycle.yml` `profiles`.
+
 ### Fixed
 
 - Tell every stage the routing decision it runs under — profile, requested

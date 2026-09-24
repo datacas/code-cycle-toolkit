@@ -121,7 +121,7 @@ class StorageTests(TelemetryTestCase):
 
     def test_routing_reasons_are_reduced_to_a_count(self) -> None:
         """The reasons are prose and belong in the published comment."""
-        target = router.parse_target("codex:openai/gpt-5.6-luna high")
+        target = router.parse_target("codex:openai/gpt-6-luna high")
         decision = router.RoutingDecision(
             "cheap_coder", target, router.RoutingMode.PRODUCTION,
             reasons=("difficulty below 3", "codex is ready"),
@@ -200,12 +200,12 @@ class ColumnBoundaryTests(TelemetryTestCase):
         self.store.record_stage("repo", "task-1", "review", status="APPROVED",
                                 profile="senior_reviewer", skill="cc-initial-review",
                                 executor="claude", provider="anthropic", effort="high",
-                                model_requested="claude-opus-5")
+                                model_requested="claude-opus-5-5")
 
         row = self.store.rows()[0]
 
         self.assertEqual("APPROVED", row["status"])
-        self.assertEqual("claude-opus-5", row["model_requested"])
+        self.assertEqual("claude-opus-5-5", row["model_requested"])
 
 
 class IdentifierBoundaryTests(TelemetryTestCase):
@@ -227,14 +227,14 @@ class IdentifierBoundaryTests(TelemetryTestCase):
 
     def test_a_model_must_be_one_this_toolkit_knows(self) -> None:
         """The closed set is the only real guarantee: no grammar separates
-        gpt-5.6-luna from sk-live-abc123."""
+        gpt-6-luna from sk-live-abc123."""
         with self.assertRaises(tm.TelemetryError):
             self.store.record_stage("repo", "task", "implement",
                                     model_requested="some-unknown-model")
 
     def test_the_known_models_come_from_the_router_profiles(self) -> None:
-        self.assertIn("gpt-5.6-luna", tm.known_models())
-        self.assertIn("claude-opus-5", tm.known_models())
+        self.assertIn("gpt-6-luna", tm.known_models())
+        self.assertIn("claude-opus-5-5", tm.known_models())
 
     def test_the_model_check_survives_a_package_qualified_import(self) -> None:
         """A guarantee that depends on import topology is not a guarantee."""
@@ -269,7 +269,7 @@ class IdentifierBoundaryTests(TelemetryTestCase):
              unittest.mock.patch.object(tm, "_router_packaged", broken[0]):
             with self.assertRaises(tm.TelemetryError):
                 self.store.record_stage("repo", "task", "implement",
-                                        model_requested="gpt-5.6-luna")
+                                        model_requested="gpt-6-luna")
 
     def test_a_reference_grammar_rejects_what_a_selector_never_contains(self) -> None:
         for value in ("has space", "tab\there", "new\nline", "quote'inside", "<angle>"):
@@ -283,7 +283,7 @@ class IdentifierBoundaryTests(TelemetryTestCase):
                            ("workspace/repo", "ENG-123")):
             with self.subTest(repo=repo):
                 self.store.record_stage(repo, task, "implement",
-                                        model_requested="gpt-5.6-luna")
+                                        model_requested="gpt-6-luna")
 
         self.assertEqual(3, len(self.store.rows()))
 
@@ -451,7 +451,7 @@ class FirstPassRateTests(TelemetryTestCase):
 
 class DispatchRecordingTests(TelemetryTestCase):
     def decision_and_result(self, blocked_capability=None, used_fallback=False):
-        target = router.parse_target("codex:openai/gpt-5.6-luna high")
+        target = router.parse_target("codex:openai/gpt-6-luna high")
         decision = router.RoutingDecision(
             "cheap_coder", target, router.RoutingMode.PRODUCTION,
             used_fallback=used_fallback, reasons=("difficulty below 3",),
@@ -466,7 +466,7 @@ class DispatchRecordingTests(TelemetryTestCase):
         else:
             result = ex.DispatchResult(
                 ex.DispatchOutcome.SUCCEEDED, "codex", target,
-                model_resolved="gpt-5.6-luna",
+                model_resolved="gpt-6-luna",
                 readiness_policy=ex.ReadinessPolicy.ATTEMPT,
                 dispatched_from=ex.Availability.AUTHENTICATED,
             )
@@ -480,8 +480,8 @@ class DispatchRecordingTests(TelemetryTestCase):
 
         self.assertEqual("cheap_coder", row["profile"])
         self.assertEqual("codex", row["executor"])
-        self.assertEqual("gpt-5.6-luna", row["model_requested"])
-        self.assertEqual("gpt-5.6-luna", row["model_resolved"])
+        self.assertEqual("gpt-6-luna", row["model_requested"])
+        self.assertEqual("gpt-6-luna", row["model_resolved"])
         self.assertEqual("succeeded", row["outcome"])
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
@@ -508,7 +508,7 @@ class DispatchRecordingTests(TelemetryTestCase):
 class ModelDriftTests(TelemetryTestCase):
     def test_a_different_model_is_reported(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
-                                model_requested="gpt-5.6-luna", model_resolved="claude-sonnet-5")
+                                model_requested="gpt-6-luna", model_resolved="claude-sonnet-5")
 
         drift = self.store.model_drift("repo")
 
@@ -517,20 +517,20 @@ class ModelDriftTests(TelemetryTestCase):
 
     def test_a_match_is_not_drift(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
-                                model_requested="gpt-5.6-luna", model_resolved="gpt-5.6-luna")
+                                model_requested="gpt-6-luna", model_resolved="gpt-6-luna")
 
         self.assertEqual([], self.store.model_drift("repo"))
 
     def test_silence_is_not_counted_as_agreement(self) -> None:
         """Codex reports no model at all; calling that a match hides the point."""
         self.store.record_stage("repo", "t1", "implement",
-                                model_requested="gpt-5.6-luna", model_resolved=None)
+                                model_requested="gpt-6-luna", model_resolved=None)
 
         self.assertEqual([], self.store.model_drift("repo"))
 
     def test_an_unrecognised_model_is_drift_without_persisting_its_name(self) -> None:
         self.store.record_stage("repo", "t1", "implement",
-                                model_requested="gpt-5.6-luna",
+                                model_requested="gpt-6-luna",
                                 model_resolved="gpt-fictional-9")
 
         row = self.store.rows("repo")[0]
@@ -547,7 +547,7 @@ class ModelDriftTests(TelemetryTestCase):
     def test_legacy_rows_without_a_resolution_token_still_report_drift(self) -> None:
         self.store.record_stage(
             "repo", "legacy", "implement",
-            model_requested="gpt-5.6-luna",
+            model_requested="gpt-6-luna",
             model_resolved="claude-sonnet-5",
         )
         row_id = self.store.rows("repo")[0]["id"]
@@ -566,7 +566,7 @@ class ModelResolutionTests(TelemetryTestCase):
     """The dispatch receipt maps to a closed observation token."""
 
     def record(self, resolved):
-        target = router.parse_target("codex:openai/gpt-5.6-luna high")
+        target = router.parse_target("codex:openai/gpt-6-luna high")
         decision = router.RoutingDecision(
             "cheap_coder", target, router.RoutingMode.PRODUCTION,
         )
@@ -586,7 +586,7 @@ class ModelResolutionTests(TelemetryTestCase):
 
     def test_omitting_the_resolved_model_records_unreported(self) -> None:
         self.store.record_stage(
-            "repo", "task", "implement", model_requested="gpt-5.6-luna"
+            "repo", "task", "implement", model_requested="gpt-6-luna"
         )
 
         row = self.store.rows("repo")[0]
@@ -594,9 +594,9 @@ class ModelResolutionTests(TelemetryTestCase):
         self.assertEqual("unreported", row["payload"]["model_resolution"])
 
     def test_matched_resolution(self) -> None:
-        row = self.record("gpt-5.6-luna")
+        row = self.record("gpt-6-luna")
 
-        self.assertEqual("gpt-5.6-luna", row["model_resolved"])
+        self.assertEqual("gpt-6-luna", row["model_resolved"])
         self.assertEqual("matched", row["payload"]["model_resolution"])
 
     def test_known_mismatch_resolution(self) -> None:

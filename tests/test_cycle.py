@@ -106,8 +106,8 @@ class FullCycleTests(CycleTestCase):
         row = self.store.rows("owner/repo")[0]
         self.assertEqual("cheap_coder", row["profile"])
         self.assertEqual("codex", row["executor"])
-        self.assertEqual("gpt-5.6-luna", row["model_requested"])
-        self.assertEqual("gpt-5.6-luna", row["model_resolved"])
+        self.assertEqual("gpt-6-luna", row["model_requested"])
+        self.assertEqual("gpt-6-luna", row["model_resolved"])
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
         self.assertEqual("succeeded", row["outcome"])
@@ -345,10 +345,10 @@ class RoleWorkspacePolicyTests(CycleTestCase):
 
         prompt = adapter.dispatched[0]
         row = self.store.rows("owner/repo")[0]
-        self.assertEqual(("reviewer", "openai", "gpt-5.6-terra", "high"),
+        self.assertEqual(("reviewer", "openai", "gpt-6-sol", "high"),
                          (row["profile"], row["provider"], row["model_requested"], row["effort"]))
         self.assertIn("profile `reviewer`", prompt)
-        self.assertIn("requested model `openai/gpt-5.6-terra`", prompt)
+        self.assertIn("requested model `openai/gpt-6-sol`", prompt)
         self.assertIn("effort `high`", prompt)
         self.assertIn("resolved model as `?`", prompt)
 
@@ -585,14 +585,14 @@ class ProfileTests(CycleTestCase):
 
     def test_the_profiles_it_was_given_are_the_ones_it_routes_with(self) -> None:
         profiles = router.load_profiles({"code_cycle": {"profiles": {
-            "cheap_coder": {"primary": "claude:anthropic/claude-opus-5 high"}}}})
+            "cheap_coder": {"primary": "claude:anthropic/claude-opus-5-5 high"}}}})
         codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
         recorder = self.recorder([codex, claude], profiles=profiles)
 
         outcome = recorder.stage("implement", "work")
 
         self.assertEqual("claude", outcome.decision.target.executor)
-        self.assertEqual("claude-opus-5", outcome.decision.target.model)
+        self.assertEqual("claude-opus-5-5", outcome.decision.target.model)
         self.assertEqual([], codex.dispatched)
 
     def test_without_them_the_built_in_defaults_apply(self) -> None:

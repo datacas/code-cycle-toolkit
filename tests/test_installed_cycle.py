@@ -146,7 +146,7 @@ class InstalledCycleTests(unittest.TestCase):
         review = [row for row in self.rows()
                   if row["role"] == "review" and row["outcome"] == "succeeded"][0]
         self.assertEqual("codex", review["executor"])
-        self.assertEqual("gpt-5.6-terra", review["model_requested"])
+        self.assertEqual("gpt-6-sol", review["model_requested"])
         self.assertIsNone(review["model_resolved"])
 
     def test_a_second_round_is_recorded_as_a_second_round(self) -> None:
