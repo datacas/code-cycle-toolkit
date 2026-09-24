@@ -97,6 +97,9 @@ class StreamingNative(ex.NativeAdapter):
     """Native-shaped scripted executor that emits progress during a stage."""
 
     enforces_read_only = True
+    # This double never contacts a provider; keep the real Git push preflight
+    # out of tests so CI does not need a repository write token.
+    requires_publication_preflight = False
 
     def __init__(self, name: str, body: str) -> None:
         self.name = name
