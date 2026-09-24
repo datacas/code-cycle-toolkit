@@ -41,11 +41,11 @@ Downloads a release and runs the bundled installer for you. No clone needed. It 
 
 ```bash
 # latest release, every host, for your user
-curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh
 
 # a specific version, or other installer options
-curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash -s -- --version v0.3.0
-curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash -s -- --agent claude --scope project --project-dir .
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh -s -- --agent claude --scope project --project-dir .
 ```
 
 ```powershell

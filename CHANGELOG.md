@@ -7,7 +7,7 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
-- One-command installers, `scripts/get.sh` (`curl … | bash`) and
+- One-command installers, `scripts/get.sh` (`curl … | sh`) and
   `scripts/get.ps1` (`irm … | iex`). They download a release (latest by
   default, or `--version main|vX.Y.Z`), run the bundled installer with
   `--force`, and so install or update both the skills and the runtime without

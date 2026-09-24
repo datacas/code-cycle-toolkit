@@ -81,7 +81,7 @@ gh auth status
 **2. Install the skills and the runtime.** One command downloads the latest release and installs the skills for every host, plus the runtime (routing and telemetry). Run it again later to update:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh
 ```
 
 ```powershell
