@@ -201,6 +201,55 @@ class DefaultPolicyTests(unittest.TestCase):
         self.assertEqual([], adapter.dispatched)
 
 
+class DispatchDurationTests(unittest.TestCase):
+    """How long an executor ran, measured where it runs."""
+
+    @staticmethod
+    def clock(*readings):
+        values = iter(readings)
+        return lambda: next(values)
+
+    def test_an_executed_dispatch_reports_its_monotonic_duration(self) -> None:
+        registry = ex.Registry([FakeAdapter(probe(ex.Availability.AUTHENTICATED))])
+
+        result = ex.dispatch(decision(), "work", registry,
+                             writes=True, clock=self.clock(100.0, 102.5))
+
+        self.assertEqual(2500, result.duration_ms)
+
+    def test_a_failed_execution_still_took_time(self) -> None:
+        failed = ex.DispatchResult(ex.DispatchOutcome.FAILED, "codex", TARGET)
+        registry = ex.Registry([FakeAdapter(probe(ex.Availability.AUTHENTICATED), failed)])
+
+        result = ex.dispatch(decision(), "work", registry, writes=True,
+                             clock=self.clock(1.0, 1.004))
+
+        self.assertEqual(4, result.duration_ms)
+
+    def test_an_attempt_refused_before_executing_has_no_duration(self) -> None:
+        def clock():
+            raise AssertionError("nothing ran, so nothing is timed")
+
+        registry = ex.Registry([FakeAdapter(probe(ex.Availability.INSTALLED))])
+
+        result = ex.dispatch(decision(), "work", registry, writes=True, clock=clock)
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertIsNone(result.duration_ms)
+
+    def test_work_that_finishes_elsewhere_has_no_duration(self) -> None:
+        """Timing the launch would report a stage as fast nobody saw finish."""
+        adapter = FakeAdapter(probe(ex.Availability.AUTHENTICATED))
+        adapter.completes_work = False
+        registry = ex.Registry([adapter])
+
+        result = ex.dispatch(decision(), "work", registry, writes=True,
+                             clock=self.clock(0.0, 3.0))
+
+        self.assertTrue(result.asynchronous)
+        self.assertIsNone(result.duration_ms)
+
+
 class DispatchGateTests(unittest.TestCase):
     def test_an_unavailable_executor_blocks_naming_the_capability(self) -> None:
         registry = ex.Registry([FakeAdapter(probe(ex.Availability.INSTALLED, proof="no credential"))])

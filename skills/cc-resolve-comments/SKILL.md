@@ -483,6 +483,8 @@ Use `issue_number: null` when no numeric issue alias exists. Use `issue_id:
 null` when no work item is linked. Set `tests.passed: true` only
 when every required executed check passed, including the valid case where no
 test is required because every resolution is a justified no-code decision.
+Reserve `tests.passed: false` for executed checks that failed; when none ran,
+report `"tests": { "ran": false }` or omit `tests`.
 
 `finding_outcomes` mirrors the dispositions already published in the comment and
 adds the dimension `resolved_findings` and `unresolved_findings` cannot carry:

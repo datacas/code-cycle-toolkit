@@ -568,20 +568,28 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
 | `cycle` | `first_review_status`, `first_pass_approved`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
-| `cycle` | `tests_passed` | a verdict reported a boolean `tests.passed`; the latest one wins |
+| `cycle` | `tests_passed` | a verdict recorded `tests_passed`; the latest one wins |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 
 Unknown is still not a default. A run that stopped before a review reached a
 verdict carries no review outcome at all — not unapproved, not zero rounds —
 and a review that reported `BLOCKED` settles nothing. A `tests` value that is
-not a boolean `passed` is not a test result. `Telemetry.cycle_outcome(repo_id,
-cycle_id)` reassembles a run from these rows and reports `closed: false` for one
+not a boolean `passed` is not a test result, and neither is one that says no
+test ran: `tests.ran: false`, or a `BLOCKED` stage reporting `passed: false`
+without `ran: true`, records no `tests_passed` at all. A stage that stopped
+before touching code has nothing to report as failed.
+`Telemetry.cycle_outcome(repo_id, cycle_id)` reassembles a run from these rows and reports `closed: false` for one
 that never wrote its closing row, whose outcome is then unknown rather than
 failed. `resolution_rounds` counts the `resolve` stages the run attempted.
 `checks_passed` and `checks_failed` remain accepted telemetry fields, but no
 skill's structured result reports check counts, so they are not a recorded
 outcome; CI state stays in the published review comment.
+
+Each dispatch row that reached an executor carries `duration_ms`, the executor
+call's wall time from a monotonic clock. An attempt refused before an executor
+ran has none, and neither does a dispatch that only started work finishing
+elsewhere: its launch time is not the stage's duration.
 
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by

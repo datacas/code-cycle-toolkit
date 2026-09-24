@@ -766,6 +766,7 @@ class Telemetry:
             missing_capability=getattr(result, "missing_capability", None),
             readiness_policy=getattr(getattr(result, "readiness_policy", None), "value", None),
             dispatched_from=getattr(getattr(result, "dispatched_from", None), "value", None),
+            duration_ms=getattr(result, "duration_ms", None),
             # The reasons themselves are prose and belong in the published
             # comment, not in a store that promises to hold none. How many there
             # were is still useful for spotting a decision that needed

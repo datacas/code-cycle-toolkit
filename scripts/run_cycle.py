@@ -677,11 +677,23 @@ def _tests(payload: dict | None) -> dict:
 
     Only a boolean `tests.passed` counts: anything else is a report nobody can
     read as a result, and recording it as one would invent a test outcome.
+
+    Nor does a `passed` that describes tests nobody ran. `tests.ran: false`
+    says so outright. A `BLOCKED` stage reporting `passed: false` without
+    claiming `ran: true` is read the same way: a skill that stopped before
+    touching code has no failure to report, and counting its `false` would
+    turn "never ran" into "failed". A `true` needs no such claim; nothing
+    passes without running.
     """
     tests = payload.get("tests") if payload else None
-    if isinstance(tests, dict) and isinstance(tests.get("passed"), bool):
-        return {"tests_passed": tests["passed"]}
-    return {}
+    if not isinstance(tests, dict) or not isinstance(tests.get("passed"), bool):
+        return {}
+    if tests.get("ran") is False:
+        return {}
+    if (tests["passed"] is False and tests.get("ran") is not True
+            and _status_of(payload) == "BLOCKED"):
+        return {}
+    return {"tests_passed": tests["passed"]}
 
 
 def _why(outcome: StageOutcome) -> str:

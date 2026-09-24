@@ -166,6 +166,11 @@ Use `BLOCKED` when access, required information, or an external condition
 prevents completion. Use `FAILED` for an unexpected technical failure. Set
 `pr_number` to `null` when no PR was created.
 
+`tests.passed: false` means tests ran and failed. When no test ran — for
+example, the work stopped as `BLOCKED` before any code changed — report
+`"tests": { "ran": false }` or omit `tests`, never `passed: false`. A `BLOCKED`
+result whose tests did run and fail says so with `"ran": true`.
+
 ## Final response
 
 End with a short handoff containing the functional status, issue provider,

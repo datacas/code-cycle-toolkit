@@ -300,6 +300,18 @@ class AsynchronousStageTests(RunCycleTestCase):
         first = self.rows()[0]
         self.assertEqual("implement", first["role"])
         self.assertEqual("succeeded", first["outcome"])
+        self.assertIsNone(first["duration_ms"])
+
+    def test_every_executed_dispatch_records_its_duration(self) -> None:
+        """#53: the column existed from the start and nothing filled it."""
+        self.run_cycle(Talker("codex"), Talker("claude"))
+
+        dispatches = [row for row in self.rows()
+                      if row["payload"].get("record_kind") == "dispatch"]
+        self.assertEqual(["implement", "review"], [row["role"] for row in dispatches])
+        for row in dispatches:
+            self.assertIsInstance(row["duration_ms"], int)
+            self.assertGreaterEqual(row["duration_ms"], 0)
 
 
 class MalformedResultTests(RunCycleTestCase):

@@ -260,6 +260,51 @@ class DriverTests(RunCycleTestCase):
 
         self.assertNotIn("tests_passed", self.cycle_row()["payload"])
 
+    def test_an_implementation_blocked_before_changing_code_records_no_test_result(self) -> None:
+        """#53: `passed: false` from a stage that never ran them is not a failure."""
+        implementer = Talker("codex", block("BLOCKED", tests={"passed": False}))
+
+        self.run_cycle(implementer, Talker("claude"))
+
+        verdicts = [row for row in self.rows()
+                    if row["payload"].get("record_kind") == "verdict"]
+        self.assertEqual(["BLOCKED"], [row["status"] for row in verdicts])
+        self.assertNotIn("tests_passed", verdicts[0]["payload"])
+        self.assertNotIn("tests_passed", self.cycle_row()["payload"])
+
+
+class TestsReportedTests(unittest.TestCase):
+    """Which reported `tests` values are a test outcome, and which are not."""
+
+    def test_executed_tests_that_failed_are_recorded_as_failed(self) -> None:
+        for payload in (
+            {"status": "IMPLEMENTED", "tests": {"passed": False}},
+            {"status": "IMPLEMENTED", "tests": {"ran": True, "passed": False}},
+            {"status": "BLOCKED", "tests": {"ran": True, "passed": False}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual({"tests_passed": False}, rc._tests(payload))
+
+    def test_executed_tests_that_passed_are_recorded_as_passed(self) -> None:
+        for payload in (
+            {"status": "IMPLEMENTED", "tests": {"passed": True}},
+            {"status": "IMPLEMENTED", "tests": {"ran": True, "passed": True}},
+            {"status": "BLOCKED", "tests": {"passed": True}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual({"tests_passed": True}, rc._tests(payload))
+
+    def test_tests_that_never_ran_record_nothing(self) -> None:
+        for payload in (
+            {"status": "IMPLEMENTED", "tests": {"ran": False, "passed": False}},
+            {"status": "IMPLEMENTED", "tests": {"ran": False}},
+            {"status": "BLOCKED", "tests": {"passed": False}},
+            {"status": "blocked", "tests": {"passed": False}},
+            {"status": "BLOCKED"},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual({}, rc._tests(payload))
+
 
 if __name__ == "__main__":
     unittest.main()
