@@ -5,53 +5,7 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
-### Changed
-
-- Restructure the documentation. `README.md` is now a landing page with a
-  workflow chooser, a quick start, and a configuration map. New guides in
-  `docs/` cover getting started, workflows, skills, the review lifecycle,
-  verification, routing, configuration, and telemetry, indexed by
-  `docs/README.md`. The existing provider, workspace-policy, and
-  instrumentation documents now link into that index. `SECURITY.md` now
-  describes the runtime and the opt-in Jev request, which the previous scope
-  statement omitted. The release checklist moved to `CONTRIBUTING.md`. The
-  configuration reference now documents `CODE_CYCLE_HOME`, `CODEX_HOME`, the
-  built-in security-review defaults, and every CLI flag.
-- `DEFAULT_PROFILES` now target the `gpt-6` Codex family and Claude Opus 5.5:
-  `auxiliary_tool`, `coordinator`, `cheap_coder` and `deep_coder` use
-  `gpt-6-luna` (was `gpt-5.6-luna`); `reviewer`, `senior_reviewer` and
-  `security` use `gpt-6-sol` (was `gpt-5.6-terra`); the `security` fallback is
-  `claude-opus-5-5` (was `claude-opus-5`). Efforts and Claude Sonnet/Haiku
-  targets are unchanged. Telemetry's built-in accepted model set follows the
-  profiles, so recording one of the old names now needs it declared in
-  `.code-cycle.yml` `profiles`.
-
-### Fixed
-
-- Tell every stage the routing decision it runs under — profile, requested
-  `provider/model` and effort — so the review run line copies the values
-  telemetry records instead of the agent inferring them from its own
-  configuration. A rerouted attempt is told the fallback's target, and the
-  resolved model stays `?` when the executor does not report it. (#56)
-
-- Record `duration_ms` for every dispatch that reached an executor, measured
-  with a monotonic clock, and stop counting `tests.passed: false` from a stage
-  that never ran its tests as a failure: `tests.ran: false`, or a `BLOCKED`
-  result without `ran: true`, now records no test outcome. `cc-implement-issue`
-  and `cc-resolve-comments` document the distinction. (#53)
-
-- Move Jev shadow to TypeSafe's official API, preserve `typesafe-ai/jev` as a
-  `jev-latest` compatibility alias, record concrete model versions resolved by
-  the rolling alias without treating them as drift, and refuse HTTP redirects
-  that could forward the bearer key to another host. (#51)
-- Correct `cc-stats` weekly sparkline alignment, report period emptiness from
-  all telemetry row types, bound long-range sparkline allocation, reject unsafe
-  repository selectors, and clarify Markdown versus JSON reply instructions.
-- Show in `cc-stats` how cycles ended: a "Cycle outcomes" table counts each
-  closed cycle by final status, keeps cycles without a closing record as
-  unknown, and reports resolution rounds when measured. Unmeasured model drift
-  now names how many dispatches did not report a model, and test verification
-  is labelled as counted per cycle. (#52)
+## [0.3.0] - 2026-09-24
 
 ### Added
 
@@ -361,6 +315,25 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- Restructure the documentation. `README.md` is now a landing page with a
+  workflow chooser, a quick start, and a configuration map. New guides in
+  `docs/` cover getting started, workflows, skills, the review lifecycle,
+  verification, routing, configuration, and telemetry, indexed by
+  `docs/README.md`. The existing provider, workspace-policy, and
+  instrumentation documents now link into that index. `SECURITY.md` now
+  describes the runtime and the opt-in Jev request, which the previous scope
+  statement omitted. The release checklist moved to `CONTRIBUTING.md`. The
+  configuration reference now documents `CODE_CYCLE_HOME`, `CODEX_HOME`, the
+  built-in security-review defaults, and every CLI flag.
+- `DEFAULT_PROFILES` now target the `gpt-6` Codex family and Claude Opus 5.5:
+  `auxiliary_tool`, `coordinator`, `cheap_coder` and `deep_coder` use
+  `gpt-6-luna` (was `gpt-5.6-luna`); `reviewer`, `senior_reviewer` and
+  `security` use `gpt-6-sol` (was `gpt-5.6-terra`); the `security` fallback is
+  `claude-opus-5-5` (was `claude-opus-5`). Efforts and Claude Sonnet/Haiku
+  targets are unchanged. Telemetry's built-in accepted model set follows the
+  profiles, so recording one of the old names now needs it declared in
+  `.code-cycle.yml` `profiles`.
+
 - `cc-resolve-comments` classifies every finding against one commit and records
   the dispositions before it edits any code, instead of triaging and fixing one
   finding at a time.
@@ -380,6 +353,31 @@ All notable changes to this project are documented here. This project follows
   Skipping now requires the rule and the reviewer to fail at the same time.
 
 ### Fixed
+
+- Tell every stage the routing decision it runs under — profile, requested
+  `provider/model` and effort — so the review run line copies the values
+  telemetry records instead of the agent inferring them from its own
+  configuration. A rerouted attempt is told the fallback's target, and the
+  resolved model stays `?` when the executor does not report it. (#56)
+
+- Record `duration_ms` for every dispatch that reached an executor, measured
+  with a monotonic clock, and stop counting `tests.passed: false` from a stage
+  that never ran its tests as a failure: `tests.ran: false`, or a `BLOCKED`
+  result without `ran: true`, now records no test outcome. `cc-implement-issue`
+  and `cc-resolve-comments` document the distinction. (#53)
+
+- Move Jev shadow to TypeSafe's official API, preserve `typesafe-ai/jev` as a
+  `jev-latest` compatibility alias, record concrete model versions resolved by
+  the rolling alias without treating them as drift, and refuse HTTP redirects
+  that could forward the bearer key to another host. (#51)
+- Correct `cc-stats` weekly sparkline alignment, report period emptiness from
+  all telemetry row types, bound long-range sparkline allocation, reject unsafe
+  repository selectors, and clarify Markdown versus JSON reply instructions.
+- Show in `cc-stats` how cycles ended: a "Cycle outcomes" table counts each
+  closed cycle by final status, keeps cycles without a closing record as
+  unknown, and reports resolution rounds when measured. Unmeasured model drift
+  now names how many dispatches did not report a model, and test verification
+  is labelled as counted per cycle. (#52)
 
 - A pair is now identified by change request and commit, not change request
   alone. A second campaign on the same change request at a new commit used to

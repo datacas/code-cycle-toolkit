@@ -5,7 +5,7 @@
 **Take a work item from the issue tracker to a reviewed, verified pull request that is ready for a human to merge.**
 
 [![Validate package](https://github.com/datacas/code-cycle-toolkit/actions/workflows/validate.yml/badge.svg)](https://github.com/datacas/code-cycle-toolkit/actions/workflows/validate.yml)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Hosts](https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-555)
 
