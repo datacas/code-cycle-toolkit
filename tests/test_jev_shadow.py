@@ -470,7 +470,7 @@ class TelemetryShapeTests(unittest.TestCase):
         with self.assertRaises(tm.TelemetryError):
             tm.validate_reference("jev_suggested_profile", "reviewer")
         with self.assertRaises(tm.TelemetryError):
-            tm.validate_reference("jev_model_requested", "gpt-5.6-luna")
+            tm.validate_reference("jev_model_requested", "gpt-6-luna")
         self.assertEqual("jev-1.14.0",
                          tm.validate_reference("jev_model_resolved", "jev-1.14.0"))
         with self.assertRaises(tm.TelemetryError):

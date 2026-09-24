@@ -345,10 +345,10 @@ class RoleWorkspacePolicyTests(CycleTestCase):
 
         prompt = adapter.dispatched[0]
         row = self.store.rows("owner/repo")[0]
-        self.assertEqual(("reviewer", "openai", "gpt-5.6-terra", "high"),
+        self.assertEqual(("reviewer", "openai", "gpt-6-sol", "high"),
                          (row["profile"], row["provider"], row["model_requested"], row["effort"]))
         self.assertIn("profile `reviewer`", prompt)
-        self.assertIn("requested model `openai/gpt-5.6-terra`", prompt)
+        self.assertIn("requested model `openai/gpt-6-sol`", prompt)
         self.assertIn("effort `high`", prompt)
         self.assertIn("resolved model as `?`", prompt)
 

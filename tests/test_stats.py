@@ -287,7 +287,7 @@ class StatsTests(unittest.TestCase):
         for seq, role in enumerate(("implement", "review"), start=1):
             self.store.record_stage(
                 "owner/repo", f"task-private-{index}", role, profile="cheap_coder",
-                executor="codex", outcome="succeeded", model_requested="gpt-5.6-luna",
+                executor="codex", outcome="succeeded", model_requested="gpt-6-luna",
                 cycle_id=cycle_id, stage_seq=seq, record_kind="dispatch",
             )
         if closed:
