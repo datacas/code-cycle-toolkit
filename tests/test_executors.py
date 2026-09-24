@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -988,28 +989,110 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual("acceptEdits", argv[argv.index("--permission-mode") + 1])
 
     def test_claude_publishing_stage_keeps_its_github_tooling(self) -> None:
-        """The publication boundary is behavioural: gh and git stay available,
-        and the stage's prompt says which operations it may perform."""
+        """Read-only publication gets gh only; writing publication also gets git."""
         for permissions in (("comment",), ("comment", "push_branch"),
                             ("comment", "create_pr", "push_branch")):
             argv = self.claude(
                 writes="push_branch" in permissions, publishes=True,
                 publication_permissions=permissions,
             )
-            self.assertEqual(["--allowedTools", "Bash(gh:*)", "Bash(git:*)"], argv[-3:])
+            self.assertIn("--allowedTools", argv)
+            allowed = argv[argv.index("--allowedTools") + 1:]
+            expected = ["Bash(gh:*)"]
+            if "push_branch" in permissions:
+                expected.append("Bash(git:*)")
+            self.assertEqual(expected, allowed)
+            if "push_branch" not in permissions:
+                index = argv.index("--disallowedTools")
+                self.assertEqual(
+                    ["--disallowedTools", "Edit", "Write", "NotebookEdit"],
+                    argv[index:index + 4],
+                )
 
     def test_claude_non_publishing_stage_gets_no_extra_tools(self) -> None:
         self.assertNotIn("--allowedTools", self.claude(writes=True))
 
-    def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
-        """A live probe wrote the file anyway with the edit tools disallowed,
-        and plan mode refuses the edit by turning a review into planning. So a
-        reading stage gets no flag here rather than a false guarantee."""
+    def test_claude_read_only_gets_edit_tools_disallowed_as_defence_in_depth(self) -> None:
         argv = self.claude(writes=False)
 
         self.assertNotIn("--permission-mode", argv)
-        self.assertNotIn("--disallowedTools", argv)
+        self.assertEqual(["--disallowedTools", "Edit", "Write", "NotebookEdit"], argv[-4:])
 
+
+    def _git(self, cwd, *args):
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args], check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    def _git_repo(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repo = Path(temporary.name) / "source"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.name", "Cycle Test")
+        self._git(repo, "config", "user.email", "cycle@example.invalid")
+        (repo / "tracked.txt").write_text("reviewed\n", encoding="utf-8")
+        self._git(repo, "add", "tracked.txt")
+        self._git(repo, "commit", "-qm", "initial")
+        return repo
+
+    def test_claude_review_uses_a_detached_disposable_worktree(self) -> None:
+        repo = self._git_repo()
+        reviewed_head = self._git(repo, "rev-parse", "HEAD")
+        seen = {}
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"], seen["cwd"] = argv, cwd
+            self.assertNotEqual(str(repo), cwd)
+            self.assertFalse(ex._paths_overlap(cwd, str(repo)))
+            self.assertEqual(reviewed_head, self._git(cwd, "rev-parse", "HEAD"))
+            self.assertIn("Do not modify files, commit, or push", argv[argv.index("-p") + 1])
+            (Path(cwd) / "reviewer-created.txt").write_text("discard me", encoding="utf-8")
+            self._git(cwd, "add", "reviewer-created.txt")
+            self._git(cwd, "commit", "-qm", "agent edit in isolated worktree")
+            return completed("{}")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+            runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("isolated_verified", result.artifacts["read_only_mode"])
+        self.assertEqual(reviewed_head, result.artifacts["implementer_head_before"])
+        self.assertEqual(64, len(result.artifacts["implementer_status_fingerprint_before"]))
+        self.assertIn("warning", result.detail)
+        self.assertFalse(Path(seen["cwd"]).exists())
+        self.assertFalse((repo / "reviewer-created.txt").exists())
+        self.assertIn("--disallowedTools", seen["argv"])
+        self.assertNotIn("--permission-mode", seen["argv"])
+
+    def test_claude_review_fails_if_the_implementer_branch_moves(self) -> None:
+        repo = self._git_repo()
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        before = self._git(repo, "rev-parse", "HEAD")
+
+        def runner(argv, timeout=None, cwd=None):
+            (repo / "branch-change.txt").write_text("changed", encoding="utf-8")
+            self._git(repo, "add", "branch-change.txt")
+            self._git(repo, "commit", "-qm", "unexpected branch change")
+            return completed("{}")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+            "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(repo),
+            runner=runner,
+            probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertIn("implementer branch, HEAD", result.detail)
+        self.assertNotEqual(before, self._git(repo, "rev-parse", "HEAD"))
 
 class PublicationPreflightTests(unittest.TestCase):
     def test_github_write_permission_uses_repository_permission_write_value(self) -> None:
@@ -1089,6 +1172,7 @@ class PublicationPreflightTests(unittest.TestCase):
         )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("enforced", result.artifacts["read_only_mode"])
         self.assertEqual("read-only", seen["argv"][seen["argv"].index("-s") + 1])
 
     def test_disposable_dispatch_requires_an_isolated_workspace(self) -> None:

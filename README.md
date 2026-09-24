@@ -131,6 +131,10 @@ Use cc-orchestrator for issue 123. Stop at READY_FOR_MANUAL_MERGE.
 | [`cc-orca-orchestrator`](docs/workflows.md#cc-orca-orchestrator) | one prompt | supervised workers, paired-review calibration | Orca |
 | [`run_cycle.py`](docs/workflows.md#runtime-driver-run_cyclepy) | a shell command | recorded, routed cycles across executors | runtime, Codex and/or Claude CLIs |
 
+Read-only roles can use Codex's enforced sandbox or Claude's isolated,
+verified review worktree. See [workspace policy](docs/role-workspace-policy.md)
+for the branch protection contract.
+
 ## Skills
 
 Thirteen skills in two layers. **Cycle skills** own the workflow: the change request, the finding IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes that cycle skills delegate to. Each one also works on its own.

@@ -735,22 +735,10 @@ nothing had ever asked for anything else. A dispatched Claude, by contrast,
 edited a file with no flag at all. So the flag on a writing Claude stage
 declares what is already happening rather than granting something new.
 
-For a **reading** Claude stage there is no honest flag, and this does not
-pretend otherwise. `--permission-mode plan` refuses the edit but turns the task
-into planning it, which is not a review. Disallowing `Edit`, `Write` and
-`NotebookEdit` does not stop a write: a live probe created the file anyway.
-Review and rereview therefore route to Codex, whose explicit `-s read-only`
-sandbox enforces non-mutation. Orca may be used only when its explicit review
-workspace contract is present; it does not claim an OS-level read-only flag and
-fails closed for a missing, mismatched or overlapping workspace. A configured
-adapter that cannot establish a non-mutating boundary is blocked before it
-starts rather than sharing the writable tree.
+For a **reading** Claude stage, the harness creates a detached worktree at the exact reviewed HEAD, outside the implementer's tree. It records the implementer's HEAD and a fingerprint of `git status --porcelain` before dispatch, then checks both again afterwards. A changed HEAD or working-tree fingerprint makes the stage a `contract_violation`. Writes within Claude's disposable review worktree produce a warning and are discarded with that worktree. The stage prompt prohibits file edits, commits, and pushes; `--disallowedTools Edit Write NotebookEdit` adds defence in depth without serving as the guarantee. Read-only Claude dispatches record `read_only_mode = isolated_verified`.
 
-The default review profiles intentionally have no fallback. If Codex is
-unavailable, a review blocks instead of silently falling back to Claude or Orca
-without the required boundary. A direct or future Orca fallback must provide
-an immutable or otherwise disposable non-mutating workspace before it starts.
-This favors review integrity over availability.
+Codex retains `-s read-only` and records `read_only_mode = enforced`, meaning its sandbox prevents workspace writes. Orca still requires its explicit review-workspace contract. Reviews may use any configured eligible executor; a profile may still choose no fallback. Publication access remains behavioural: a read-only stage receives only the tools its role permits, such as `gh` for an allowed comment.
+
 
 ## Running a cycle
 

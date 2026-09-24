@@ -29,11 +29,13 @@ security prompt blind.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -707,6 +709,137 @@ class CodexAdapter(NativeAdapter):
         return False, f"no credential at {auth}"
 
 
+def _git_output(cwd: str, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", cwd, *args], capture_output=True, text=True,
+    )
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "git command failed").strip()
+        raise ExecutorError(detail)
+    return completed.stdout.rstrip("\n")
+
+
+def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
+    """Run a reviewer in a detached worktree and verify its source checkout."""
+    if not isinstance(cwd, str) or not cwd:
+        return adapter._blocked(
+            target, "review_workspace_isolation",
+            "a Claude read-only stage needs an implementer Git checkout to verify",
+        )
+    worktree = None
+    root = None
+    before_head = before_status = before_branch = None
+    try:
+        root = _git_output(cwd, "rev-parse", "--show-toplevel")
+        before_head = _git_output(root, "rev-parse", "HEAD")
+        before_branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
+        before_status = _git_output(
+            root, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+        )
+        worktree = tempfile.mkdtemp(prefix="code-cycle-review-")
+        Path(worktree).rmdir()
+        if _paths_overlap(worktree, root):
+            raise ExecutorError("the disposable review worktree overlaps the implementer checkout")
+        _git_output(root, "worktree", "add", "--detach", worktree, before_head)
+        review_head = _git_output(worktree, "rev-parse", "HEAD")
+        if review_head != before_head:
+            raise ExecutorError("the disposable worktree is not at the reviewed HEAD")
+    except Exception as exc:
+        if worktree and root:
+            subprocess.run(
+                ["git", "-C", root, "worktree", "remove", "--force", worktree],
+                capture_output=True, text=True,
+            )
+            subprocess.run(["git", "-C", root, "worktree", "prune"],
+                           capture_output=True, text=True)
+        if worktree:
+            shutil.rmtree(worktree, ignore_errors=True)
+        return adapter._blocked(
+            target, "review_workspace_isolation",
+            f"could not prepare an isolated review worktree: {exc}",
+        )
+
+    prompt = (
+        f"{task}\n\nREAD-ONLY HARNESS CONTRACT: Do not modify files, commit, or push. "
+        "This stage runs in a disposable detached worktree; any local edits will "
+        "be discarded. Any change to the implementer's branch or working tree "
+        "fails this stage."
+    )
+    result = None
+    workspace_changed = False
+    source_error = "the implementer branch, HEAD, or working-tree fingerprint changed during review"
+    cleanup_warning = None
+    after_head = after_status_fingerprint = None
+    try:
+        result = dispatch_call(prompt, worktree)
+        try:
+            after_head = _git_output(root, "rev-parse", "HEAD")
+            after_branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
+            after_status = _git_output(
+                root, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+            )
+            after_status_fingerprint = hashlib.sha256(after_status.encode("utf-8")).hexdigest()
+            source_changed = (
+                after_head != before_head or after_branch != before_branch
+                or after_status != before_status
+            )
+        except Exception as exc:
+            source_changed = True
+            source_error = f"could not verify the implementer checkout after review: {exc}"
+        try:
+            workspace_head = _git_output(worktree, "rev-parse", "HEAD")
+            workspace_status = _git_output(
+                worktree, "status", "--porcelain", "--untracked-files=all", "--ignored=matching",
+            )
+            workspace_changed = workspace_head != review_head or bool(workspace_status)
+        except Exception:
+            workspace_changed = True
+    finally:
+        try:
+            removed = subprocess.run(
+                ["git", "-C", root, "worktree", "remove", "--force", worktree],
+                capture_output=True, text=True,
+            )
+            if removed.returncode:
+                shutil.rmtree(worktree, ignore_errors=True)
+                subprocess.run(["git", "-C", root, "worktree", "prune"],
+                               capture_output=True, text=True)
+                if Path(worktree).exists():
+                    cleanup_warning = "the disposable review workspace could not be removed"
+        except Exception as exc:
+            shutil.rmtree(worktree, ignore_errors=True)
+            cleanup_warning = f"could not remove the disposable review workspace: {exc}"
+
+    warnings = []
+    if workspace_changed:
+        warnings.append("the reviewer changed its disposable workspace; those edits were discarded")
+    if cleanup_warning:
+        warnings.append(cleanup_warning)
+    artifacts = dict(result.artifacts)
+    artifacts["read_only_mode"] = "isolated_verified"
+    artifacts["implementer_head_before"] = before_head
+    artifacts["implementer_status_fingerprint_before"] = hashlib.sha256(
+        before_status.encode("utf-8"),
+    ).hexdigest()
+    if after_head is not None:
+        artifacts["implementer_head_after"] = after_head
+    if after_status_fingerprint is not None:
+        artifacts["implementer_status_fingerprint_after"] = after_status_fingerprint
+    if warnings:
+        artifacts["warnings"] = warnings
+    if source_changed:
+        return replace(
+            result, outcome=DispatchOutcome.CONTRACT_VIOLATION,
+            missing_capability=None,
+            detail="read-only contract violation: " + source_error,
+            artifacts=artifacts,
+        )
+    detail = result.detail
+    if warnings:
+        detail = detail + ("; " if detail else "") + "warning: " + "; ".join(warnings)
+    return replace(result, detail=detail, artifacts=artifacts)
+
+
 class ClaudeAdapter(NativeAdapter):
     name = "claude"
     binary = "claude"
@@ -718,7 +851,21 @@ class ClaudeAdapter(NativeAdapter):
     }
 
     def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
-        return True, "Claude receives gh and git; the stage's publication policy is stated in its prompt"
+        return True, "Claude uses gh for comments and git for writing stages; publication policy stays in its prompt"
+
+    def supports_non_writing(self, **dispatch_kwargs) -> bool:
+        cwd = dispatch_kwargs.get("cwd")
+        return isinstance(cwd, str) and bool(cwd) and Path(cwd).is_dir()
+
+    def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
+                 timeout: int = 3600, runner=_run, writes: bool = False,
+                 publishes: bool = False,
+                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
+        return super().dispatch(
+            target, task, cwd=cwd, timeout=timeout, runner=runner,
+            writes=writes, publishes=publishes,
+            publication_permissions=publication_permissions,
+        )
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
@@ -746,11 +893,15 @@ class ClaudeAdapter(NativeAdapter):
                 "--effort", target.effort, "--output-format", "json"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
-        # A publishing stage keeps its ordinary GitHub tooling. Which of those
-        # operations the stage may perform is a behavioural rule stated in its
-        # prompt (`cycle.publication_policy`), not a permission narrowed here.
+        else:
+            # Defence in depth. Read-only safety comes from the disposable
+            # worktree and the source-checkout verification in dispatch().
+            argv += ["--disallowedTools", "Edit", "Write", "NotebookEdit"]
+        # Publication remains behavioural. A read-only publisher may use gh to
+        # post its comment, but does not need git access to the reviewed branch.
         if publishes:
-            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git:*)"]
+            argv += (["--allowedTools", "Bash(gh:*)", "Bash(git:*)"] if writes
+                     else ["--allowedTools", "Bash(gh:*)"])
         return argv
 
     def agent_output(self, stdout: str) -> str:
@@ -1166,8 +1317,24 @@ def dispatch(
     kw.pop("workspace", None)
 
     started = clock()
-    result = adapter.dispatch(target, task, **kw)
+    if (workspace_policy is WorkspacePolicy.READ_ONLY
+            and target.executor == "claude" and not adapter.enforces_read_only):
+        result = _isolated_review_dispatch(
+            adapter, target, task, cwd=kw.get("cwd"),
+            dispatch_call=lambda prompt, isolated_cwd: adapter.dispatch(
+                target, prompt, **{**kw, "cwd": isolated_cwd, "writes": False},
+            ),
+        )
+    else:
+        result = adapter.dispatch(target, task, **kw)
     elapsed = max(0, round((clock() - started) * 1000))
+    if workspace_policy is WorkspacePolicy.READ_ONLY:
+        artifacts = dict(result.artifacts)
+        artifacts.setdefault(
+            "read_only_mode",
+            "enforced" if adapter.enforces_read_only else "isolated_verified",
+        )
+        result = replace(result, artifacts=artifacts)
     # From what the adapter is, not from what this result remembered to say.
     asynchronous = (result.asynchronous
                     or (not adapter.completes_work

@@ -204,11 +204,12 @@ DEFAULT_PROFILES: dict[str, dict] = {
                        "fallback": "claude:anthropic/claude-sonnet-5 high"},
     "reviewer":       {"primary": "codex:openai/gpt-6-sol high"},
     "senior_reviewer": {"primary": "codex:openai/gpt-6-sol max"},
-    # Security audits are strict read-only stages. Claude remains available
-    # for write-capable roles, but its adapter cannot enforce this boundary.
+    # Claude is an eligible security fallback through the isolated and verified
+    # read-only worktree harness; profile defaults still express the chosen
+    # order.
     "security":       {"primary": "codex:openai/gpt-6-sol high",
-                       # Compatibility-only registry entry: the read-only
-                       # eligibility filter deliberately never selects Claude.
+                       # Selected only when the isolated review harness is
+                       # available.
                        "fallback": "claude:anthropic/claude-opus-5-5 high"},
 }
 

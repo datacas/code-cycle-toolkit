@@ -18,11 +18,11 @@ repository. The default auxiliary profile uses Codex because its sandbox can
 confine writes to the disposable cwd; an adapter without that boundary is not
 eligible for `disposable`, even when its process cwd is isolated.
 
-An adapter is eligible only when it can enforce the requested policy. Codex
-can enforce strict read-only execution directly and can confine writes to a
-disposable cwd. Claude cannot enforce either boundary, so it is not a valid
-target for `read_only` or `disposable` roles. Orca follows the same fail-closed
-rule and requires its own explicit orchestration context where applicable.
+An adapter is eligible only when the harness can establish the requested policy. Codex enforces read-only execution directly with its sandbox and records `read_only_mode = enforced`.
+
+Claude cannot enforce read-only inside its process, so the harness runs it in a detached worktree at the exact reviewed HEAD, outside the implementer's tree. Before and after the stage, the harness compares the implementer's HEAD and `git status --porcelain`; a change is a `contract_violation`. Edits inside the disposable review worktree produce a warning and are discarded. Claude records `read_only_mode = isolated_verified`, and its reviewer cannot write to the branch. The prompt also prohibits edits, commits, and pushes, while CLI tool restrictions provide defence in depth. Publication access remains behavioural and follows the role's existing policy.
+
+Claude remains ineligible for `disposable` roles because it cannot confine writes to their workspace. Orca follows its explicit review-workspace contract and requires its own orchestration context where applicable.
 
 This deliberately separates useful generated output from unauthorized source
 tree changes: verification reports, caches, build output, and runtime state

@@ -35,7 +35,7 @@ A profile names a *kind* of work. It never appears in a skill as a model name.
 | `auxiliary_tool` | verify, run, bootstrap | `codex:openai/gpt-6-luna medium` | — |
 | `cheap_tool` | compatibility for direct/custom callers; no built-in role selects it | `claude:anthropic/claude-haiku-4-5-20251001 low` | — |
 
-¹ Kept in the registry for compatibility only. The security stage is read-only and Claude can't enforce read-only, so this fallback is never selected.
+¹ The security profile retains this configured fallback; Claude runs read-only stages only through the isolated, verified workspace contract described below.
 
 The source of truth is `DEFAULT_PROFILES` in [`scripts/router.py`](../scripts/router.py). Override only what you want to change, and the rest keep their defaults:
 
@@ -94,10 +94,10 @@ Each role has a fixed write permission. Only an executor that can **enforce** it
 | Role | Policy | Eligible executors |
 |---|---|---|
 | `implement`, `resolve` | `workspace_write` | Codex (`-s workspace-write`), Claude (`acceptEdits`), Orca |
-| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`); Orca only with an explicit isolated review workspace |
+| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (isolated and verified worktree), Orca (explicit review workspace) |
 | `verify`, `run` | `disposable` | Codex, confined to a disposable workspace |
 
-Claude can't enforce read-only, so it is never used for review roles. That is why review profiles have **no fallback**: when Codex is unavailable, a review blocks instead of running without a proven non-mutating boundary. Details are in [Role workspace policy](role-workspace-policy.md).
+Codex records `read_only_mode = enforced`: its sandbox prevents workspace writes. Claude records `read_only_mode = isolated_verified`: the harness checks out the reviewed HEAD in a detached disposable worktree, verifies that the implementer's HEAD and working-tree fingerprint did not change, and discards local edits. A Claude reviewer cannot write to the branch. Reviews may still be configured without a fallback; that is a profile choice. Publication access remains role-specific, and a reviewer may publish only the comment its role permits. Details are in [Role workspace policy](role-workspace-policy.md).
 
 ## Publication boundary
 
