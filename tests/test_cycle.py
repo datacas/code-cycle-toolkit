@@ -337,6 +337,21 @@ class RoleWorkspacePolicyTests(CycleTestCase):
         for task in adapter.dispatched:
             self.assertIn("Never merge, force-push, delete remote refs", task)
 
+    def test_a_routed_review_is_told_the_values_its_run_line_must_carry(self) -> None:
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter])
+
+        recorder.stage("review", "review it")
+
+        prompt = adapter.dispatched[0]
+        row = self.store.rows("owner/repo")[0]
+        self.assertEqual(("reviewer", "openai", "gpt-5.6-terra", "high"),
+                         (row["profile"], row["provider"], row["model_requested"], row["effort"]))
+        self.assertIn("profile `reviewer`", prompt)
+        self.assertIn("requested model `openai/gpt-5.6-terra`", prompt)
+        self.assertIn("effort `high`", prompt)
+        self.assertIn("resolved model as `?`", prompt)
+
     def test_a_local_only_stage_is_told_it_publishes_nothing(self) -> None:
         adapter = ScriptedAdapter("codex")
         recorder = self.recorder([adapter], local_only=True)
@@ -453,8 +468,23 @@ class RerouteRecordingTests(CycleTestCase):
         recorder.stage("implement", "the real task")
 
         self.assertEqual(1, len(codex.dispatched))
-        self.assertEqual(codex.dispatched, claude.dispatched)
+        self.assertEqual(1, len(claude.dispatched))
+        strip = lambda task: task.split("\n\nRouting for this stage")[0]  # noqa: E731
+        self.assertEqual(strip(codex.dispatched[0]), strip(claude.dispatched[0]))
         self.assertTrue(codex.dispatched[0].startswith("the real task\n\n"))
+
+    def test_the_fallback_attempt_is_told_its_own_target(self) -> None:
+        codex, claude, recorder = self.quota_then_fallback()
+
+        recorder.stage("implement", "the real task")
+
+        rows = self.store.rows("owner/repo")
+        for adapter, row in zip((codex, claude), rows):
+            with self.subTest(executor=row["executor"]):
+                self.assertIn(f"profile `{row['profile']}`", adapter.dispatched[0])
+                self.assertIn(f"requested model `{row['provider']}/{row['model_requested']}`",
+                              adapter.dispatched[0])
+                self.assertIn(f"effort `{row['effort']}`", adapter.dispatched[0])
 
     def test_it_reroutes_at_most_once(self) -> None:
         codex = ScriptedAdapter("codex", outcomes=[(ex.DispatchOutcome.BLOCKED, "operating_quota")])
