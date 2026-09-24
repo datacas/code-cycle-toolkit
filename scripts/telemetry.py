@@ -116,6 +116,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "provider": ("token", frozenset({"openai", "anthropic"})),
     "effort": ("token", frozenset({"low", "medium", "high", "max"})),
     "readiness_policy": ("token", frozenset({"proven", "attempt"})),
+    "read_only_mode": ("token", frozenset({"enforced", "detected"})),
     "dispatched_from": ("token", frozenset({
         "unknown", "installed", "authenticated", "quota_exhausted", "ready",
     })),
@@ -766,6 +767,7 @@ class Telemetry:
             missing_capability=getattr(result, "missing_capability", None),
             readiness_policy=getattr(getattr(result, "readiness_policy", None), "value", None),
             dispatched_from=getattr(getattr(result, "dispatched_from", None), "value", None),
+            read_only_mode=(getattr(result, "artifacts", {}) or {}).get("read_only_mode"),
             duration_ms=getattr(result, "duration_ms", None),
             # The reasons themselves are prose and belong in the published
             # comment, not in a store that promises to hold none. How many there

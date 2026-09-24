@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -224,9 +225,15 @@ class LocalOnlyPolicyTests(RunCycleTestCase):
                            cwd=temporary.name, local_only=True)
 
     def test_local_only_rejects_the_live_repository(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        live_repo = Path(temporary.name) / "live-repository"
+        live_repo.mkdir()
+        subprocess.run(["git", "-C", str(live_repo), "init", "-q"], check=True)
+
         with self.assertRaises(rc.CycleDriverError):
             self.run_cycle(Talker("codex"), Talker("claude"),
-                           cwd=str(ROOT), local_only=True)
+                           cwd=str(live_repo), local_only=True)
 
 
 class MainLocalOnlyTests(unittest.TestCase):

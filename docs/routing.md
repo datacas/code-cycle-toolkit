@@ -35,7 +35,7 @@ A profile names a *kind* of work. It never appears in a skill as a model name.
 | `auxiliary_tool` | verify, run, bootstrap | `codex:openai/gpt-6-luna medium` | — |
 | `cheap_tool` | compatibility for direct/custom callers; no built-in role selects it | `claude:anthropic/claude-haiku-4-5-20251001 low` | — |
 
-¹ Kept in the registry for compatibility only. The security stage is read-only and Claude can't enforce read-only, so this fallback is never selected.
+¹ The security profile retains this configured fallback. Claude runs read-only stages in a disposable clone that the harness watches for changes, as described below.
 
 The source of truth is `DEFAULT_PROFILES` in [`scripts/router.py`](../scripts/router.py). Override only what you want to change, and the rest keep their defaults:
 
@@ -94,10 +94,10 @@ Each role has a fixed write permission. Only an executor that can **enforce** it
 | Role | Policy | Eligible executors |
 |---|---|---|
 | `implement`, `resolve` | `workspace_write` | Codex (`-s workspace-write`), Claude (`acceptEdits`), Orca |
-| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`); Orca only with an explicit isolated review workspace |
+| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (disposable clone, writes detected, not prevented), Orca (explicit review workspace) |
 | `verify`, `run` | `disposable` | Codex, confined to a disposable workspace |
 
-Claude can't enforce read-only, so it is never used for review roles. That is why review profiles have **no fallback**: when Codex is unavailable, a review blocks instead of running without a proven non-mutating boundary. Details are in [Role workspace policy](role-workspace-policy.md).
+Codex records `read_only_mode = enforced`: its sandbox prevents workspace writes. Claude records `read_only_mode = detected`: the harness creates an independent detached clone with its own Git object store at the reviewed HEAD, removes its remotes, and discards local edits. The harness requires a clean implementer checkout and checks its HEAD, working-tree fingerprint, and configured remote refs before and after review; a detected change fails the stage as a contract violation. Claude runs with its full tooling and its ordinary `gh` and `git` access, so it can publish its own comment. With Claude, read-only is watched, not enforced. The harness detects a write it can observe, but it cannot prevent or undo a remote write: a push, a merge, or a change to the change request. A push that is later restored before the stage ends also goes unseen. The maintainer has accepted this risk. Anyone who needs a full guarantee should review with Codex or give the reviewer read-only credentials. Publication access remains role-specific, and a reviewer may publish only the comment its role permits. Details are in [Role workspace policy](role-workspace-policy.md).
 
 ## Publication boundary
 

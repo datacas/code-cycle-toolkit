@@ -450,7 +450,7 @@ class FirstPassRateTests(TelemetryTestCase):
 
 
 class DispatchRecordingTests(TelemetryTestCase):
-    def decision_and_result(self, blocked_capability=None, used_fallback=False):
+    def decision_and_result(self, blocked_capability=None, used_fallback=False, read_only_mode=None):
         target = router.parse_target("codex:openai/gpt-6-luna high")
         decision = router.RoutingDecision(
             "cheap_coder", target, router.RoutingMode.PRODUCTION,
@@ -469,6 +469,7 @@ class DispatchRecordingTests(TelemetryTestCase):
                 model_resolved="gpt-6-luna",
                 readiness_policy=ex.ReadinessPolicy.ATTEMPT,
                 dispatched_from=ex.Availability.AUTHENTICATED,
+                artifacts=({"read_only_mode": read_only_mode} if read_only_mode else {}),
             )
         return decision, result
 
@@ -486,6 +487,13 @@ class DispatchRecordingTests(TelemetryTestCase):
         self.assertEqual("attempt", row["readiness_policy"])
         self.assertEqual("authenticated", row["dispatched_from"])
         self.assertEqual(1, row["payload"]["routing_reason_count"])
+
+    def test_read_only_mode_is_recorded_in_dispatch_payload(self) -> None:
+        decision, result = self.decision_and_result(read_only_mode="detected")
+
+        self.store.record_dispatch("repo", "t-review", "review", decision, result)
+
+        self.assertEqual("detected", self.store.rows()[0]["payload"]["read_only_mode"])
 
     def test_a_fallback_is_visible_in_the_row(self) -> None:
         decision, result = self.decision_and_result(used_fallback=True)
