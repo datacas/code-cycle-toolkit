@@ -1082,6 +1082,8 @@ class PermissionTests(unittest.TestCase):
             self.assertIn("Do not modify files, commit, or push", argv[argv.index("-p") + 1])
             (Path(cwd) / "reviewer-created.txt").write_text("discard me", encoding="utf-8")
             self._git(cwd, "add", "reviewer-created.txt")
+            self._git(cwd, "config", "user.name", "Reviewer Test")
+            self._git(cwd, "config", "user.email", "reviewer@example.invalid")
             self._git(cwd, "commit", "-qm", "agent edit in isolated clone")
             return completed("{}")
 
@@ -1158,6 +1160,8 @@ class PermissionTests(unittest.TestCase):
         def runner(argv, timeout=None, cwd=None):
             (Path(cwd) / "reviewer.txt").write_text("review result\\n", encoding="utf-8")
             self._git(cwd, "add", "reviewer.txt")
+            self._git(cwd, "config", "user.name", "Reviewer Test")
+            self._git(cwd, "config", "user.email", "reviewer@example.invalid")
             self._git(cwd, "commit", "-qm", "reviewer change")
             self._git(cwd, "push", str(remote), "HEAD:refs/heads/review")
             return completed("{}")
