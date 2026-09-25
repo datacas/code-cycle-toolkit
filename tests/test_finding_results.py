@@ -244,6 +244,14 @@ class CapturedFindingResultTests(unittest.TestCase):
         self.assertEqual(1, result["findings_total"])
         self.assertEqual(1, result["findings_blocking"])
 
+    def test_malformed_resolve_entry_is_unknown_with_or_without_blocker_list(self) -> None:
+        for blocking in (None, ["REV-1"]):
+            payload = {"unresolved_findings": ["REV-1"]}
+            if blocking is not None:
+                payload["blocking_findings"] = blocking
+            with self.subTest(blocking=blocking):
+                self.assertEqual({}, cycle._findings(payload, "resolve"))
+
 
 if __name__ == "__main__":
     unittest.main()

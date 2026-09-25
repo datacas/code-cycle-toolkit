@@ -825,7 +825,8 @@ def _findings(payload: dict | None, role: str) -> dict:
                     if item.get("status") in {"open", "still_open"}]
     elif role == "resolve":
         findings = payload.get("unresolved_findings")
-        if not isinstance(findings, list):
+        if (not isinstance(findings, list)
+                or any(not isinstance(item, dict) for item in findings)):
             return {}
     else:
         return {}
@@ -890,6 +891,8 @@ def _unique_findings(findings: list) -> list | None:
 
 def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
     """Reject conflicting blocker signals when every finding is classifiable."""
+    if any(not isinstance(item, dict) for item in findings):
+        return False
     if not all(isinstance(item.get("id"), str)
                and isinstance(item.get("blocks_approval"), bool)
                for item in findings):
