@@ -29,6 +29,7 @@ checks that the two do not drift apart.
 #### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1
 #### [CCR-20260924-003] · manual · openai/gpt-6-sol→? · high · schema:1
 #### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123…4567 · schema:1
+#### [CCT-20260924-004] · manual · openai/gpt-6-sol→? · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
 #### [REV-004] · medium · resolved · valid · blocks:yes — Short title
 ```
 
@@ -41,11 +42,14 @@ republishes the comment preserves existing run lines and mints none.
 `triaged:` token is the commit every disposition in that run was judged against.
 
 With no runtime routing decision, both review and triage lines use the reserved
-profile `manual` and record the host-configured provider, requested model, and
-effort. Values the host does not expose are written as `unknown` independently;
-the resolved model remains `?` without an executor receipt. A `manual` line is
-comment-only: it is not a telemetry dispatch. Comment-based analysis counts
-these runs separately from dispatched stages.
+profile `manual` and record the host-configured provider, model selector, and
+effort. The model selector follows the active host session; Codex CLI/profile/
+config precedence and Claude Code's current session selection are documented in
+[Review lifecycle](review-cycle.md). Read only those values, never unrelated
+configuration content. Values the host does not expose are written as
+`unknown` independently; the resolved model remains `?` without an executor
+receipt. A `manual` line is comment-only, not a telemetry dispatch. Comment-
+based analysis counts these runs separately from dispatched stages.
 
 **Finding header.** One per published finding, new or previous.
 

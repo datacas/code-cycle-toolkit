@@ -243,7 +243,7 @@ class RunLineTests(unittest.TestCase):
         run = contract.parse_run_line(MANUAL_REVIEW_RUN)
 
         assert run is not None
-        self.assertEqual(contract.MANUAL_PROFILE, run.profile)
+        self.assertEqual("manual", run.profile)
         self.assertEqual("openai", run.model.provider)
         self.assertEqual("gpt-6-sol", run.model.requested)
         self.assertIsNone(run.model.resolved)
@@ -254,7 +254,7 @@ class RunLineTests(unittest.TestCase):
         run = contract.parse_run_line(REVIEW_RUN)
 
         assert run is not None
-        self.assertNotEqual(contract.MANUAL_PROFILE, run.profile)
+        self.assertNotEqual("manual", run.profile)
         self.assertEqual(REVIEW_RUN, contract.format_run_line(run))
 
     def test_manual_run_allows_unknown_host_configuration_tokens(self) -> None:
@@ -265,6 +265,22 @@ class RunLineTests(unittest.TestCase):
         run = contract.parse_run_line(line)
 
         assert run is not None
+        self.assertEqual("unknown", run.model.provider)
+        self.assertEqual("unknown", run.model.requested)
+        self.assertEqual("unknown", run.effort)
+        self.assertEqual(line, contract.format_run_line(run))
+
+    def test_manual_triage_run_round_trips_with_unknown_host_values(self) -> None:
+        line = (
+            "#### [CCT-20260924-004] · manual · unknown/unknown→? · unknown "
+            "· triaged:0123456789abcdef0123456789abcdef01234567 · schema:1"
+        )
+
+        run = contract.parse_run_line(line)
+
+        assert run is not None
+        self.assertEqual("triage", run.kind)
+        self.assertEqual("manual", run.profile)
         self.assertEqual("unknown", run.model.provider)
         self.assertEqual("unknown", run.model.requested)
         self.assertEqual("unknown", run.effort)

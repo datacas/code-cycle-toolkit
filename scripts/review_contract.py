@@ -53,8 +53,6 @@ FINDING_PREFIX = "REV-"
 CANDIDATE_PREFIX = "CAL-"
 
 UNKNOWN_MODEL = "?"
-# Reserved profile for a review or triage line written without runtime routing.
-MANUAL_PROFILE = "manual"
 
 _HEADER_RE = re.compile(r"^#{1,6}\s*\[([A-Z]+-[A-Za-z0-9-]+)\]\s*(.*)$")
 _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
