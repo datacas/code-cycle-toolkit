@@ -111,6 +111,31 @@ jobs:
             done
           done
 
+      - name: Install Codex skills to .agents/skills only
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/codex-home"
+          rm -rf "$home"
+          mkdir -p "$home/.codex/skills/cc-verify" "$home/.codex/skills/other-skill"
+
+          # Without --force the earlier copies are named and kept.
+          HOME="$home" bash scripts/install.sh --agent codex --scope global --no-runtime 2>"$RUNNER_TEMP/codex-warning"
+          grep -q "$home/.codex/skills/cc-verify" "$RUNNER_TEMP/codex-warning" \
+            || { echo "The installer did not warn about the duplicate" >&2; exit 1; }
+          [ -d "$home/.codex/skills/cc-verify" ] \
+            || { echo "The installer removed a duplicate without --force" >&2; exit 1; }
+
+          # With --force this toolkit's copies go and nothing else does.
+          HOME="$home" bash scripts/install.sh --agent codex --scope global --no-runtime --force
+          for skill in $EXPECTED_SKILLS; do
+            [ -f "$home/.agents/skills/$skill/SKILL.md" ] \
+              || { echo "Missing installed skill: $home/.agents/skills/$skill/SKILL.md" >&2; exit 1; }
+            [ ! -e "$home/.codex/skills/$skill" ] \
+              || { echo "Codex skill duplicated in $home/.codex/skills/$skill" >&2; exit 1; }
+          done
+          [ -d "$home/.codex/skills/other-skill" ] \
+            || { echo "The installer removed a skill that is not its own" >&2; exit 1; }
+
       - name: Refuse to overwrite without --force
         run: |
           set -uo pipefail
@@ -250,6 +275,44 @@ jobs:
           $survived = (Get-Content -LiteralPath $outside -Raw).Trim()
           if ($survived -ne 'precious') {
               throw "The installer wrote through the link: $survived"
+          }
+
+      - name: Install Codex skills to .agents/skills only
+        shell: pwsh
+        run: |
+          # A global install writes to the runner's own profile, which is
+          # discarded with the job.
+          $home_ = [Environment]::GetFolderPath('UserProfile')
+          $agents = Join-Path $home_ '.agents\skills'
+          $legacy = Join-Path $home_ '.codex\skills'
+          foreach ($name in 'cc-verify', 'other-skill') {
+              New-Item -ItemType Directory -Path (Join-Path $legacy $name) -Force | Out-Null
+          }
+
+          # Without -Force the earlier copies are named and kept.
+          $warnings = & .\scripts\install.ps1 -Agent codex -Scope global -NoRuntime 3>&1 |
+              Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+          if (-not ($warnings -match [regex]::Escape((Join-Path $legacy 'cc-verify')))) {
+              throw 'The installer did not warn about the duplicate'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $legacy 'cc-verify'))) {
+              throw 'The installer removed a duplicate without -Force'
+          }
+
+          # With -Force this toolkit's copies go and nothing else does.
+          & .\scripts\install.ps1 -Agent codex -Scope global -NoRuntime -Force
+          $skills = $env:EXPECTED_SKILLS -split '\s+' | Where-Object { $_ }
+          foreach ($skill in $skills) {
+              $skillFile = Join-Path (Join-Path $agents $skill) 'SKILL.md'
+              if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
+                  throw "Missing installed skill: $skillFile"
+              }
+              if (Test-Path -LiteralPath (Join-Path $legacy $skill)) {
+                  throw "Codex skill duplicated in $(Join-Path $legacy $skill)"
+              }
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $legacy 'other-skill'))) {
+              throw 'The installer removed a skill that is not its own'
           }
 
       - name: Refuse to overwrite without -Force

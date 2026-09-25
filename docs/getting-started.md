@@ -98,7 +98,7 @@ Where files land:
 | Target | Global | Project |
 |---|---|---|
 | Claude Code | `~/.claude/skills/` | `<repo>/.claude/skills/` |
-| Codex | `~/.agents/skills/` and `~/.codex/skills/` | `<repo>/.agents/skills/` |
+| Codex | `~/.agents/skills/` | `<repo>/.agents/skills/` |
 | OpenCode | `~/.config/opencode/skills/` | `<repo>/.opencode/skills/` |
 | Runtime (one copy for all hosts) | `~/.code-cycle/runtime/` | `<repo>/.code-cycle/runtime/` |
 
@@ -108,6 +108,7 @@ Installer behaviour:
 - `--no-runtime` (`-NoRuntime`) installs skills only.
 - The installer writes `.code-cycle/.gitignore` containing `*` when none exists. In a project install, this keeps the runtime from being committed by accident. An existing file is left alone, even with `--force`.
 - A symlink on any path the installer writes to is refused, not followed.
+- Earlier versions also copied Codex skills to `~/.codex/skills/`, which Codex reads too, so each skill appeared twice. A global Codex install warns about this toolkit's copies there; with `--force` (always passed by `get.sh` and `get.ps1`) it removes them. Other skills in that directory, and links, are left alone.
 - WSL and native Windows are separate environments. Run the matching installer in each one you use.
 
 All installer flags are listed in [Configuration → Command-line flags](configuration.md#command-line-flags).

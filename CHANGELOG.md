@@ -58,6 +58,13 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- A global Codex installation writes the skills to `~/.agents/skills/` only.
+  Earlier versions also copied them to `~/.codex/skills/`, and current Codex
+  reads both, so every `cc-*` skill appeared twice. Existing users should
+  remove `~/.codex/skills/cc-*`, or rerun the installer with `--force` (the
+  one-command `get.sh` and `get.ps1` always pass it), which removes this
+  toolkit's own copies there and leaves every other skill and any link alone.
+  Without `--force` the installer names the duplicates and removes nothing.
 - The installers no longer tell you to add the runtime to `PYTHONPATH` as if it
   were required. `run_cycle.py` and `cc-stats` run by path and don't need it.
   The documentation marks it as optional, for code that imports the runtime's
