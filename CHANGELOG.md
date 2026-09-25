@@ -12,7 +12,7 @@ All notable changes to this project are documented here. This project follows
   stages are not run; the rest keep the full cycle's routing, recording, and
   iteration limit. Before any dispatch the driver refuses a resume without
   `--pr`, and reads the pull request to check that it is open, its head branch
-  exists, and `--cwd` is on that branch. A resumed run is a new cycle whose
+  exists, and `--cwd` is on that branch at the pull request's head commit. A resumed run is a new cycle whose
   rows carry `started_from`, and first-pass approval — in `cc-stats` and in the
   measured routing rate — counts only cycles that started at `implement`.
   Telemetry schema 5.

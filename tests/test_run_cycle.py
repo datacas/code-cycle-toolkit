@@ -1248,14 +1248,17 @@ class ResumeTests(RunCycleTestCase):
 class ChangeRequestCheckTests(unittest.TestCase):
     """The pull request is read, not assumed, before a resume dispatches."""
 
+    HEAD = "a" * 40
+
     def runner(self, *, state="OPEN", branch="issue-72", current="issue-72",
-               branch_exists=True):
+               branch_exists=True, checked_out=HEAD):
         seen = []
 
         def run(command, **kw):
             seen.append(command)
             if command[:3] == ["gh", "pr", "view"]:
                 out = json.dumps({"state": state, "headRefName": branch,
+                                  "headRefOid": self.HEAD,
                                   "headRepository": {"name": "api"},
                                   "headRepositoryOwner": {"login": "owner"}})
                 return subprocess.CompletedProcess(command, 0, out, "")
@@ -1263,8 +1266,10 @@ class ChangeRequestCheckTests(unittest.TestCase):
                 code = 0 if branch_exists else 1
                 return subprocess.CompletedProcess(
                     command, code, "", "" if branch_exists else "HTTP 404: Branch not found")
-            if command[:2] == ["git", "rev-parse"]:
+            if command == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
                 return subprocess.CompletedProcess(command, 0, current + "\n", "")
+            if command == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(command, 0, checked_out + "\n", "")
             raise AssertionError(command)
 
         return run, seen
@@ -1274,6 +1279,15 @@ class ChangeRequestCheckTests(unittest.TestCase):
         rc.check_change_request("owner/api", "74", "/work", run=run)
         self.assertEqual(["gh", "pr", "view", "74", "--repo", "owner/api"], seen[0][:6])
         self.assertIn("repos/owner/api/branches/issue-72", seen[1])
+        self.assertIn("headRefOid", seen[0][-1])
+        self.assertEqual(["git", "rev-parse", "HEAD"], seen[-1])
+
+    def test_a_stale_checkout_of_the_right_branch_is_refused(self) -> None:
+        """REV-001: the branch name matched, the code did not."""
+        run, _ = self.runner(checked_out="b" * 40)
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.check_change_request("owner/api", "74", "/work", run=run)
+        self.assertIn("not at aaaaaaaaaaaa, the head commit", str(refused.exception))
 
     def test_a_closed_pull_request_is_refused(self) -> None:
         run, _ = self.runner(state="MERGED")

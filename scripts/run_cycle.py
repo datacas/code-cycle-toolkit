@@ -471,7 +471,10 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
 
     A resume trusts the pull request's comments to carry the earlier review,
     so it has to be the pull request this worktree is on: open, with its head
-    branch still present, and checked out in `cwd`. Each is read, not assumed,
+    branch still present, checked out in `cwd`, and at the pull request's head
+    commit. A matching branch name alone is not enough: a checkout behind or
+    ahead of the pull request would be reviewed or fixed as if it were the
+    pull request. Each is read, not assumed,
     and the first that fails is named. Only GitHub pull requests can be read.
     """
     def call(command: list[str], what: str) -> str:
@@ -487,7 +490,7 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
 
     reference = change_request_id.lstrip("#")
     raw = call(["gh", "pr", "view", reference, "--repo", repo_id, "--json",
-                "state,headRefName,headRepository,headRepositoryOwner"],
+                "state,headRefName,headRefOid,headRepository,headRepositoryOwner"],
                f"read pull request {change_request_id} in {repo_id}")
     try:
         pull = json.loads(raw)
@@ -501,6 +504,9 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
     branch = pull.get("headRefName")
     if not isinstance(branch, str) or not branch:
         raise CycleDriverError(f"pull request {change_request_id} names no head branch")
+    head = pull.get("headRefOid")
+    if not isinstance(head, str) or not head:
+        raise CycleDriverError(f"pull request {change_request_id} names no head commit")
     owner = (pull.get("headRepositoryOwner") or {}).get("login")
     name = (pull.get("headRepository") or {}).get("name")
     head_repo = f"{owner}/{name}" if owner and name else repo_id
@@ -512,6 +518,13 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
         raise CycleDriverError(
             f"the working directory is on {current}, not on {branch}, the head "
             f"branch of pull request {change_request_id}")
+    checked_out = call(["git", "rev-parse", "HEAD"],
+                       "read the commit checked out in the working directory")
+    if checked_out != head:
+        raise CycleDriverError(
+            f"the working directory is at {checked_out[:12]}, not at {head[:12]}, "
+            f"the head commit of pull request {change_request_id}; update it "
+            "to the pull request's head before resuming")
 
 
 def read_structured_result(result: DispatchResult | None) -> Reported:
