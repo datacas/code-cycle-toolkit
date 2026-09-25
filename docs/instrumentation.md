@@ -565,13 +565,15 @@ Three payload keys tie a run together, listed in `telemetry.CORRELATION_FIELDS`:
 | `cycle_id` | minted once per `CycleRecorder`, so two runs of one work item stay apart; validated before anything is dispatched |
 | `stage_seq` | the number of the `stage()` call; a rerouted attempt shares its stage's number, and a verdict carries the number of the latest dispatch of its role |
 | `record_kind` | `dispatch`, `verdict` or `cycle` |
+| `started_from` | the stage the cycle began at: `implement`, or `review`/`resolve`/`rereview` for a run that resumed an existing change request (`run_cycle.py --from`); on every row of the cycle, and a row without it reads as `implement` |
 
 Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 
 | Source | Fields | Written when |
 |---|---|---|
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
-| `cycle` | `first_review_status`, `first_pass_approved`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
+| `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
+| `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
 | `cycle` | `tests_passed` | a verdict recorded `tests_passed`; the latest one wins |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |

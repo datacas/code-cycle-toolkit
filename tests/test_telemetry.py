@@ -372,6 +372,24 @@ class FirstPassRateTests(TelemetryTestCase):
 
         self.assertEqual(0.0, self.store.first_pass_rate("repo").value)
 
+    def test_a_resumed_cycle_is_not_a_first_pass(self) -> None:
+        """A cycle that resumed a change request reviews an earlier run's
+        work, so its review is not that implementation's first pass."""
+        for i in range(10):
+            self.store.record_stage("repo", f"t{i}", "implement", profile="cheap_coder")
+            self.store.record_stage("repo", f"t{i}", "review", profile="senior_reviewer",
+                                    status="APPROVED", started_from="review")
+        self.assertEqual(0, self.store.first_pass_rate("repo").observations)
+
+        for i in range(10):
+            self.store.record_stage("repo", f"t{i}", "review", profile="senior_reviewer",
+                                    status="CHANGES_REQUESTED", started_from="implement")
+        self.assertEqual(0.0, self.store.first_pass_rate("repo").value)
+
+    def test_started_from_is_a_closed_vocabulary(self) -> None:
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "review", started_from="deploy")
+
     def test_a_review_without_a_verdict_is_not_a_failed_first_pass(self) -> None:
         """An append-only API makes recording before the verdict ordinary, and
         counting that as a failure would poison the cost model."""

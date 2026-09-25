@@ -12,7 +12,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from run_cycle import CycleDriverError, load_config, repository_of
-from telemetry import MINIMUM_SAMPLE, TelemetryError, default_database_path, validate_reference
+from telemetry import (
+    MINIMUM_SAMPLE,
+    TelemetryError,
+    default_database_path,
+    started_at_implement,
+    validate_reference,
+)
 
 
 CONFIDENCE_BUCKETS = (
@@ -83,7 +89,8 @@ def _first_pass(rows: list[dict], start: datetime | None = None,
                 end: datetime | None = None) -> dict:
     by_task: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
-        if row["payload"].get("record_kind") != "shadow":
+        # A resumed cycle reviews an earlier run's work: not a first pass.
+        if row["payload"].get("record_kind") != "shadow" and started_at_implement(row):
             by_task[row["task_id"]].append(row)
     passed = total = 0
     for task_rows in by_task.values():

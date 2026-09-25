@@ -377,7 +377,7 @@ class RecorderShadowTests(CycleTestCase):
             model="jev-latest")))
 
         allowed = tm.SHADOW_FIELDS | tm.CORRELATION_FIELDS | {
-            "routing_strategy", "local_only"}
+            "routing_strategy", "local_only", "started_from"}
         for row in self.store.rows("owner/repo"):
             if row["payload"].get("record_kind") != "shadow":
                 self.assertFalse({k for k in row["payload"] if k.startswith("jev_")})

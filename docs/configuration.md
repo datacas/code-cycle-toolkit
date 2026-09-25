@@ -201,7 +201,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `run_cycle.py`
 
-`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--max-iterations` (default 3) · `--cwd` · `--local-only` · `--timeout` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--max-iterations` (default 3) · `--cwd` · `--local-only` · `--timeout` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
 
 ### `stats.py` (used by `cc-stats`)
 

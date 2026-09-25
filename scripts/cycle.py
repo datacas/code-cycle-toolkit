@@ -54,7 +54,7 @@ from router import (
     route,
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
-from telemetry import Telemetry, routing_decision_fields, validate_reference
+from telemetry import CYCLE_STARTS, Telemetry, routing_decision_fields, validate_reference
 
 SCHEMA_VERSION = 1
 
@@ -208,6 +208,7 @@ class CycleRecorder:
         profiles: dict | None = None,
         routing_strategy: RoutingStrategy = RoutingStrategy.FIXED,
         local_only: bool = False,
+        started_from: str = "implement",
         change_observer: Callable[[], ChangeSignals | None] | None = None,
         verification_available: bool | None = None,
         cycle_id: str | None = None,
@@ -246,6 +247,13 @@ class CycleRecorder:
         if profiles is not None:
             telemetry.add_known_models(self.repo_id, models_from_profiles(profiles))
         self.local_only = local_only
+        # Where this cycle began. Recorded on every row, because a cycle that
+        # resumed an existing change request reviews an earlier run's work and
+        # must not be read as that implementation's first pass.
+        if started_from not in CYCLE_STARTS:
+            raise CycleError(
+                f"a cycle starts at one of {', '.join(CYCLE_STARTS)}, not {started_from!r}")
+        self.started_from = started_from
         # Pre-routing state. Each is what the cycle knew before routing the
         # next stage, never what that stage went on to produce; `None` or an
         # empty mapping is "not known", which is recorded by omission.
@@ -425,6 +433,7 @@ class CycleRecorder:
                 record_kind="shadow",
                 routing_strategy=self.routing_strategy.value,
                 local_only=self.local_only,
+                started_from=self.started_from,
                 **shadow_fields(self.shadow.config, decision.profile, suggestion),
             )
         except Exception:
@@ -453,6 +462,7 @@ class CycleRecorder:
             iteration=self.iteration, status=status,
             routing_strategy=self.routing_strategy.value,
             local_only=self.local_only,
+            started_from=self.started_from,
             cycle_id=self.cycle_id, record_kind="verdict",
             **source, **fields,
         )
@@ -478,6 +488,7 @@ class CycleRecorder:
             iterations=self.iteration,
             routing_strategy=self.routing_strategy.value,
             local_only=self.local_only,
+            started_from=self.started_from,
             cycle_id=self.cycle_id, record_kind="cycle",
             **{**self.observed_outcome(), **fields},
         )
@@ -506,10 +517,13 @@ class CycleRecorder:
         if first is not None:
             outcome.update(
                 first_review_status=first,
-                first_pass_approved=first == "APPROVED",
                 resolution_needed=first == "CHANGES_REQUESTED",
                 resolution_rounds=sum(1 for stage in self.stages if stage.role == "resolve"),
             )
+            # A first pass is an implementation's first review. A resumed
+            # cycle's review judged work from an earlier run.
+            if self.started_from == "implement":
+                outcome["first_pass_approved"] = first == "APPROVED"
         if self.final_review_status is not None:
             outcome.update(
                 final_review_status=self.final_review_status,
@@ -553,12 +567,14 @@ class CycleRecorder:
                 routing_reason_count=len(decision.reasons or ()),
                 **routing_decision_fields(decision),
                 local_only=self.local_only,
+                started_from=self.started_from,
                 **signals,
             )
         return self.telemetry.record_dispatch(
             self.repo_id, self.task_id, role, decision, result,
             iteration=self.iteration,
             local_only=self.local_only,
+            started_from=self.started_from,
             cycle_id=self.cycle_id, stage_seq=self.stage_seq,
             record_kind="dispatch",
             **signals,

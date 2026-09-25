@@ -7,6 +7,16 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `run_cycle.py --from review|resolve|rereview --pr N` resumes an existing
+  change request instead of implementing the work item again. The skipped
+  stages are not run; the rest keep the full cycle's routing, recording, and
+  iteration limit. Before any dispatch the driver refuses a resume without
+  `--pr`, and reads the pull request to check that it is open, its head branch
+  exists, and `--cwd` is on that branch at the pull request's head commit. A resumed run is a new cycle whose
+  rows carry `started_from`, and first-pass approval — in `cc-stats` and in the
+  measured routing rate — counts only cycles that started at `implement`.
+  Telemetry schema 5.
+
 - One-command installers, `scripts/get.sh` (`curl … | sh`) and
   `scripts/get.ps1` (`irm … | iex`). They download a release (latest by
   default, or `--version main|vX.Y.Z`), run the bundled installer with
