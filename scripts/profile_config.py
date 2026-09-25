@@ -24,6 +24,7 @@ Claude cannot confine writes to a disposable workspace, so `auxiliary_tool`
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -569,10 +570,36 @@ def write_declaration(path: Path, declaration: dict) -> str:
     if declared_profiles(after) != declaration:
         raise ProfileConfigError("the written profiles block does not read back as proposed")
     load_profiles(after)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(updated, encoding="utf-8")
-    os.replace(tmp, path)
+    _replace_atomically(path, updated)
     return updated
+
+
+def _replace_atomically(path: Path, text: str) -> None:
+    """Write `text` to `path` through a fresh temporary file.
+
+    The temporary name is unique and created exclusively, so nothing planted
+    beside the configuration — a symlink at a predictable name — can redirect
+    the write to another file.
+    """
+    import tempfile
+
+    directory = path.parent if str(path.parent) else Path(".")
+    if path.is_file():
+        mode = path.stat().st_mode & 0o777
+    else:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.chmod(name, mode)
+        os.replace(name, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name)
+        raise
 
 
 # --- command line ----------------------------------------------------------

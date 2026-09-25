@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -283,6 +284,29 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(proposal("balanced-openai-implements").declaration,
                              written["code_cycle"]["profiles"])
             self.assertEqual({"key": "value"}, written["other_tool"])
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_write_ignores_a_planted_temporary_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".code-cycle.yml"
+            path.write_text(COMMENTED_CONFIG, encoding="utf-8")
+            path.chmod(0o640)
+            victim = Path(tmp) / "victim.txt"
+            victim.write_text("untouched\n", encoding="utf-8")
+            for name in (".code-cycle.yml.tmp", ".code-cycle.yml.tmp.tmp"):
+                try:
+                    (Path(tmp) / name).symlink_to(victim)
+                except (OSError, NotImplementedError):
+                    self.skipTest("symlinks are not available here")
+            pc.write_declaration(path, {"security": {"fallback": None}})
+            self.assertEqual("untouched\n", victim.read_text(encoding="utf-8"))
+            self.assertFalse(path.is_symlink())
+            self.assertIn("fallback: null", path.read_text(encoding="utf-8"))
+            if os.name == "posix":
+                self.assertEqual(0o640, path.stat().st_mode & 0o777)
+            leftovers = sorted(p.name for p in Path(tmp).iterdir())
+            self.assertEqual([".code-cycle.yml", ".code-cycle.yml.tmp",
+                              ".code-cycle.yml.tmp.tmp", "victim.txt"], leftovers)
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to read a configuration")
     def test_an_invalid_proposal_writes_nothing(self) -> None:

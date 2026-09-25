@@ -78,7 +78,12 @@ jobs:
           home="$RUNNER_TEMP/get-home"
           mkdir -p "$home"
           HOME="$home" sh scripts/get.sh --version main
-          for skill in $EXPECTED_SKILLS; do
+          # get.sh downloads main, so assert the skills main ships; this
+          # pull request's own skill set is asserted by the local installs.
+          git fetch --quiet --depth=1 origin main
+          main_skills=$(git ls-tree --name-only FETCH_HEAD skills/ | sed 's#^skills/##')
+          [ -n "$main_skills" ] || { echo "could not list the skills on main" >&2; exit 1; }
+          for skill in $main_skills; do
             [ -f "$home/.claude/skills/$skill/SKILL.md" ] \
               || { echo "get.sh did not install $skill" >&2; exit 1; }
           done
@@ -181,7 +186,12 @@ jobs:
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-get-target'
           New-Item -ItemType Directory -Path $project -Force | Out-Null
           & .\scripts\get.ps1 -Version main -Agent claude -Scope project -ProjectDir $project
-          $skills = $env:EXPECTED_SKILLS -split '\s+' | Where-Object { $_ }
+          # get.ps1 downloads main, so assert the skills main ships; this
+          # pull request's own skill set is asserted by the local installs.
+          git fetch --quiet --depth=1 origin main
+          if ($LASTEXITCODE -ne 0) { throw 'could not fetch main' }
+          $skills = git ls-tree --name-only FETCH_HEAD skills/ | ForEach-Object { $_ -replace '^skills/', '' }
+          if (-not $skills) { throw 'could not list the skills on main' }
           foreach ($skill in $skills) {
               $skillFile = Join-Path $project ".claude\skills\$skill\SKILL.md"
               if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
