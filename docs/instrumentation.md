@@ -592,6 +592,28 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 
+Finding counts are read from the result shape for the stage: `findings` for an
+initial review, `new_findings` plus `verified_findings` for a rereview, and
+`unresolved_findings` for a resolution. In a rereview, `still_open` is counted
+as `open`; resolved and not-applicable findings do not count as open. A
+present, valid empty list records zero. An initial review or resolution with
+its finding key absent records no count; a rereview with both finding keys
+absent does too. A rereview may omit either `new_findings` or
+`verified_findings` when the other is present, in which case the missing list
+is treated as empty. A present but non-list value leaves counts unknown. If a
+review or rereview entry has a missing or unrecognised status, its finding
+counts are omitted rather than treating that entry as resolved. In a rereview,
+duplicate IDs with conflicting status, severity, or blocking values also make
+the counts unknown; identical entries count once.
+
+When `blocking_findings` is present, its unique IDs supply
+`findings_blocking`. If every counted finding has an ID and a boolean
+`blocks_approval`, those flags must agree with the list or the finding counts
+are omitted as ambiguous. If those per-finding fields are incomplete, the
+explicit list remains authoritative. Without the list, blocking counts come
+from findings marked `blocks_approval: true`. Per-severity counts are recorded
+only when every counted finding has a recognised severity.
+
 Unknown is still not a default. A run that stopped before a review reached a
 verdict carries no review outcome at all — not unapproved, not zero rounds —
 and a review that reported `BLOCKED` settles nothing. A `tests` value that is
