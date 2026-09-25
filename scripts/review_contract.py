@@ -588,6 +588,93 @@ def verify_triage_freeze(
     return problems
 
 
+#: The statuses with which a resolution run claims to be done with a finding.
+#: A disposition is never a claim: it says whether the finding was right, and
+#: it is frozen at triage, while a claim is what the resolver did about it.
+CLAIM_STATUSES = frozenset({"resolved", "not_applicable"})
+
+RESOLUTION_RUN = "resolution"
+REVIEW_RUN = "review"
+
+
+@dataclass(frozen=True)
+class RunStatuses:
+    """The status each finding ended one run in, and which kind of run it was.
+
+    `kind` is `resolution` for a triage run or a `resolve` result, `review` for
+    a review run or a `review`/`rereview` result. `statuses` holds the last
+    status the run published per ID. A review run with empty `statuses` is a
+    review that ran but whose findings could not be read: it consumes pending
+    claims without rejecting any, because no rejection was observed.
+    """
+
+    kind: str
+    statuses: dict[str, str] = field(default_factory=dict)
+
+
+def run_statuses(record: ReviewRecord) -> RunStatuses | None:
+    """Read one parsed comment as one run, or None when it is not one.
+
+    A comment with only triage run lines is a resolution run, one with only
+    review run lines is a review run. A comment with no run line, or with both
+    kinds, cannot be placed in the sequence and is left out. Within the comment
+    the last header for an ID is the run's position.
+    """
+    kinds = {run.kind for run in record.runs}
+    if kinds == {"triage"}:
+        kind = RESOLUTION_RUN
+    elif kinds == {"review"}:
+        kind = REVIEW_RUN
+    else:
+        return None
+    statuses: dict[str, str] = {}
+    for finding in record.findings:
+        statuses[finding.id] = finding.status
+    return RunStatuses(kind=kind, statuses=statuses)
+
+
+def claimed_fix_survivals(
+    runs: Iterable[RunStatuses | ReviewRecord],
+) -> dict[str, int]:
+    """Count, per finding ID, how often it survived a claimed fix.
+
+    A finding survives a claimed fix when a resolution run publishes its ID as
+    `resolved` or `not_applicable` (the claim) and the next review run after it
+    publishes the same ID as `open` (the rejection). Each claim is judged by
+    that one next review only, so each (claim, next review) pair counts at most
+    once. A review that does not republish a claimed ID, confirms it, or
+    agrees it no longer applies consumes the claim without counting it.
+
+    Not counted: a finding the resolver left `open` (persisting), a
+    `resolved`→`open` sequence with no claim between two reviews (a
+    regression), and a claim whose next review had no readable findings.
+
+    `runs` is ordered oldest first. A parsed comment is read through
+    `run_statuses`; one that is not a run is skipped. Only IDs with at least
+    one survival appear in the result.
+    """
+    survivals: dict[str, int] = {}
+    pending: set[str] = set()
+    for item in runs:
+        run = run_statuses(item) if isinstance(item, ReviewRecord) else item
+        if run is None:
+            continue
+        if run.kind == RESOLUTION_RUN:
+            for finding_id, status in run.statuses.items():
+                if status in CLAIM_STATUSES:
+                    pending.add(finding_id)
+                else:
+                    pending.discard(finding_id)
+        elif run.kind == REVIEW_RUN:
+            for finding_id in pending:
+                if run.statuses.get(finding_id) == "open":
+                    survivals[finding_id] = survivals.get(finding_id, 0) + 1
+            pending.clear()
+        else:
+            raise ContractError(f"unknown run kind {run.kind!r}")
+    return survivals
+
+
 def finding_outcomes(record: ReviewRecord) -> list[dict[str, str]]:
     """Build the optional `ORCHESTRATION_RESULT` mirror from the durable record.
 

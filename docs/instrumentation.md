@@ -531,6 +531,7 @@ could have supplied.
 | observed | `changed_files_count`, `has_tests`, `touches_dependencies`, `touches_database`, `touches_auth`, `touches_api`, `touches_migrations`, `touches_ci`, `changed_<language>_files` | the diff against the default branch, `scripts/stage_signals.py` |
 | observed | `prior_findings_total`, `prior_findings_blocking`, `prior_findings_<severity>` | the latest verdict recorded before the stage |
 | observed | `previous_failed_attempts`, `resolution_round`, `verification_available` | the cycle's own state, and `--verification` when given |
+| observed | `repeated_findings` | the finding IDs that survived at least one claimed fix earlier in this cycle (schema 7) |
 | estimated | `changed_lines_estimate`, `test_count_estimate` | added plus deleted text lines; added lines that look like a test definition |
 
 `telemetry.PRE_ROUTING_SIGNALS` holds the same classification, so a query can
@@ -546,7 +547,12 @@ every finding names its severity: a partial breakdown would read as zero for
 the severities it missed. `previous_failed_attempts` counts the dispatches in
 this cycle that did not succeed before this routing, including an attempt
 abandoned for a reroute. `resolution_round` appears only on `resolve` and
-`rereview`.
+`rereview`. So does `repeated_findings` (schema 7): the number of finding IDs
+that survived a claimed fix before this routing, as
+[Exit conditions](review-cycle.md#exit-conditions) defines it. It is recorded
+only by `run_cycle.py`, which reads the structured results; a recorder whose
+caller does not track it leaves it out. It is not `previous_failed_attempts`,
+which counts failed dispatches, not failed fixes.
 
 Unknown is not zero. A diff that could not be read — no worktree, no base that
 resolves, Git missing — leaves every change signal out; a diff that was read and
@@ -591,6 +597,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `tests_passed` | a verdict recorded `tests_passed`; the latest one wins |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |
 
 Finding counts are read from the result shape for the stage: `findings` for an
 initial review, `new_findings` plus `verified_findings` for a rereview, and
@@ -631,6 +638,13 @@ equals the result's `head_sha`: checks of an earlier head are not this stage's,
 and a missing count would otherwise read as zero. Schema version 6 adds
 `checks_pending`; `checks_passed` and `checks_failed` were accepted before but
 never written. Check names stay in the published comment.
+
+`stop_reason` (schema 7) is the exit condition the run met, one of
+`telemetry.STOP_REASONS`: `approved`, `iteration_limit`, `no_progress`,
+`repeated_findings`, `stage_not_completed` (a stage reported something other
+than a completion, or only started work that finishes elsewhere),
+`dispatch_failed`, or `local_only`. A closing row from an earlier version has
+none, and `cc-stats` reads it as unknown.
 
 Each dispatch row that reached an executor carries `duration_ms`, the executor
 call's wall time from a monotonic clock. An attempt refused before an executor

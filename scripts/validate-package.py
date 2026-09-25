@@ -356,6 +356,45 @@ def check_implement_contract(root: Path, errors: list[str]) -> None:
     errors.extend(f"{where}: {problem}" for problem in diagnosis_errors(shown))
 
 
+ORCHESTRATOR_SKILLS = ("cc-orchestrator", "cc-orca-orchestrator")
+LADDER_SECTION = "### Repeated-findings ladder"
+#: What each orchestrator's ladder must state, in the words that define it:
+#: the claim, the rejection, both rungs, and where the definition lives.
+LADDER_PHRASES = (
+    "survives a claimed fix",
+    "`resolved` or `not_applicable`",
+    "`open` or `still_open`",
+    "never the disposition",
+    "**First survival**",
+    "**Second survival**",
+    "`HUMAN_INTERVENTION` before",
+    "`PARTIALLY_RESOLVED`",
+    "`review_contract.claimed_fix_survivals`",
+)
+
+
+def check_repeated_findings_ladder(root: Path, errors: list[str]) -> None:
+    """Both orchestrators must state the same ladder the runtime applies.
+
+    The definition lives in `review_contract.claimed_fix_survivals`; the
+    orchestrators apply it in prose. A section that lost a rung or the
+    definition of a claim would let the two drift without anything failing.
+    """
+    for skill in ORCHESTRATOR_SKILLS:
+        path = root / "skills" / skill / "SKILL.md"
+        if not path.is_file():
+            continue
+        where = f"skills/{skill}/SKILL.md"
+        section = extract_section(path.read_text(encoding="utf-8"), LADDER_SECTION)
+        if section is None:
+            errors.append(f"{where}: missing section {LADDER_SECTION!r}")
+            continue
+        flattened = " ".join(section.split())
+        for phrase in LADDER_PHRASES:
+            if phrase not in flattened:
+                errors.append(f"{where}: {LADDER_SECTION!r} does not state {phrase!r}")
+
+
 def validate_manifest(path: Path, expected_name: str) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -451,6 +490,7 @@ def validate_package(root: Path) -> list[str]:
         check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
+        check_repeated_findings_ladder(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE
         orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"

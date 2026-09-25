@@ -238,6 +238,30 @@ class ValidatePackageTests(unittest.TestCase):
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
         return VALIDATOR.validate_package(package)
 
+    def test_rejects_an_orchestrator_without_the_repeated_findings_ladder(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orca-orchestrator" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("### Repeated-findings ladder", "### Ladder", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "skills/cc-orca-orchestrator/SKILL.md: missing section "
+                    "'### Repeated-findings ladder'")
+
+    def test_rejects_a_ladder_that_lost_its_second_rung(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orchestrator" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("**Second survival**", "**Later**", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "does not state '**Second survival**'")
+
     def test_rejects_an_implement_result_example_that_is_not_json(self) -> None:
         errors = self.edit_implement_skill(
             '"related_items": ["130", "131"]', '"related_items": ["130", "131"],'

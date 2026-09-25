@@ -268,6 +268,11 @@ class CycleRecorder:
         self.change_observer = change_observer
         self.verification_available = verification_available
         self.failed_attempts = 0
+        # How many findings survived a claimed fix before the next routing.
+        # Set by the driver that reads the structured results; `None` is a
+        # recorder whose caller does not track it, and is left off the row.
+        # Not `failed_attempts`: that counts dispatches, not fixes.
+        self.repeated_findings: int | None = None
         self.prior_findings: dict[str, int] = {}
         self.iteration = 0
         self.stages: list[StageOutcome] = []
@@ -556,6 +561,8 @@ class CycleRecorder:
             signals["verification_available"] = self.verification_available
         if role in RESOLUTION_ROLES:
             signals["resolution_round"] = self.iteration
+            if self.repeated_findings is not None:
+                signals["repeated_findings"] = self.repeated_findings
         return signals
 
     def _record(self, role: str, decision: RoutingDecision,

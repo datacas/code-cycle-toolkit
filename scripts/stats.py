@@ -212,21 +212,30 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
     """
     seen: set[str] = set()
     closing: dict[str, dict] = {}
+    # `repeated_findings` is a pre-routing signal on resolve and rereview rows
+    # from schema 7. A cycle with no such row is not measured, not zero.
+    repeated: dict[str, bool] = {}
     for row in rows:
         payload = row["payload"]
         cycle_id = payload.get("cycle_id")
         if not cycle_id:
             continue
         seen.add(cycle_id)
+        value = payload.get("repeated_findings")
+        if isinstance(value, int) and not isinstance(value, bool):
+            repeated[cycle_id] = repeated.get(cycle_id, False) or value > 0
         if payload.get("record_kind") == "cycle":
             # Rows are read in recorded order; the last close is authoritative.
             closing[cycle_id] = row
 
     statuses = Counter()
+    stop_reasons = Counter()
     rounds = []
     for row in closing.values():
         status = str(row.get("status") or "").upper()
         statuses[status or "UNKNOWN"] += 1
+        # A closing row from before schema 7 did not say why it stopped.
+        stop_reasons[row["payload"].get("stop_reason") or "unknown"] += 1
         value = row["payload"].get("resolution_rounds")
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             rounds.append(value)
@@ -236,6 +245,11 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
         "closed": sum(statuses.values()),
         "unknown": unknown,
         "status": _counter(statuses),
+        "stop_reasons": _counter(stop_reasons),
+        "repeated_findings": {
+            "measured": len(repeated),
+            "cycles": sum(repeated.values()),
+        },
         "resolution_rounds": {
             "measured": len(rounds),
             "total": sum(rounds) if rounds else None,
@@ -567,6 +581,13 @@ def render_markdown(report: dict) -> str:
     if outcomes["unknown"]:
         lines += ["", f"{outcomes['unknown']} of {outcomes['cycles']} cycle(s) have no closing "
                       "record; their outcome is unknown, neither finished nor failed."]
+    if outcomes["stop_reasons"]:
+        lines += [""]
+        lines += _count_table("Stop reason", "Cycles", outcomes["stop_reasons"])
+    repeated = outcomes["repeated_findings"]
+    if repeated["measured"]:
+        lines += ["", f"Cycles with a finding that survived a claimed fix: "
+                      f"**{repeated['cycles']}** of {repeated['measured']} measured."]
     rounds = outcomes["resolution_rounds"]
     if rounds["measured"]:
         lines += ["", f"Resolution rounds: **{rounds['total']}** across {rounds['measured']} "

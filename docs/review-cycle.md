@@ -23,7 +23,7 @@ sequenceDiagram
 1. **Initial review** reads the whole diff from the merge base, runs its delegated passes, and publishes one comment with findings `REV-001`, `REV-002`, and so on.
 2. **Resolution** first classifies *every* finding against one commit, then edits. Valid findings are fixed and verified. Rejected ones get a reasoned reply.
 3. **Rereview** reads the whole accumulated diff again and reproduces each claimed fix. It classifies each previous finding and numbers new ones after the highest existing ID.
-4. Repeat until approved, or until an orchestrator's iteration limit or no-progress guard stops it.
+4. Repeat until approved, or until an orchestrator's iteration limit, no-progress guard, or repeated-findings ladder stops it (see [Exit conditions](#exit-conditions)).
 
 Reviews always cover the **accumulated diff from the merge base to the current head**, never only the latest commit.
 
@@ -141,6 +141,30 @@ An orchestrator reports `READY_FOR_MANUAL_MERGE` only when **all** of these hold
 - required checks passed. Pending, skipped, failed, or missing checks are not success.
 
 A human still owns the merge.
+
+The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dispatched, on any of these:
+
+| Stop | When | Recorded as |
+|---|---|---|
+| Iteration limit | the resolve+rereview budget is spent: `max_iterations`, default `3` in `run_cycle.py` and `6` in the orchestrator skills | `iteration_limit` |
+| No progress | a rereview reports the same `head_sha` and the same open finding set as the review before it | `no_progress` |
+| Repeated findings | one `REV-xxx` ID survived a claimed fix twice | `repeated_findings` |
+
+**A finding survives a claimed fix** when a resolution publishes its ID as `resolved` or `not_applicable` and the next review reopens it as `open` (`still_open` in a rereview's result). The claim is the status, never the disposition: a finding triaged `valid` and left `open` is no claim; one triaged `incorrect` and published `not_applicable` is one. Each claim is judged by the next review only, and within one run the last header for an ID is its position. These do not count:
+
+| Sequence | Why not |
+|---|---|
+| `open@CCR → open@CCT → open@CCR` | the resolver never claimed it; the no-progress guard and the limit cover it |
+| `resolved@CCT → resolved@CCR` | a confirmed fix |
+| `resolved@CCT → not_applicable@CCR` | the reviewer agreed it no longer applies |
+| `resolved@CCR → … → open@CCR` with no claim between | a regression, reported as one |
+| a claim whose next rereview had no readable result | no rejection was observed |
+
+The ladder has two rungs. After the **first** survival, the next resolution is told which IDs survived and must reproduce each with the reviewer's reproduction before editing, re-derive its cause, and not republish it `not_applicable` without new evidence; otherwise it reports `PARTIALLY_RESOLVED` and says the finding is contested. The **second** survival of the same ID stops the loop. Neither rung changes a model, profile, provider, or disposition.
+
+The no-progress guard alone misses this pattern: a resolver that pushes a commit which does not fix the finding changes the head. On PR #74, `REV-001` went `open → resolved → open → not_applicable → open` across three reviews and nothing stopped it.
+
+`review_contract.claimed_fix_survivals` is the single definition. It reads parsed comments for analysis, and `run_cycle.py` feeds it the structured results of the current run. A resumed cycle (`--from`) starts at zero survivals, so it can stop later than a whole cycle would, never earlier. Both orchestrator skills apply the same ladder, and the package validator checks that they state it.
 
 ---
 

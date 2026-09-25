@@ -364,6 +364,34 @@ class StatsTests(unittest.TestCase):
         self.assertIn("Resolution rounds: **6** across 4 closed cycle(s)", markdown)
         self.assertNotIn("cycle-private", json.dumps(report))
 
+    def test_stop_reasons_and_repeated_findings_are_reported(self) -> None:
+        self.record_cycle(0)  # a closing row from before schema 7
+        for index, (reason, repeated) in enumerate(
+                (("repeated_findings", 1), ("approved", 0)), start=1):
+            cycle_id = f"cycle-private-{index}"
+            self.store.record_stage(
+                "owner/repo", f"task-private-{index}", "resolve", profile="cheap_coder",
+                executor="codex", outcome="succeeded", model_requested="gpt-6-luna",
+                cycle_id=cycle_id, stage_seq=1, record_kind="dispatch",
+                repeated_findings=repeated,
+            )
+            self.store.record_stage(
+                "owner/repo", f"task-private-{index}", "coordinate",
+                status="HUMAN_INTERVENTION", cycle_id=cycle_id, record_kind="cycle",
+                stop_reason=reason,
+            )
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        outcomes = report["summary"]["cycle_outcomes"]
+        markdown = stats.render_markdown(report)
+
+        self.assertEqual({"approved": 1, "repeated_findings": 1, "unknown": 1},
+                         outcomes["stop_reasons"])
+        self.assertEqual({"measured": 2, "cycles": 1}, outcomes["repeated_findings"])
+        self.assertIn("| repeated_findings | 1 |", markdown)
+        self.assertIn("survived a claimed fix: **1** of 2 measured", markdown)
+
     def test_cycle_without_closing_row_is_neither_finished_nor_failed(self) -> None:
         self.record_cycle(0, status="READY_FOR_MANUAL_MERGE")
         self.record_cycle(1, closed=False)

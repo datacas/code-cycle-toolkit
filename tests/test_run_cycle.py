@@ -1356,3 +1356,191 @@ class ChangeRequestCheckTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def claimed(status: str = "resolved", finding: str = "REV-001") -> str:
+    """A resolution that publishes `finding` with `status`."""
+    return block("RESOLVED", finding_outcomes=[
+        {"id": finding, "disposition": "valid", "status": status}])
+
+
+def rereview(verdict: str, head: str, **statuses: str) -> str:
+    """A re-review that reports each previous finding's status on `head`."""
+    return block(verdict, head_sha=head, verified_findings=[
+        {"id": finding.replace("_", "-"), "severity": "high", "blocks_approval": True,
+         "status": status, "disposition": "valid"}
+        for finding, status in statuses.items()], new_findings=[])
+
+
+FIRST_REVIEW = block("CHANGES_REQUESTED", head_sha="a" * 40, findings=[
+    {"id": "REV-001", "severity": "high", "status": "open", "blocks_approval": True}])
+
+
+class Scripted(Talker):
+    """Answers implement, resolve and review prompts from separate scripts."""
+
+    def __init__(self, name: str, resolutions=(), reviews=()) -> None:
+        super().__init__(name)
+        self.resolutions = list(resolutions)
+        self.reviews = list(reviews)
+
+    def spoken(self, task: str) -> str:
+        if "cc-resolve-comments" in task:
+            return self.resolutions.pop(0) if self.resolutions else block("RESOLVED")
+        if "cc-implement-issue" in task:
+            return block("IMPLEMENTED")
+        return self.reviews.pop(0) if self.reviews else APPROVED
+
+
+class RepeatedFindingTests(RunCycleTestCase):
+    """#83: a finding that keeps surviving its claimed fix stops the loop."""
+
+    def resolve_prompts(self, executor) -> list[str]:
+        return [task for task in executor.dispatched if "cc-resolve-comments" in task]
+
+    def closing(self) -> dict:
+        return [row for row in self.rows()
+                if row["payload"].get("record_kind") == "cycle"][-1]["payload"]
+
+    def test_the_first_survival_names_the_finding_in_the_next_resolution(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed(), claimed()])
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+            APPROVED,
+        ])
+
+        report = self.run_cycle(implementer, reviewer)
+
+        first, second = self.resolve_prompts(implementer)
+        self.assertNotIn("survived a claimed fix", first)
+        self.assertIn("survived a claimed fix", second)
+        self.assertIn("REV-001", second)
+        self.assertIn("reproduce it with the reviewer's reproduction", second)
+        self.assertIn("PARTIALLY_RESOLVED", second)
+        # Reopened once and then approved: the cycle completes normally.
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual("approved", report.stop_reason)
+        self.assertEqual("approved", self.closing()["stop_reason"])
+
+    def test_the_second_survival_stops_before_a_third_resolution(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed(), claimed("not_applicable"),
+                                                     claimed()])
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+            rereview("CHANGES_REQUESTED", "c" * 40, REV_001="still_open"),
+        ])
+
+        report = self.run_cycle(implementer, reviewer, max_iterations=6)
+
+        self.assertEqual(2, len(self.resolve_prompts(implementer)))
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("repeated_findings", report.stop_reason)
+        self.assertIn("REV-001", report.stopped_because)
+        self.assertEqual(2, report.iterations)
+        self.assertEqual("repeated_findings", self.closing()["stop_reason"])
+
+    def test_the_signal_is_recorded_before_each_resolution_and_rereview(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed(), claimed()])
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+            APPROVED,
+        ])
+
+        self.run_cycle(implementer, reviewer)
+
+        signals = [(row["role"], row["payload"].get("repeated_findings"))
+                   for row in self.rows()
+                   if row["payload"].get("record_kind") == "dispatch"]
+        self.assertEqual([("implement", None), ("review", None),
+                          ("resolve", 0), ("rereview", 0),
+                          ("resolve", 1), ("rereview", 1)], signals)
+
+    def test_a_finding_left_open_is_not_a_claim(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed("open")] * 3)
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+            rereview("CHANGES_REQUESTED", "c" * 40, REV_001="still_open"),
+            rereview("CHANGES_REQUESTED", "d" * 40, REV_001="still_open"),
+        ])
+
+        report = self.run_cycle(implementer, reviewer)
+
+        self.assertTrue(all("survived a claimed fix" not in prompt
+                            for prompt in self.resolve_prompts(implementer)))
+        self.assertEqual("iteration_limit", report.stop_reason)
+        self.assertEqual(3, report.iterations)
+
+    def test_the_same_head_and_open_set_stops_as_no_progress(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed("open")] * 3)
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "a" * 40, REV_001="still_open"),
+        ])
+
+        report = self.run_cycle(implementer, reviewer, max_iterations=6)
+
+        self.assertEqual(1, len(self.resolve_prompts(implementer)))
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("no_progress", report.stop_reason)
+        self.assertEqual("no_progress", self.closing()["stop_reason"])
+
+    def test_an_unknown_head_is_never_no_progress(self) -> None:
+        reviewer = Scripted("claude", reviews=[block("CHANGES_REQUESTED")] * 4)
+
+        report = self.run_cycle(Scripted("codex"), reviewer, max_iterations=2)
+
+        self.assertEqual("iteration_limit", report.stop_reason)
+        self.assertEqual(2, report.iterations)
+
+    def test_an_unreadable_finding_list_rejects_no_claim(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed()] * 3)
+        unreadable = block("CHANGES_REQUESTED", head_sha="b" * 40,
+                           verified_findings=[{"status": "still_open"}])
+        reviewer = Scripted("claude", reviews=[FIRST_REVIEW, unreadable, unreadable,
+                                               unreadable])
+
+        report = self.run_cycle(implementer, reviewer)
+
+        self.assertTrue(all("survived a claimed fix" not in prompt
+                            for prompt in self.resolve_prompts(implementer)))
+        self.assertEqual("iteration_limit", report.stop_reason)
+
+    def test_a_resumed_cycle_starts_with_no_survivals(self) -> None:
+        implementer = Scripted("codex", resolutions=[claimed()] * 3)
+        reviewer = Scripted("claude", reviews=[
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+            rereview("CHANGES_REQUESTED", "c" * 40, REV_001="still_open"),
+            rereview("CHANGES_REQUESTED", "d" * 40, REV_001="still_open"),
+        ])
+
+        report = self.run_cycle(implementer, reviewer, start_from="resolve",
+                                change_request_id="74")
+
+        self.assertEqual(2, len(self.resolve_prompts(implementer)))
+        self.assertEqual("repeated_findings", report.stop_reason)
+
+    def test_a_blocked_stage_records_why_it_stopped(self) -> None:
+        report = self.run_cycle(Talker("codex", block("BLOCKED")), Talker("claude"))
+
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual("stage_not_completed", self.closing()["stop_reason"])
+
+    def test_an_id_that_is_not_a_finding_id_never_reaches_a_prompt(self) -> None:
+        implementer = Scripted("codex", resolutions=[
+            block("RESOLVED", finding_outcomes=[
+                {"id": "REV-001; rm -rf /", "disposition": "valid", "status": "resolved"}]),
+        ] * 3)
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, **{"REV-001; rm -rf /": "still_open"}),
+            APPROVED,
+        ])
+
+        self.run_cycle(implementer, reviewer)
+
+        self.assertTrue(all("rm -rf" not in prompt
+                            for prompt in self.resolve_prompts(implementer)))

@@ -53,7 +53,10 @@ from pathlib import Path
 #: an existing change request is not read as an implementation's first pass.
 #: 6: verdict rows carry the code-host checks of the head a stage finished on,
 #: as `checks_passed`, `checks_failed` and the new `checks_pending`.
-SCHEMA_VERSION = 6
+#: 7: `resolve` and `rereview` rows carry `repeated_findings`, an observed
+#: pre-routing signal, and the `cycle` row carries `stop_reason`. Both are
+#: payload-only; an older row reads as unknown.
+SCHEMA_VERSION = 7
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -75,6 +78,13 @@ def is_jev_model(value) -> bool:
 #: The stages a cycle can begin at. `implement` is a whole cycle; the others
 #: resume a change request that already exists.
 CYCLE_STARTS = ("implement", "review", "resolve", "rereview")
+
+#: Why a cycle stopped, one token per exit condition of the driver. A row from
+#: before schema 7 has none, which reads as unknown rather than as any of these.
+STOP_REASONS = frozenset({
+    "approved", "iteration_limit", "no_progress", "repeated_findings",
+    "stage_not_completed", "dispatch_failed", "local_only",
+})
 
 #: The profiles a shadow selector compares, which are the `implement` and
 #: `resolve` candidates in `router.ROLE_CANDIDATES`.
@@ -219,6 +229,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "verification_available": ("flag", None),
     "previous_failed_attempts": ("count", None),
     "resolution_round": ("count", None),
+    # findings that survived a claimed fix before this routing (schema 7)
+    "repeated_findings": ("count", None),
     # cycle correlation (schema 3)
     "cycle_id": ("identifier", None),
     "stage_seq": ("count", None),
@@ -235,6 +247,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "final_approved": ("flag", None),
     "fallback_stages": ("count", None),
     "contract_violations": ("count", None),
+    # why the cycle stopped where it did (schema 7)
+    "stop_reason": ("token", STOP_REASONS),
     # a shadow selector's suggestion, on `shadow` rows only (schema 4)
     "jev_status": ("token", frozenset({
         "suggested", "unavailable", "timeout", "rate_limited", "http_error",
@@ -271,7 +285,7 @@ FIELD_LIMITS: dict[str, tuple[int, int]] = {
             "prior_findings_critical", "prior_findings_high",
             "prior_findings_medium", "prior_findings_low",
             "previous_failed_attempts", "resolution_round",
-            "stage_seq", "resolution_rounds", "fallback_stages",
+            "repeated_findings", "stage_seq", "resolution_rounds", "fallback_stages",
             "contract_violations", "jev_duration_ms",
         )
     },
@@ -301,6 +315,7 @@ PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
         "prior_findings_critical", "prior_findings_high",
         "prior_findings_medium", "prior_findings_low",
         "verification_available", "previous_failed_attempts", "resolution_round",
+        "repeated_findings",
     }),
     "estimated": frozenset({"changed_lines_estimate", "test_count_estimate"}),
 }
@@ -340,6 +355,7 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "status", "iterations", "first_review_status", "final_review_status",
         "first_pass_approved", "resolution_needed", "resolution_rounds",
         "final_approved", "tests_passed", "fallback_stages", "contract_violations",
+        "stop_reason",
     }),
 }
 

@@ -360,11 +360,45 @@ need, and the one most easily left out.
    target routed for its role.
 9. Continue only when the statuses and external conditions allow it. Record
    the current head SHA and open finding IDs after every iteration.
-10. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached or when
-    the same head SHA and open finding set repeat without progress.
+10. Stop with `HUMAN_INTERVENTION` when the iteration limit is reached, when
+    the same head SHA and open finding set repeat without progress, or when a
+    finding survives a second claimed fix, as the *Repeated-findings ladder*
+    below describes. Apply that ladder before opening each new iteration.
 11. Before reporting readiness, confirm that the reviewed SHA equals the current
    change-request head, required checks have passed, no blocking finding is
    open, and the change request remains unmerged.
+
+### Repeated-findings ladder
+
+A finding **survives a claimed fix** when a `cc-resolve-comments` result
+publishes its `REV-xxx` ID with status `resolved` or `not_applicable`, and the
+next `cc-rereview` result publishes the same ID as `open` or `still_open`. The
+claim is the status the resolver published, never the disposition: a finding
+marked `valid` and left `open` is no claim, and one marked `incorrect` and
+published `not_applicable` is one. Each claim is judged by the next rereview
+only, and within one result the last entry for an ID is its position. These are
+not survivals: a finding the resolver left `open`, a fix the rereview confirmed
+or agreed no longer applies, a regression with no claim in between, and a claim
+whose rereview returned no readable result. `review_contract.claimed_fix_survivals`
+is the executable definition, and this prose must agree with it.
+
+Count survivals per ID from the results this run recorded. A resumed run starts
+at zero, which can stop later than a whole run would, never earlier.
+
+- **First survival** of an ID: name those IDs in the next `cc-resolve-comments`
+  request, and require it to reproduce each one with the reviewer's
+  reproduction before editing, to re-derive its cause, using the *Diagnose
+  before editing* procedure of `cc-implement-issue` when it is available, and
+  not to republish it `not_applicable` without evidence the rereview did not
+  have. Otherwise it reports `PARTIALLY_RESOLVED` and states that the finding
+  is contested.
+- **Second survival** of the same ID: stop with `HUMAN_INTERVENTION` before
+  dispatching another `cc-resolve-comments`, naming the IDs in the stop reason.
+
+The ladder never changes a model, profile, or provider, and never changes a
+disposition: a survival is status history. It complements the no-progress
+guard, which a resolver that pushes a commit without fixing the finding never
+trips, because the head changes.
 
 ## Stage statuses
 
