@@ -225,6 +225,8 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
 | `--timeout` | adapter default (3600 s) | Seconds one dispatch may take |
+| `--verbose` | off | Print stage starts, periodic dispatch progress, and stage results; default terminal output stays unchanged |
+| `--progress-interval` | `60` seconds | Time between progress lines while a stage is running |
 | `--database` | [default path](telemetry.md#where-it-lives) | Telemetry database |
 | `--config` / `--no-config` | `.code-cycle.yml` in `--cwd` | Use another file, or the built-in defaults on purpose |
 
@@ -233,6 +235,8 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 **Local-only rehearsal:** `--cwd /path/to/linked-worktree --local-only` refuses the live repository. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
+
+The runtime always updates an atomic status file at `<telemetry database directory>/status/<cycle_id>.json`, including when `--verbose` is off. Read current and recently finished cycles with `python3 ~/.code-cycle/runtime/cycle_status.py`; add `--follow` to refresh every 60 seconds or pass `--progress-interval N` to change it. `--status-dir` selects another status directory, and `--database` follows a custom telemetry database path. Status snapshots include the active role, routing target, elapsed time, tool count, and one short activity line.
 
 **Ends:** prints one line per stage and the final status, and writes every row to the telemetry database.
 

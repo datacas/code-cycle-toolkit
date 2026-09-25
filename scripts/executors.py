@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import shutil
 import subprocess
 import tempfile
@@ -270,9 +271,50 @@ class DispatchResult:
         return f"{self.executor}: {self.outcome.value} as {self.model_resolved or '?'}{suffix}"
 
 
-def _run(argv: list[str], timeout: int = 30, cwd: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-                          stdin=subprocess.DEVNULL)
+def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
+         on_output=None) -> subprocess.CompletedProcess:
+    if on_output is None:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                              stdin=subprocess.DEVNULL)
+
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=cwd, stdin=subprocess.DEVNULL,
+    )
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def drain(stream, lines: list[str], publish: bool = False) -> None:
+        for line in iter(stream.readline, ""):
+            lines.append(line)
+            if publish:
+                try:
+                    on_output(line)
+                except Exception:
+                    # Display callbacks must not interrupt the running agent.
+                    pass
+        stream.close()
+
+    stdout_thread = threading.Thread(target=drain, args=(process.stdout, stdout_lines, True),
+                                     daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=(process.stderr, stderr_lines),
+                                     daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise subprocess.TimeoutExpired(
+            argv, timeout, output="".join(stdout_lines), stderr="".join(stderr_lines),
+        ) from exc
+    stdout_thread.join()
+    stderr_thread.join()
+    return subprocess.CompletedProcess(argv, returncode,
+                                       "".join(stdout_lines), "".join(stderr_lines))
 
 
 def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
@@ -485,10 +527,55 @@ class NativeAdapter(Adapter):
                     return name
         return None
 
+    def _stream_activity(self, line: str, callback) -> None:
+        """Extract a short user-facing update from a native JSON event."""
+        try:
+            payload = json.loads(line)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        event_type = payload.get("type")
+        if self.name == "codex":
+            item = payload.get("item")
+            if not isinstance(item, dict):
+                return
+            item_type = item.get("type")
+            if item_type == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    callback(text=text)
+            elif event_type == "item.started" and item_type in {
+                "command_execution", "mcp_tool_call", "collab_tool_call", "web_search",
+            }:
+                callback(text=f"{item_type.replace('_', ' ')} started", tool=True)
+            return
+
+        message = payload.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if event_type == "assistant" and isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and isinstance(block.get("text"), str):
+                    callback(text=block["text"])
+                elif block.get("type") == "tool_use":
+                    name = block.get("name")
+                    callback(text=f"Using {name}" if isinstance(name, str) else "Using tool",
+                             tool=True)
+            return
+
+        if event_type == "content_block_delta":
+            delta = payload.get("delta")
+            if isinstance(delta, dict) and isinstance(delta.get("text"), str):
+                callback(text=delta["text"])
+
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
                  writes: bool = False, publishes: bool = False,
-                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
+                 publication_permissions: tuple[str, ...] = (),
+                 on_progress=None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -510,7 +597,13 @@ class NativeAdapter(Adapter):
             argv = (self.argv(target, task, cwd, writes, True)
                     if publishes else self.argv(target, task, cwd, writes))
         try:
-            completed = runner(argv, timeout=timeout, cwd=cwd)
+            if on_progress is not None and runner is _run:
+                completed = runner(
+                    argv, timeout=timeout, cwd=cwd,
+                    on_output=lambda line: self._stream_activity(line, on_progress),
+                )
+            else:
+                completed = runner(argv, timeout=timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -929,11 +1022,13 @@ class ClaudeAdapter(NativeAdapter):
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run, writes: bool = False,
                  publishes: bool = False,
-                 publication_permissions: tuple[str, ...] = ()) -> DispatchResult:
+                 publication_permissions: tuple[str, ...] = (),
+                 on_progress=None) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
+            on_progress=on_progress,
         )
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
@@ -959,7 +1054,7 @@ class ClaudeAdapter(NativeAdapter):
         # dispatcher that silently ran in the coordinator's directory would
         # implement the wrong repository without saying so.
         argv = [self.binary, "-p", task, "--model", target.model,
-                "--effort", target.effort, "--output-format", "json"]
+                "--effort", target.effort, "--output-format", "stream-json", "--verbose"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
         # A reading stage keeps its full tooling on purpose. It is told not to
@@ -973,7 +1068,7 @@ class ClaudeAdapter(NativeAdapter):
         return argv
 
     def agent_output(self, stdout: str) -> str:
-        """Claude prints one JSON object whose `result` holds the reply.
+        """Unwrap the final result event from Claude's verbose JSONL stream.
 
         Observed on a live run alongside `modelUsage`, `usage` and timings. If
         the envelope is not there, the output is returned unchanged: a caller
@@ -982,11 +1077,22 @@ class ClaudeAdapter(NativeAdapter):
         try:
             payload = json.loads(stdout)
         except ValueError:
-            return stdout
+            payload = None
         if isinstance(payload, dict):
             spoken = payload.get("result")
             if isinstance(spoken, str):
                 return spoken
+        for line in stdout.splitlines():
+            if not line.lstrip().startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                spoken = event.get("result")
+                if isinstance(spoken, str):
+                    return spoken
         return stdout
 
     def auth_evidence(self) -> tuple[bool, str]:
@@ -1287,6 +1393,7 @@ def dispatch(
     registry = registry or Registry()
     target = decision.target
     adapter = registry.get(target.executor)
+    on_progress = kw.pop("on_progress", None)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -1383,6 +1490,8 @@ def dispatch(
     # The contract is consumed by this layer. Adapters receive only concrete
     # execution arguments, never an unrecognised policy keyword.
     kw.pop("workspace", None)
+    if isinstance(adapter, NativeAdapter) and on_progress is not None:
+        kw["on_progress"] = on_progress
 
     started = clock()
     if (workspace_policy is WorkspacePolicy.READ_ONLY

@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
+from cycle_status import CycleStatusWriter
 from executors import DispatchResult, ReadinessPolicy, Registry
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from router import (
@@ -500,6 +501,8 @@ def run_cycle(
     verification_available: bool | None = None,
     jev: JevConfig | None = None,
     shadow: JevShadow | None = None,
+    verbose: bool = False,
+    progress_interval: float = 60,
 ) -> CycleReport:
     """implement -> review -> (resolve -> rereview)*, every stage recorded.
 
@@ -535,6 +538,13 @@ def run_cycle(
         verification_available=verification_available,
         shadow=shadow,
     )
+    status_writer = CycleStatusWriter(
+        telemetry.path, recorder.cycle_id, repo_id, task_id,
+        progress_interval=progress_interval, verbose=verbose,
+    )
+    recorder.stage_started = status_writer.stage_started
+    recorder.on_progress = status_writer.activity
+    status_writer.start()
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
     if cwd:
@@ -549,7 +559,9 @@ def run_cycle(
                           change_request_id=change_request_id, local_only=local_only),
                                  **dispatch_kwargs)
         report.stages.append(outcome)
-        return outcome, read_structured_result(outcome.result)
+        reported = read_structured_result(outcome.result)
+        status_writer.stage_finished(outcome.result, reported.status)
+        return outcome, reported
 
     def stop(because: str, status: str = UNRESOLVED_END,
              reported: Reported | None = None) -> CycleReport:
@@ -559,6 +571,7 @@ def run_cycle(
         if reported is not None:
             report.reason = reported.reason
         recorder.close(status)
+        status_writer.finish(status)
         return report
 
     def advance(role: str, instruction: str = "", *,
@@ -803,6 +816,10 @@ def main(argv: list[str] | None = None) -> int:
                               "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
+    parser.add_argument("--verbose", action="store_true",
+                        help="show stage starts, live progress, and stage results")
+    parser.add_argument("--progress-interval", type=float, default=60,
+                        help="seconds between live progress lines (default: 60)")
     parser.add_argument("--database", default=None,
                         help=f"telemetry database (default: {default_database_path()})")
     parser.add_argument("--config", default=None,
@@ -810,6 +827,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-config", action="store_true",
                         help="run on the built-in defaults, ignoring any configuration")
     args = parser.parse_args(argv)
+    if args.progress_interval <= 0:
+        parser.error("--progress-interval must be greater than zero")
 
     try:
         repo, profiles, routing_strategy = plan_with_strategy(args)
@@ -834,6 +853,8 @@ def main(argv: list[str] | None = None) -> int:
             max_iterations=args.max_iterations,
             cwd=args.cwd,
             timeout=args.timeout,
+            verbose=args.verbose,
+            progress_interval=args.progress_interval,
             local_only=args.local_only,
             change_bases=change_bases,
             verification_available=(
