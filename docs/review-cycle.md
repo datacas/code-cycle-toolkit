@@ -45,6 +45,26 @@ A published comment carries three kinds of machine-readable line. Their tokens s
 
 `model_resolved` is what the **executor** reported having launched, never what the agent believes it is. When the executor doesn't report a model (Codex never does), the line shows `?`, which means "can't know" rather than "matched". When the runtime routed the stage, the profile, requested model, and effort are copied verbatim from the routing decision.
 
+Without runtime routing, both review and triage lines use the reserved profile
+`manual`, which is not configurable and never replaces supplied routing data.
+Record the host-configured provider, model selector, and effort, not the agent's
+self-description. Prefer effective values exposed by the active session. If the
+host does not expose them, resolve only the relevant config keys, applying the
+Codex order `-m`/`--model` or `-c`/`--config` override → trusted project
+`.codex/config.toml` → selected `profile = ...`/`--profile` file under
+`$CODEX_HOME` → `$CODEX_HOME/config.toml` (default
+`$HOME/.codex/config.toml`). Read `model_provider` from the effective host
+setting or CLI override, not project config. For Claude Code, use the active
+session model and effort, including current `/model` and `/effort` selections;
+if not exposed, follow the key's precedence across managed settings,
+per-session `--model`/`--effort` or `--settings`/environment overrides, and
+active project/local/user settings. The user file is `~/.claude/settings.json`.
+Keep a configured alias such as `opus` as the model selector; do not expand it
+to a versioned model ID. If the host exposes only a full ID, record that ID.
+Read only the model/provider/effort values needed and never
+print or copy unrelated configuration. Write `unknown` independently for any
+unavailable value. `model_resolved` remains `?` without an executor receipt.
+
 A skill that republishes a comment keeps every run line it didn't write.
 
 ## Finding fields

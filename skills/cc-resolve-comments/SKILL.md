@@ -210,12 +210,42 @@ produced the findings below it:
 #### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1
 ```
 
+```text
+#### [CCR-20260924-003] · manual · openai/gpt-6-sol→? · high · schema:1
+```
+
 Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
 the effort, and the schema version. Both sides of the arrow are always written,
 including when they match. `model_requested` is what the profile asked for.
 When the runtime states the routed profile, requested model, and effort in
 the task, copy those values verbatim into the line; never substitute the
 agent's own configuration for them.
+When no routing decision was supplied, use the reserved profile token `manual`
+for both review and triage run lines. It is never a configurable profile and
+must not replace a profile supplied by runtime routing. For a manual run, record
+the host-configured provider, model selector, and effort, not the agent's
+self-description. Resolve only these values from the effective host session;
+never print or copy the whole configuration file or unrelated settings.
+
+- **Codex:** prefer the active session's effective values. When those are not
+  exposed, resolve `model` and `model_reasoning_effort` in this order: CLI
+  `-m`/`--model` or `-c`/`--config` overrides; trusted project
+  `.codex/config.toml` layers; the selected `profile = ...` or `--profile` file;
+  then `$CODEX_HOME/config.toml` (default `$HOME/.codex/config.toml`). Profile
+  files are `$CODEX_HOME/<profile>.config.toml`. Read `model_provider` from the
+  effective host setting or CLI override; do not infer it from project config.
+- **Claude Code:** prefer the active session's selected model and effort,
+  including current `/model` and `/effort` selections. If they are not exposed,
+  follow the key's host precedence across managed settings, per-session
+  `--model`/`--effort` or `--settings`/environment overrides, then active
+  project/local/user settings (`model` and `effortLevel`; user file
+  `~/.claude/settings.json`). Record the selected model selector as configured,
+  including an alias such as `opus` rather than expanding it to a versioned
+  model ID. If the host exposes only a full ID, record that identifier.
+
+Write `unknown` independently for each provider, model, or effort value the
+host does not expose or that cannot be resolved. Keep `model_resolved` as `?`
+unless the executor's dispatch receipt reports it.
 `model_resolved` is what the executor reports having launched, and nothing else:
 an agent asked to name its own model answers from its own configuration, which is
 the very thing under suspicion when an alias is repointed. When the executor
@@ -231,6 +261,13 @@ were all judged against:
 
 ```text
 #### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
+```
+
+Without runtime routing, a resolver uses the same `manual` and host-value rules
+for its `CCT-` line:
+
+```text
+#### [CCT-20260924-004] · manual · openai/gpt-6-sol→? · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
 ```
 
 Every finding the comment publishes — new or previous — carries this header

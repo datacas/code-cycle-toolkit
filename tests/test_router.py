@@ -420,6 +420,12 @@ class ProfileConfigTests(unittest.TestCase):
         with self.assertRaises(router.RouterError):
             router.load_profiles({"code_cycle": {"profiles": {"cheep_coder": {"primary": "a:b/c d"}}}})
 
+    def test_manual_is_reserved_and_cannot_be_a_routed_profile(self) -> None:
+        with self.assertRaisesRegex(router.RouterError, "reserved for manually invoked runs"):
+            router.load_profiles({"code_cycle": {"profiles": {
+                "manual": {"primary": "codex:openai/gpt-6-sol high"},
+            }}})
+
     def test_a_malformed_target_is_refused(self) -> None:
         for bad in ("claude/opus high", "claude:opus high", "claude:anthropic/opus"):
             with self.subTest(spec=bad):
