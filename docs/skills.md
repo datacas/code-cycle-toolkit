@@ -1,6 +1,6 @@
 # Skills reference
 
-Thirteen skills in two layers. The source of truth for each one is its `skills/<name>/SKILL.md`. This page summarises what you need to use them.
+Fourteen skills in two layers. The source of truth for each one is its `skills/<name>/SKILL.md`. This page summarises what you need to use them.
 
 **Cycle skills** own the workflow: the change request, the `REV-xxx` IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes. Cycle skills call them as *delegated passes*: the pass returns its findings to the caller and doesn't publish. Invoked directly, a supporting skill reports to you, or publishes when that is its job.
 
@@ -21,6 +21,7 @@ Thirteen skills in two layers. The source of truth for each one is its `skills/<
 | [`cc-run`](#cc-run) | supporting | Start services and confirm they respond | — | `cc-verify` | ✅ |
 | [`cc-provider-bootstrap`](#cc-provider-bootstrap) | supporting | Resolve and health-check providers | writes `.code-cycle.yml` only on confirmation | `cc-implement-issue`, orchestrators | ✅ |
 | [`cc-stats`](#cc-stats) | supporting | Report local telemetry | — | you | ✅ |
+| [`cc-profile-config`](#cc-profile-config) | supporting | Show, choose, and write routing profiles | writes `.code-cycle.yml` only on confirmation | you | ✅ |
 
 ```text
 cc-orchestrator / cc-orca-orchestrator
@@ -216,6 +217,16 @@ Reports this repository's local telemetry. It covers cycles, stages, first-pass 
 Use cc-stats.
 Show me the toolkit stats for the last 7 days.
 /cc-stats all time
+```
+
+### `cc-profile-config`
+
+Shows the repository's effective routing profiles: each profile's roles, primary and fallback marked as configured or default, relative cost, how its read-only roles are guaranteed (`enforced` for Codex, `detected` for Claude), and which executors are installed and authenticated. It then offers presets — `balanced-openai-implements`, `balanced-anthropic-implements`, `defaults`, `single-openai`, `single-anthropic` — or custom targets. It validates the choice, including Codex models and efforts against Codex's local models cache, shows the exact `code_cycle.profiles` block, and writes it only after confirmation, leaving every other key and comment in `.code-cycle.yml` as it was. It needs the runtime. See [Routing → Changing profiles](routing.md#changing-profiles).
+
+```text
+Use cc-profile-config.
+Use cc-profile-config with preset=balanced-openai-implements.
+Show me which models this repository uses for each role.
 ```
 
 ---

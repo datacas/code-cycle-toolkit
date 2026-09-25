@@ -327,9 +327,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="telemetry database; status files sit beside it")
     parser.add_argument("--status-dir", default=None,
                         help="read status files from this directory")
+    parser.add_argument("--profiles", action="store_true",
+                        help="show the effective routing profiles of --cwd instead")
+    parser.add_argument("--cwd", default=".",
+                        help="repository whose .code-cycle.yml --profiles reads")
     args = parser.parse_args(argv)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
+    if args.profiles:
+        import profile_config
+        return profile_config.main(["show", "--cwd", args.cwd])
     directory = status_directory(args.database, args.status_dir)
     try:
         while True:

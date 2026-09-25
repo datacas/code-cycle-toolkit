@@ -21,6 +21,15 @@ All notable changes to this project are documented here. This project follows
   validated commit and publishes a release with the version's `CHANGELOG.md`
   section as notes. It refuses to release when that section is missing, and
   does nothing when the tag already exists.
+- `cc-profile-config`, a supporting skill backed by the runtime component
+  `profile_config.py`. It shows a repository's effective routing profiles
+  (configured or default, roles, relative cost, read-only guarantee, executor
+  availability), offers balanced cross-vendor, default, and single-vendor
+  presets or custom targets, validates them against Codex's local models cache,
+  and writes only the `code_cycle.profiles` block of `.code-cycle.yml` after
+  confirmation, preserving every other key and comment. The balanced presets
+  never let the implementing vendor review, fallbacks included.
+  `cycle_status.py --profiles` prints the same table without an agent (#73).
 
 ### Changed
 

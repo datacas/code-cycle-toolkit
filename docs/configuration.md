@@ -114,7 +114,7 @@ A configuration file that exists but can't be read (bad YAML, PyYAML missing, wr
 
 Target format: `executor:provider/model effort`, where executor is `codex`, `claude`, or `orca`. Profile names: `cheap_coder`, `deep_coder`, `reviewer`, `senior_reviewer`, `security`, `coordinator`, `auxiliary_tool`, `cheap_tool`. Models you declare here are also added to telemetry's accepted model set for this repository.
 
-Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [Routing and models](routing.md).
+Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [Routing and models](routing.md). To see the effective profiles or write this block with a preset, use [`cc-profile-config`](skills.md#cc-profile-config).
 
 ### Review
 
@@ -211,6 +211,10 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 | `--days N` | `30` | Look-back window |
 | `--all-time` | off | Whole history |
 | `--format markdown\|json` | `markdown` | Output format |
+
+### `profile_config.py` (used by `cc-profile-config`)
+
+`show | propose | write | presets` · `--cwd <repo root>` · `--config <path>` · `--preset <name>` · `--set <profile>.primary|fallback=<target|none>` (repeatable) · `--allow-cross-split` · `--confirmed` (required by `write`) · `--no-probe` · `--format markdown|json`. See [Routing → Changing profiles](routing.md#changing-profiles).
 
 ### `validate-package.py`
 

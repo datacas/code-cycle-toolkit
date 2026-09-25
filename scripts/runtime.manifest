@@ -15,6 +15,7 @@ executors.py
 router.py
 telemetry.py
 cycle_status.py
+profile_config.py
 stats.py
 security_gate.py
 review_contract.py

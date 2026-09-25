@@ -236,7 +236,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 
-The runtime always updates an atomic status file at `<telemetry database directory>/status/<cycle_id>.json`, including when `--verbose` is off. Read current and recently finished cycles with `python3 ~/.code-cycle/runtime/cycle_status.py`; add `--follow` to refresh every 60 seconds or pass `--progress-interval N` to change it. `--status-dir` selects another status directory, and `--database` follows a custom telemetry database path. Status snapshots include the active role, routing target, elapsed time, tool count, and one short activity line.
+The runtime always updates an atomic status file at `<telemetry database directory>/status/<cycle_id>.json`, including when `--verbose` is off. Read current and recently finished cycles with `python3 ~/.code-cycle/runtime/cycle_status.py`; add `--follow` to refresh every 60 seconds or pass `--progress-interval N` to change it. `--status-dir` selects another status directory, and `--database` follows a custom telemetry database path. `python3 ~/.code-cycle/runtime/cycle_status.py --profiles` prints the effective routing profiles of the current repository instead, or of `--cwd <root>`. Status snapshots include the active role, routing target, elapsed time, tool count, and one short activity line.
 
 **Ends:** prints one line per stage and the final status, and writes every row to the telemetry database.
 

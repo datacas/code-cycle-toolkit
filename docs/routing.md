@@ -51,6 +51,28 @@ code_cycle:
 
 An unknown profile name, or a `primary`/`fallback` that isn't a target string, stops the run before anything is dispatched.
 
+### Changing profiles
+
+[`cc-profile-config`](skills.md#cc-profile-config) shows the effective profiles and writes this block for you, only after you confirm it. Without an agent, the runtime component does the same:
+
+```bash
+python3 ~/.code-cycle/runtime/profile_config.py show                  # effective profiles, config vs default
+python3 ~/.code-cycle/runtime/profile_config.py propose --preset balanced-openai-implements
+python3 ~/.code-cycle/runtime/profile_config.py write --preset balanced-openai-implements --confirmed
+```
+
+| Preset | Implementation (`cheap_coder`, `deep_coder`) | Review (`reviewer`, `senior_reviewer`, `security`) |
+|---|---|---|
+| `balanced-openai-implements` | Codex `gpt-6-luna high` / `max` | Claude `claude-sonnet-5 high` / `claude-opus-5-5 high` |
+| `balanced-anthropic-implements` | Claude `claude-sonnet-5 high` / `claude-opus-5-5 high` | Codex `gpt-6-sol high` / `max` |
+| `defaults` | as `DEFAULT_PROFILES` (removes the block) | as `DEFAULT_PROFILES` |
+| `single-openai` | Codex | Codex |
+| `single-anthropic` | Claude | Claude |
+
+The **balanced** presets keep the vendor that implements from reviewing its own work, fallbacks included, and declare no fallback on either side: availability belongs to the executor, so a same-executor fallback is down whenever its primary is, and a fallback on the other executor would cross the split. A crossing target is refused unless `--allow-cross-split` is passed. `auxiliary_tool` (verify, run, bootstrap) stays on Codex in every preset, because only Codex can confine a disposable workspace.
+
+`--set <profile>.primary=<target>` and `--set <profile>.fallback=<target|none>` adjust any preset or the current profiles. Codex models and efforts are checked against Codex's local models cache (`$CODEX_HOME/models_cache.json`); Claude publishes no local list, so its targets are reported as unchecked. `write` changes only the profiles block, keeps every other key and comment, declares only what differs from the defaults, and refuses a proposal with errors.
+
 ## Targets and executors
 
 A target is one string: **`executor:provider/model effort`**.
