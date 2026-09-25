@@ -40,6 +40,13 @@ GitHub-only examples, not a universal requirement. The issue provider is
 If the change request or code host is ambiguous, stop with `BLOCKED`. Read
 `docs/provider-contract.md` when working from the toolkit source.
 
+When the code host is GitHub and `gh` is authenticated, use `gh` for every read
+and write on the change request, including comments, reviews, threads, and
+checks. Use a GitHub connector or MCP tool only when `gh` is unavailable. If a
+GitHub publication attempt returns HTTP 403 or 404 through another tool, retry
+once with `gh` before reporting `BLOCKED`, and name the failed tool in the
+report. For Bitbucket, use its configured tooling.
+
 ## Output language
 
 Write every published artefact — PR comments, thread replies, commit messages,

@@ -325,9 +325,10 @@ class RoleWorkspacePolicyTests(CycleTestCase):
 
         recorder.stage("review", "review it")
         recorder.stage("resolve", "resolve it")
+        recorder.stage("rereview", "rereview it")
         recorder.stage("implement", "implement it")
 
-        review, resolve, implement = adapter.dispatched
+        review, resolve, _, implement = adapter.dispatched
         self.assertIn("you may comment on the work item", review)
         self.assertIn("You may not create the change request", review)
         self.assertIn("push the working branch", review.split("You may not")[1])
@@ -336,6 +337,9 @@ class RoleWorkspacePolicyTests(CycleTestCase):
         self.assertNotIn("You may not", implement)
         for task in adapter.dispatched:
             self.assertIn("Never merge, force-push, delete remote refs", task)
+            self.assertIn("For a GitHub code host, when `gh` is authenticated", task)
+            self.assertIn("retry once with `gh`", task)
+            self.assertIn("For Bitbucket, use its configured tooling", task)
 
     def test_a_routed_review_is_told_the_values_its_run_line_must_carry(self) -> None:
         adapter = ScriptedAdapter("codex")

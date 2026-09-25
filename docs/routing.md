@@ -140,6 +140,8 @@ No stage may merge, force-push, delete remote refs, modify the base branch, clos
 
 Before a publishing dispatch, the runtime checks readiness: for a GitHub `origin`, `gh` authentication and repository permission, plus a `git push --dry-run` against a temporary ref, which it doesn't create. A publishing Codex stage keeps its filesystem sandbox and gets network access only to GitHub and Bitbucket hosts, through a permission profile (Codex CLI ≥ 0.138.0). A publishing Claude stage is additionally allowed `gh` and `git`. Orca, and any adapter that hasn't declared how it grants publication access, fails closed for publishing stages. Failures are recorded as `missing_capability=publication_access` before the model starts.
 
+When the code host is GitHub and `gh` is authenticated, publishing stages use `gh` for every read and write on the change request. A GitHub connector or MCP tool is used only when `gh` is unavailable. If a GitHub publication attempt returns HTTP 403 or 404 through another tool, the stage retries once with `gh` before reporting `BLOCKED` and names the failed tool. Bitbucket continues to use its configured tooling.
+
 ## Routing strategies
 
 ```yaml

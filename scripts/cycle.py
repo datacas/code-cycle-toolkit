@@ -143,6 +143,14 @@ def publication_policy(role: str, publication_permissions: tuple[str, ...]) -> s
     rule = f"Publication policy for this {role} stage: you may {allowed}."
     if denied:
         rule += f" You may not {'; '.join(denied)}."
+    rule += (
+        " For a GitHub code host, when `gh` is authenticated, use `gh` for every "
+        "read and write on this change request; use a GitHub connector or MCP "
+        "tool only when `gh` is unavailable. If a GitHub publication attempt "
+        "returns HTTP 403 or 404 through another tool, retry once with `gh` "
+        "before reporting `BLOCKED`, and name the failed tool in that report. "
+        "For Bitbucket, use its configured tooling."
+    )
     return f"{rule} {PUBLICATION_PROHIBITIONS}"
 
 
