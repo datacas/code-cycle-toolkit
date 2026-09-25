@@ -58,6 +58,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- Review and rereview verdict rows now record finding counts from each skill's
+  documented result shape. Rows written before this change have no finding
+  counts; their missing values are unknown, not zero.
+
 - A global Codex installation writes the skills to `~/.agents/skills/` only.
   Earlier versions also copied them to `~/.codex/skills/`, and current Codex
   reads both, so every `cc-*` skill appeared twice. Existing users should

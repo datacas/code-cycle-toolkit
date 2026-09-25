@@ -2,7 +2,10 @@
   "capture": {
     "executor": "codex",
     "captured_at": "2026-09-24",
-    "role": "implement"
+    "role": "implement",
+    "host": "github",
+    "model": "unknown (not recorded in the capture source)",
+    "skill_commit": "unknown (not recorded in the capture source)"
   },
   "result": {
     "skill": "cc-implement-issue",

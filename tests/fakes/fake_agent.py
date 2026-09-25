@@ -94,35 +94,14 @@ def speak(model: str, message: str) -> None:
     print(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}))
 
 
-def main(argv: list[str]) -> int:
-    if "--version" in argv:
-        # Exercise the current Codex permission-profile path in installed-cycle
-        # tests, without installing either real agent.
-        print(f"{NAME} 0.138.0-fake")
-        return 0
-
-    if os.environ.get("FAKE_QUOTA") == NAME:
-        print("usage limit reached for this window", file=sys.stderr)
-        return 1
-
-    model = flag(argv, "-m", "--model") or "unknown"
-    prompt = prompt_of(argv)
-    said = [f"prompt received: {prompt}"]
-
-    if (os.environ.get("FAKE_SILENT") == NAME
-            or (os.environ.get("FAKE_SILENT_REVIEW") == NAME
-                and "cc-initial-review" in prompt)):
-        speak(model, said[0])
-        return 0
-
-    status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)
-    selected = next(((skill, role) for skill, role in (
-        ("cc-implement-issue", "implement"),
-        ("cc-initial-review", "review"),
-        ("cc-rereview", "rereview"),
-        ("cc-resolve-comments", "resolve"),
-    ) if skill in prompt), ("fake", None))
-    skill, role = selected
+def result_for_role(role: str, status: str = "CHANGES_REQUESTED") -> dict:
+    """Return the structured payload this fake stage emits for a role."""
+    skill = {
+        "implement": "cc-implement-issue",
+        "review": "cc-initial-review",
+        "rereview": "cc-rereview",
+        "resolve": "cc-resolve-comments",
+    }.get(role, "fake")
     payload = {"skill": skill, "status": status}
     if role == "implement" and status == "IMPLEMENTED":
         payload["change_request_id"] = "4"
@@ -155,6 +134,39 @@ def main(argv: list[str]) -> int:
             {"id": "REV-002", "status": "resolved"},
         ]
         payload["unresolved_findings"] = []
+    return payload
+
+
+def main(argv: list[str]) -> int:
+    if "--version" in argv:
+        # Exercise the current Codex permission-profile path in installed-cycle
+        # tests, without installing either real agent.
+        print(f"{NAME} 0.138.0-fake")
+        return 0
+
+    if os.environ.get("FAKE_QUOTA") == NAME:
+        print("usage limit reached for this window", file=sys.stderr)
+        return 1
+
+    model = flag(argv, "-m", "--model") or "unknown"
+    prompt = prompt_of(argv)
+    said = [f"prompt received: {prompt}"]
+
+    if (os.environ.get("FAKE_SILENT") == NAME
+            or (os.environ.get("FAKE_SILENT_REVIEW") == NAME
+                and "cc-initial-review" in prompt)):
+        speak(model, said[0])
+        return 0
+
+    status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)
+    selected = next(((skill, role) for skill, role in (
+        ("cc-implement-issue", "implement"),
+        ("cc-initial-review", "review"),
+        ("cc-rereview", "rereview"),
+        ("cc-resolve-comments", "resolve"),
+    ) if skill in prompt), ("fake", None))
+    _, role = selected
+    payload = result_for_role(role or "unknown", status)
     said += [BEGIN, json.dumps(payload), END]
     speak(model, "\n".join(said))
     return 0
