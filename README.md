@@ -64,6 +64,7 @@ Pick the row that matches what you want to do.
 | bring an unfamiliar project up locally | [`cc-run`](docs/skills.md#cc-run) | — |
 | check that provider access is configured | [`cc-provider-bootstrap`](docs/skills.md#cc-provider-bootstrap) | — |
 | see how the cycle has been performing | [`cc-stats`](docs/skills.md#cc-stats) | — |
+| see or change which model serves each role | [`cc-profile-config`](docs/skills.md#cc-profile-config) | writes `.code-cycle.yml` on confirmation |
 
 Not sure? Read [Choosing a workflow](docs/workflows.md#choosing-a-workflow).
 
@@ -138,7 +139,7 @@ that does and does not guarantee.
 
 ## Skills
 
-Thirteen skills in two layers. **Cycle skills** own the workflow: the change request, the finding IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes that cycle skills delegate to. Each one also works on its own.
+Fourteen skills in two layers. **Cycle skills** own the workflow: the change request, the finding IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes that cycle skills delegate to. Each one also works on its own.
 
 | Skill | Layer | Purpose | Changes code? |
 |---|---|---|:---:|
@@ -155,6 +156,7 @@ Thirteen skills in two layers. **Cycle skills** own the workflow: the change req
 | `cc-run` | supporting | Start a project's services and confirm they respond | — |
 | `cc-provider-bootstrap` | supporting | Resolve and health-check the provider pair | — |
 | `cc-stats` | supporting | Report local telemetry for this repository | — |
+| `cc-profile-config` | supporting | Show, choose, and write routing profiles | — |
 
 → Inputs, statuses, and examples for each: [Skills reference](docs/skills.md)
 
@@ -197,7 +199,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 |---|---|
 | [Getting started](docs/getting-started.md) | Requirements, installation, authentication, first run |
 | [Workflows](docs/workflows.md) | Every way to run the toolkit, and when to choose each |
-| [Skills reference](docs/skills.md) | All thirteen skills: inputs, outputs, statuses |
+| [Skills reference](docs/skills.md) | All fourteen skills: inputs, outputs, statuses |
 | [Review lifecycle](docs/review-cycle.md) | `REV-xxx` findings, severities, dispositions, run lines |
 | [Verification](docs/verification.md) | Evidence rules, stop conditions, CI reporting |
 | [Routing and models](docs/routing.md) | Profiles, executors, fallbacks, strategies, Jev, calibration |

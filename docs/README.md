@@ -10,7 +10,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 |---|---|---|
 | 1 | [Getting started](getting-started.md) | install the toolkit, authenticate providers, and run a first cycle |
 | 2 | [Workflows](workflows.md) | choose between single skills, the manual cycle, the orchestrators, and the runtime driver |
-| 3 | [Skills reference](skills.md) | know what each of the thirteen skills takes, does, and returns |
+| 3 | [Skills reference](skills.md) | know what each of the fourteen skills takes, does, and returns |
 | 4 | [Review lifecycle](review-cycle.md) | understand `REV-xxx` findings, severities, statuses, dispositions, and run lines |
 | 5 | [Verification](verification.md) | know what counts as evidence and when a stage stops to ask |
 

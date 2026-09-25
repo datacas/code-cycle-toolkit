@@ -123,6 +123,11 @@ This is the only place a role resolves to a model, so a candidate changes here
 and nowhere else. An unknown profile name is refused rather than ignored: a typo
 that silently routes nowhere is worse than one that stops the run.
 
+When the configuration has no `profiles` block, mention once, in the startup
+report, that `cc-profile-config` can show the effective profiles and write one,
+such as a balanced preset where the vendor that implements never reviews its
+own work. Do not run it automatically and do not add a profiles block yourself.
+
 An optional `security_review` key declares when the security audit always runs,
 regardless of what any model concludes:
 
