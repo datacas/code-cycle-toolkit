@@ -55,6 +55,23 @@ class StatsTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-TASK", serialized)
         self.assertNotIn("OTHER-REPO-TASK", serialized)
 
+    def test_first_pass_ignores_cycles_that_resumed_a_change_request(self) -> None:
+        for index in range(10):
+            self.add_task(f"TASK-{index}", "CHANGES_REQUESTED")
+        # A resumed cycle's approval judged work an earlier run produced; it is
+        # neither the first review nor a first pass.
+        for index in range(10, 20):
+            self.store.record_stage("owner/repo", f"TASK-{index}", "implement",
+                                    profile="cheap_coder", started_from="implement")
+            self.store.record_stage("owner/repo", f"TASK-{index}", "review",
+                                    status="APPROVED", started_from="resolve")
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        self.assertEqual({"passed": 0, "total": 10, "minimum": 10, "value": 0.0},
+                         report["summary"]["first_pass"])
+
     def test_small_samples_remain_unknown_and_json_has_no_fake_zero_rate(self) -> None:
         for index in range(9):
             self.add_task(f"TASK-{index}", "APPROVED")
