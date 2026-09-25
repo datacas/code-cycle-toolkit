@@ -51,11 +51,58 @@ function Install-Claude {
 }
 
 function Install-Codex {
-    # .agents/skills is the cross-agent compatibility path. .codex/skills is
-    # retained for Codex installations that use the traditional home path.
+    # .agents/skills is the cross-agent path that Codex and OpenCode read. Codex
+    # also reads ~/.codex/skills, so a second copy there lists every skill twice.
     Copy-Skills (Join-Path $BaseDir '.agents\skills')
     if ($Scope -eq 'global') {
-        Copy-Skills (Join-Path $BaseDir '.codex\skills')
+        Remove-LegacyCodexSkills
+    }
+}
+
+function Test-ReparsePoint {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    return [bool]($Item -and ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint))
+}
+
+# Earlier versions also copied every skill to ~/.codex/skills. Only entries
+# named after this toolkit's own skills are considered, and nothing is removed
+# without -Force. A link is refused rather than followed: ~/.codex/skills
+# linked to ~/.agents/skills would otherwise delete the copy just installed.
+# The refusal is a warning, not a failure, because the installation itself is
+# already complete.
+function Remove-LegacyCodexSkills {
+    $CodexDir = Join-Path $BaseDir '.codex'
+    $Legacy = Join-Path $CodexDir 'skills'
+
+    if ((Test-ReparsePoint $CodexDir) -or (Test-ReparsePoint $Legacy)) {
+        Write-Warning "Left $Legacy alone: it is a link, so duplicates there are not removed."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Legacy -PathType Container)) { return }
+
+    $Found = @(Get-ChildItem -LiteralPath $SkillsRoot -Directory | ForEach-Object {
+        $Target = Join-Path $Legacy $_.Name
+        if (Test-ReparsePoint $Target) {
+            Write-Warning "Left $Target alone: it is a link."
+        } elseif (Get-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue) {
+            $Target
+        }
+    })
+    if ($Found.Count -eq 0) { return }
+
+    if (-not $Force) {
+        $Quoted = ($Found | ForEach-Object { "'$($_ -replace "'", "''")'" }) -join ', '
+        Write-Warning ("An earlier version installed these skills to $Legacy too, so Codex lists them twice:`n  " +
+            ($Found -join "`n  ") +
+            "`nRemove them with: Remove-Item -Recurse -Force -LiteralPath $Quoted`nor rerun this installer with -Force.")
+        return
+    }
+
+    foreach ($Target in $Found) {
+        Remove-Item -LiteralPath $Target -Recurse -Force
+        Write-Host "Removed duplicate $Target"
     }
 }
 

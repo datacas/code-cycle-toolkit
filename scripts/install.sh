@@ -120,12 +120,55 @@ install_claude() {
 }
 
 install_codex() {
-  # .agents/skills is the cross-agent compatibility path. .codex/skills is
-  # retained for Codex installations that use the traditional home path.
+  # .agents/skills is the cross-agent path that Codex and OpenCode read. Codex
+  # also reads ~/.codex/skills, so a second copy there lists every skill twice.
   copy_skills "$BASE_DIR/.agents/skills"
   if [ "$SCOPE" = 'global' ]; then
-    copy_skills "$BASE_DIR/.codex/skills"
+    remove_legacy_codex_skills
   fi
+}
+
+# Earlier versions also copied every skill to ~/.codex/skills. Only entries
+# named after this toolkit's own skills are considered, and nothing is removed
+# without --force. A link is refused rather than followed: ~/.codex/skills
+# linked to ~/.agents/skills would otherwise delete the copy just installed.
+# The refusal is a warning, not a failure, because the installation itself is
+# already complete.
+remove_legacy_codex_skills() {
+  local legacy skill_dir target
+  local found=()
+  legacy="$BASE_DIR/.codex/skills"
+
+  if [ -L "$BASE_DIR/.codex" ] || [ -L "$legacy" ] || [ "$legacy" -ef "$BASE_DIR/.agents/skills" ]; then
+    printf 'Left %s alone: it is a link, so duplicates there are not removed.\n' "$legacy" >&2
+    return 0
+  fi
+  [ -d "$legacy" ] || return 0
+
+  for skill_dir in "$SKILLS_ROOT"/*; do
+    [ -d "$skill_dir" ] || continue
+    target="$legacy/${skill_dir##*/}"
+    if [ -L "$target" ]; then
+      printf 'Left %s alone: it is a link.\n' "$target" >&2
+    elif [ -e "$target" ]; then
+      found+=("$target")
+    fi
+  done
+  [ "${#found[@]}" -gt 0 ] || return 0
+
+  if [ "$FORCE" -ne 1 ]; then
+    printf 'Warning: an earlier version installed these skills to %s too, so Codex lists them twice:\n' "$legacy" >&2
+    printf '  %s\n' "${found[@]}" >&2
+    printf 'Remove them with: rm -rf' >&2
+    printf ' %q' "${found[@]}" >&2
+    printf '\nor rerun this installer with --force.\n' >&2
+    return 0
+  fi
+
+  for target in "${found[@]}"; do
+    rm -rf "$target"
+    printf 'Removed duplicate %s\n' "$target"
+  done
 }
 
 install_opencode() {

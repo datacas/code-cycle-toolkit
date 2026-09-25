@@ -91,6 +91,8 @@ irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/ge
 
 `npx skills add datacas/code-cycle-toolkit --all --global --copy` installs the skills **without** the runtime, so `cc-stats` and recorded cycles won't work. See [what the runtime adds](docs/getting-started.md#skills-and-runtime) and [other install options](docs/getting-started.md#install).
 
+Codex skills install to `~/.agents/skills/` only. If an earlier version also left them in `~/.codex/skills/`, Codex lists each one twice; running the command again removes those copies.
+
 **3. Optional configuration.** In the repository you want to work on, a `.code-cycle.yml` stores non-secret defaults. On the first run, `cc-provider-bootstrap` proposes this file, including `review.trusted_authors` set to your authenticated login, and writes it only if you confirm. You can skip this step, or write it yourself:
 
 ```yaml
