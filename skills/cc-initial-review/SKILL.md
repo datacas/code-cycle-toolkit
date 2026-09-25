@@ -218,12 +218,25 @@ produced the findings below it:
 #### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1
 ```
 
+```text
+#### [CCR-20260924-003] · manual · openai/gpt-6-sol→? · high · schema:1
+```
+
 Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
 the effort, and the schema version. Both sides of the arrow are always written,
 including when they match. `model_requested` is what the profile asked for.
 When the runtime states the routed profile, requested model, and effort in
 the task, copy those values verbatim into the line; never substitute the
 agent's own configuration for them.
+When no routing decision was supplied, use the reserved profile token `manual`.
+It is never a configurable profile and must not replace a profile supplied by
+runtime routing. For a manual run, read the host-configured provider, requested
+model, and effort from the host's active configuration, not the agent's
+self-description. In Codex, use `model` and `model_reasoning_effort` from the
+active `~/.codex/config.toml`, including any active `-c` overrides. In Claude
+Code, use the selected session model and effort exposed by the host. Write
+`unknown` independently for each value the host does not expose. Keep
+`model_resolved` as `?` unless the executor's dispatch receipt reports it.
 `model_resolved` is what the executor reports having launched, and nothing else:
 an agent asked to name its own model answers from its own configuration, which is
 the very thing under suspicion when an alias is repointed. When the executor

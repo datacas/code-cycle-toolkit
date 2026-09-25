@@ -15,6 +15,10 @@ When the runtime drives a cycle, every stage writes rows to a local SQLite datab
 
 The published PR comment is a separate record that exists either way. See [Review lifecycle](review-cycle.md).
 
+Manual review and triage run lines use profile `manual` and remain visible in
+that comment record. They have no telemetry rows and are not dispatch stages;
+count them separately only in comment-based analysis.
+
 ## Where it lives
 
 ```text

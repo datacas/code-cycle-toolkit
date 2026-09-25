@@ -112,6 +112,10 @@ least the telemetry module's minimum sample of 10 tasks. Rates and suggested
 profile outcomes include their sample counts and stay unknown below that
 threshold. Confidence buckets show their numeric ranges.
 
+If the user also requests analysis of published review comments, count run
+lines with profile `manual` separately as comment-only review or triage runs.
+Do not include them in telemetry stage, dispatch, role, or profile counts.
+
 Cycle outcomes count each correlated cycle once by its final status. A cycle
 with no closing record in the period is unknown, never finished or failed.
 Test verification is also counted per cycle. CI on stage heads sets each implementation or

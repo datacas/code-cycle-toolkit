@@ -45,6 +45,15 @@ A published comment carries three kinds of machine-readable line. Their tokens s
 
 `model_resolved` is what the **executor** reported having launched, never what the agent believes it is. When the executor doesn't report a model (Codex never does), the line shows `?`, which means "can't know" rather than "matched". When the runtime routed the stage, the profile, requested model, and effort are copied verbatim from the routing decision.
 
+When no routing decision was supplied, the reserved profile token is `manual`.
+The line records the host-configured provider, requested model, and effort, not
+the agent's self-description. Codex reads `model` and
+`model_reasoning_effort` from the active `~/.codex/config.toml`, applying any
+active `-c` overrides; Claude Code uses the selected session model and effort
+exposed by the host. Use `unknown` independently for any value the host does not
+expose. `manual` is not a configurable profile and must not replace a profile
+when runtime routing data is present.
+
 A skill that republishes a comment keeps every run line it didn't write.
 
 ## Finding fields

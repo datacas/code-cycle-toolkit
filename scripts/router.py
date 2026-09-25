@@ -228,6 +228,7 @@ PROFILE_COST = {
 # Five of five real implementations needed changes. Until a repository measures
 # its own rate, assume the correction round happens.
 DEFAULT_FIRST_PASS_RATE = 0.0
+MANUAL_PROFILE = "manual"
 
 
 def parse_target(spec: str) -> Target:
@@ -270,6 +271,10 @@ def load_profiles(config: dict | None = None) -> dict[str, Profile]:
         declared = (section or {}).get("profiles") or {}
     if not isinstance(declared, dict):
         raise RouterError("code_cycle.profiles must be a mapping")
+
+    if MANUAL_PROFILE in declared:
+        raise RouterError(
+            f"profile name {MANUAL_PROFILE!r} is reserved for manually invoked runs")
 
     unknown = sorted(set(declared) - set(DEFAULT_PROFILES))
     if unknown:

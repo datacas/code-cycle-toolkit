@@ -19,6 +19,10 @@ REVIEW_RUN = (
     "#### [CCR-20260918-001] · senior_reviewer · "
     "anthropic/sonnet-5→sonnet-5 · high · schema:1"
 )
+MANUAL_REVIEW_RUN = (
+    "#### [CCR-20260924-003] · manual · "
+    "openai/gpt-6-sol→? · high · schema:1"
+)
 PRE_EDIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 POST_EDIT_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 TRIAGE_RUN = (
@@ -234,6 +238,37 @@ class RunLineTests(unittest.TestCase):
 
         assert run is not None
         self.assertEqual(REVIEW_RUN, contract.format_run_line(run))
+
+    def test_manual_run_round_trips_with_host_configured_model(self) -> None:
+        run = contract.parse_run_line(MANUAL_REVIEW_RUN)
+
+        assert run is not None
+        self.assertEqual(contract.MANUAL_PROFILE, run.profile)
+        self.assertEqual("openai", run.model.provider)
+        self.assertEqual("gpt-6-sol", run.model.requested)
+        self.assertIsNone(run.model.resolved)
+        self.assertEqual("high", run.effort)
+        self.assertEqual(MANUAL_REVIEW_RUN, contract.format_run_line(run))
+
+    def test_routed_run_line_keeps_runtime_values_verbatim(self) -> None:
+        run = contract.parse_run_line(REVIEW_RUN)
+
+        assert run is not None
+        self.assertNotEqual(contract.MANUAL_PROFILE, run.profile)
+        self.assertEqual(REVIEW_RUN, contract.format_run_line(run))
+
+    def test_manual_run_allows_unknown_host_configuration_tokens(self) -> None:
+        line = MANUAL_REVIEW_RUN.replace(
+            "openai/gpt-6-sol", "unknown/unknown"
+        ).replace(" · high ·", " · unknown ·")
+
+        run = contract.parse_run_line(line)
+
+        assert run is not None
+        self.assertEqual("unknown", run.model.provider)
+        self.assertEqual("unknown", run.model.requested)
+        self.assertEqual("unknown", run.effort)
+        self.assertEqual(line, contract.format_run_line(run))
 
     def test_consecutive_reviews_of_one_change_request_get_distinct_ids(self) -> None:
         comment = "\n".join(
