@@ -32,7 +32,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 | Row | Written | Holds |
 |---|---|---|
 | `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
-| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` when tests actually ran |
+| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` when tests actually ran, `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed |
 | `cycle` | once, when the run closes | final status, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, tests passed |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
 
@@ -47,7 +47,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 
 **Unknown is not zero.** A signal or outcome nobody observed is left out, never stored as `0`, `false`, or "failed". An `implement` stage has no diff signals, because no diff exists yet. A cycle without a closing row is *unknown*, not failed.
 
-The field-by-field schema, correlation keys, and schema versions 1–4 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+The field-by-field schema, correlation keys, and schema versions 1–6 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 
 ## What is never recorded
 
@@ -95,7 +95,7 @@ python3 ~/.code-cycle/runtime/stats.py --cwd . --days 7
 python3 ~/.code-cycle/runtime/stats.py --cwd . --all-time --format json
 ```
 
-**The report includes:** tasks and stages, first-pass approval (numerator/denominator), daily activity, stages by role and profile, fallbacks, dispatch blockages, model drift, review verdicts, cycle outcomes, findings by severity, test verification, measured durations, and Jev comparisons. Rates stay *unknown* below 10 tasks. A period is compared with the previous one only when both have 10 or more. Routing cost *estimates* are never presented as real cost.
+**The report includes:** tasks and stages, first-pass approval (numerator/denominator), daily activity, stages by role and profile, fallbacks, dispatch blockages, model drift, review verdicts, cycle outcomes, findings by severity, test verification, CI on stage heads, measured durations, and Jev comparisons. Rates stay *unknown* below 10 tasks. A period is compared with the previous one only when both have 10 or more. Routing cost *estimates* are never presented as real cost.
 
 The report prints aggregates only. It never prints task or cycle IDs, comments, prompts, paths, diffs, or raw rows. If the database is missing or empty for this repository, it says so. It never creates a database or a configuration file.
 
@@ -103,7 +103,7 @@ The report prints aggregates only. It never prints task or cycle IDs, comments, 
 
 - Telemetry **records**. Nothing reads it back to change behaviour automatically. There is no model selection from statistics, no scoring, and no adaptive learning. The only feedback path is the `measured` strategy's cost estimate.
 - The schema will keep changing. Older rows are read as they were written.
-- CI results stay in the PR comment. `checks_passed` and `checks_failed` exist as fields, but no stage reports them.
+- CI check names stay in the PR comment. Telemetry keeps only the counts for the head an implementation or resolution finished on.
 
 ---
 

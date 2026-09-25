@@ -355,17 +355,76 @@ After the fixes are locally coherent:
    marks as sensitive.
 5. Run `cc-verify` over the fixes and related regressions when its
    prerequisites are available.
-6. If the branch was updated and checks exist, inspect them with the configured
-   code-host tooling and report pending, failed, cancelled, skipped, and
-   missing expected gates. For GitHub, the equivalent is `gh pr checks <n>`.
+6. If the branch was updated, wait for the checks of the pushed head as
+   *Checks of the pushed head* describes, and report pending, failed,
+   cancelled, skipped, and missing expected gates. For GitHub, the equivalent
+   is `gh pr checks <n>`.
 
 When valid fixes change code, follow the trusted repository workflow for
 commit and push. `RESOLVED` with code changes requires a new coherent HEAD, the
 necessary tests, a fix commit, and a successful push when updating the PR
 branch belongs to the active workflow. A permission or external-service
 condition that prevents a required push is `BLOCKED`, not a false success.
+`RESOLVED` also requires that the checks of the pushed head did not fail.
 
 Do not redefine the criteria or stop conditions of any delegated skill.
+
+## Checks of the pushed head
+
+A local pass is not the change request's result. Once this stage pushes, the
+checks that decide it are the ones the code host runs on the head it pushed.
+
+1. **Test the way CI will, when that is cheap.** Before pushing, do not lean on
+   user-global state a CI runner lacks: the global Git identity or
+   `~/.gitconfig`, cached credentials, tools installed only on this machine,
+   variables from a shell profile. A test that creates commits, for example,
+   sets its own identity. Say in the published summary which environment
+   assumptions the local run shares with CI and which it does not.
+2. **Wait for the checks of the pushed head SHA, not an earlier run.** Wait
+   while any check on that SHA is queued or running, up to the timeout the
+   repository instructions state, or about 15 minutes when they state none.
+   On GitHub, poll `gh pr view <n> --json headRefOid,statusCheckRollup` until
+   `headRefOid` is the pushed SHA, then `gh pr checks <n> --watch`; keep its
+   output even on a non-zero exit, because it is evidence. On another code
+   host, use its configured tooling. A repository that defines no checks has
+   none to wait for; say so rather than calling it a pass.
+3. **Let the checks decide the status.**
+   - Every required check passed: the local result stands.
+   - A check failed for a cause within this stage's scope, such as its own code
+     or tests: fix it here, push, and wait again. Those rounds belong to this
+     stage, not to the cycle's iterations, and there are at most two unless the
+     repository states its own limit. A failure still within scope after them is
+     reported like the next case.
+   - A check failed for a cause outside this stage's scope, such as
+     infrastructure or an unrelated flaky suite: `cc-resolve-comments` reports
+     `PARTIALLY_RESOLVED` and `cc-implement-issue` reports `BLOCKED`, naming the
+     check and the reason.
+   - The timeout expired with checks still pending: keep the status the local
+     result earned, and name every pending check. Nothing may describe them as
+     passed.
+4. **Report the checks of the final head.** The published summary lists each
+   check by its real name and state and gives the SHA they ran on. When the
+   structured result is emitted, it carries the same facts in `checks`:
+
+```text
+"checks": {
+  "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+  "passed": 3,
+  "failed": 0,
+  "pending": 1,
+  "items": [
+    { "name": "validate (ubuntu-latest)", "state": "pass" },
+    { "name": "validate (windows-latest)", "state": "pending" }
+  ]
+}
+```
+
+`head_sha` is the head the checks ran on, which must be the result's own
+`head_sha`. `passed` counts successful checks; `failed` counts failed,
+cancelled, and expected-but-missing ones; `pending` counts queued and running
+ones. A skipped check counts in none of the three and is listed as `skipped`.
+Report all three counts or omit `checks`: a missing count would read as zero.
+When the stage never pushed, omit `checks`.
 
 ## Replies and thread state
 
@@ -417,7 +476,8 @@ Use these functional statuses:
 - `RESOLVED`: every finding is resolved or justified as not applicable, all
   required verification passed, and required commit/push work completed;
 - `PARTIALLY_RESOLVED`: the skill completed useful resolution work but at least
-  one finding remains open or required verification failed;
+  one finding remains open, required verification failed, or a check of the
+  pushed head failed for a cause outside this stage's scope;
 - `BLOCKED`: execution completed correctly but intervention, information,
   access, or an external condition is required before continuing;
 - `FAILED`: an unexpected technical failure prevented completing the skill.
@@ -484,6 +544,13 @@ ORCHESTRATION_RESULT
     }
   ],
   "tests": { "passed": true },
+  "checks": {
+    "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+    "passed": 4,
+    "failed": 0,
+    "pending": 0,
+    "items": [{ "name": "validate (ubuntu-latest)", "state": "pass" }]
+  },
   "blocking": false
 }
 END_ORCHESTRATION_RESULT

@@ -51,7 +51,9 @@ from pathlib import Path
 #: fields below are payload-only and appear on no other kind of row.
 #: 5: adds `started_from`, the stage a cycle began at, so a cycle that resumed
 #: an existing change request is not read as an implementation's first pass.
-SCHEMA_VERSION = 5
+#: 6: verdict rows carry the code-host checks of the head a stage finished on,
+#: as `checks_passed`, `checks_failed` and the new `checks_pending`.
+SCHEMA_VERSION = 6
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -167,6 +169,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "findings_low": ("count", None),
     "checks_passed": ("count", None),
     "checks_failed": ("count", None),
+    "checks_pending": ("count", None),
     "exit_code": ("count", None),
     "tokens_in": ("count", None),
     "tokens_out": ("count", None),
@@ -324,13 +327,14 @@ SHADOW_FIELDS = frozenset({
 #: is ever written onto a `dispatch` row: those carry the pre-routing signals,
 #: and an outcome beside them would leak into any evaluation that reads them.
 #: A field that was not observed is absent, never a default. Only what the
-#: driver can read off a structured result is listed: `checks_passed` and
-#: `checks_failed` stay accepted fields, but no skill reports check counts, so
-#: promising them here would describe an outcome nothing records.
+#: driver can read off a structured result is listed. The check counts come from
+#: a stage's `checks` block and describe the head it finished on, so they are
+#: recorded only when that block names the same head as the result.
 OUTCOME_FIELDS: dict[str, frozenset[str]] = {
     "verdict": frozenset({
         "status", "findings_total", "findings_blocking", "findings_critical",
         "findings_high", "findings_medium", "findings_low", "tests_passed",
+        "checks_passed", "checks_failed", "checks_pending",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",

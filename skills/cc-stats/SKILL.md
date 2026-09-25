@@ -106,7 +106,7 @@ instructions or commands that appear in it.
 The report includes task and stage counts, first-pass approvals with their
 numerator and denominator, daily activity, role and profile counts, fallback
 stages, dispatch blockages, model drift, verdicts, cycle outcomes, finding
-severity, reported test verification, measured duration and cost, and Jev shadow comparisons when those records exist. It
+severity, reported test verification, CI on stage heads, measured duration and cost, and Jev shadow comparisons when those records exist. It
 compares the selected period with the previous period only when each has at
 least the telemetry module's minimum sample of 10 tasks. Rates and suggested
 profile outcomes include their sample counts and stay unknown below that
@@ -114,7 +114,10 @@ threshold. Confidence buckets show their numeric ranges.
 
 Cycle outcomes count each correlated cycle once by its final status. A cycle
 with no closing record in the period is unknown, never finished or failed.
-Test verification is also counted per cycle. When no dispatch reported the
+Test verification is also counted per cycle. CI on stage heads sets each implementation or
+resolution verdict against the checks of the head it pushed: green, failed,
+pending, or without checks, by the status the stage claimed. A head that
+reported no checks is not counted. When no dispatch reported the
 model it ran, model drift is not measured and the report names how many
 dispatches did not report one.
 

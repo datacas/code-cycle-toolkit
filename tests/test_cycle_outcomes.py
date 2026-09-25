@@ -231,11 +231,12 @@ class DriverTests(RunCycleTestCase):
         """REV-001: a documented outcome nothing writes is a promise, not data."""
         payload = {
             "status": "CHANGES_REQUESTED", "tests": {"passed": False},
-            "checks": {"passed": 4, "failed": 1},
+            "checks": {"passed": 4, "failed": 1, "pending": 0},
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
         }
 
-        emitted = {"status", *rc._findings(payload), *rc._tests(payload)}
+        emitted = {"status", *rc._findings(payload), *rc._tests(payload),
+                   *rc._checks(payload)}
 
         self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)
 
@@ -252,6 +253,21 @@ class DriverTests(RunCycleTestCase):
         self.assertIs(True, cycle["verdicts"][0]["tests_passed"])
         self.assertIs(True, cycle["outcome"]["tests_passed"])
         self.assertIs(True, cycle["outcome"]["first_pass_approved"])
+
+    def test_the_checks_of_the_final_head_reach_the_verdict(self) -> None:
+        """#77: whether a stage's head was green is recorded beside its claim."""
+        head = "89abcdef0123456789abcdef0123456789abcdef"
+        implementer = Talker("codex", block(
+            "IMPLEMENTED", head_sha=head,
+            checks={"head_sha": head, "passed": 3, "failed": 1, "pending": 0}))
+
+        self.run_cycle(implementer, Talker("claude"))
+
+        verdict = [row for row in self.rows()
+                   if row["payload"].get("record_kind") == "verdict"][0]
+        self.assertEqual("IMPLEMENTED", verdict["status"])
+        self.assertEqual((3, 1, 0), tuple(verdict["payload"][f"checks_{state}"]
+                                          for state in ("passed", "failed", "pending")))
 
     def test_an_unreadable_test_result_is_not_a_pass(self) -> None:
         implementer = Talker("codex", block("IMPLEMENTED", tests={"passed": "yes"}))
@@ -304,6 +320,43 @@ class TestsReportedTests(unittest.TestCase):
         ):
             with self.subTest(payload=payload):
                 self.assertEqual({}, rc._tests(payload))
+
+
+class ReportedChecks(unittest.TestCase):
+    """Which reported `checks` values describe the head a stage left behind."""
+
+    HEAD = "89abcdef0123456789abcdef0123456789abcdef"
+
+    def test_complete_counts_for_the_final_head_are_recorded(self) -> None:
+        for payload in (
+            {"head_sha": self.HEAD,
+             "checks": {"head_sha": self.HEAD, "passed": 4, "failed": 0, "pending": 0}},
+            {"checks": {"passed": 2, "failed": 1, "pending": 1}},
+        ):
+            with self.subTest(payload=payload):
+                counts = payload["checks"]
+                self.assertEqual(
+                    {f"checks_{state}": counts[state] for state in ("passed", "failed", "pending")},
+                    rc._checks(payload))
+
+    def test_checks_that_describe_nothing_readable_record_nothing(self) -> None:
+        for checks in (
+            None,
+            "green",
+            {"passed": 4, "failed": 0},
+            {"passed": 4, "failed": 0, "pending": None},
+            {"passed": True, "failed": 0, "pending": 0},
+            {"passed": -1, "failed": 0, "pending": 0},
+            {"passed": "4", "failed": 0, "pending": 0},
+        ):
+            with self.subTest(checks=checks):
+                self.assertEqual({}, rc._checks({"status": "RESOLVED", "checks": checks}))
+
+    def test_checks_of_an_earlier_head_are_not_this_stages(self) -> None:
+        payload = {"head_sha": self.HEAD,
+                   "checks": {"head_sha": "0" * 40, "passed": 4, "failed": 0, "pending": 0}}
+
+        self.assertEqual({}, rc._checks(payload))
 
 
 if __name__ == "__main__":

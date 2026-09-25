@@ -7,6 +7,21 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `cc-implement-issue` and `cc-resolve-comments` wait for the checks of the
+  head they pushed before they report success, bounded by the repository's
+  timeout or about 15 minutes. A failure within the stage's scope is fixed
+  and pushed again in at most two rounds. A failure outside that scope makes
+  a resolution `PARTIALLY_RESOLVED` and an implementation `BLOCKED`. Checks
+  still pending at the timeout are named and never reported as passed. Both
+  stages test the way CI will when that is cheap, with no reliance on the
+  global Git identity or other machine-only state, and report the final
+  head's checks, by name and with their SHA, in the summary and in a new
+  `checks` result key. The shared section *Checks of the pushed head* is
+  validated byte for byte. The runtime records `checks_passed`,
+  `checks_failed` and the new `checks_pending` on the verdict row when they
+  describe the stage's own head, and `cc-stats` reports CI on stage heads by
+  claimed status. Telemetry schema 6.
+
 - `run_cycle.py --from review|resolve|rereview --pr N` resumes an existing
   change request instead of implementing the work item again. The skipped
   stages are not run; the rest keep the full cycle's routing, recording, and

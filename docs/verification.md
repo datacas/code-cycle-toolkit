@@ -61,9 +61,26 @@ gh pr view <n> --json isDraft,headRefName,baseRefName,labels,statusCheckRollup
 gh pr checks <n>          # output kept even on non-zero exit: it is evidence
 ```
 
+### Stages that push wait for their head
+
+A local pass isn't the change request's result. `cc-implement-issue` after it opens the PR, and `cc-resolve-comments` after it pushes a fix, wait for the checks **of the head SHA they pushed**, never an earlier run's, while any is queued or running. The wait is bounded by the repository's own timeout, or about 15 minutes when it states none. Their shared section *Checks of the pushed head* holds the rule.
+
+| Checks of the pushed head | Result |
+|---|---|
+| every required check passed | the local result stands |
+| failed within the stage's scope (its own code or tests) | the stage fixes it, pushes and waits again, at most two rounds unless the repository sets its own limit; these rounds aren't cycle iterations |
+| failed outside the stage's scope (infrastructure, an unrelated flaky suite) | `PARTIALLY_RESOLVED` for a resolution, `BLOCKED` for an implementation, naming the check and why |
+| still pending at the timeout | the local status stands, and every pending check is named; none is reported as passed |
+
+Before pushing, the stage tests the way CI will when that's cheap: no reliance on the global Git identity, `~/.gitconfig`, cached credentials, or anything else only the developer's machine has. The summary states which environment assumptions its local run shares with CI and which it doesn't.
+
+The published summary lists the final head's checks by name and state with the SHA they ran on. The structured result carries them as `checks`: `head_sha`, the counts `passed`, `failed` (failed, cancelled, or expected but missing) and `pending`, and the named `items`.
+
 ## In telemetry
 
-When the runtime drives the cycle, a verdict row records `tests_passed` only when a stage actually ran tests. A stage that stopped before running tests (`"tests": {"ran": false}`, or a `BLOCKED` result without `ran: true`) records no test outcome, rather than a failure. CI state stays in the PR comment and isn't copied into telemetry. See [Telemetry](telemetry.md).
+When the runtime drives the cycle, a verdict row records `tests_passed` only when a stage actually ran tests. A stage that stopped before running tests (`"tests": {"ran": false}`, or a `BLOCKED` result without `ran: true`) records no test outcome, rather than a failure.
+
+A verdict row also records `checks_passed`, `checks_failed` and `checks_pending` when the stage reported all three counts for its own head. Counts for a different head, or an incomplete set, record nothing. `cc-stats` sets each implementation and resolution head against its CI, so it can show how often a `RESOLVED` head was actually green. The check names stay in the PR comment. See [Telemetry](telemetry.md).
 
 ---
 

@@ -55,6 +55,40 @@ class StatsTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-TASK", serialized)
         self.assertNotIn("OTHER-REPO-TASK", serialized)
 
+    def add_head(self, task: str, role: str, status: str, **checks) -> None:
+        self.store.record_stage("owner/repo", task, role, status=status,
+                                record_kind="verdict",
+                                **{f"checks_{state}": count for state, count in checks.items()})
+
+    def test_stage_checks_set_each_claimed_head_against_its_ci(self) -> None:
+        """#77: how often a "resolved" head was actually green."""
+        self.add_head("A", "resolve", "RESOLVED", passed=4, failed=0, pending=0)
+        self.add_head("B", "resolve", "RESOLVED", passed=3, failed=1, pending=0)
+        self.add_head("C", "implement", "IMPLEMENTED", passed=2, failed=0, pending=2)
+        self.add_head("D", "implement", "IMPLEMENTED", passed=0, failed=0, pending=0)
+        self.add_head("E", "review", "APPROVED", passed=4, failed=0, pending=0)
+        self.store.record_stage("owner/repo", "F", "resolve", status="RESOLVED",
+                                record_kind="verdict")
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        checks = report["summary"]["stage_checks"]
+
+        self.assertEqual({"measured": 4, "green": 1, "failed": 1, "pending": 1, "none": 1},
+                         {key: checks[key] for key in ("measured", "green", "failed", "pending", "none")})
+        self.assertEqual({"green": 1, "failed": 1, "pending": 0, "none": 0},
+                         checks["by_status"]["RESOLVED"])
+        self.assertIn("RESOLVED 1 of 2 green", stats.render_markdown(report))
+
+    def test_stage_checks_that_nothing_reported_stay_unreported(self) -> None:
+        self.add_task("TASK", "APPROVED")
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        self.assertEqual(0, report["summary"]["stage_checks"]["measured"])
+        self.assertIn("CI on stage heads: not reported", stats.render_markdown(report))
+
     def test_first_pass_ignores_cycles_that_resumed_a_change_request(self) -> None:
         for index in range(10):
             self.add_task(f"TASK-{index}", "CHANGES_REQUESTED")
