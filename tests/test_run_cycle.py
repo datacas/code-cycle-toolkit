@@ -465,6 +465,20 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertEqual([], claude.dispatched)
         self.assertEqual(said, report.reason)
 
+    def test_a_defect_that_could_not_be_reproduced_stops_before_review(self) -> None:
+        said = "could not reproduce with the reported input; asked for logs"
+        codex = Talker("codex", block("BLOCKED", error=said, pr_number=None, diagnosis={
+            "classification": "not_reproduced", "decision": "needs_evidence",
+            "related_search": "basic", "reproduced": False,
+            "cause_matches_issue": None, "related_items": []}))
+        claude = Talker("claude")
+
+        report = self.run_cycle(codex, claude)
+
+        self.assertEqual(["implement"], [stage.role for stage in report.stages])
+        self.assertEqual([], claude.dispatched)
+        self.assertEqual(said, report.reason)
+
     def test_a_status_the_store_cannot_hold_is_not_carried_to_it(self) -> None:
         """It would raise on the way in and end the run without its last row."""
         report = self.run_cycle(Talker("codex", block("MOSTLY_FINE")), Talker("claude"))

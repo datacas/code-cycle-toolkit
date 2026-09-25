@@ -90,7 +90,7 @@ Use cc-stats for the last 7 days.
 
 1. Runs `cc-provider-bootstrap`; stops on `BLOCKED` or `FAILED` before creating anything.
 2. Labels the work (`difficulty`, `verifiability`, security sensitivity) **before** routing, so the routing can't be justified after the fact.
-3. Runs `cc-implement-issue`, then `cc-initial-review`. An implementation that stops `BLOCKED` on its diagnosis — a duplicate, or a shared cause that should not be fixed in isolation — ends the cycle before review, with its reason shown.
+3. Runs `cc-implement-issue`, then `cc-initial-review`. An implementation that stops `BLOCKED` on its diagnosis — a duplicate, a shared cause that should not be fixed in isolation, or a defect it could not reproduce — ends the cycle before review, with its reason shown.
 4. On `CHANGES_REQUESTED`, loops `cc-resolve-comments` → `cc-rereview`, passing each stage the previous structured result so `REV-xxx` IDs stay stable.
 5. Validates the exit conditions against the code host: the reviewed SHA equals the current head, required checks passed, no blocking finding is open, and the PR is still unmerged.
 

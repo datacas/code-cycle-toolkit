@@ -264,6 +264,57 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "does not define `stop_duplicate`")
 
+    def test_rejects_dropping_the_non_reproduced_outcome(self) -> None:
+        errors = self.edit_implement_skill("| `needs_evidence` |", "| `ask` |")
+
+        self.assert_error_contains(errors, "does not define `needs_evidence`")
+
+    def test_rejects_a_reproduction_flag_that_is_not_boolean_or_null(self) -> None:
+        errors = self.edit_implement_skill('"reproduced": true', '"reproduced": "unknown"')
+
+        self.assert_error_contains(errors, "`diagnosis.reproduced` must be true, false, or null")
+
+    def test_rejects_related_items_that_are_not_a_list(self) -> None:
+        errors = self.edit_implement_skill(
+            '"related_items": ["130", "131"]', '"related_items": "130"'
+        )
+
+        self.assert_error_contains(errors, "`diagnosis.related_items` must be a list")
+
+
+class DiagnosisShapeTests(unittest.TestCase):
+    """Every diagnosis the skill allows, not only the one its example prints."""
+
+    NOT_REPRODUCED = {
+        "classification": "not_reproduced", "decision": "needs_evidence",
+        "related_search": "basic", "reproduced": False,
+        "cause_matches_issue": None, "related_items": [],
+    }
+
+    def test_a_defect_that_could_not_be_reproduced_has_a_valid_diagnosis(self) -> None:
+        self.assertEqual([], VALIDATOR.diagnosis_errors(self.NOT_REPRODUCED))
+
+    def test_a_non_reproduced_defect_cannot_claim_a_known_cause(self) -> None:
+        for changed in ({"reproduced": True}, {"cause_matches_issue": False}):
+            with self.subTest(changed=changed):
+                problems = VALIDATOR.diagnosis_errors({**self.NOT_REPRODUCED, **changed})
+
+                self.assertTrue(any("`not_reproduced` requires" in p for p in problems))
+
+    def test_an_integer_is_not_a_boolean(self) -> None:
+        problems = VALIDATOR.diagnosis_errors({**self.NOT_REPRODUCED, "reproduced": 0})
+
+        self.assertTrue(any("must be true, false, or null" in p for p in problems))
+
+    def test_related_items_hold_identifiers_only(self) -> None:
+        for items in (["130", 131], [""], [{"id": "130"}]):
+            with self.subTest(items=items):
+                problems = VALIDATOR.diagnosis_errors(
+                    {**self.NOT_REPRODUCED, "related_items": items}
+                )
+
+                self.assertTrue(any("related_items" in p for p in problems))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,13 +165,16 @@ diagnosis; a defect with several symptoms gets the full procedure below.
 3. **Reproduce.** For a defect, reproduce it before editing with the narrowest
    command or test, and record the command and its observed result. When it
    cannot be reproduced, say so and why; never report it as reproduced, and do
-   not fix it blind.
+   not fix it blind. Without a reproduction the mechanism and the cause stay
+   unknown, so the diagnosis ends in `needs_evidence` unless related work
+   already settles the item as a duplicate, superseded, or already resolved.
 4. **Mechanism.** Trace the entry point, the mechanism, and the invariant that
    breaks. Name the invariant.
 5. **Classify** the item as exactly one of `isolated_defect`, `shared_cause`,
-   `duplicate`, `superseded`, `already_resolved`, `feature_request`, or
-   `cause_mismatch`. `cause_mismatch` means the reproduced cause differs from
-   the one the item proposes.
+   `duplicate`, `superseded`, `already_resolved`, `feature_request`,
+   `cause_mismatch`, or `not_reproduced`. `cause_mismatch` means the reproduced
+   cause differs from the one the item proposes; `not_reproduced` means a defect
+   could not be reproduced, so its cause could not be established.
 6. **Fix shape.** Prefer the change that restores the invariant where it breaks
    over a local patch per symptom. Prefer removing a state, flag, gate, or
    duplicate representation over adding one. When the fix also addresses other
@@ -186,9 +189,10 @@ diagnosis; a defect with several symptoms gets the full procedure below.
 | `do_not_implement_in_isolation` | a shared cause whose root fix exceeds this item's scope, or where fixing this symptom alone would add a local patch the root fix would later remove | `BLOCKED` before creating a branch. Comment on the work item with the related items, the shared cause, and the proposed root fix, and ask for a scope decision. |
 | `stop_duplicate` | `duplicate`, `superseded`, or `already_resolved` | `BLOCKED` before creating a branch. Comment on the work item with the evidence: the other item, or the commit or change request that resolved it. |
 | `needs_scope_decision` | a `cause_mismatch` whose real cause lies outside the item's scope | `BLOCKED` before creating a branch, stating the corrected cause. |
+| `needs_evidence` | `not_reproduced` | `BLOCKED` before creating a branch. Comment on the work item with the reproduction attempted and its observed result, and ask for the missing evidence, such as steps, environment, logs, or the failing input. |
 
 A `cause_mismatch` whose real cause lies within the item's scope continues as
-`implement`, and the change request states the corrected cause. The three
+`implement`, and the change request states the corrected cause. The four
 stopping decisions create no branch, commit, or change request; the comment on
 the work item is their only published artefact, and the final response and any
 structured result name the decision and the related items.
@@ -329,10 +333,12 @@ only; no prose goes in it. `classification` and `decision` take the tokens
 listed there. `related_search` is `basic` or `widened`, so a reader can tell "no
 related items found" from "not searched widely". `reproduced` is `true` or
 `false` for a defect and `null` when reproduction does not apply, such as for a
-feature request. `cause_matches_issue` is `true` or `false` when the item
-proposed a cause and `null` when it proposed none. `related_items` lists the
+feature request; `not_reproduced` always carries `false`. `cause_matches_issue`
+is `true` or `false` when the item proposed a cause and the diagnosis
+established one, and `null` when the item proposed none or the cause could not
+be established, as with `not_reproduced`. `related_items` lists the
 identifiers of the related items found, in the issue provider's native form, and
-is empty when there are none. The three stopping decisions report `BLOCKED` with
+is empty when there are none. The four stopping decisions report `BLOCKED` with
 `pr_number` set to `null` and still carry `diagnosis`. When the stage stopped
 before diagnosing, for example on a bootstrap failure, omit `diagnosis`.
 

@@ -262,16 +262,52 @@ RESULT_BLOCK_RE = re.compile(
 )
 DIAGNOSIS_CLASSIFICATIONS = (
     "isolated_defect", "shared_cause", "duplicate", "superseded",
-    "already_resolved", "feature_request", "cause_mismatch",
+    "already_resolved", "feature_request", "cause_mismatch", "not_reproduced",
 )
 DIAGNOSIS_DECISIONS = (
     "implement", "implement_root_fix", "do_not_implement_in_isolation",
-    "stop_duplicate", "needs_scope_decision",
+    "stop_duplicate", "needs_scope_decision", "needs_evidence",
 )
 DIAGNOSIS_KEYS = {
     "classification", "decision", "related_search", "reproduced",
     "cause_matches_issue", "related_items",
 }
+
+
+def diagnosis_errors(diagnosis: object) -> list[str]:
+    """What is wrong with one `diagnosis` object, as the skill defines it."""
+    if not isinstance(diagnosis, dict):
+        return ["`diagnosis` is not an object"]
+    problems: list[str] = []
+    if set(diagnosis) != DIAGNOSIS_KEYS:
+        problems.append(
+            f"`diagnosis` keys {sorted(diagnosis)} differ from {sorted(DIAGNOSIS_KEYS)}"
+        )
+    if diagnosis.get("classification") not in DIAGNOSIS_CLASSIFICATIONS:
+        problems.append("`diagnosis.classification` is not a known token")
+    if diagnosis.get("decision") not in DIAGNOSIS_DECISIONS:
+        problems.append("`diagnosis.decision` is not a known token")
+    if diagnosis.get("related_search") not in ("basic", "widened"):
+        problems.append("`diagnosis.related_search` must be basic or widened")
+    for key in ("reproduced", "cause_matches_issue"):
+        # Compared by type: `1 in (True, False, None)` is true in Python.
+        if key in diagnosis and not (
+            diagnosis[key] is None or isinstance(diagnosis[key], bool)
+        ):
+            problems.append(f"`diagnosis.{key}` must be true, false, or null")
+    items = diagnosis.get("related_items")
+    if not isinstance(items, list) or not all(
+        isinstance(item, str) and item for item in items
+    ):
+        problems.append("`diagnosis.related_items` must be a list of identifiers")
+    if diagnosis.get("classification") == "not_reproduced" and (
+        diagnosis.get("reproduced") is not False
+        or diagnosis.get("cause_matches_issue") is not None
+    ):
+        problems.append(
+            "`not_reproduced` requires `reproduced: false` and `cause_matches_issue: null`"
+        )
+    return problems
 
 
 def check_implement_contract(root: Path, errors: list[str]) -> None:
@@ -291,8 +327,13 @@ def check_implement_contract(root: Path, errors: list[str]) -> None:
     if diagnosis is None:
         errors.append(f"{where}: missing section {DIAGNOSIS_SECTION!r}")
     else:
-        for token in DIAGNOSIS_CLASSIFICATIONS + DIAGNOSIS_DECISIONS:
+        for token in DIAGNOSIS_CLASSIFICATIONS:
             if f"`{token}`" not in diagnosis:
+                errors.append(f"{where}: {DIAGNOSIS_SECTION!r} does not define `{token}`")
+        # A decision is defined by its row in the decision table; a mention in
+        # the prose around it does not say when it applies or what happens.
+        for token in DIAGNOSIS_DECISIONS:
+            if f"\n| `{token}` |" not in diagnosis:
                 errors.append(f"{where}: {DIAGNOSIS_SECTION!r} does not define `{token}`")
         for depth in ("**Basic, always.**", "**Widened, when any signal is present.**"):
             if depth not in diagnosis:
@@ -312,16 +353,7 @@ def check_implement_contract(root: Path, errors: list[str]) -> None:
     if not isinstance(shown, dict):
         errors.append(f"{where}: result example has no `diagnosis` object")
         return
-    if set(shown) != DIAGNOSIS_KEYS:
-        errors.append(
-            f"{where}: `diagnosis` keys {sorted(shown)} differ from {sorted(DIAGNOSIS_KEYS)}"
-        )
-    if shown.get("classification") not in DIAGNOSIS_CLASSIFICATIONS:
-        errors.append(f"{where}: `diagnosis.classification` is not a known token")
-    if shown.get("decision") not in DIAGNOSIS_DECISIONS:
-        errors.append(f"{where}: `diagnosis.decision` is not a known token")
-    if shown.get("related_search") not in ("basic", "widened"):
-        errors.append(f"{where}: `diagnosis.related_search` must be basic or widened")
+    errors.extend(f"{where}: {problem}" for problem in diagnosis_errors(shown))
 
 
 def validate_manifest(path: Path, expected_name: str) -> str:
