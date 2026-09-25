@@ -49,7 +49,9 @@ from pathlib import Path
 #: `payload`; a row from an earlier version simply has no cycle to belong to.
 #: 4: adds `shadow` rows holding an optional selector's suggestion, whose
 #: fields below are payload-only and appear on no other kind of row.
-SCHEMA_VERSION = 4
+#: 5: adds `started_from`, the stage a cycle began at, so a cycle that resumed
+#: an existing change request is not read as an implementation's first pass.
+SCHEMA_VERSION = 5
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -67,6 +69,10 @@ def is_jev_model(value) -> bool:
     return (isinstance(value, str) and len(value) <= 64
             and (value in JEV_MODELS
                  or JEV_MODEL_VERSION_PATTERN.fullmatch(value) is not None))
+
+#: The stages a cycle can begin at. `implement` is a whole cycle; the others
+#: resume a change request that already exists.
+CYCLE_STARTS = ("implement", "review", "resolve", "rereview")
 
 #: The profiles a shadow selector compares, which are the `implement` and
 #: `resolve` candidates in `router.ROLE_CANDIDATES`.
@@ -214,6 +220,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "cycle_id": ("identifier", None),
     "stage_seq": ("count", None),
     "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle", "shadow"})),
+    # where the cycle began (schema 5)
+    "started_from": ("token", frozenset(CYCLE_STARTS)),
     # observed outcomes, written only once they are known (schema 3)
     "tests_passed": ("flag", None),
     "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
@@ -429,6 +437,17 @@ MAX_PAYLOAD_VALUE_LENGTH = 120
 #: as a failure would invent an outcome.
 TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 PASSING_REVIEW_STATUSES = frozenset({"APPROVED"})
+
+
+def started_at_implement(row: dict) -> bool:
+    """Whether a row belongs to a cycle that began by implementing.
+
+    A resumed cycle reviews an implementation some earlier run produced, so its
+    review says nothing about a first pass. A row written before `started_from`
+    existed came from a driver that could only start at `implement`.
+    """
+    payload = row.get("payload") or {}
+    return payload.get("started_from", "implement") == "implement"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stages (
@@ -811,6 +830,9 @@ class Telemetry:
 
         The profile filter names the *implementer* whose work was reviewed, not
         the reviewer, because the question is which implementer is good enough.
+
+        A review from a cycle that resumed a change request is not counted: it
+        judged an implementation some earlier run produced, perhaps after fixes.
         """
         implementers = {}
         for row in self.rows(repo_id):
@@ -824,6 +846,8 @@ class Telemetry:
         seen_reviews = set()
         for row in self.rows(repo_id):
             if row["role"] != "review" or row["task_id"] in seen_reviews:
+                continue
+            if not started_at_implement(row):
                 continue
             if row["task_id"] not in implementers:
                 continue

@@ -221,6 +221,8 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--security-sensitive` | off | Routes review to `senior_reviewer` |
 | `--verification` | unknown | `available` / `unavailable`, recorded as a signal |
 | `--mode` | `production` | `calibration` never falls back and needs proven readiness |
+| `--from` | `implement` | Stage to start at: `implement`, `review`, `resolve`, or `rereview`; anything but `implement` resumes `--pr` |
+| `--pr` | — | Existing change request a resumed cycle works on; required by `--from review\|resolve\|rereview` |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
@@ -233,6 +235,16 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 **Requires:** the runtime and an authenticated Codex and/or Claude CLI. For publishing stages, it also needs `gh` authenticated with push access, Codex CLI 0.138.0 or later, and a working tree on a named branch. Before any publishing dispatch, a readiness check verifies this and records `missing_capability=publication_access` when it fails.
 
 **Local-only rehearsal:** `--cwd /path/to/linked-worktree --local-only` refuses the live repository. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
+
+**Resuming a change request:** when a cycle stops midway, for example because the resolver hit an environment problem, `--from` continues it without implementing the work item again:
+
+```bash
+python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from resolve   # resolve -> rereview loop
+python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from review    # fresh initial review, then loop
+python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from rereview  # rereview first, then loop
+```
+
+The stages before `--from` are skipped. The rest run with the same routing, recording, and `--max-iterations` as a full cycle. `resolve` and `rereview` rely on the pull request's comments carrying the previous review; the stage recovers those findings through `review.trusted_authors`. Before anything is dispatched, the driver refuses `--from` without `--pr`, `--pr` without a resuming `--from`, and `--local-only` with a resume. It then reads the pull request with `gh` and stops with the reason unless it is open, its head branch still exists, and `--cwd` has that branch checked out. Only GitHub pull requests can be resumed. A resumed run is a **new cycle** with its own `cycle_id`, and every row carries `started_from`, so its review never counts as a first pass.
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 

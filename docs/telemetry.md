@@ -31,7 +31,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 
 | Row | Written | Holds |
 |---|---|---|
-| `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, and the pre-routing signals below |
+| `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
 | `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` when tests actually ran |
 | `cycle` | once, when the run closes | final status, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, tests passed |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |

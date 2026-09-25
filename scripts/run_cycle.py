@@ -42,6 +42,7 @@ import argparse
 import difflib
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,7 @@ from router import (
 )
 from stage_signals import collect_change_signals
 from telemetry import (
+    CYCLE_STARTS,
     Telemetry,
     TelemetryError,
     default_database_path,
@@ -141,6 +143,9 @@ COMPLETES = {
     "review": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
     "rereview": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
 }
+
+#: The stages that resume a change request instead of creating one.
+RESUMES = frozenset(CYCLE_STARTS) - {"implement"}
 
 #: How a cycle can end. Each one is a fact about this run, not a judgement.
 APPROVED_END = "READY_FOR_MANUAL_MERGE"
@@ -287,8 +292,7 @@ class Reported:
                 reference = value.strip()
             else:
                 continue
-            if (reference and len(reference) <= 128
-                    and all(char.isalnum() or char in "#._:/-" for char in reference)):
+            if safe_reference(reference):
                 return reference
         return None
 
@@ -361,6 +365,12 @@ class CycleReport:
         return "\n".join(lines)
 
 
+def safe_reference(reference: str) -> bool:
+    """Whether a change-request reference may be put into a stage's prompt."""
+    return (bool(reference) and len(reference) <= 128
+            and all(char.isalnum() or char in "#._:/-" for char in reference))
+
+
 def readable(text: str, limit: int = REASON_LIMIT) -> str:
     """Text from an executor, made safe to put on somebody's screen.
 
@@ -426,6 +436,82 @@ def validate_local_only_cwd(cwd: str | None) -> None:
         raise CycleDriverError(f"--local-only could not read the worktree marker: {error}") from error
     if not marker_text.startswith("gitdir:"):
         raise CycleDriverError(f"--local-only requires a linked Git worktree: {path}")
+
+
+def validate_start(start_from: str, change_request_id: str | None,
+                   *, local_only: bool = False) -> None:
+    """Refuse a resume that cannot be honest, before anything is dispatched.
+
+    A resumed cycle works on a change request somebody names: without one there
+    is nothing to review, and guessing it from the work item would be a guess.
+    A local-only run creates no change request, so it has nothing to resume.
+    """
+    if start_from not in CYCLE_STARTS:
+        raise CycleDriverError(
+            f"--from must be one of {', '.join(CYCLE_STARTS)}, not {start_from!r}")
+    if start_from == "implement":
+        if change_request_id is not None:
+            raise CycleDriverError(
+                "--pr names an existing change request; it needs --from "
+                "review, resolve or rereview")
+        return
+    if not change_request_id:
+        raise CycleDriverError(f"--from {start_from} requires --pr")
+    if not safe_reference(change_request_id):
+        raise CycleDriverError(
+            "--pr must be a change-request reference: letters, digits and #._:/-")
+    if local_only:
+        raise CycleDriverError(
+            f"--local-only stops after implementation; it cannot resume from {start_from}")
+
+
+def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
+                         *, run=subprocess.run) -> None:
+    """Refuse to resume a change request that is not there to work on.
+
+    A resume trusts the pull request's comments to carry the earlier review,
+    so it has to be the pull request this worktree is on: open, with its head
+    branch still present, and checked out in `cwd`. Each is read, not assumed,
+    and the first that fails is named. Only GitHub pull requests can be read.
+    """
+    def call(command: list[str], what: str) -> str:
+        try:
+            done = run(command, capture_output=True, text=True, check=False,
+                       stdin=subprocess.DEVNULL, cwd=cwd or None)
+        except OSError as error:
+            raise CycleDriverError(f"could not {what}: {error}") from error
+        if done.returncode != 0:
+            raise CycleDriverError(
+                f"could not {what}: {readable(done.stderr or done.stdout, 200)}")
+        return done.stdout.strip()
+
+    reference = change_request_id.lstrip("#")
+    raw = call(["gh", "pr", "view", reference, "--repo", repo_id, "--json",
+                "state,headRefName,headRepository,headRepositoryOwner"],
+               f"read pull request {change_request_id} in {repo_id}")
+    try:
+        pull = json.loads(raw)
+    except ValueError as error:
+        raise CycleDriverError(
+            f"pull request {change_request_id} could not be read") from error
+    state = str(pull.get("state") or "").upper()
+    if state != "OPEN":
+        raise CycleDriverError(
+            f"pull request {change_request_id} is {state or 'in an unknown state'}, not open")
+    branch = pull.get("headRefName")
+    if not isinstance(branch, str) or not branch:
+        raise CycleDriverError(f"pull request {change_request_id} names no head branch")
+    owner = (pull.get("headRepositoryOwner") or {}).get("login")
+    name = (pull.get("headRepository") or {}).get("name")
+    head_repo = f"{owner}/{name}" if owner and name else repo_id
+    call(["gh", "api", f"repos/{head_repo}/branches/{branch}", "--silent"],
+         f"find the head branch {branch} of pull request {change_request_id}")
+    current = call(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                   "read the branch checked out in the working directory")
+    if current != branch:
+        raise CycleDriverError(
+            f"the working directory is on {current}, not on {branch}, the head "
+            f"branch of pull request {change_request_id}")
 
 
 def read_structured_result(result: DispatchResult | None) -> Reported:
@@ -503,8 +589,16 @@ def run_cycle(
     shadow: JevShadow | None = None,
     verbose: bool = False,
     progress_interval: float = 60,
+    start_from: str = "implement",
+    change_request_id: str | None = None,
 ) -> CycleReport:
     """implement -> review -> (resolve -> rereview)*, every stage recorded.
+
+    `start_from` resumes an existing change request, `change_request_id`,
+    instead: `review` runs a fresh initial review, `resolve` enters the loop
+    at its resolution and `rereview` at its re-review. The stages before it
+    are skipped, not recorded, and the loop keeps the same routing, recording
+    and iteration limit. It is a new cycle, and every row says where it began.
 
     With `change_bases`, each stage routed after the implementation is routed
     knowing the diff against the first base that resolves. Without them, the
@@ -514,6 +608,7 @@ def run_cycle(
     Jev's suggestion beside the rules' choice; the rules still route every
     stage. `shadow` injects an already-built observer instead, for tests.
     """
+    validate_start(start_from, change_request_id, local_only=local_only)
     if shadow is None and jev is not None and jev.enabled:
         shadow = JevShadow(jev)
     if local_only:
@@ -530,6 +625,7 @@ def run_cycle(
         telemetry, repo_id, task_id, signals,
         availability=availability, registry=registry, mode=mode, policy=policy,
         probes=probes, profiles=profiles, local_only=local_only,
+        started_from=start_from,
         routing_strategy=routing_strategy,
         change_observer=(
             (lambda: collect_change_signals(cwd, change_bases))
@@ -597,29 +693,46 @@ def run_cycle(
             return reported, stop(reported.explain(role), reported=reported)
         return reported, None
 
-    reported, stopped = advance("implement")
-    if stopped is not None:
-        return stopped
-    if local_only:
-        return stop(
-            "local-only run stops after implementation; no change request was created for review",
-            UNRESOLVED_END,
-            reported=reported,
-        )
+    reported = Reported()
+    verdict = None
+    if start_from == "implement":
+        reported, stopped = advance("implement")
+        if stopped is not None:
+            return stopped
+        if local_only:
+            return stop(
+                "local-only run stops after implementation; no change request was created for review",
+                UNRESOLVED_END,
+                reported=reported,
+            )
 
-    change_request_id = reported.change_request_id
-    if change_request_id is None:
-        return stop(
-            "implement completed without change_request_id or legacy pr_number; "
-            "stopping before review",
-            reported=reported,
-        )
+        change_request_id = reported.change_request_id
+        if change_request_id is None:
+            return stop(
+                "implement completed without change_request_id or legacy pr_number; "
+                "stopping before review",
+                reported=reported,
+            )
 
-    reported, stopped = advance("review", change_request_id=change_request_id)
-    if stopped is not None:
-        return stopped
-    verdict = reported.status
-    report.verdict = verdict
+    if start_from in {"implement", "review"}:
+        reported, stopped = advance("review", change_request_id=change_request_id)
+        if stopped is not None:
+            return stopped
+        verdict = reported.status
+        report.verdict = verdict
+    elif start_from == "rereview":
+        reported, stopped = advance("rereview", "Re-review the change after the fixes.",
+                                    change_request_id=change_request_id)
+        if stopped is not None:
+            return stopped
+        verdict = reported.status
+        report.verdict = verdict
+    else:
+        # Resuming at the resolution: the change request's own comments carry
+        # the review it resolves, and the stage recovers those findings. The
+        # verdict is what this cycle acts on, not one it observed, so the
+        # report's verdict stays unset until a re-review gives one.
+        verdict = "CHANGES_REQUESTED"
 
     while verdict == "CHANGES_REQUESTED" and recorder.iteration < max_iterations:
         recorder.next_iteration()
@@ -808,6 +921,12 @@ def main(argv: list[str] | None = None) -> int:
                               "recorded as a pre-routing signal, unknown when omitted"))
     parser.add_argument("--mode", choices=("production", "calibration"),
                         default="production")
+    parser.add_argument("--from", dest="start_from", choices=CYCLE_STARTS,
+                        default="implement",
+                        help=("stage to start at; anything but implement resumes "
+                              "the change request named by --pr (default: implement)"))
+    parser.add_argument("--pr", dest="change_request", default=None,
+                        help="existing change request a resumed cycle works on")
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
@@ -831,11 +950,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--progress-interval must be greater than zero")
 
     try:
+        validate_start(args.start_from, args.change_request, local_only=args.local_only)
         repo, profiles, routing_strategy = plan_with_strategy(args)
+        config = resolve_config(args)
+        if args.start_from in RESUMES:
+            host = (config.get("code_cycle") or {}).get("code_host")
+            if host not in (None, "github"):
+                raise CycleDriverError(
+                    f"resuming reads the pull request through GitHub; code_host "
+                    f"{host} is not supported")
+            check_change_request(repo, args.change_request, args.cwd)
     except CycleDriverError as error:
         parser.error(str(error))
 
-    config = resolve_config(args)
     change_bases = change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
@@ -862,6 +989,8 @@ def main(argv: list[str] | None = None) -> int:
                 else args.verification == "available"
             ),
             jev=jev,
+            start_from=args.start_from,
+            change_request_id=args.change_request,
         )
     except CycleDriverError as error:
         parser.error(str(error))
