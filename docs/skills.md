@@ -55,13 +55,16 @@ Implements one work item and takes it to a tested pull request.
 - **Does:**
   1. runs `cc-provider-bootstrap`;
   2. reads the work item (title, body, labels, comments, acceptance criteria);
-  3. makes the smallest coherent change, with regression tests for defects and contract changes;
-  4. runs the narrowest tests, then `cc-verify`;
-  5. reviews its own diff for stray files, secrets, and debug output;
-  6. commits, pushes, and opens a PR linked to the work item.
+  3. diagnoses it before editing: treats the item's stated cause as a hypothesis, searches related work (basic always, widened on signals such as recurrence, a bug label, or shared code), reproduces a defect, names the broken invariant, and decides (see below);
+  4. makes the change the diagnosis chose, preferring a fix that restores the invariant at its source, with regression tests for defects and contract changes;
+  5. runs the narrowest tests, then `cc-verify`;
+  6. reviews its own diff for stray files, secrets, and debug output;
+  7. commits, pushes, and opens a PR linked to the work item, with a *Diagnosis* section.
 - **Local-only:** if you ask for local work only, it stops after the checks and reports that no PR was created.
+- **Diagnosis decisions:** `implement` and `implement_root_fix` proceed; the second lists in the PR every other open item the root fix also addresses, without closing them. `do_not_implement_in_isolation` (a shared cause whose root fix exceeds the item), `stop_duplicate` (duplicate, superseded, or already resolved), `needs_scope_decision` (the real cause lies outside the item), and `needs_evidence` (a defect that could not be reproduced) stop as `BLOCKED` before any branch exists and comment on the work item with the evidence.
 - **Statuses:** `IMPLEMENTED`, `BLOCKED`, `FAILED`.
-- **Never:** merges, describes the PR as reviewed, or closes unrelated issues.
+- **Result:** the structured result carries an additive `diagnosis` object with closed values only: `classification` (`isolated_defect`, `shared_cause`, `duplicate`, `superseded`, `already_resolved`, `feature_request`, `cause_mismatch`, `not_reproduced`), `decision`, `related_search` (`basic` or `widened`), `reproduced` and `cause_matches_issue` (`true`, `false`, or `null` when not applicable or not established), and `related_items` (identifiers only). Consumers that ignore unknown keys are unaffected.
+- **Never:** merges, describes the PR as reviewed, or closes or labels unrelated issues, including the related items its diagnosis found.
 
 ```text
 Use cc-implement-issue for issue 123 and open a pull request.

@@ -7,6 +7,14 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `cc-implement-issue` diagnoses a work item before editing. It treats the
+  item's stated cause as a hypothesis, searches related work at a basic depth
+  always and a widened one on signals, reproduces a defect first, names the
+  broken invariant, and ends in one decision. A duplicate, a shared cause
+  whose root fix exceeds the item, or a defect it could not reproduce stops as
+  `BLOCKED` before any branch exists and comments on the work item; a root
+  fix within scope lists the other items it addresses. The PR gains a *Diagnosis* section and the structured result an
+  additive `diagnosis` object. The validator checks both.
 - `cc-implement-issue` and `cc-resolve-comments` wait for the checks of the
   head they pushed before they report success, bounded by the repository's
   timeout or about 15 minutes. A failure within the stage's scope is fixed

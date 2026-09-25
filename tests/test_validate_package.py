@@ -230,6 +230,91 @@ class ValidatePackageTests(unittest.TestCase):
             errors, "cc-orchestrator does not route Claude-to-Codex mode"
         )
 
+    def edit_implement_skill(self, old: str, new: str) -> list[str]:
+        package = self.copy_package()
+        path = package / "skills" / "cc-implement-issue" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return VALIDATOR.validate_package(package)
+
+    def test_rejects_an_implement_result_example_that_is_not_json(self) -> None:
+        errors = self.edit_implement_skill(
+            '"related_items": ["130", "131"]', '"related_items": ["130", "131"],'
+        )
+
+        self.assert_error_contains(errors, "result example is not strict JSON")
+
+    def test_rejects_an_implement_result_example_without_diagnosis(self) -> None:
+        errors = self.edit_implement_skill('"diagnosis": {', '"diagnosed": {')
+
+        self.assert_error_contains(errors, "result example has no `diagnosis` object")
+
+    def test_rejects_a_diagnosis_decision_the_section_does_not_define(self) -> None:
+        errors = self.edit_implement_skill(
+            '"decision": "implement_root_fix"', '"decision": "patch_symptom"'
+        )
+
+        self.assert_error_contains(errors, "`diagnosis.decision` is not a known token")
+
+    def test_rejects_dropping_a_diagnosis_decision(self) -> None:
+        errors = self.edit_implement_skill(
+            "| `stop_duplicate` |", "| `stop` |"
+        )
+
+        self.assert_error_contains(errors, "does not define `stop_duplicate`")
+
+    def test_rejects_dropping_the_non_reproduced_outcome(self) -> None:
+        errors = self.edit_implement_skill("| `needs_evidence` |", "| `ask` |")
+
+        self.assert_error_contains(errors, "does not define `needs_evidence`")
+
+    def test_rejects_a_reproduction_flag_that_is_not_boolean_or_null(self) -> None:
+        errors = self.edit_implement_skill('"reproduced": true', '"reproduced": "unknown"')
+
+        self.assert_error_contains(errors, "`diagnosis.reproduced` must be true, false, or null")
+
+    def test_rejects_related_items_that_are_not_a_list(self) -> None:
+        errors = self.edit_implement_skill(
+            '"related_items": ["130", "131"]', '"related_items": "130"'
+        )
+
+        self.assert_error_contains(errors, "`diagnosis.related_items` must be a list")
+
+
+class DiagnosisShapeTests(unittest.TestCase):
+    """Every diagnosis the skill allows, not only the one its example prints."""
+
+    NOT_REPRODUCED = {
+        "classification": "not_reproduced", "decision": "needs_evidence",
+        "related_search": "basic", "reproduced": False,
+        "cause_matches_issue": None, "related_items": [],
+    }
+
+    def test_a_defect_that_could_not_be_reproduced_has_a_valid_diagnosis(self) -> None:
+        self.assertEqual([], VALIDATOR.diagnosis_errors(self.NOT_REPRODUCED))
+
+    def test_a_non_reproduced_defect_cannot_claim_a_known_cause(self) -> None:
+        for changed in ({"reproduced": True}, {"cause_matches_issue": False}):
+            with self.subTest(changed=changed):
+                problems = VALIDATOR.diagnosis_errors({**self.NOT_REPRODUCED, **changed})
+
+                self.assertTrue(any("`not_reproduced` requires" in p for p in problems))
+
+    def test_an_integer_is_not_a_boolean(self) -> None:
+        problems = VALIDATOR.diagnosis_errors({**self.NOT_REPRODUCED, "reproduced": 0})
+
+        self.assertTrue(any("must be true, false, or null" in p for p in problems))
+
+    def test_related_items_hold_identifiers_only(self) -> None:
+        for items in (["130", 131], [""], [{"id": "130"}]):
+            with self.subTest(items=items):
+                problems = VALIDATOR.diagnosis_errors(
+                    {**self.NOT_REPRODUCED, "related_items": items}
+                )
+
+                self.assertTrue(any("related_items" in p for p in problems))
+
 
 if __name__ == "__main__":
     unittest.main()

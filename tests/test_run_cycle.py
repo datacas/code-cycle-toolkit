@@ -433,6 +433,52 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertEqual("BLOCKED", reported["status"])
 
 
+    def test_a_diagnosed_duplicate_stops_before_review_with_its_reason(self) -> None:
+        """`stop_duplicate` needs no driver support: it is a BLOCKED like any
+        other, and the reason the implementer gave reaches the operator."""
+        said = "already resolved by change request 97"
+        codex = Talker("codex", block("BLOCKED", error=said, pr_number=None, diagnosis={
+            "classification": "duplicate", "decision": "stop_duplicate",
+            "related_search": "basic", "reproduced": None,
+            "cause_matches_issue": None, "related_items": ["97"]}))
+        claude = Talker("claude")
+
+        report = self.run_cycle(codex, claude)
+
+        self.assertEqual(["implement"], [stage.role for stage in report.stages])
+        self.assertEqual([], claude.dispatched)
+        self.assertIn("reported BLOCKED", report.stopped_because)
+        self.assertIn(said, report.explain())
+
+    def test_a_shared_cause_left_unfixed_stops_before_review(self) -> None:
+        said = "shared cause with 130 and 131; root fix exceeds this item's scope"
+        codex = Talker("codex", block("BLOCKED", error=said, pr_number=None, diagnosis={
+            "classification": "shared_cause",
+            "decision": "do_not_implement_in_isolation",
+            "related_search": "widened", "reproduced": True,
+            "cause_matches_issue": False, "related_items": ["130", "131"]}))
+        claude = Talker("claude")
+
+        report = self.run_cycle(codex, claude)
+
+        self.assertEqual(["implement"], [stage.role for stage in report.stages])
+        self.assertEqual([], claude.dispatched)
+        self.assertEqual(said, report.reason)
+
+    def test_a_defect_that_could_not_be_reproduced_stops_before_review(self) -> None:
+        said = "could not reproduce with the reported input; asked for logs"
+        codex = Talker("codex", block("BLOCKED", error=said, pr_number=None, diagnosis={
+            "classification": "not_reproduced", "decision": "needs_evidence",
+            "related_search": "basic", "reproduced": False,
+            "cause_matches_issue": None, "related_items": []}))
+        claude = Talker("claude")
+
+        report = self.run_cycle(codex, claude)
+
+        self.assertEqual(["implement"], [stage.role for stage in report.stages])
+        self.assertEqual([], claude.dispatched)
+        self.assertEqual(said, report.reason)
+
     def test_a_status_the_store_cannot_hold_is_not_carried_to_it(self) -> None:
         """It would raise on the way in and end the run without its last row."""
         report = self.run_cycle(Talker("codex", block("MOSTLY_FINE")), Talker("claude"))
