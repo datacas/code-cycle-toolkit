@@ -754,10 +754,10 @@ def run_cycle(
     # What the ladder and the no-progress guard read: every completed run in
     # this cycle, and each review's head and open set. A resumed cycle starts
     # with neither, so it can stop later than a whole cycle would, never
-    # earlier.
+    # earlier. `recorder.repeated_findings` stays unknown until the ladder is
+    # first evaluated: a cycle that never reached it was not measured at zero.
     history: list[RunStatuses] = []
     progress: list[tuple[str, frozenset[str]] | None] = []
-    recorder.repeated_findings = 0
 
     reported = Reported()
     verdict = None
@@ -905,8 +905,10 @@ def _finding_statuses(payload: dict | None, role: str) -> dict[str, str] | None:
             if not isinstance(item, dict):
                 return None
             finding_id, status = item.get("id"), item.get("status")
+            # The type first: a JSON list or object is unhashable, and a
+            # membership test on it would raise instead of reading as unknown.
             if (not isinstance(finding_id, str) or FINDING_ID.fullmatch(finding_id) is None
-                    or status not in vocabulary):
+                    or not isinstance(status, str) or status not in vocabulary):
                 return None
             statuses[finding_id] = vocabulary[status]
     return statuses

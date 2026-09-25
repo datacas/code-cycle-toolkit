@@ -17,8 +17,9 @@ All notable changes to this project are documented here. This project follows
   runtime also applies the skills' no-progress guard (same head, same open
   set). Both orchestrators state the ladder, and the validator checks it.
   Telemetry schema 7 adds the observed signal `repeated_findings` on
-  `resolve`/`rereview` rows and `stop_reason` on the `cycle` row; `cc-stats`
-  reports both.
+  `resolve`/`rereview` rows, its last evaluated value and `stop_reason` on the
+  `cycle` row; `cc-stats` reports both. A cycle that never reached the ladder
+  leaves `repeated_findings` unknown, not zero.
 - `cc-implement-issue` diagnoses a work item before editing. It treats the
   item's stated cause as a hypothesis, searches related work at a basic depth
   always and a widened one on signals, reproduces a defect first, names the

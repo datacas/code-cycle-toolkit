@@ -268,10 +268,13 @@ class CycleRecorder:
         self.change_observer = change_observer
         self.verification_available = verification_available
         self.failed_attempts = 0
-        # How many findings survived a claimed fix before the next routing.
-        # Set by the driver that reads the structured results; `None` is a
-        # recorder whose caller does not track it, and is left off the row.
-        # Not `failed_attempts`: that counts dispatches, not fixes.
+        # How many findings survived a claimed fix, as last evaluated. Set by
+        # the driver that reads the structured results; `None` is a recorder
+        # whose caller has not evaluated it, and is left off every row. Each
+        # later dispatch carries it as a pre-routing signal and the closing
+        # row keeps the last value, so a survival found by the final rereview
+        # is not lost when no dispatch follows it. Not `failed_attempts`: that
+        # counts dispatches, not fixes.
         self.repeated_findings: int | None = None
         self.prior_findings: dict[str, int] = {}
         self.iteration = 0
@@ -544,6 +547,8 @@ class CycleRecorder:
             )
         if self.tests_passed is not None:
             outcome["tests_passed"] = self.tests_passed
+        if self.repeated_findings is not None:
+            outcome["repeated_findings"] = self.repeated_findings
         return outcome
 
     def _pre_routing(self, role: str, change: ChangeSignals | None) -> dict:

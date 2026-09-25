@@ -550,9 +550,11 @@ abandoned for a reroute. `resolution_round` appears only on `resolve` and
 `rereview`. So does `repeated_findings` (schema 7): the number of finding IDs
 that survived a claimed fix before this routing, as
 [Exit conditions](review-cycle.md#exit-conditions) defines it. It is recorded
-only by `run_cycle.py`, which reads the structured results; a recorder whose
-caller does not track it leaves it out. It is not `previous_failed_attempts`,
-which counts failed dispatches, not failed fixes.
+only by `run_cycle.py`, which reads the structured results, and only once the
+ladder has been evaluated, the first time a review asks for changes: before
+that, and in a recorder whose caller does not track it, it is left out rather
+than recorded as zero. It is not `previous_failed_attempts`, which counts
+failed dispatches, not failed fixes.
 
 Unknown is not zero. A diff that could not be read — no worktree, no base that
 resolves, Git missing — leaves every change signal out; a diff that was read and
@@ -598,6 +600,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 | `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |
+| `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
 
 Finding counts are read from the result shape for the stage: `findings` for an
 initial review, `new_findings` plus `verified_findings` for a rereview, and

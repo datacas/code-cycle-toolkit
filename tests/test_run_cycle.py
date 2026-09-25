@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import executors as ex  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
+import stats  # noqa: E402
 import telemetry as tm  # noqa: E402
 from test_cycle import ScriptedAdapter  # noqa: E402
 
@@ -1528,6 +1529,67 @@ class RepeatedFindingTests(RunCycleTestCase):
 
         self.assertEqual("stage_not_completed", report.stop_reason)
         self.assertEqual("stage_not_completed", self.closing()["stop_reason"])
+
+    def test_a_status_that_is_not_text_makes_the_list_unreadable(self) -> None:
+        """REV-001: an unhashable status used to raise instead of reading as unknown."""
+        for status in ([], {}, ["open"], {"state": "open"}, 1, None, True):
+            with self.subTest(status=status):
+                for role, key in (("review", "findings"),
+                                  ("rereview", "verified_findings"),
+                                  ("resolve", "finding_outcomes")):
+                    payload = {key: [{"id": "REV-001", "status": status}]}
+                    self.assertIsNone(rc._finding_statuses(payload, role))
+                self.assertIsNone(rc._progress_key(
+                    "rereview", {"head_sha": "b" * 40,
+                                 "verified_findings": [{"id": "REV-001", "status": status}]}))
+
+    def test_a_malformed_status_still_ends_the_cycle_normally(self) -> None:
+        malformed = [{"id": "REV-001", "status": []}]
+        implementer = Scripted("codex", resolutions=[
+            block("RESOLVED", finding_outcomes=malformed)])
+        reviewer = Scripted("claude", reviews=[
+            block("CHANGES_REQUESTED", head_sha="a" * 40, findings=malformed),
+            block("CHANGES_REQUESTED", head_sha="b" * 40, verified_findings=malformed),
+        ])
+
+        report = self.run_cycle(implementer, reviewer, max_iterations=1)
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("iteration_limit", report.stop_reason)
+        closing = self.closing()
+        self.assertEqual("iteration_limit", closing["stop_reason"])
+        self.assertEqual(0, closing["repeated_findings"])
+
+    def test_a_survival_found_by_the_last_rereview_reaches_the_closing_row(self) -> None:
+        """REV-002: the final rereview's survival has no later dispatch to carry it."""
+        implementer = Scripted("codex", resolutions=[claimed()])
+        reviewer = Scripted("claude", reviews=[
+            FIRST_REVIEW,
+            rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+        ])
+
+        report = self.run_cycle(implementer, reviewer, max_iterations=1)
+
+        self.assertEqual("iteration_limit", report.stop_reason)
+        closing = self.closing()
+        self.assertEqual("iteration_limit", closing["stop_reason"])
+        self.assertEqual(1, closing["repeated_findings"])
+        summary = stats.aggregate(self.rows(), repo_id="owner/api", days=None)
+        self.assertEqual({"measured": 1, "cycles": 1},
+                         summary["summary"]["cycle_outcomes"]["repeated_findings"])
+
+    def test_a_cycle_that_never_reached_the_ladder_is_not_measured(self) -> None:
+        for implementer, reviewer in (
+                (Talker("codex", block("BLOCKED")), Talker("claude")),
+                (Talker("codex"), Talker("claude"))):
+            with self.subTest(implementer=implementer.body):
+                self.run_cycle(implementer, reviewer)
+
+                self.assertNotIn("repeated_findings", self.closing())
+        self.assertTrue(all("repeated_findings" not in row["payload"] for row in self.rows()))
+        summary = stats.aggregate(self.rows(), repo_id="owner/api", days=None)
+        self.assertEqual({"measured": 0, "cycles": 0},
+                         summary["summary"]["cycle_outcomes"]["repeated_findings"])
 
     def test_an_id_that_is_not_a_finding_id_never_reaches_a_prompt(self) -> None:
         implementer = Scripted("codex", resolutions=[
