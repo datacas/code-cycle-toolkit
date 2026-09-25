@@ -389,9 +389,13 @@ For every previous finding, state exactly one:
 - obsolete because the relevant scope was removed or changed.
 
 Represent those outcomes in the structured result as `resolved`, `still_open`,
-or `not_applicable`. A fix that is present but cannot be verified is not
-`resolved`: use `still_open` with the concrete reason, and use `BLOCKED` when a
-required external condition prevents completing the verdict.
+or `not_applicable`. `still_open` corresponds to `open` in the common finding
+header contract; keep the structured token for compatibility. A fix that is
+present but cannot be verified is not `resolved`: use `still_open` with the
+concrete reason, and use `BLOCKED` when a required external condition prevents
+completing the verdict.
+Each `verified_findings` entry includes its `severity` and `blocks_approval`
+alongside its ID and status fields so the runtime can count open findings.
 
 List new findings separately. Consolidate duplicates by root cause without
 hiding their affected surfaces.
@@ -504,7 +508,13 @@ ORCHESTRATION_RESULT
     "effort": "high"
   },
   "verified_findings": [
-    { "id": "REV-001", "status": "resolved", "disposition": "valid" }
+    {
+      "id": "REV-001",
+      "severity": "high",
+      "blocks_approval": true,
+      "status": "resolved",
+      "disposition": "valid"
+    }
   ],
   "new_findings": [
     {

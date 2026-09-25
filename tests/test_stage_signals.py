@@ -298,12 +298,12 @@ class DriverSignalTests(RunCycleTestCase):
     def test_severity_counts_are_recorded_only_when_every_finding_has_one(self) -> None:
         complete = rc._findings({"unresolved_findings": [
             {"severity": "high", "blocks_approval": True}, {"severity": "low"},
-        ]})
+        ]}, "resolve")
         self.assertEqual(1, complete["findings_high"])
         self.assertEqual(0, complete["findings_critical"])
         partial = rc._findings({"unresolved_findings": [
             {"severity": "high"}, {"id": "REV-002"},
-        ]})
+        ]}, "resolve")
         self.assertEqual(2, partial["findings_total"])
         self.assertNotIn("findings_high", partial)
 
@@ -313,9 +313,10 @@ class DriverSignalTests(RunCycleTestCase):
         self.assertEqual(("origin/HEAD",), rc.change_bases_of({}))
 
     def test_the_review_is_routed_knowing_the_implementation_findings_never(self) -> None:
-        reviewer = Talker("claude", block("CHANGES_REQUESTED", unresolved_findings=[
-            {"id": "REV-001", "severity": "high", "blocks_approval": True},
-        ]))
+        reviewer = Talker("claude", block("CHANGES_REQUESTED", findings=[
+            {"id": "REV-001", "severity": "high", "status": "open",
+             "blocks_approval": True},
+        ], blocking_findings=["REV-001"]))
         self.run_cycle(Talker("codex"), reviewer, max_iterations=0)
         review = [row for row in self.rows() if row["role"] == "review"]
         self.assertNotIn("prior_findings_total", review[0]["payload"])

@@ -235,7 +235,7 @@ class DriverTests(RunCycleTestCase):
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
         }
 
-        emitted = {"status", *rc._findings(payload), *rc._tests(payload),
+        emitted = {"status", *rc._findings(payload, "resolve"), *rc._tests(payload),
                    *rc._checks(payload)}
 
         self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)

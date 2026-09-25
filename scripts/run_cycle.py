@@ -700,7 +700,8 @@ def run_cycle(
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
-            recorder.record_verdict(role, reported.status, **_findings(reported.payload),
+            recorder.record_verdict(role, reported.status,
+                                    **_findings(reported.payload, role),
                                     **_tests(reported.payload),
                                     **_checks(reported.payload))
         if not reported.completes(role):
@@ -788,28 +789,123 @@ def _elsewhere(outcome: StageOutcome) -> str:
 SEVERITIES = ("critical", "high", "medium", "low")
 
 
-def _findings(payload: dict | None) -> dict:
-    """Counts the executor reported. Absent is absent, never zero."""
+def _findings(payload: dict | None, role: str) -> dict:
+    """Count the findings documented for this stage. Absent is never zero."""
     if not payload:
         return {}
-    out = {}
-    unresolved = payload.get("unresolved_findings")
-    if isinstance(unresolved, list):
-        out["findings_total"] = len(unresolved)
+    if role == "review":
+        candidates = payload.get("findings")
+        if not isinstance(candidates, list):
+            return {}
+        if _valid_findings(candidates, {"open", "resolved", "not_applicable"}) is None:
+            return {}
+        findings = [item for item in candidates if item.get("status") == "open"]
+    elif role == "rereview":
+        new_findings = payload.get("new_findings")
+        verified_findings = payload.get("verified_findings")
+        if (("new_findings" in payload and not isinstance(new_findings, list))
+                or ("verified_findings" in payload
+                    and not isinstance(verified_findings, list))):
+            return {}
+        if not isinstance(new_findings, list) and not isinstance(verified_findings, list):
+            return {}
+        new_findings = new_findings if isinstance(new_findings, list) else []
+        verified_findings = (verified_findings
+                             if isinstance(verified_findings, list) else [])
+        if _valid_findings(new_findings, {"open", "resolved", "not_applicable"}) is None:
+            return {}
+        if _valid_findings(
+                verified_findings,
+                {"still_open", "open", "resolved", "not_applicable"}) is None:
+            return {}
+        all_findings = _unique_findings(new_findings + verified_findings)
+        if all_findings is None:
+            return {}
+        findings = [item for item in all_findings
+                    if item.get("status") in {"open", "still_open"}]
+    elif role == "resolve":
+        findings = payload.get("unresolved_findings")
+        if (not isinstance(findings, list)
+                or any(not isinstance(item, dict) for item in findings)):
+            return {}
+    else:
+        return {}
+    # A malformed entry or conflicting duplicate makes the count unknown. In
+    # particular, dropping a finding with no status would turn a reported
+    # review issue into a false zero.
+    if findings is None:
+        return {}
+
+    out = {"findings_total": len(findings)}
+    blocking = payload.get("blocking_findings")
+    if isinstance(blocking, list):
+        if any(not isinstance(identifier, str) for identifier in blocking):
+            return {}
+        if not _blocking_findings_consistent(findings, blocking):
+            return {}
+        out["findings_blocking"] = len(set(blocking))
+    else:
         out["findings_blocking"] = sum(
-            1 for finding in unresolved
-            if isinstance(finding, dict) and finding.get("blocks_approval")
+            1 for finding in findings
+            if isinstance(finding, dict) and finding.get("blocks_approval") is True
         )
-        severities = [
-            finding.get("severity") if isinstance(finding, dict) else None
-            for finding in unresolved
-        ]
-        # Per-severity counts only when every finding says which it is: a
-        # partial breakdown would read as zero for the severities it missed.
-        if all(severity in SEVERITIES for severity in severities):
-            for severity in SEVERITIES:
-                out[f"findings_{severity}"] = severities.count(severity)
+    severities = [
+        finding.get("severity") if isinstance(finding, dict) else None
+        for finding in findings
+    ]
+    # A partial breakdown would read as zero for severities it missed.
+    if all(severity in SEVERITIES for severity in severities):
+        for severity in SEVERITIES:
+            out[f"findings_{severity}"] = severities.count(severity)
     return out
+
+
+def _valid_findings(entries: list, statuses: set[str]) -> list | None:
+    """Validate entry shapes and statuses, or return None when ambiguous."""
+    for item in entries:
+        if not isinstance(item, dict):
+            return None
+        status = item.get("status")
+        if not isinstance(status, str) or status not in statuses:
+            return None
+    return entries
+
+
+def _unique_findings(findings: list) -> list | None:
+    """Deduplicate identical IDs and reject duplicate IDs with conflicting data."""
+    unique = {}
+    anonymous = []
+    for finding in findings:
+        identifier = finding.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            anonymous.append(finding)
+            continue
+        previous = unique.get(identifier)
+        if previous is None:
+            unique[identifier] = finding
+        elif any(previous.get(key) != finding.get(key)
+                 for key in ("status", "severity", "blocks_approval")):
+            return None
+    return list(unique.values()) + anonymous
+
+
+def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
+    """Reject conflicting blocker signals when every finding is classifiable."""
+    if any(not isinstance(item, dict) for item in findings):
+        return False
+    if not all(isinstance(item.get("id"), str)
+               and isinstance(item.get("blocks_approval"), bool)
+               for item in findings):
+        return True
+    by_id = {}
+    for finding in findings:
+        identifier = finding["id"]
+        value = finding["blocks_approval"]
+        if identifier in by_id and by_id[identifier] != value:
+            return False
+        by_id[identifier] = value
+    expected = {identifier for identifier, blocks in by_id.items() if blocks}
+    return expected == set(blocking)
 
 
 def _tests(payload: dict | None) -> dict:

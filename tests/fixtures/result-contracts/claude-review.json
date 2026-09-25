@@ -1,0 +1,33 @@
+{
+  "capture": {
+    "executor": "claude",
+    "captured_at": "2026-09-23",
+    "role": "review",
+    "host": "github",
+    "model": "unknown (not recorded in the capture source)",
+    "skill_commit": "unknown (not recorded in the capture source)"
+  },
+  "result": {
+    "skill": "cc-initial-review",
+    "status": "CHANGES_REQUESTED",
+    "issue_provider": "github",
+    "issue_id": "ID-001",
+    "code_host": "github",
+    "change_request_id": "1",
+    "pr_number": 1,
+    "issue_number": 1,
+    "head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "findings": [
+      {
+        "id": "REV-001",
+        "severity": "high",
+        "status": "open",
+        "disposition": "-",
+        "blocks_approval": true
+      }
+    ],
+    "blocking_findings": ["REV-001"],
+    "blocking": false
+  }
+}

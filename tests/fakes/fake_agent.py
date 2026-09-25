@@ -94,6 +94,49 @@ def speak(model: str, message: str) -> None:
     print(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}))
 
 
+def result_for_role(role: str, status: str = "CHANGES_REQUESTED") -> dict:
+    """Return the structured payload this fake stage emits for a role."""
+    skill = {
+        "implement": "cc-implement-issue",
+        "review": "cc-initial-review",
+        "rereview": "cc-rereview",
+        "resolve": "cc-resolve-comments",
+    }.get(role, "fake")
+    payload = {"skill": skill, "status": status}
+    if role == "implement" and status == "IMPLEMENTED":
+        payload["change_request_id"] = "4"
+    if role == "review" and status != "BLOCKED":
+        findings = ([
+            {"id": "REV-001", "severity": "high", "status": "open",
+             "blocks_approval": True},
+            {"id": "REV-002", "severity": "low", "status": "open",
+             "blocks_approval": False},
+        ] if status == "CHANGES_REQUESTED" else [])
+        payload["findings"] = findings
+        payload["blocking_findings"] = [item["id"] for item in findings
+                                         if item["blocks_approval"]]
+    elif role == "rereview" and status != "BLOCKED":
+        payload["verified_findings"] = [
+            {"id": "REV-001", "severity": "high", "blocks_approval": True,
+             "status": "resolved", "disposition": "valid"},
+            {"id": "REV-002", "severity": "low", "blocks_approval": False,
+             "status": "resolved", "disposition": "valid"},
+        ]
+        payload["new_findings"] = []
+        payload["blocking_findings"] = []
+    elif role == "resolve" and status != "BLOCKED":
+        payload["finding_outcomes"] = [
+            {"id": "REV-001", "disposition": "valid", "status": "resolved"},
+            {"id": "REV-002", "disposition": "valid", "status": "resolved"},
+        ]
+        payload["resolved_findings"] = [
+            {"id": "REV-001", "status": "resolved"},
+            {"id": "REV-002", "status": "resolved"},
+        ]
+        payload["unresolved_findings"] = []
+    return payload
+
+
 def main(argv: list[str]) -> int:
     if "--version" in argv:
         # Exercise the current Codex permission-profile path in installed-cycle
@@ -116,16 +159,14 @@ def main(argv: list[str]) -> int:
         return 0
 
     status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)
-    payload = {"skill": "fake", "status": status}
-    if status == "IMPLEMENTED":
-        payload["change_request_id"] = "4"
-    if status == "CHANGES_REQUESTED":
-        payload["unresolved_findings"] = [
-            {"id": "REV-001", "severity": "high", "status": "open",
-             "blocks_approval": True},
-            {"id": "REV-002", "severity": "low", "status": "open",
-             "blocks_approval": False},
-        ]
+    selected = next(((skill, role) for skill, role in (
+        ("cc-implement-issue", "implement"),
+        ("cc-initial-review", "review"),
+        ("cc-rereview", "rereview"),
+        ("cc-resolve-comments", "resolve"),
+    ) if skill in prompt), ("fake", None))
+    _, role = selected
+    payload = result_for_role(role or "unknown", status)
     said += [BEGIN, json.dumps(payload), END]
     speak(model, "\n".join(said))
     return 0

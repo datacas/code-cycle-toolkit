@@ -1,0 +1,39 @@
+{
+  "capture": {
+    "executor": "claude",
+    "captured_at": "2026-09-23",
+    "role": "resolve",
+    "host": "github",
+    "model": "unknown (not recorded in the capture source)",
+    "skill_commit": "unknown (not recorded in the capture source)"
+  },
+  "result": {
+    "skill": "cc-resolve-comments",
+    "status": "RESOLVED",
+    "issue_provider": "github",
+    "issue_id": "ID-001",
+    "code_host": "github",
+    "change_request_id": "1",
+    "pr_number": 1,
+    "issue_number": 1,
+    "previous_head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+    "tests": { "passed": true },
+    "resolved_findings": [
+      {
+        "id": "REV-001",
+        "status": "resolved",
+        "commit_sha": "89abcdef0123456789abcdef0123456789abcdef"
+      }
+    ],
+    "unresolved_findings": [
+      {
+        "id": "REV-002",
+        "severity": "medium",
+        "status": "open",
+        "blocks_approval": true
+      }
+    ],
+    "blocking": false
+  }
+}
