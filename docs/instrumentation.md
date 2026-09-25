@@ -572,6 +572,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | Source | Fields | Written when |
 |---|---|---|
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
+| `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
 | `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
@@ -589,9 +590,13 @@ before touching code has nothing to report as failed.
 `Telemetry.cycle_outcome(repo_id, cycle_id)` reassembles a run from these rows and reports `closed: false` for one
 that never wrote its closing row, whose outcome is then unknown rather than
 failed. `resolution_rounds` counts the `resolve` stages the run attempted.
-`checks_passed` and `checks_failed` remain accepted telemetry fields, but no
-skill's structured result reports check counts, so they are not a recorded
-outcome; CI state stays in the published review comment.
+The check counts describe the head a stage left behind, as its `checks` block
+reports them after waiting for that head's CI. They are recorded only when all
+three are non-negative integers and, when both name a head, `checks.head_sha`
+equals the result's `head_sha`: checks of an earlier head are not this stage's,
+and a missing count would otherwise read as zero. Schema version 6 adds
+`checks_pending`; `checks_passed` and `checks_failed` were accepted before but
+never written. Check names stay in the published comment.
 
 Each dispatch row that reached an executor carries `duration_ms`, the executor
 call's wall time from a monotonic clock. An attempt refused before an executor

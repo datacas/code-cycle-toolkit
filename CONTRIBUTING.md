@@ -73,6 +73,7 @@ with them. Several sections are therefore duplicated verbatim:
 | `### The ORCHESTRATION_RESULT block is opt-in` | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `### Where the block goes` | the same three |
 | `### The PR comment is the machine-readable record` | the same three |
+| `## Checks of the pushed head` | `cc-implement-issue`, `cc-resolve-comments` |
 
 Editing one copy means editing all of them. The validator compares the copies
 byte for byte and fails on drift, which is the whole point: these sections

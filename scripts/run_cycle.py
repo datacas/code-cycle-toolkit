@@ -701,7 +701,8 @@ def run_cycle(
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
             recorder.record_verdict(role, reported.status, **_findings(reported.payload),
-                                    **_tests(reported.payload))
+                                    **_tests(reported.payload),
+                                    **_checks(reported.payload))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
         return reported, None
@@ -833,6 +834,32 @@ def _tests(payload: dict | None) -> dict:
             and _status_of(payload) == "BLOCKED"):
         return {}
     return {"tests_passed": tests["passed"]}
+
+
+CHECK_COUNTS = ("passed", "failed", "pending")
+
+
+def _checks(payload: dict | None) -> dict:
+    """The code-host checks of the head the stage finished on. Absent is absent.
+
+    A count is recorded only when the stage reported all three, each a
+    non-negative integer: a partial report would read the missing states as
+    zero, and "no pending check" is exactly what a stage that stopped waiting
+    must not be taken to have said. Nor are checks that ran on another head
+    this stage's: when both the result and its `checks` name a head, they must
+    agree, or the counts describe a commit the stage did not leave behind.
+    """
+    checks = payload.get("checks") if payload else None
+    if not isinstance(checks, dict):
+        return {}
+    counts = {state: checks.get(state) for state in CHECK_COUNTS}
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+               for value in counts.values()):
+        return {}
+    ran_on, head = checks.get("head_sha"), payload.get("head_sha")
+    if isinstance(ran_on, str) and isinstance(head, str) and ran_on != head:
+        return {}
+    return {f"checks_{state}": value for state, value in counts.items()}
 
 
 def _why(outcome: StageOutcome) -> str:

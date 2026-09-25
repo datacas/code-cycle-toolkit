@@ -50,6 +50,10 @@ SHARED_REVIEW_SECTIONS = (
     "### The change-request comment is the machine-readable record",
 )
 
+# The two skills that push a head wait for its checks by the same rule.
+HEAD_PUSHING_SKILLS = ("cc-implement-issue", "cc-resolve-comments")
+SHARED_HEAD_SECTIONS = ("## Checks of the pushed head",)
+
 # Every skill repeats these two sections verbatim, for the same reason.
 SHARED_ALL_SECTIONS = ("## Repository conventions",)
 # cc-run publishes no GitHub artefact, so it states the language rule in its own
@@ -342,6 +346,7 @@ def validate_package(root: Path) -> list[str]:
             root, sorted(REQUIRED_SKILLS - LANGUAGE_EXEMPT), SHARED_PUBLISHING_SECTIONS, errors
         )
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
+        check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
         check_record_contract(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE

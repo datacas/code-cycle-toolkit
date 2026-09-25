@@ -244,6 +244,51 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
     }
 
 
+#: The stages that leave a head behind, whose checks say whether it was green.
+HEAD_PRODUCING_ROLES = frozenset({"implement", "resolve"})
+CHECK_STATES = ("green", "failed", "pending", "none")
+
+
+def _check_state(payload: dict) -> str | None:
+    """How the head a stage finished on stood on CI, or None when unreported."""
+    counts = [payload.get(f"checks_{state}") for state in ("passed", "failed", "pending")]
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in counts):
+        return None
+    passed, failed, pending = counts
+    if failed:
+        return "failed"
+    if pending:
+        return "pending"
+    return "green" if passed else "none"
+
+
+def _stage_checks(rows: list[dict]) -> dict:
+    """CI state of each implementation or resolution head, by reported status.
+
+    Only verdicts are read: the counts arrive on the row that reports what the
+    stage claimed, which is what lets a "resolved" head be set against its CI.
+    """
+    by_status: dict[str, Counter] = defaultdict(Counter)
+    for row in rows:
+        payload = row["payload"]
+        if payload.get("record_kind") != "verdict" or row.get("role") not in HEAD_PRODUCING_ROLES:
+            continue
+        state = _check_state(payload)
+        if state is not None:
+            by_status[str(row.get("status") or "UNKNOWN").upper()][state] += 1
+    totals = Counter()
+    for counts in by_status.values():
+        totals.update(counts)
+    return {
+        "measured": sum(totals.values()),
+        **{state: totals[state] for state in CHECK_STATES},
+        "by_status": {
+            status: {state: counts[state] for state in CHECK_STATES}
+            for status, counts in sorted(by_status.items())
+        },
+    }
+
+
 def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
               now: datetime | None = None, minimum: int = MINIMUM_SAMPLE) -> dict:
     """Build a JSON-safe report without returning raw telemetry rows."""
@@ -374,6 +419,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                 "measured": sum(verification.values()),
                 "not_reported": len(verification_groups) - sum(verification.values()),
             },
+            "stage_checks": _stage_checks(current),
             "duration_ms": {
                 "measured": len(durations),
                 "mean": sum(durations) / len(durations) if durations else None,
@@ -564,6 +610,19 @@ def render_markdown(report: dict) -> str:
     else:
         lines.append(f"- Test verification, per cycle: not reported for "
                      f"{verification['not_reported']} cycle(s)")
+    checks = summary["stage_checks"]
+    if checks["measured"]:
+        per_status = "; ".join(
+            f"{status} {counts['green']} of {sum(counts.values())} green"
+            for status, counts in checks["by_status"].items()
+        )
+        lines.append(
+            f"- CI on stage heads: **{checks['green']} of {checks['measured']} green**, "
+            f"{checks['failed']} failed, {checks['pending']} pending, "
+            f"{checks['none']} without checks ({per_status})"
+        )
+    else:
+        lines.append("- CI on stage heads: not reported")
     duration, cost = summary["duration_ms"], summary["cost_usd"]
     lines.append(
         f"- Duration: **{duration['total'] / 1000:.1f}s total** across {duration['measured']} measured stages"
