@@ -1,0 +1,22 @@
+{
+  "capture": {
+    "executor": "codex",
+    "captured_at": "2026-09-24",
+    "role": "implement"
+  },
+  "result": {
+    "skill": "cc-implement-issue",
+    "status": "IMPLEMENTED",
+    "issue_provider": "github",
+    "issue_id": "ID-001",
+    "issue_number": 1,
+    "code_host": "github",
+    "repo": "owner/repository",
+    "change_request_id": "1",
+    "pr_number": 1,
+    "branch": "issue-1",
+    "head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "tests": { "passed": true },
+    "blocking": false
+  }
+}

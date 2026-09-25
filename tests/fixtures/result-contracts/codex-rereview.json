@@ -1,0 +1,30 @@
+{
+  "capture": {
+    "executor": "codex",
+    "captured_at": "2026-09-23",
+    "role": "rereview"
+  },
+  "result": {
+    "skill": "cc-rereview",
+    "status": "BLOCKED",
+    "issue_provider": "github",
+    "issue_id": "ID-001",
+    "code_host": "github",
+    "change_request_id": "1",
+    "pr_number": 1,
+    "issue_number": 1,
+    "previous_reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "reviewed_head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+    "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
+    "verified_findings": [
+      { "id": "REV-001", "status": "resolved" },
+      { "id": "REV-002", "status": "resolved" },
+      { "id": "REV-003", "status": "still_open" },
+      { "id": "REV-003", "status": "resolved" },
+      { "id": "REV-004", "status": "still_open" }
+    ],
+    "new_findings": [],
+    "blocking_findings": ["REV-004"],
+    "blocking": true
+  }
+}

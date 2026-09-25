@@ -700,7 +700,8 @@ def run_cycle(
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
-            recorder.record_verdict(role, reported.status, **_findings(reported.payload),
+            recorder.record_verdict(role, reported.status,
+                                    **_findings(reported.payload, role),
                                     **_tests(reported.payload),
                                     **_checks(reported.payload))
         if not reported.completes(role):
@@ -788,27 +789,51 @@ def _elsewhere(outcome: StageOutcome) -> str:
 SEVERITIES = ("critical", "high", "medium", "low")
 
 
-def _findings(payload: dict | None) -> dict:
-    """Counts the executor reported. Absent is absent, never zero."""
+def _findings(payload: dict | None, role: str) -> dict:
+    """Count the findings documented for this stage. Absent is never zero."""
     if not payload:
         return {}
-    out = {}
-    unresolved = payload.get("unresolved_findings")
-    if isinstance(unresolved, list):
-        out["findings_total"] = len(unresolved)
-        out["findings_blocking"] = sum(
-            1 for finding in unresolved
-            if isinstance(finding, dict) and finding.get("blocks_approval")
+    if role == "review":
+        candidates = payload.get("findings")
+        if not isinstance(candidates, list):
+            return {}
+        findings = [item for item in candidates
+                    if isinstance(item, dict) and item.get("status") == "open"]
+    elif role == "rereview":
+        new_findings = payload.get("new_findings")
+        verified_findings = payload.get("verified_findings")
+        if not isinstance(new_findings, list) and not isinstance(verified_findings, list):
+            return {}
+        findings = [item for item in (new_findings or [])
+                    if isinstance(item, dict) and item.get("status") == "open"]
+        findings.extend(
+            item for item in (verified_findings or [])
+            if isinstance(item, dict) and item.get("status") in {"still_open", "open"}
         )
-        severities = [
-            finding.get("severity") if isinstance(finding, dict) else None
-            for finding in unresolved
-        ]
-        # Per-severity counts only when every finding says which it is: a
-        # partial breakdown would read as zero for the severities it missed.
-        if all(severity in SEVERITIES for severity in severities):
-            for severity in SEVERITIES:
-                out[f"findings_{severity}"] = severities.count(severity)
+    elif role == "resolve":
+        findings = payload.get("unresolved_findings")
+        if not isinstance(findings, list):
+            return {}
+    else:
+        return {}
+
+    out = {"findings_total": len(findings)}
+    blocking = payload.get("blocking_findings")
+    if isinstance(blocking, list):
+        out["findings_blocking"] = len(blocking)
+    else:
+        out["findings_blocking"] = sum(
+            1 for finding in findings
+            if isinstance(finding, dict) and finding.get("blocks_approval") is True
+        )
+    severities = [
+        finding.get("severity") if isinstance(finding, dict) else None
+        for finding in findings
+    ]
+    # A partial breakdown would read as zero for severities it missed.
+    if all(severity in SEVERITIES for severity in severities):
+        for severity in SEVERITIES:
+            out[f"findings_{severity}"] = severities.count(severity)
     return out
 
 
