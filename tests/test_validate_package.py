@@ -274,6 +274,18 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "result example has no `diagnosis` object")
 
+    def test_rejects_an_implement_result_example_without_work_units(self) -> None:
+        errors = self.edit_implement_skill('"work_units": [', '"units": [')
+
+        self.assert_error_contains(errors, "`work_units` must be a non-empty list")
+
+    def test_rejects_an_unknown_work_unit_rollback_token(self) -> None:
+        errors = self.edit_implement_skill(
+            '"rollback": "independent"', '"rollback": "sometimes"'
+        )
+
+        self.assert_error_contains(errors, "`work_units[0].rollback` is not a known token")
+
     def test_rejects_a_diagnosis_decision_the_section_does_not_define(self) -> None:
         errors = self.edit_implement_skill(
             '"decision": "implement_root_fix"', '"decision": "patch_symptom"'
@@ -338,6 +350,49 @@ class DiagnosisShapeTests(unittest.TestCase):
                 )
 
                 self.assertTrue(any("related_items" in p for p in problems))
+
+
+class WorkUnitShapeTests(unittest.TestCase):
+    """The structured result carries tokens and commit references only."""
+
+    def test_accepts_each_rollback_boundary(self) -> None:
+        for rollback in ("independent", "dependent", "irreversible"):
+            with self.subTest(rollback=rollback):
+                units = [{
+                    "id": "WU-1",
+                    "commit_sha": "89abcdef0123456789abcdef0123456789abcdef",
+                    "rollback": rollback,
+                }]
+
+                self.assertEqual([], VALIDATOR.work_units_errors(units))
+
+    def test_accepts_null_sha_for_a_required_single_commit(self) -> None:
+        units = [{"id": "WU-1", "commit_sha": None, "rollback": "independent"}]
+
+        self.assertEqual([], VALIDATOR.work_units_errors(units))
+
+    def test_rejects_a_truncated_commit_sha(self) -> None:
+        units = [{"id": "WU-1", "commit_sha": "89abcdef", "rollback": "independent"}]
+
+        problems = VALIDATOR.work_units_errors(units)
+
+        self.assertTrue(any("must be a full SHA or null" in problem for problem in problems))
+
+    def test_rejects_duplicate_ids_and_non_token_fields(self) -> None:
+        units = [
+            {"id": "WU-1", "commit_sha": None, "rollback": "independent"},
+            {
+                "id": "WU-1",
+                "commit_sha": None,
+                "rollback": "dependent",
+                "description": "free text",
+            },
+        ]
+
+        problems = VALIDATOR.work_units_errors(units)
+
+        self.assertTrue(any("duplicates `WU-1`" in problem for problem in problems))
+        self.assertTrue(any("keys" in problem for problem in problems))
 
 
 if __name__ == "__main__":

@@ -174,6 +174,11 @@ Apply this section only when the change touches a user interface.
 - Are there new environment variables, and are they documented?
 - Does deployment need a manual step such as a migration, a seed, or a flag?
 - Is a clean rollback possible if it fails?
+- For each irreversible step in the change (such as an applied migration,
+  destructive data change, dependency publication, or external state), does
+  the matching *Work units* row declare `irreversible`, name the effect a
+  revert leaves behind, and state the manual recovery step? An irreversible
+  step not declared as `irreversible` is a finding.
 - Are new dependencies necessary, maintained, and free of known
   vulnerabilities?
 

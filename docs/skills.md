@@ -56,14 +56,16 @@ Implements one work item and takes it to a tested pull request.
   1. runs `cc-provider-bootstrap`;
   2. reads the work item (title, body, labels, comments, acceptance criteria);
   3. diagnoses it before editing: treats the item's stated cause as a hypothesis, searches related work (basic always, widened on signals such as recurrence, a bug label, or shared code), reproduces a defect, names the broken invariant, and decides (see below);
-  4. makes the change the diagnosis chose, preferring a fix that restores the invariant at its source, with regression tests for defects and contract changes;
-  5. runs the narrowest tests, then `cc-verify`;
-  6. reviews its own diff for stray files, secrets, and debug output;
-  7. commits, pushes, and opens a PR linked to the work item, with a *Diagnosis* section.
+  4. plans work units after diagnosis and before editing, grouping each behaviour with its code, tests, verification, and applicable documentation;
+  5. makes the planned change, preferring a fix that restores the invariant at its source, with regression tests for defects and contract changes;
+  6. runs the narrowest tests for each unit, then `cc-verify`;
+  7. reviews its own diff for stray files, secrets, and debug output;
+  8. commits per unit when the repository permits it, then pushes and opens a PR linked to the work item with *Diagnosis* and *Work units* sections.
 - **Local-only:** if you ask for local work only, it stops after the checks and reports that no PR was created.
 - **Diagnosis decisions:** `implement` and `implement_root_fix` proceed; the second lists in the PR every other open item the root fix also addresses, without closing them. `do_not_implement_in_isolation` (a shared cause whose root fix exceeds the item), `stop_duplicate` (duplicate, superseded, or already resolved), `needs_scope_decision` (the real cause lies outside the item), and `needs_evidence` (a defect that could not be reproduced) stop as `BLOCKED` before any branch exists and comment on the work item with the evidence.
+- **Work units:** one behaviour is a unit, with its files, tests, verification, and applicable documentation. Each unit leaves the tree passing. The PR's *Work units* table records behaviour, files, tests, verification, and rollback (`independent`, `dependent`, or `irreversible`). A `dependent` row names the units it must be reverted with; an `irreversible` row names the effect and manual recovery step.
 - **Statuses:** `IMPLEMENTED`, `BLOCKED`, `FAILED`.
-- **Result:** the structured result carries an additive `diagnosis` object with closed values only: `classification` (`isolated_defect`, `shared_cause`, `duplicate`, `superseded`, `already_resolved`, `feature_request`, `cause_mismatch`, `not_reproduced`), `decision`, `related_search` (`basic` or `widened`), `reproduced` and `cause_matches_issue` (`true`, `false`, or `null` when not applicable or not established), and `related_items` (identifiers only). Consumers that ignore unknown keys are unaffected.
+- **Result:** the structured result carries an additive `diagnosis` object with closed values only: `classification` (`isolated_defect`, `shared_cause`, `duplicate`, `superseded`, `already_resolved`, `feature_request`, `cause_mismatch`, `not_reproduced`), `decision`, `related_search` (`basic` or `widened`), `reproduced` and `cause_matches_issue` (`true`, `false`, or `null` when not applicable or not established), and `related_items` (identifiers only). It also carries `work_units` as a non-empty list of `{id, commit_sha, rollback}` tokens whenever at least one unit was planned, even if a later step stops as `BLOCKED`; omit it if the run stops before planning. `commit_sha` is null when no per-unit commit exists, including local-only work that stops before committing or a repository that requires one combined commit; `pr_number` is null when no PR was created, distinguishing local-only work from a combined-commit PR. Consumers that ignore unknown keys are unaffected.
 - **Never:** merges, describes the PR as reviewed, or closes or labels unrelated issues, including the related items its diagnosis found.
 
 ```text

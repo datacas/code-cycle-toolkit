@@ -110,29 +110,37 @@ created. Never merge a pull request or close unrelated issues.
    diagnose the work item as *Diagnose before editing* describes, before
    creating a branch or editing anything. Continue only on the decisions
    `implement` and `implement_root_fix`.
-5. Implement the issue in the fix shape the diagnosis chose. Preserve existing behavior outside its scope and add
-   regression coverage when the change fixes a defect or changes a contract.
-6. Run the narrowest relevant tests first, then the repository's required
-   verification when its prerequisites are available; `cc-verify` performs
-   that pass. Record commands and observed results; do not call an unchecked
-   implementation complete.
-7. Review the accumulated diff for scope, accidental files, secrets, debug
+5. Plan work units after diagnosis and before editing. A unit is one behaviour
+   with its code, tests, verification, and applicable documentation. Order the
+   units so each leaves the tree passing. Treat a single-behaviour change as
+   one unit; do not split work just to create more commits.
+6. Implement the planned units in the fix shape the diagnosis chose. Preserve
+   existing behavior outside the issue's scope and add regression coverage when
+   the change fixes a defect or changes a contract.
+7. Run the narrowest relevant tests for each unit first, then the repository's
+   required verification when its prerequisites are available; `cc-verify`
+   performs that pass. Record the commands and results for each unit. Do not
+   call an unchecked implementation complete.
+8. Review the accumulated diff for scope, accidental files, secrets, debug
    output, generated artifacts, and missing tests.
-8. Create a focused commit using the repository's trusted workflow. Push the
-   branch only when the requested issue-to-PR workflow authorizes it.
-9. Open a pull request through the configured code host against the resolved
-   base branch. Include the work-item's canonical key and URL, and the
-   *Diagnosis* section described below. Use `Closes
-   #<issue_number>` only for GitHub Issues when the repository workflow uses
-   automatic closure; for Plane and Jira, use the provider-native link and do
-   not claim that the work item was closed unless its state was observed.
-10. Wait for the checks of the pushed head and let them decide the status, as
-   *Checks of the pushed head* describes.
-11. Report the issue provider, work-item ID, code host, repository, branch,
-   commit, change-request ID and URL, verification, the checks of the final
-   head, and any residual risk. Do
-   not describe the change request as reviewed or approved; that is a later
-   skill's responsibility.
+9. Commit each unit separately when the repository's workflow allows multiple
+   commits. If it requires one commit, keep one commit and use `null` for every
+   unit's `commit_sha` in the structured result. Follow the repository's
+   workflow in either case. Push the branch only when the requested
+   issue-to-PR workflow authorizes it.
+10. Open a pull request through the configured code host against the resolved
+    base branch. Include the work-item's canonical key and URL, the
+    *Diagnosis* section described below, and the *Work units* table described
+    below. Use `Closes
+    #<issue_number>` only for GitHub Issues when the repository workflow uses
+    automatic closure; for Plane and Jira, use the provider-native link and do
+    not claim that the work item was closed unless its state was observed.
+11. Wait for the checks of the pushed head and let them decide the status, as
+    *Checks of the pushed head* describes.
+12. Report the issue provider, work-item ID, code host, repository, branch,
+    commit, change-request ID and URL, work units, verification, the checks of
+    the final head, and any residual risk. Do not describe the change request
+    as reviewed or approved; that is a later skill's responsibility.
 
 ## Diagnose before editing
 
@@ -205,6 +213,27 @@ they were searched, and the fix shape. When the decision is
 `implement_root_fix`, it also lists the other open items the change addresses.
 When the structured result is emitted, it carries the same decision in the
 `diagnosis` object described under *Structured result*.
+
+**Record the work units.** The pull request body also carries a *Work units*
+table with one row per planned unit and these columns: behaviour, files, tests,
+verification, and rollback. State the rollback boundary accurately:
+
+- `independent`: reverting the unit's commit alone restores the previous
+  behaviour;
+- `dependent`: it must be reverted together with the named units;
+- `irreversible`: a revert does not undo an effect such as an applied
+  migration, data backfill, published artefact, or external state. Name the
+  effect and the manual step that undoes it.
+
+Keep the table's files, tests, and verification specific to each unit. When the
+repository requires a single commit, describe the same units in the table and
+use `null` for their `commit_sha` values.
+
+Use this table shape, replacing the example values with the actual unit details:
+
+| Unit | Behaviour | Files | Tests | Verification | Rollback |
+|---|---|---|---|---|---|
+| `WU-1` | `<behaviour>` | `<paths>` | `<tests>` | `<commands and results>` | `<independent, dependent, or irreversible boundary>` |
 
 ## Checks of the pushed head
 
@@ -293,6 +322,13 @@ ORCHESTRATION_RESULT
   "branch": "issue-123-short-name",
   "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
   "tests": { "passed": true },
+  "work_units": [
+    {
+      "id": "WU-1",
+      "commit_sha": "89abcdef0123456789abcdef0123456789abcdef",
+      "rollback": "independent"
+    }
+  ],
   "diagnosis": {
     "classification": "shared_cause",
     "decision": "implement_root_fix",
@@ -341,6 +377,18 @@ identifiers of the related items found, in the issue provider's native form, and
 is empty when there are none. The four stopping decisions report `BLOCKED` with
 `pr_number` set to `null` and still carry `diagnosis`. When the stage stopped
 before diagnosing, for example on a bootstrap failure, omit `diagnosis`.
+
+Include `work_units` whenever at least one unit was planned, including when a
+later step stops as `BLOCKED`; omit it when the stage stops before planning,
+such as on a bootstrap failure or a stopping diagnosis decision. When present,
+it is a non-empty list. Each object contains only `id` (`WU-1`, `WU-2`, ...),
+`commit_sha` (a full commit SHA for a per-unit commit, or `null` when no
+per-unit commit exists, such as when the repository requires one combined
+commit or local-only work stops before committing), and `rollback`
+(`independent`, `dependent`, or `irreversible`). For a local-only result,
+`pr_number` is `null`, distinguishing it from a combined-commit pull request.
+Put the behaviour and any rollback explanation in the pull request's *Work
+units* table, not in this token-only list.
 
 ## Final response
 
