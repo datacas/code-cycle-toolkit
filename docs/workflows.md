@@ -60,7 +60,10 @@ Use cc-stats for the last 7 days.
 
 **When:** you want the full cycle but want to read each result, and possibly change course, before the next stage starts.
 
-**What it does:** you run the four cycle skills in order. Each one recovers state from the pull request's comments, so nothing has to be carried between them by hand.
+**What it does:** you run the four cycle skills in order. The implementation
+step plans functional work units and records their tests, verification, and
+rollback boundaries in the pull request. Each stage recovers state from the
+pull request's comments, so nothing has to be carried between them by hand.
 
 ```text
 1. Use cc-implement-issue for issue 123 and open a pull request.

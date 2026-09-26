@@ -272,6 +272,10 @@ DIAGNOSIS_KEYS = {
     "classification", "decision", "related_search", "reproduced",
     "cause_matches_issue", "related_items",
 }
+WORK_UNIT_KEYS = {"id", "commit_sha", "rollback"}
+WORK_UNIT_ROLLBACKS = ("independent", "dependent", "irreversible")
+WORK_UNIT_ID_RE = re.compile(r"WU-[1-9][0-9]*")
+COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def diagnosis_errors(diagnosis: object) -> list[str]:
@@ -310,8 +314,46 @@ def diagnosis_errors(diagnosis: object) -> list[str]:
     return problems
 
 
+def work_units_errors(work_units: object) -> list[str]:
+    """Validate the token-only work-unit result contract."""
+    if not isinstance(work_units, list) or not work_units:
+        return ["`work_units` must be a non-empty list"]
+
+    problems: list[str] = []
+    seen_ids: set[str] = set()
+    for index, unit in enumerate(work_units):
+        where = f"`work_units[{index}]`"
+        if not isinstance(unit, dict):
+            problems.append(f"{where} must be an object")
+            continue
+        if set(unit) != WORK_UNIT_KEYS:
+            problems.append(
+                f"{where} keys {sorted(unit)} differ from {sorted(WORK_UNIT_KEYS)}"
+            )
+
+        unit_id = unit.get("id")
+        if not isinstance(unit_id, str) or not WORK_UNIT_ID_RE.fullmatch(unit_id):
+            problems.append(f"`work_units[{index}].id` must be a WU-N token")
+        elif unit_id in seen_ids:
+            problems.append(f"`work_units[{index}].id` duplicates `{unit_id}`")
+        else:
+            seen_ids.add(unit_id)
+
+        commit_sha = unit.get("commit_sha")
+        if commit_sha is not None and (
+            not isinstance(commit_sha, str)
+            or not COMMIT_SHA_RE.fullmatch(commit_sha)
+        ):
+            problems.append(f"`work_units[{index}].commit_sha` must be a full SHA or null")
+
+        if unit.get("rollback") not in WORK_UNIT_ROLLBACKS:
+            problems.append(f"`work_units[{index}].rollback` is not a known token")
+
+    return problems
+
+
 def check_implement_contract(root: Path, errors: list[str]) -> None:
-    """Keep the implement stage's diagnosis and its result example consistent.
+    """Keep the implement stage's diagnosis, work units, and result example consistent.
 
     The diagnosis section defines the tokens; the result example is what a
     consumer copies. Both must name the same closed vocabulary, and the example
@@ -354,6 +396,10 @@ def check_implement_contract(root: Path, errors: list[str]) -> None:
         errors.append(f"{where}: result example has no `diagnosis` object")
         return
     errors.extend(f"{where}: {problem}" for problem in diagnosis_errors(shown))
+    errors.extend(
+        f"{where}: {problem}"
+        for problem in work_units_errors(example.get("work_units"))
+    )
 
 
 ORCHESTRATOR_SKILLS = ("cc-orchestrator", "cc-orca-orchestrator")
