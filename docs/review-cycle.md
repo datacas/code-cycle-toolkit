@@ -164,7 +164,7 @@ The ladder has two rungs. After the **first** survival, the next resolution is t
 
 The no-progress guard alone misses this pattern: a resolver that pushes a commit which does not fix the finding changes the head. On PR #74, `REV-001` went `open → resolved → open → not_applicable → open` across three reviews and nothing stopped it.
 
-`review_contract.claimed_fix_survivals` is the single definition. It reads parsed comments for analysis, and `run_cycle.py` feeds it the structured results of the current run. A resumed cycle (`--from`) starts at zero survivals, so it can stop later than a whole cycle would, never earlier. Both orchestrator skills apply the same ladder, and the package validator checks that they state it.
+`review_contract.claimed_fix_survivals` is the single definition. It reads parsed trusted comments for analysis, attributing each comment to the run lines it introduces first (real comments republish earlier run lines, and one run can span several comments), and `run_cycle.py` feeds it the structured results of the current run. A resumed cycle (`--from`) starts at zero survivals, so it can stop later than a whole cycle would, never earlier. Both orchestrator skills apply the same ladder, and the package validator checks that they state it.
 
 ---
 

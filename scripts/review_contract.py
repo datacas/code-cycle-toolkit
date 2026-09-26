@@ -612,29 +612,42 @@ class RunStatuses:
     statuses: dict[str, str] = field(default_factory=dict)
 
 
-def run_statuses(record: ReviewRecord) -> RunStatuses | None:
-    """Read one parsed comment as one run, or None when it is not one.
+def comment_runs(records: Iterable[ReviewRecord]) -> list[RunStatuses]:
+    """Fold parsed comments, oldest first, into the runs they published.
 
-    A comment with only triage run lines is a resolution run, one with only
-    review run lines is a review run. A comment with no run line, or with both
-    kinds, cannot be placed in the sequence and is left out. Within the comment
-    the last header for an ID is the run's position.
+    Real comments do not map one to one onto runs. A resolver's summary
+    republishes every earlier review run line beside its own triage line, a
+    rereview republishes every earlier line before its own, and one run can
+    span several comments: a triage comment followed by a summary for the same
+    `CCT-…`. So a comment belongs to the run lines it introduces for the first
+    time in the sequence:
+
+    - new lines all of one kind start a new run of that kind;
+    - no new line, but at least one known line, continues the current run, and
+      its headers override that run's earlier positions;
+    - new lines of both kinds, or no run line at all, cannot be placed and are
+      left out.
+
+    Within a run the last header for an ID is the run's position.
     """
-    kinds = {run.kind for run in record.runs}
-    if kinds == {"triage"}:
-        kind = RESOLUTION_RUN
-    elif kinds == {"review"}:
-        kind = REVIEW_RUN
-    else:
-        return None
-    statuses: dict[str, str] = {}
-    for finding in record.findings:
-        statuses[finding.id] = finding.status
-    return RunStatuses(kind=kind, statuses=statuses)
+    runs: list[RunStatuses] = []
+    seen: set[str] = set()
+    for record in records:
+        new = [run for run in record.runs if run.id not in seen]
+        seen.update(run.id for run in record.runs)
+        kinds = {run.kind for run in new}
+        statuses = {finding.id: finding.status for finding in record.findings}
+        if kinds == {"triage"}:
+            runs.append(RunStatuses(RESOLUTION_RUN, statuses))
+        elif kinds == {"review"}:
+            runs.append(RunStatuses(REVIEW_RUN, statuses))
+        elif not kinds and record.runs and runs:
+            runs[-1].statuses.update(statuses)
+    return runs
 
 
 def claimed_fix_survivals(
-    runs: Iterable[RunStatuses | ReviewRecord],
+    runs: Iterable[RunStatuses] | Iterable[ReviewRecord],
 ) -> dict[str, int]:
     """Count, per finding ID, how often it survived a claimed fix.
 
@@ -649,16 +662,19 @@ def claimed_fix_survivals(
     `resolved`→`open` sequence with no claim between two reviews (a
     regression), and a claim whose next review had no readable findings.
 
-    `runs` is ordered oldest first. A parsed comment is read through
-    `run_statuses`; one that is not a run is skipped. Only IDs with at least
-    one survival appear in the result.
+    `runs` is ordered oldest first: either runs already mapped from structured
+    results, or parsed trusted comments, which are folded by `comment_runs`.
+    The caller filters comments by trusted author first. Only IDs with at
+    least one survival appear in the result.
     """
+    items = list(runs)
+    if items and all(isinstance(item, ReviewRecord) for item in items):
+        items = comment_runs(items)
     survivals: dict[str, int] = {}
     pending: set[str] = set()
-    for item in runs:
-        run = run_statuses(item) if isinstance(item, ReviewRecord) else item
-        if run is None:
-            continue
+    for run in items:
+        if not isinstance(run, RunStatuses):
+            raise ContractError("runs must be all RunStatuses or all ReviewRecord")
         if run.kind == RESOLUTION_RUN:
             for finding_id, status in run.statuses.items():
                 if status in CLAIM_STATUSES:

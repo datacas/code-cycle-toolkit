@@ -710,11 +710,11 @@ class ClaimedFixSurvivalTests(unittest.TestCase):
         )
 
     def test_a_claim_whose_rereview_had_no_readable_result(self) -> None:
-        self.assert_not_a_survival(
-            _comment(_triage(1), "#### [REV-001] · high · resolved · valid · blocks:yes"),
+        self.assertEqual({}, contract.claimed_fix_survivals([
+            contract.RunStatuses(contract.RESOLUTION_RUN, {"REV-001": "resolved"}),
             contract.RunStatuses(contract.REVIEW_RUN),
-            _comment(_review(3), "#### [REV-001] · high · open · valid · blocks:yes"),
-        )
+            contract.RunStatuses(contract.REVIEW_RUN, {"REV-001": "open"}),
+        ]))
 
     def test_a_claim_is_judged_by_the_next_review_only(self) -> None:
         self.assertEqual({"REV-001": 1}, contract.claimed_fix_survivals([
@@ -766,6 +766,52 @@ class ClaimedFixSurvivalTests(unittest.TestCase):
                      "#### [REV-001] · high · resolved · valid · blocks:yes",
                      "#### [REV-002] · low · open · valid · blocks:no"),
         ]))
+
+    def test_the_pr_74_history_as_provider_comments_counts_two_survivals(self) -> None:
+        """REV-003: real comments republish earlier run lines, and one run spans comments."""
+        leak = "#### [REV-001] · high · {} · valid · blocks:yes — Leak"
+        history = [
+            _comment(_review(1), leak.format("open")),
+            _comment(_triage(1), leak.format("open")),
+            _comment("\n".join([_review(1), _triage(1), _review(2)]), leak.format("open")),
+            _comment(_triage(2), leak.format("open")),
+            # The same run's summary: no new run line, republishes the claim.
+            _comment("\n".join([_review(1), _review(2), _triage(1), _triage(2)]),
+                     leak.format("resolved")),
+            _comment("\n".join([_review(1), _triage(1), _review(2), _triage(2),
+                                 _review(3)]), leak.format("open")),
+            _comment(_triage(3), leak.format("open")),
+            _comment("\n".join([_review(1), _review(2), _review(3), _triage(1),
+                                 _triage(2), _triage(3)]), leak.format("not_applicable")),
+            _comment("\n".join([_review(1), _triage(1), _review(2), _triage(2),
+                                 _review(3), _triage(3), _review(4)]), leak.format("open")),
+            _comment(_triage(4), leak.format("not_applicable")),
+            _comment("\n".join([_review(n) for n in range(1, 6)]
+                                + [_triage(n) for n in range(1, 5)]),
+                     leak.format("not_applicable")),
+        ]
+
+        self.assertEqual({"REV-001": 2}, contract.claimed_fix_survivals(history))
+        self.assertEqual(
+            [("review", "open"), ("resolution", "open"), ("review", "open"),
+             ("resolution", "resolved"), ("review", "open"),
+             ("resolution", "not_applicable"), ("review", "open"),
+             ("resolution", "not_applicable"), ("review", "not_applicable")],
+            [(run.kind, run.statuses["REV-001"])
+             for run in contract.comment_runs(history)])
+
+    def test_new_run_lines_of_both_kinds_are_not_placed(self) -> None:
+        self.assertEqual([], contract.comment_runs([
+            _comment("\n".join([_review(1), _triage(1)]),
+                     "#### [REV-001] · high · resolved · valid · blocks:yes"),
+        ]))
+
+    def test_mixed_inputs_are_refused(self) -> None:
+        with self.assertRaises(contract.ContractError):
+            contract.claimed_fix_survivals([
+                _comment(_triage(1), "#### [REV-001] · high · resolved · valid · blocks:yes"),
+                contract.RunStatuses(contract.REVIEW_RUN, {"REV-001": "open"}),
+            ])
 
     def test_structured_runs_use_the_same_definition(self) -> None:
         self.assertEqual({"REV-001": 1}, contract.claimed_fix_survivals([
