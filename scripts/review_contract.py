@@ -588,6 +588,109 @@ def verify_triage_freeze(
     return problems
 
 
+#: The statuses with which a resolution run claims to be done with a finding.
+#: A disposition is never a claim: it says whether the finding was right, and
+#: it is frozen at triage, while a claim is what the resolver did about it.
+CLAIM_STATUSES = frozenset({"resolved", "not_applicable"})
+
+RESOLUTION_RUN = "resolution"
+REVIEW_RUN = "review"
+
+
+@dataclass(frozen=True)
+class RunStatuses:
+    """The status each finding ended one run in, and which kind of run it was.
+
+    `kind` is `resolution` for a triage run or a `resolve` result, `review` for
+    a review run or a `review`/`rereview` result. `statuses` holds the last
+    status the run published per ID. A review run with empty `statuses` is a
+    review that ran but whose findings could not be read: it consumes pending
+    claims without rejecting any, because no rejection was observed.
+    """
+
+    kind: str
+    statuses: dict[str, str] = field(default_factory=dict)
+
+
+def comment_runs(records: Iterable[ReviewRecord]) -> list[RunStatuses]:
+    """Fold parsed comments, oldest first, into the runs they published.
+
+    Real comments do not map one to one onto runs. A resolver's summary
+    republishes every earlier review run line beside its own triage line, a
+    rereview republishes every earlier line before its own, and one run can
+    span several comments: a triage comment followed by a summary for the same
+    `CCT-…`. So a comment belongs to the run lines it introduces for the first
+    time in the sequence:
+
+    - new lines all of one kind start a new run of that kind;
+    - no new line, but at least one known line, continues the current run, and
+      its headers override that run's earlier positions;
+    - new lines of both kinds, or no run line at all, cannot be placed and are
+      left out.
+
+    Within a run the last header for an ID is the run's position.
+    """
+    runs: list[RunStatuses] = []
+    seen: set[str] = set()
+    for record in records:
+        new = [run for run in record.runs if run.id not in seen]
+        seen.update(run.id for run in record.runs)
+        kinds = {run.kind for run in new}
+        statuses = {finding.id: finding.status for finding in record.findings}
+        if kinds == {"triage"}:
+            runs.append(RunStatuses(RESOLUTION_RUN, statuses))
+        elif kinds == {"review"}:
+            runs.append(RunStatuses(REVIEW_RUN, statuses))
+        elif not kinds and record.runs and runs:
+            runs[-1].statuses.update(statuses)
+    return runs
+
+
+def claimed_fix_survivals(
+    runs: Iterable[RunStatuses] | Iterable[ReviewRecord],
+) -> dict[str, int]:
+    """Count, per finding ID, how often it survived a claimed fix.
+
+    A finding survives a claimed fix when a resolution run publishes its ID as
+    `resolved` or `not_applicable` (the claim) and the next review run after it
+    publishes the same ID as `open` (the rejection). Each claim is judged by
+    that one next review only, so each (claim, next review) pair counts at most
+    once. A review that does not republish a claimed ID, confirms it, or
+    agrees it no longer applies consumes the claim without counting it.
+
+    Not counted: a finding the resolver left `open` (persisting), a
+    `resolved`→`open` sequence with no claim between two reviews (a
+    regression), and a claim whose next review had no readable findings.
+
+    `runs` is ordered oldest first: either runs already mapped from structured
+    results, or parsed trusted comments, which are folded by `comment_runs`.
+    The caller filters comments by trusted author first. Only IDs with at
+    least one survival appear in the result.
+    """
+    items = list(runs)
+    if items and all(isinstance(item, ReviewRecord) for item in items):
+        items = comment_runs(items)
+    survivals: dict[str, int] = {}
+    pending: set[str] = set()
+    for run in items:
+        if not isinstance(run, RunStatuses):
+            raise ContractError("runs must be all RunStatuses or all ReviewRecord")
+        if run.kind == RESOLUTION_RUN:
+            for finding_id, status in run.statuses.items():
+                if status in CLAIM_STATUSES:
+                    pending.add(finding_id)
+                else:
+                    pending.discard(finding_id)
+        elif run.kind == REVIEW_RUN:
+            for finding_id in pending:
+                if run.statuses.get(finding_id) == "open":
+                    survivals[finding_id] = survivals.get(finding_id, 0) + 1
+            pending.clear()
+        else:
+            raise ContractError(f"unknown run kind {run.kind!r}")
+    return survivals
+
+
 def finding_outcomes(record: ReviewRecord) -> list[dict[str, str]]:
     """Build the optional `ORCHESTRATION_RESULT` mirror from the durable record.
 

@@ -37,7 +37,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 |---|---|---|
 | `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
 | `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` when tests actually ran, `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed |
-| `cycle` | once, when the run closes | final status, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, tests passed |
+| `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, tests passed |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
 
 **Pre-routing signals** are what the router could have known before it chose a profile. They are kept separate from outcomes so a future selector can be judged fairly:
@@ -46,12 +46,12 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 |---|---|
 | declared | `difficulty`, `verifiability`, `security_sensitive` |
 | read from the diff against `repository.default_branch` | changed file count; has tests; touches dependencies, database, auth, API, migrations, or CI; changed files per language (python, javascript, typescript, go, rust, java, csharp, ruby, php, shell, sql, markdown, other) |
-| from the cycle | prior findings (total, blocking, per severity), previous failed attempts, resolution round, `verification_available` |
+| from the cycle | prior findings (total, blocking, per severity), previous failed attempts, resolution round, repeated findings, `verification_available` |
 | estimated | changed lines, test count |
 
 **Unknown is not zero.** A signal or outcome nobody observed is left out, never stored as `0`, `false`, or "failed". An `implement` stage has no diff signals, because no diff exists yet. A cycle without a closing row is *unknown*, not failed.
 
-The field-by-field schema, correlation keys, and schema versions 1–6 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+The field-by-field schema, correlation keys, and schema versions 1–7 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 
 ## What is never recorded
 
@@ -73,7 +73,7 @@ Every field, column or payload key, goes through one typed gate (`telemetry.FIEL
 - **Dispatch blockages** by capability, so an exhausted quota window stays distinct from a trust dialog.
 - **Model drift:** the requested model versus the model the executor reported. Executors that report nothing (Codex) are counted as unmeasured, not as agreement.
 - **Rules versus Jev:** agreement and outcome comparisons from shadow rows.
-- **Cycle outcomes:** how runs ended, how many rounds they took, and whether tests ran.
+- **Cycle outcomes:** how runs ended and why they stopped, how many rounds they took, how many had a finding that survived a claimed fix, and whether tests ran. Cycles recorded before schema 7 show an unknown stop reason.
 
 ## Reading it with `cc-stats`
 

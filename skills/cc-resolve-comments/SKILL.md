@@ -334,6 +334,16 @@ an equivalent B into `obsolete` for no reason but list order, and the dispositio
 then measures the sequence rather than the finding. Judging every finding against
 the same commit is what makes the dispositions comparable at all.
 
+A finding you publish as `resolved` or `not_applicable` is a claim that the
+next rereview judges. When that rereview reopens it, the finding has survived a
+claimed fix, and the orchestrator may name it in your request as contested. For
+each finding so named, reproduce it with the reviewer's reproduction before
+editing and re-derive its cause, using the *Diagnose before editing* procedure
+of `cc-implement-issue` when it is available. Do not republish it
+`not_applicable` without evidence the rereview did not have; otherwise leave it `open`, report `PARTIALLY_RESOLVED`,
+and state in the comment that the finding is contested. Its disposition stays
+frozen: a survival is status history, not a new triage.
+
 Reconcile recovered structured findings with every real code-host comment and
 thread. A structured finding does not override the current code or actual
 resolved/unresolved thread state. Do not close a finding without recording the

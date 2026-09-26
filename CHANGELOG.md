@@ -7,6 +7,19 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- The resolve → rereview loop detects a finding that survives a claimed fix:
+  a resolution publishes its `REV-xxx` ID as `resolved` or `not_applicable`
+  and the next review reopens it. `review_contract.claimed_fix_survivals` is
+  the single definition. After the first survival the next resolution is told
+  to reproduce and re-diagnose the named findings before editing; the second
+  survival of one ID stops the cycle with `HUMAN_INTERVENTION` before another
+  resolution is dispatched. No model, profile or disposition changes. The
+  runtime also applies the skills' no-progress guard (same head, same open
+  set). Both orchestrators state the ladder, and the validator checks it.
+  Telemetry schema 7 adds the observed signal `repeated_findings` on
+  `resolve`/`rereview` rows, its last evaluated value and `stop_reason` on the
+  `cycle` row; `cc-stats` reports both. A cycle that never reached the ladder
+  leaves `repeated_findings` unknown, not zero.
 - `cc-implement-issue` diagnoses a work item before editing. It treats the
   item's stated cause as a hypothesis, searches related work at a basic depth
   always and a widened one on signals, reproduces a defect first, names the

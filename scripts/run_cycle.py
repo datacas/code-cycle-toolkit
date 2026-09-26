@@ -51,6 +51,12 @@ from cycle import CycleRecorder, StageOutcome
 from cycle_status import CycleStatusWriter
 from executors import DispatchResult, ReadinessPolicy, Registry
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
+from review_contract import (
+    RESOLUTION_RUN,
+    REVIEW_RUN,
+    RunStatuses,
+    claimed_fix_survivals,
+)
 from router import (
     RouterError,
     RoutingMode,
@@ -150,6 +156,30 @@ RESUMES = frozenset(CYCLE_STARTS) - {"implement"}
 #: How a cycle can end. Each one is a fact about this run, not a judgement.
 APPROVED_END = "READY_FOR_MANUAL_MERGE"
 UNRESOLVED_END = "HUMAN_INTERVENTION"
+
+#: The escalation ladder for a finding that survives a claimed fix, as defined
+#: by `review_contract.claimed_fix_survivals`. One survival can be an honestly
+#: incomplete fix, so the next resolution is told to reproduce before editing.
+#: Two survivals of one ID across different heads is the pattern neither the
+#: iteration limit nor the no-progress guard catches, so the cycle stops before
+#: another resolution is dispatched. Named constants, not configuration; the
+#: ladder never changes a model, profile or provider.
+SURVIVALS_BEFORE_DIRECTIVE = 1
+SURVIVALS_BEFORE_STOP = 2
+
+#: What the next resolution is told about the findings that survived once.
+CONTESTED_DIRECTIVE = (
+    "These findings survived a claimed fix and the next re-review reopened "
+    "them: {ids}. For each one, before editing, reproduce it with the "
+    "reviewer's reproduction and re-derive its cause, using the diagnosis "
+    "procedure when one is available. Do not publish them as not_applicable "
+    "again without evidence the re-review did not have; otherwise report "
+    "PARTIALLY_RESOLVED and state that the finding is contested."
+)
+
+#: A finding ID that may be put into a later stage's prompt.
+FINDING_ID = re.compile(r"REV-[A-Za-z0-9-]{1,40}")
+HEAD_SHA = re.compile(r"[0-9a-f]{7,40}")
 
 
 class CycleDriverError(RuntimeError):
@@ -343,6 +373,8 @@ class CycleReport:
     #: The agent's own account of why, when it gave one. Its claim, not a
     #: verified fact, and informative only: nothing branches on it.
     reason: str | None = None
+    #: The exit condition, one of `telemetry.STOP_REASONS`.
+    stop_reason: str | None = None
     stages: list[StageOutcome] = field(default_factory=list)
 
     @property
@@ -673,13 +705,15 @@ def run_cycle(
         return outcome, reported
 
     def stop(because: str, status: str = UNRESOLVED_END,
-             reported: Reported | None = None) -> CycleReport:
+             reported: Reported | None = None, *,
+             stop_reason: str = "stage_not_completed") -> CycleReport:
         report.stopped_because = because
         report.status = status
         report.iterations = recorder.iteration
+        report.stop_reason = stop_reason
         if reported is not None:
             report.reason = reported.reason
-        recorder.close(status)
+        recorder.close(status, stop_reason=stop_reason)
         status_writer.finish(status)
         return report
 
@@ -693,7 +727,8 @@ def run_cycle(
         """
         outcome, reported = run(role, instruction, change_request_id=change_request_id)
         if not outcome.succeeded:
-            return reported, stop(_why(outcome), reported=reported)
+            return reported, stop(_why(outcome), reported=reported,
+                                  stop_reason="dispatch_failed")
         if _started_elsewhere(outcome):
             return reported, stop(_elsewhere(outcome), reported=reported)
         # The dispatch and the work are different facts. This records what the
@@ -706,7 +741,23 @@ def run_cycle(
                                     **_checks(reported.payload))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
+        # Only a completed stage enters the history the ladder reads. The
+        # cycle already stops on anything else, so an unreadable result can
+        # neither reset nor advance a count.
+        run_statuses = _run_statuses(role, reported.payload)
+        if run_statuses is not None:
+            history.append(run_statuses)
+        if role in {"review", "rereview"}:
+            progress.append(_progress_key(role, reported.payload))
         return reported, None
+
+    # What the ladder and the no-progress guard read: every completed run in
+    # this cycle, and each review's head and open set. A resumed cycle starts
+    # with neither, so it can stop later than a whole cycle would, never
+    # earlier. `recorder.repeated_findings` stays unknown until the ladder is
+    # first evaluated: a cycle that never reached it was not measured at zero.
+    history: list[RunStatuses] = []
+    progress: list[tuple[str, frozenset[str]] | None] = []
 
     reported = Reported()
     verdict = None
@@ -719,6 +770,7 @@ def run_cycle(
                 "local-only run stops after implementation; no change request was created for review",
                 UNRESOLVED_END,
                 reported=reported,
+                stop_reason="local_only",
             )
 
         change_request_id = reported.change_request_id
@@ -749,10 +801,32 @@ def run_cycle(
         # report's verdict stays unset until a re-review gives one.
         verdict = "CHANGES_REQUESTED"
 
-    while verdict == "CHANGES_REQUESTED" and recorder.iteration < max_iterations:
+    while verdict == "CHANGES_REQUESTED":
+        survivals = claimed_fix_survivals(history)
+        recorder.repeated_findings = len(survivals)
+        repeated = sorted(finding for finding, count in survivals.items()
+                          if count >= SURVIVALS_BEFORE_STOP)
+        if repeated:
+            return stop(
+                f"{', '.join(repeated)} survived {SURVIVALS_BEFORE_STOP} claimed "
+                "fixes; stopping before another resolution",
+                reported=reported, stop_reason="repeated_findings")
+        if len(progress) >= 2 and progress[-1] is not None and progress[-1] == progress[-2]:
+            return stop(
+                "the re-review found the same head and the same open findings "
+                "as the previous review",
+                reported=reported, stop_reason="no_progress")
+        if recorder.iteration >= max_iterations:
+            break
         recorder.next_iteration()
 
-        _, stopped = advance("resolve", "Resolve the findings from the review.",
+        instruction = "Resolve the findings from the review."
+        contested = sorted(finding for finding, count in survivals.items()
+                           if count >= SURVIVALS_BEFORE_DIRECTIVE)
+        if contested:
+            instruction = (f"{instruction} "
+                           f"{CONTESTED_DIRECTIVE.format(ids=', '.join(contested))}")
+        _, stopped = advance("resolve", instruction,
                              change_request_id=change_request_id)
         if stopped is not None:
             return stopped
@@ -767,9 +841,9 @@ def run_cycle(
     # The last stage's own account travels with every ending, not only the bad
     # ones: a run that finished still said something about how.
     if verdict == "APPROVED":
-        return stop("", APPROVED_END, reported=reported)
+        return stop("", APPROVED_END, reported=reported, stop_reason="approved")
     return stop(f"still {verdict} after {recorder.iteration} round(s)",
-                reported=reported)
+                reported=reported, stop_reason="iteration_limit")
 
 
 def _started_elsewhere(outcome: StageOutcome) -> bool:
@@ -787,6 +861,88 @@ def _elsewhere(outcome: StageOutcome) -> str:
 
 
 SEVERITIES = ("critical", "high", "medium", "low")
+
+#: The finding statuses each role's structured result may publish, and the
+#: contract status each one reads as. `still_open` is the re-review's word for
+#: a previous finding it reopened.
+ROLE_FINDING_STATUSES = {
+    "review": {"open": "open", "resolved": "resolved",
+               "not_applicable": "not_applicable"},
+    "rereview": {"open": "open", "still_open": "open", "resolved": "resolved",
+                 "not_applicable": "not_applicable"},
+    "resolve": {"open": "open", "resolved": "resolved",
+                "not_applicable": "not_applicable"},
+}
+
+
+def _finding_statuses(payload: dict | None, role: str) -> dict[str, str] | None:
+    """The last status each finding ended a stage's result in, or None.
+
+    None means the result carries no readable finding list: an entry without a
+    finding ID or with a status outside the role's vocabulary makes the whole
+    list unreadable rather than silently shorter, because a shorter list could
+    look like progress. A later entry for an ID overrides an earlier one, as the
+    last header of a comment does.
+    """
+    if not payload:
+        return None
+    if role == "review":
+        keys = ("findings",)
+    elif role == "rereview":
+        keys = ("verified_findings", "new_findings")
+    elif role == "resolve":
+        keys = (("finding_outcomes",) if "finding_outcomes" in payload
+                else ("resolved_findings", "unresolved_findings"))
+    else:
+        return None
+    lists = [payload.get(key) for key in keys if key in payload]
+    if not lists or any(not isinstance(entries, list) for entries in lists):
+        return None
+    vocabulary = ROLE_FINDING_STATUSES[role]
+    statuses: dict[str, str] = {}
+    for entries in lists:
+        for item in entries:
+            if not isinstance(item, dict):
+                return None
+            finding_id, status = item.get("id"), item.get("status")
+            # The type first: a JSON list or object is unhashable, and a
+            # membership test on it would raise instead of reading as unknown.
+            if (not isinstance(finding_id, str) or FINDING_ID.fullmatch(finding_id) is None
+                    or not isinstance(status, str) or status not in vocabulary):
+                return None
+            statuses[finding_id] = vocabulary[status]
+    return statuses
+
+
+def _run_statuses(role: str, payload: dict | None) -> RunStatuses | None:
+    """One completed stage as one run of `claimed_fix_survivals`.
+
+    A review whose findings cannot be read is still the next review after a
+    claim: it consumes the claim without rejecting it. A resolution whose
+    findings cannot be read claims nothing.
+    """
+    statuses = _finding_statuses(payload, role)
+    if role in {"review", "rereview"}:
+        return RunStatuses(REVIEW_RUN, statuses or {})
+    if role == "resolve" and statuses is not None:
+        return RunStatuses(RESOLUTION_RUN, statuses)
+    return None
+
+
+def _progress_key(role: str, payload: dict | None) -> tuple[str, frozenset[str]] | None:
+    """A review's head and open finding set, or None when either is unknown.
+
+    Unknown never matches, so the no-progress guard fires only on two reviews
+    that both reported the same head and the same readable open set.
+    """
+    head = payload.get("head_sha") if payload else None
+    if not isinstance(head, str) or HEAD_SHA.fullmatch(head) is None:
+        return None
+    statuses = _finding_statuses(payload, role)
+    if statuses is None:
+        return None
+    return head, frozenset(finding for finding, status in statuses.items()
+                           if status == "open")
 
 
 def _findings(payload: dict | None, role: str) -> dict:
