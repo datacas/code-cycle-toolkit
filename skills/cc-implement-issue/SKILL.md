@@ -132,11 +132,11 @@ created. Never merge a pull request or close unrelated issues.
     base branch. Include the work-item's canonical key and URL, the
     *Diagnosis* section described below, and the *Work units* table described
     below. Use `Closes
-   #<issue_number>` only for GitHub Issues when the repository workflow uses
-   automatic closure; for Plane and Jira, use the provider-native link and do
-   not claim that the work item was closed unless its state was observed.
+    #<issue_number>` only for GitHub Issues when the repository workflow uses
+    automatic closure; for Plane and Jira, use the provider-native link and do
+    not claim that the work item was closed unless its state was observed.
 11. Wait for the checks of the pushed head and let them decide the status, as
-   *Checks of the pushed head* describes.
+    *Checks of the pushed head* describes.
 12. Report the issue provider, work-item ID, code host, repository, branch,
     commit, change-request ID and URL, work units, verification, the checks of
     the final head, and any residual risk. Do not describe the change request
@@ -378,11 +378,17 @@ is empty when there are none. The four stopping decisions report `BLOCKED` with
 `pr_number` set to `null` and still carry `diagnosis`. When the stage stopped
 before diagnosing, for example on a bootstrap failure, omit `diagnosis`.
 
-`work_units` is a non-empty list. Each object contains only `id` (`WU-1`,
-`WU-2`, ...), `commit_sha` (a full commit SHA, or `null` when the repository
-requires a single commit), and `rollback` (`independent`, `dependent`, or
-`irreversible`). Put the behaviour and any rollback explanation in the pull
-request's *Work units* table, not in this token-only list.
+Include `work_units` whenever at least one unit was planned, including when a
+later step stops as `BLOCKED`; omit it when the stage stops before planning,
+such as on a bootstrap failure or a stopping diagnosis decision. When present,
+it is a non-empty list. Each object contains only `id` (`WU-1`, `WU-2`, ...),
+`commit_sha` (a full commit SHA for a per-unit commit, or `null` when no
+per-unit commit exists, such as when the repository requires one combined
+commit or local-only work stops before committing), and `rollback`
+(`independent`, `dependent`, or `irreversible`). For a local-only result,
+`pr_number` is `null`, distinguishing it from a combined-commit pull request.
+Put the behaviour and any rollback explanation in the pull request's *Work
+units* table, not in this token-only list.
 
 ## Final response
 

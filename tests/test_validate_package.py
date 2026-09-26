@@ -337,7 +337,6 @@ class DiagnosisShapeTests(unittest.TestCase):
 
                 self.assertTrue(any("`not_reproduced` requires" in p for p in problems))
 
-
     def test_an_integer_is_not_a_boolean(self) -> None:
         problems = VALIDATOR.diagnosis_errors({**self.NOT_REPRODUCED, "reproduced": 0})
 
