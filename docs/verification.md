@@ -10,6 +10,27 @@ The toolkit counts something as verified only after it has run it. This page exp
 4. **Verification doesn't edit code** unless you ask.
 5. **A pass that couldn't run isn't a passed check.** A missing delegated skill is reported as a degraded pass.
 
+## Evidence levels
+
+Every recorded test outcome has one `tests_basis` token. The functional
+conclusion is separate: it describes the agent's judgement, while the basis
+says who produced the evidence that judgement rests on.
+
+| `tests_basis` | Meaning | Example | Source |
+|---|---|---|---|
+| `claimed` | No executed command is attached | `"tests": { "passed": true }` | The agent |
+| `agent_reported` | The result includes a command, exit status, and count, as reported by the agent | `pytest tests/test_x.py` → exit 0, 14 run | The agent; auditable in the comment, not proof |
+| `runtime_observed` | The runtime observed the fact itself | Executor exit code, head SHA, or a command the runtime ran | The runtime |
+| `externally_verified` | A system the agent does not control owns the fact | Checks on the pushed head SHA read by the runtime | The code host |
+
+Evidence entries use `level: static` or `level: test` to describe the command;
+these are command categories, not `tests_basis` values. `cc-verify` emits the
+entries and one conclusion token: `verified`, `verified_with_reservations`,
+`not_verified`, or `failed`. The conclusion is the agent's judgement and does
+not raise its evidence level. Missing or contradictory evidence never becomes
+a verified test outcome. Older telemetry rows without `tests_basis` are read
+as `claimed`.
+
 ## What each stage verifies
 
 | Stage | Verifies |
@@ -78,7 +99,19 @@ The published summary lists the final head's checks by name and state with the S
 
 ## In telemetry
 
-When the runtime drives the cycle, a verdict row records `tests_passed` only when a stage actually ran tests. A stage that stopped before running tests (`"tests": {"ran": false}`, or a `BLOCKED` result without `ran: true`) records no test outcome, rather than a failure.
+When the runtime drives the cycle, each `tests_passed` value is stored beside
+its `tests_basis`; the telemetry gate rejects a row that has one without the
+other. A boolean `passed` without evidence is `claimed`. A well-formed evidence
+list with at least one successful test entry and no failing command is
+`agent_reported`. Missing or contradictory evidence fails closed. A stage that
+reports `ran: false` records no test outcome. A justified no-code resolution
+uses `"tests": { "ran": false, "reason": "no_code_change" }`, never
+`passed: true`.
+
+`cc-stats` groups outcomes by basis. It labels `claimed` as claimed and
+`agent_reported` as reported; it uses “verified” for test outcomes only when
+their basis is `runtime_observed` or `externally_verified`. Agent conclusion
+tokens are shown separately from those evidence levels.
 
 A verdict row also records `checks_passed`, `checks_failed` and `checks_pending` when the stage reported all three counts for its own head. Counts for a different head, or an incomplete set, record nothing. `cc-stats` sets each implementation and resolution head against its CI, so it can show how often a `RESOLVED` head was actually green. The check names stay in the PR comment. See [Telemetry](telemetry.md).
 

@@ -56,13 +56,24 @@ from pathlib import Path
 #: 7: `resolve` and `rereview` rows carry `repeated_findings`, an observed
 #: pre-routing signal, and the `cycle` row carries `stop_reason`. Both are
 #: payload-only; an older row reads as unknown.
-SCHEMA_VERSION = 7
+#: 8: test outcomes carry `tests_basis`, the evidence level they rest on, and
+#: verdicts carry the agent's separate `verification` conclusion.
+SCHEMA_VERSION = 8
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
 #: Below this many observations a rate is reported as unknown. Not a
 #: significance test — just a refusal to let three runs set a routing constant.
 MINIMUM_SAMPLE = 10
+
+TEST_BASE_ORDER = (
+    "claimed", "agent_reported", "runtime_observed", "externally_verified",
+)
+TEST_BASES = frozenset(TEST_BASE_ORDER)
+VERIFICATION_CONCLUSION_ORDER = (
+    "verified", "verified_with_reservations", "not_verified", "failed",
+)
+VERIFICATION_CONCLUSIONS = frozenset(VERIFICATION_CONCLUSION_ORDER)
 
 #: TypeSafe model identifiers are constrained to its alias and version format.
 #: This records future concrete versions without accepting arbitrary strings.
@@ -239,6 +250,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "started_from": ("token", frozenset(CYCLE_STARTS)),
     # observed outcomes, written only once they are known (schema 3)
     "tests_passed": ("flag", None),
+    # the evidence level and agent conclusion for a test outcome (schema 8)
+    "tests_basis": ("token", TEST_BASES),
+    "verification": ("token", VERIFICATION_CONCLUSIONS),
     "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
     "final_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
     "first_pass_approved": ("flag", None),
@@ -349,13 +363,14 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
     "verdict": frozenset({
         "status", "findings_total", "findings_blocking", "findings_critical",
         "findings_high", "findings_medium", "findings_low", "tests_passed",
+        "tests_basis", "verification",
         "checks_passed", "checks_failed", "checks_pending",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",
         "first_pass_approved", "resolution_needed", "resolution_rounds",
-        "final_approved", "tests_passed", "fallback_stages", "contract_violations",
-        "stop_reason",
+        "final_approved", "tests_passed", "tests_basis", "verification",
+        "fallback_stages", "contract_violations", "stop_reason",
     }),
 }
 
@@ -743,6 +758,12 @@ class Telemetry:
             raise TelemetryError("a stage needs repo_id, task_id and role")
 
         fields = dict(fields)
+        has_test_outcome = fields.get("tests_passed") is not None
+        has_test_basis = fields.get("tests_basis") is not None
+        if has_test_outcome != has_test_basis:
+            raise TelemetryError(
+                "tests_passed and tests_basis must be recorded together"
+            )
         if "model_resolved" in fields:
             stored, resolution = self._model_observation(
                 repo_id, fields.get("model_requested"), fields["model_resolved"]

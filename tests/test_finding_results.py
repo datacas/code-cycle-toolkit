@@ -178,9 +178,9 @@ class CapturedFindingResultTests(unittest.TestCase):
             "rereview": "BLOCKED",
         }
         expected_tests = {
-            "implement": {"tests_passed": True},
+            "implement": {"tests_passed": True, "tests_basis": "claimed"},
             "review": {},
-            "resolve": {"tests_passed": True},
+            "resolve": {"tests_passed": True, "tests_basis": "claimed"},
             "rereview": {},
         }
         for role, payload in by_role.items():

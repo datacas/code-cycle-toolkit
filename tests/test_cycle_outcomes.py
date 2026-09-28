@@ -30,13 +30,15 @@ class ReconstructionTests(CycleTestCase):
     def corrected_cycle(self):
         recorder = self.recorder(self.adapters())
         recorder.stage("implement", "work")
-        recorder.record_verdict("implement", "IMPLEMENTED", tests_passed=True)
+        recorder.record_verdict("implement", "IMPLEMENTED", tests_passed=True,
+                                tests_basis="claimed")
         recorder.stage("review", "review")
         recorder.record_verdict("review", "CHANGES_REQUESTED", findings_total=3,
                                 findings_blocking=1, **SEVERITIES)
         recorder.next_iteration()
         recorder.stage("resolve", "resolve")
-        recorder.record_verdict("resolve", "RESOLVED", tests_passed=False)
+        recorder.record_verdict("resolve", "RESOLVED", tests_passed=False,
+                                tests_basis="claimed")
         recorder.stage("rereview", "rereview")
         recorder.record_verdict("rereview", "APPROVED", findings_total=0)
         recorder.close("READY_FOR_MANUAL_MERGE")
@@ -53,7 +55,8 @@ class ReconstructionTests(CycleTestCase):
             "first_review_status": "CHANGES_REQUESTED", "first_pass_approved": False,
             "resolution_needed": True, "resolution_rounds": 1,
             "final_review_status": "APPROVED", "final_approved": True,
-            "tests_passed": False, "fallback_stages": 0, "contract_violations": 0,
+            "tests_passed": False, "tests_basis": "claimed",
+            "fallback_stages": 0, "contract_violations": 0,
         }, cycle["outcome"])
         review = cycle["verdicts"][1]
         self.assertEqual({"stage_seq": 2, "role": "review", "status": "CHANGES_REQUESTED",
@@ -97,7 +100,8 @@ class UnknownIsNotDefaultTests(CycleTestCase):
         outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
 
         for absent in ("first_pass_approved", "resolution_needed", "resolution_rounds",
-                       "final_approved", "first_review_status", "tests_passed"):
+                       "final_approved", "first_review_status", "tests_passed",
+                       "tests_basis", "verification"):
             with self.subTest(field=absent):
                 self.assertNotIn(absent, outcome)
         self.assertEqual(0, outcome["contract_violations"])
@@ -158,7 +162,8 @@ class SeparationTests(CycleTestCase):
         recorder.stage("review", "review")
         before = [row for row in self.store.rows("owner/repo")]
 
-        recorder.record_verdict("review", "APPROVED", findings_total=0, tests_passed=True)
+        recorder.record_verdict("review", "APPROVED", findings_total=0,
+                                tests_passed=True, tests_basis="claimed")
         recorder.close("READY_FOR_MANUAL_MERGE")
 
         after = self.store.rows("owner/repo")
@@ -191,9 +196,20 @@ class AllowlistTests(CycleTestCase):
     def test_outcome_fields_accept_only_their_types(self) -> None:
         for field, value in (("first_review_status", "LGTM"), ("final_approved", "yes"),
                              ("resolution_rounds", -1), ("tests_passed", {"passed": True}),
+                             ("tests_basis", "unverified"), ("verification", "maybe"),
                              ("record_kind", "note")):
             with self.subTest(field=field), self.assertRaises(tm.TelemetryError):
                 self.store.record_stage("owner/repo", "API-055", "coordinate", **{field: value})
+
+    def test_a_test_outcome_and_its_basis_are_required_together(self) -> None:
+        with self.assertRaisesRegex(tm.TelemetryError, "tests_passed and tests_basis"):
+            self.store.record_stage("owner/repo", "API-055", "implement",
+                                    tests_passed=True)
+        with self.assertRaisesRegex(tm.TelemetryError, "tests_passed and tests_basis"):
+            self.store.record_stage("owner/repo", "API-055", "implement",
+                                    tests_basis="claimed")
+        self.store.record_stage("owner/repo", "API-055", "implement",
+                                tests_passed=True, tests_basis="claimed")
 
     def test_a_cycle_id_is_refused_before_anything_is_dispatched(self) -> None:
         codex = ScriptedAdapter("codex")
@@ -230,7 +246,8 @@ class DriverTests(RunCycleTestCase):
     def test_every_documented_verdict_outcome_is_one_the_driver_records(self) -> None:
         """REV-001: a documented outcome nothing writes is a promise, not data."""
         payload = {
-            "status": "CHANGES_REQUESTED", "tests": {"passed": False},
+            "status": "CHANGES_REQUESTED",
+            "tests": {"passed": False, "conclusion": "failed"},
             "checks": {"passed": 4, "failed": 1, "pending": 0},
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
         }
@@ -251,7 +268,9 @@ class DriverTests(RunCycleTestCase):
         self.assertTrue(report.approved)
         cycle = self.store.cycle_outcome("owner/api", self.cycle_row()["payload"]["cycle_id"])
         self.assertIs(True, cycle["verdicts"][0]["tests_passed"])
+        self.assertEqual("claimed", cycle["verdicts"][0]["tests_basis"])
         self.assertIs(True, cycle["outcome"]["tests_passed"])
+        self.assertEqual("claimed", cycle["outcome"]["tests_basis"])
         self.assertIs(True, cycle["outcome"]["first_pass_approved"])
 
     def test_the_checks_of_the_final_head_reach_the_verdict(self) -> None:
@@ -297,9 +316,19 @@ class TestsReportedTests(unittest.TestCase):
             {"status": "IMPLEMENTED", "tests": {"passed": False}},
             {"status": "IMPLEMENTED", "tests": {"ran": True, "passed": False}},
             {"status": "BLOCKED", "tests": {"ran": True, "passed": False}},
+            {"status": "BLOCKED", "tests": {
+                "passed": False,
+                "evidence": [{"level": "test", "command": "pytest tests/test_x.py",
+                              "exit_code": 1, "executed": 1}],
+            }},
         ):
             with self.subTest(payload=payload):
-                self.assertEqual({"tests_passed": False}, rc._tests(payload))
+                expected = (
+                    {"tests_passed": False, "tests_basis": "agent_reported"}
+                    if payload["status"] == "BLOCKED" and "evidence" in payload["tests"]
+                    else {"tests_passed": False, "tests_basis": "claimed"}
+                )
+                self.assertEqual(expected, rc._tests(payload))
 
     def test_executed_tests_that_passed_are_recorded_as_passed(self) -> None:
         for payload in (
@@ -308,7 +337,46 @@ class TestsReportedTests(unittest.TestCase):
             {"status": "BLOCKED", "tests": {"passed": True}},
         ):
             with self.subTest(payload=payload):
-                self.assertEqual({"tests_passed": True}, rc._tests(payload))
+                self.assertEqual({"tests_passed": True, "tests_basis": "claimed"},
+                                 rc._tests(payload))
+
+    def test_consistent_evidence_is_agent_reported_and_keeps_conclusion_separate(self) -> None:
+        payload = {"status": "IMPLEMENTED", "tests": {
+            "ran": True, "passed": True, "conclusion": "verified_with_reservations",
+            "evidence": [
+                {"level": "static", "command": "ruff check .", "exit_code": 0,
+                 "executed": None},
+                {"level": "test", "command": "pytest tests/test_x.py", "exit_code": 0,
+                 "executed": 14},
+            ],
+        }}
+
+        self.assertEqual({
+            "tests_passed": True, "tests_basis": "agent_reported",
+            "verification": "verified_with_reservations",
+        }, rc._tests(payload))
+
+    def test_failing_or_incomplete_evidence_never_records_a_pass(self) -> None:
+        cases = (
+            [{"level": "test", "command": "pytest tests/test_x.py", "exit_code": 1,
+              "executed": 14}],
+            [{"level": "static", "command": "ruff check .", "exit_code": 0,
+              "executed": None}],
+            [{"level": "test", "command": "pytest tests/test_x.py", "exit_code": 0}],
+        )
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                self.assertEqual(
+                    {"tests_passed": False, "tests_basis": "agent_reported"},
+                    rc._tests({"status": "IMPLEMENTED", "tests": {
+                        "passed": True, "evidence": evidence,
+                    }}),
+                )
+
+    def test_no_code_change_never_records_passed_true(self) -> None:
+        self.assertEqual({}, rc._tests({"status": "RESOLVED", "tests": {
+            "ran": False, "reason": "no_code_change", "passed": True,
+        }}))
 
     def test_tests_that_never_ran_record_nothing(self) -> None:
         for payload in (

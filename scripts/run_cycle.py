@@ -68,6 +68,7 @@ from router import (
 from stage_signals import collect_change_signals
 from telemetry import (
     CYCLE_STARTS,
+    VERIFICATION_CONCLUSIONS,
     Telemetry,
     TelemetryError,
     default_database_path,
@@ -1065,27 +1066,69 @@ def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
 
 
 def _tests(payload: dict | None) -> dict:
-    """Whether the stage reported its tests passing. Absent is not passing.
+    """Read the agent's test outcome and classify the evidence it supplied.
 
-    Only a boolean `tests.passed` counts: anything else is a report nobody can
-    read as a result, and recording it as one would invent a test outcome.
-
-    Nor does a `passed` that describes tests nobody ran. `tests.ran: false`
-    says so outright. A `BLOCKED` stage reporting `passed: false` without
-    claiming `ran: true` is read the same way: a skill that stopped before
-    touching code has no failure to report, and counting its `false` would
-    turn "never ran" into "failed". A `true` needs no such claim; nothing
-    passes without running.
+    A result without evidence remains a claim. A present evidence list must be
+    well-formed, contain a successful `test` entry, and contain no failed
+    command before it can support `passed: true`. Incomplete or contradictory
+    evidence fails closed. The conclusion is kept separately from its basis.
     """
     tests = payload.get("tests") if payload else None
-    if not isinstance(tests, dict) or not isinstance(tests.get("passed"), bool):
+    if not isinstance(tests, dict):
         return {}
+
+    result = {}
+    conclusion = tests.get("conclusion")
+    if isinstance(conclusion, str) and conclusion in VERIFICATION_CONCLUSIONS:
+        result["verification"] = conclusion
+
     if tests.get("ran") is False:
-        return {}
-    if (tests["passed"] is False and tests.get("ran") is not True
-            and _status_of(payload) == "BLOCKED"):
-        return {}
-    return {"tests_passed": tests["passed"]}
+        return result
+    passed = tests.get("passed")
+    if not isinstance(passed, bool):
+        return result
+    evidence = tests.get("evidence")
+    if (passed is False and tests.get("ran") is not True
+            and _status_of(payload) == "BLOCKED"
+            and (evidence is None or evidence == [])):
+        return result
+
+    if evidence is None or evidence == []:
+        result.update(tests_passed=passed, tests_basis="claimed")
+        return result
+
+    well_formed = isinstance(evidence, list)
+    test_pass_observed = False
+    failed_command_observed = False
+    if well_formed:
+        for item in evidence:
+            if not isinstance(item, dict):
+                well_formed = False
+                break
+            level = item.get("level")
+            command = item.get("command")
+            exit_code = item.get("exit_code")
+            executed = item.get("executed")
+            if (not isinstance(level, str) or level not in {"static", "test"}
+                    or not isinstance(command, str) or not command.strip()
+                    or not isinstance(exit_code, int) or isinstance(exit_code, bool)
+                    or "executed" not in item
+                    or (executed is not None
+                        and (not isinstance(executed, int)
+                             or isinstance(executed, bool) or executed < 0))):
+                well_formed = False
+                break
+            if exit_code != 0:
+                failed_command_observed = True
+            if level == "test" and exit_code == 0:
+                test_pass_observed = True
+
+    result.update(
+        tests_passed=(passed and well_formed and test_pass_observed
+                      and not failed_command_observed),
+        tests_basis="agent_reported",
+    )
+    return result
 
 
 CHECK_COUNTS = ("passed", "failed", "pending")

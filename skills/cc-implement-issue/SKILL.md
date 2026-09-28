@@ -119,8 +119,11 @@ created. Never merge a pull request or close unrelated issues.
    the change fixes a defect or changes a contract.
 7. Run the narrowest relevant tests for each unit first, then the repository's
    required verification when its prerequisites are available; `cc-verify`
-   performs that pass. Record the commands and results for each unit. Do not
-   call an unchecked implementation complete.
+   performs that pass. Record the commands and results for each unit. Keep the
+   `tests.evidence` entries identical to the `cc-verify` record. The published
+   PR's *Verification* section repeats those entries and labels them
+   agent-reported. Do not describe agent-reported evidence as runtime-observed
+   or externally verified. Do not call an unchecked implementation complete.
 8. Review the accumulated diff for scope, accidental files, secrets, debug
    output, generated artifacts, and missing tests.
 9. Commit each unit separately when the repository's workflow allows multiple
@@ -321,7 +324,15 @@ ORCHESTRATION_RESULT
   "pr_number": 456,
   "branch": "issue-123-short-name",
   "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
-  "tests": { "passed": true },
+  "tests": {
+    "ran": true,
+    "passed": true,
+    "conclusion": "verified_with_reservations",
+    "evidence": [
+      { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
+      { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
+    ]
+  },
   "work_units": [
     {
       "id": "WU-1",
@@ -361,8 +372,12 @@ prevents completion. Use `FAILED` for an unexpected technical failure. Set
 
 `tests.passed: false` means tests ran and failed. When no test ran — for
 example, the work stopped as `BLOCKED` before any code changed — report
-`"tests": { "ran": false }` or omit `tests`, never `passed: false`. A `BLOCKED`
-result whose tests did run and fail says so with `"ran": true`.
+`"tests": { "ran": false }` or omit `tests`, never `passed: false`. When tests
+ran, include the `cc-verify` conclusion token and its evidence list, preserving
+the exact commands, exit codes, and executed counts. Keep `passed` for
+compatibility; an older result with `passed: true` and no evidence is only a
+claim. A `BLOCKED` result whose tests did run and fail says so with
+`"ran": true`.
 
 `diagnosis` records the outcome of *Diagnose before editing* with closed values
 only; no prose goes in it. `classification` and `decision` take the tokens
