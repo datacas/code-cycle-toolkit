@@ -386,6 +386,16 @@ class TestsReportedTests(unittest.TestCase):
                     "evidence": evidence,
                 }}))
 
+    def test_an_unhashable_conclusion_is_ignored(self) -> None:
+        self.assertEqual({"tests_passed": True, "tests_basis": "agent_reported"},
+                         rc._tests({"status": "IMPLEMENTED", "tests": {
+                             "ran": True, "passed": True, "conclusion": [],
+                             "evidence": [{
+                                 "level": "test", "command": "pytest tests/test_x.py",
+                                 "exit_code": 0, "executed": 14,
+                             }],
+                         }}))
+
     def test_failing_or_incomplete_evidence_never_records_a_pass(self) -> None:
         cases = (
             [{"level": "test", "command": "pytest tests/test_x.py", "exit_code": 1,

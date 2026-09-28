@@ -1088,7 +1088,8 @@ def _tests(payload: dict | None) -> dict:
     passed = tests.get("passed")
     if not isinstance(passed, bool):
         return result
-    if passed and conclusion in {"not_verified", "failed"}:
+    if (passed and isinstance(conclusion, str)
+            and conclusion in {"not_verified", "failed"}):
         passed = False
     evidence = tests.get("evidence")
     if (passed is False and tests.get("ran") is not True
