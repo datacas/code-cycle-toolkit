@@ -576,8 +576,9 @@ class NativeAdapter(Adapter):
 
         The runtime puts evidence outside every workspace, such as the complete
         diff a review judges. This CLI's sandbox already reads the whole file
-        system, so the default adds nothing; an adapter confined to its
-        directory widens the reading and never the writing.
+        system, so the default adds nothing. `dispatch()` passes `read_dirs`
+        only to a stage that does not write, because a granted directory may
+        be writable too.
         """
         return argv
 
@@ -1047,8 +1048,10 @@ class ClaudeAdapter(NativeAdapter):
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
         # A non-interactive Claude reads only inside its working directory
         # without asking, and nobody is there to answer. `--add-dir` is the
-        # documented way to grant another one; it takes several values, so it
-        # goes last, where nothing positional follows it.
+        # documented way to grant another one, for reading and editing alike,
+        # which is why `dispatch()` never passes one to a writing stage. It
+        # takes several values, so it goes last, where nothing positional
+        # follows it.
         return argv + ["--add-dir", *read_dirs] if read_dirs else argv
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
@@ -1515,8 +1518,11 @@ def dispatch(
     # Evidence the runtime wrote outside the workspace. Only a native CLI is
     # started here and can be granted a directory; Orca's worker runs where
     # Orca puts it, and its prompt already says what to do without the file.
+    # A writing stage is granted nothing: Claude's added directories are
+    # editable under `acceptEdits`, and evidence must stay outside the writable
+    # boundary of the stage it is evidence for.
     read_dirs = tuple(kw.pop("read_dirs", ()) or ())
-    if isinstance(adapter, NativeAdapter) and read_dirs:
+    if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 
     started = clock()

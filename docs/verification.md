@@ -37,10 +37,14 @@ layers:
   of `change_bases_of` that resolves, the same resolution the change signals
   use. The file goes in a fresh temporary directory outside the workspace and
   outside Claude's disposable review clone. The prompt names the file, the base,
-  merge base and head SHAs, the line count, and the SHA-256; a Claude stage is
-  granted the directory with `--add-dir`, and Codex's sandbox already reads it.
-  The file is removed when the stage ends. When no base resolves, no file is
-  written and the prompt says so; the stage never receives a partial file.
+  merge base and head SHAs, the line count, and the SHA-256. A Claude stage that
+  doesn't write is granted the directory with `--add-dir`; a writing stage is
+  granted nothing, because an added directory is editable too. Codex's sandbox
+  already reads it. The file is read-only, and after the stage the runtime
+  checks its SHA-256 again: a changed or missing file stops the cycle as
+  `stage_not_completed` before the stage's verdict is read. The file is removed
+  when the stage ends. When no base resolves, no file is written and the prompt
+  says so; the stage never receives a partial file.
 - **The skills state the rule.** Every skill that reads a diff or cites output
   carries the shared `## Complete evidence` section, for manual runs and for
   evidence other than the diff. A truncation or summary marker, or output

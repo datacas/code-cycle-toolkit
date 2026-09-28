@@ -52,7 +52,13 @@ from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from cycle_status import CycleStatusWriter
-from executors import DispatchResult, ReadinessPolicy, Registry, _paths_overlap
+from executors import (
+    DispatchResult,
+    ReadinessPolicy,
+    Registry,
+    _paths_overlap,
+    _remove_workspace,
+)
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from review_contract import (
     RESOLUTION_RUN,
@@ -488,6 +494,21 @@ class DiffArtifact:
             "section describes."
         )
 
+    def changed(self) -> str | None:
+        """Why the file no longer holds what the prompt described, or None.
+
+        A stage that can write may reach it, whatever its permissions say. The
+        review would then rest on evidence the runtime did not produce, so the
+        caller treats any change as a stage that did not complete.
+        """
+        try:
+            content = self.path.read_bytes()
+        except OSError:
+            return f"the diff supplied as evidence ({self.path}) was removed during the stage"
+        if hashlib.sha256(content).hexdigest() != self.sha256:
+            return f"the diff supplied as evidence ({self.path}) was changed during the stage"
+        return None
+
 
 def write_diff_artifact(cwd: str | None, bases: tuple[str, ...] | None,
                         directory: Path, *, timeout: int = 60) -> DiffArtifact | None:
@@ -519,6 +540,8 @@ def write_diff_artifact(cwd: str | None, bases: tuple[str, ...] | None,
         if content is None:
             path.unlink(missing_ok=True)
             continue
+        # Read-only against an accidental edit. Not a boundary: the hash is.
+        path.chmod(0o444)
         return DiffArtifact(
             path=path, base=base, merge_base=merge_base, head=head,
             lines=content.count(b"\n"),
@@ -806,9 +829,13 @@ def run_cycle(
         dispatch_kwargs["timeout"] = timeout
 
     def run(role: str, instruction: str = "", *,
-            change_request_id: str | None = None) -> tuple[StageOutcome, Reported]:
+            change_request_id: str | None = None
+            ) -> tuple[StageOutcome, Reported, str | None]:
+        """Dispatch one stage; also say whether the evidence it was given changed."""
         evidence = ""
         stage_kwargs = dispatch_kwargs
+        artifact = None
+        tampered = None
         directory = diff_directory(cwd) if role in DIFF_ROLES else None
         try:
             if role in DIFF_ROLES:
@@ -822,15 +849,17 @@ def run_cycle(
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence),
                 **stage_kwargs)
+            if artifact is not None:
+                tampered = artifact.changed()
         finally:
             # The diff lives for its stage only. A later stage writes its own,
             # from the head that stage will judge.
             if directory is not None:
-                shutil.rmtree(directory, ignore_errors=True)
+                _remove_workspace(str(directory))
         report.stages.append(outcome)
         reported = read_structured_result(outcome.result)
         status_writer.stage_finished(outcome.result, reported.status)
-        return outcome, reported
+        return outcome, reported, tampered
 
     def stop(because: str, status: str = UNRESOLVED_END,
              reported: Reported | None = None, *,
@@ -853,7 +882,12 @@ def run_cycle(
         condition that has to be remembered four times is one that will be
         missing from the fourth.
         """
-        outcome, reported = run(role, instruction, change_request_id=change_request_id)
+        outcome, reported, tampered = run(role, instruction,
+                                          change_request_id=change_request_id)
+        # Before anything the stage reported is read: its verdict rests on
+        # evidence the runtime no longer vouches for.
+        if tampered is not None:
+            return reported, stop(tampered, reported=reported)
         if not outcome.succeeded:
             return reported, stop(_why(outcome), reported=reported,
                                   stop_reason="dispatch_failed")

@@ -1730,6 +1730,22 @@ class Reader(Talker):
         return self.answers.pop(0) if self.answers else APPROVED
 
 
+class Tamperer(Talker):
+    """A stage that reaches the evidence file and does something to it."""
+
+    def __init__(self, name: str, act) -> None:
+        super().__init__(name)
+        self.act = act
+
+    def spoken(self, task: str) -> str:
+        match = DIFF_PATH.search(task)
+        if match:
+            path = Path(match.group(1))
+            path.chmod(0o644)  # a writing agent can undo a permission bit
+            self.act(path)
+        return super().spoken(task)
+
+
 class CompleteDiffTests(RunCycleTestCase):
     """The runtime hands a diff stage the whole diff, written by Git (#88)."""
 
@@ -1816,6 +1832,44 @@ class CompleteDiffTests(RunCycleTestCase):
 
         self.assertNotIn("Complete diff", implementer.dispatched[0])
         self.assertIn("Complete diff", reviewer.read[0][0])
+
+    def test_a_stage_that_changes_its_evidence_stops_the_cycle(self) -> None:
+        """REV-001: a writing stage can reach the file, so the hash is the boundary."""
+        implementer = Tamperer("codex", lambda path: path.write_bytes(b"shorter\n"))
+        reviewer = Reader("claude", [block("CHANGES_REQUESTED"), APPROVED])
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(["review", "resolve"], [stage.role for stage in report.stages])
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("was changed during the stage", report.stopped_because)
+        self.assertEqual(1, len(reviewer.read))  # no rereview judged the altered diff
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_a_stage_that_removes_its_evidence_stops_the_cycle(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Tamperer("claude", lambda path: path.unlink())
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("was removed during the stage", report.stopped_because)
+        self.assertIsNone(report.verdict)
+
+    def test_the_diff_file_is_read_only(self) -> None:
+        directory = rc.diff_directory(str(self.repo))
+        self.addCleanup(ex._remove_workspace, str(directory))
+
+        artifact = rc.write_diff_artifact(str(self.repo), ("main",), directory)
+
+        self.assertEqual(0, artifact.path.stat().st_mode & 0o222)
+        self.assertIsNone(artifact.changed())
 
     def test_a_temporary_directory_inside_the_workspace_is_not_used(self) -> None:
         inside = self.repo / "tmp"

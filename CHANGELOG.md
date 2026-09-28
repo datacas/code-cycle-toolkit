@@ -9,8 +9,10 @@ All notable changes to this project are documented here. This project follows
 
 - The runtime hands every `review`, `resolve`, and `rereview` stage the complete
   accumulated diff as a file Git wrote itself, outside the workspace, with its
-  base, head, line count, and SHA-256 in the prompt; a Claude stage is granted
-  that directory with `--add-dir`. A host hook that compacts `git diff` can no
+  base, head, line count, and SHA-256 in the prompt; a non-writing Claude stage
+  is granted that directory with `--add-dir`. The file is read-only, and a
+  stage that changes or removes it stops the cycle before its verdict is read.
+  A host hook that compacts `git diff` can no
   longer shorten what a runtime-driven review judges. With no resolvable base,
   no file is written and the prompt says so. Eight skills share a new
   `## Complete evidence` section: compacted or truncated output is incomplete,

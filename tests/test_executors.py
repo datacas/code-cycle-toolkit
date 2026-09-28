@@ -623,6 +623,30 @@ class ReadDirectoryTests(unittest.TestCase):
 
         self.assertNotIn("--add-dir", self.argv(ex.ClaudeAdapter(), target))
 
+    def test_a_writing_stage_is_never_granted_the_evidence_directory(self) -> None:
+        """Claude's added directories are editable under `acceptEdits` (REV-001)."""
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("{}")
+
+        result = ex.dispatch(
+            decision(target=router.parse_target("claude:anthropic/claude-sonnet-5 high")),
+            "resolve", ex.Registry([ex.ClaudeAdapter()]), writes=True,
+            policy=ex.ReadinessPolicy.ATTEMPT, cwd="/repo/api", runner=runner,
+            read_dirs=("/tmp/code-cycle-diff-x",),
+            probes={"claude": ex.ProbeResult(
+                "claude", ex.Availability.AUTHENTICATED, "credential present",
+                provable_ceiling=ex.Availability.AUTHENTICATED,
+            )},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIn("acceptEdits", seen["argv"])
+        self.assertNotIn("--add-dir", seen["argv"])
+        self.assertNotIn("/tmp/code-cycle-diff-x", seen["argv"])
+
     def test_codex_read_only_sandbox_already_reads_it_and_keeps_the_task_last(self) -> None:
         argv = self.argv(ex.CodexAdapter(), TARGET, writes=False,
                          read_dirs=("/tmp/code-cycle-diff-x",))
