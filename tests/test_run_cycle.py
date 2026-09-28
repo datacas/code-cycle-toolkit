@@ -8,14 +8,18 @@ executor whose structured block is delimited, parseable and not a result.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -130,6 +134,11 @@ class RunCycleTestCase(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
+        # Host-local state, including each stage's evidence, stays in the test.
+        self.home = Path(temporary.name) / "home"
+        patcher = mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_cycle(self, implementer, reviewer, **kw):
         telemetry = kw.pop("telemetry", self.store)
@@ -1658,3 +1667,261 @@ class RepeatedFindingTests(RunCycleTestCase):
 
         self.assertTrue(all("rm -rf" not in prompt
                             for prompt in self.resolve_prompts(implementer)))
+
+
+def git(repo: Path, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false", *args],
+        check=True, capture_output=True,
+    ).stdout
+
+
+def change_repository(root: Path) -> Path:
+    """A `main` and a feature branch one commit ahead of it."""
+    repo = root / "checkout"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "kept.py").write_text("".join(f"line {n}\n" for n in range(400)))
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "kept.py").write_text("".join(f"changed {n}\n" for n in range(400)))
+    (repo / "added.py").write_text("print('new')\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "change")
+    return repo
+
+
+#: Captured before any test patches it.
+REAL_WRITABLE_ROOTS = rc.writable_temporary_roots
+
+DIFF_PATH = re.compile(r"accumulated diff of this change to `([^`]+)`")
+
+
+class ReadingClaude(ex.ClaudeAdapter):
+    """The real Claude adapter, with a runner that reads the diff it was given."""
+
+    requires_publication_preflight = False
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    def probe(self):
+        return ex.ProbeResult(self.name, ex.Availability.READY, "scripted")
+
+    def dispatch(self, target, task, **kw):
+        def runner(argv, timeout=None, cwd=None, **_):
+            prompt = argv[2]
+            match = DIFF_PATH.search(prompt)
+            path = Path(match.group(1)) if match else None
+            self.seen.append({
+                "argv": argv, "cwd": cwd, "prompt": prompt, "path": path,
+                "content": path.read_bytes() if path is not None else None,
+            })
+            return subprocess.CompletedProcess(argv, 0, APPROVED, "")
+        return super().dispatch(target, task, runner=runner, **kw)
+
+
+class Reader(Talker):
+    """A scripted executor that reads the diff file while its stage runs."""
+
+    def __init__(self, name: str, answers: list[str] | None = None) -> None:
+        super().__init__(name)
+        self.answers = list(answers or [])
+        self.read: list[tuple[str, bytes | None]] = []
+
+    def spoken(self, task: str) -> str:
+        match = DIFF_PATH.search(task)
+        self.read.append((task, Path(match.group(1)).read_bytes() if match else None))
+        if "cc-resolve-comments" in task:
+            return block("RESOLVED")
+        return self.answers.pop(0) if self.answers else APPROVED
+
+
+class Tamperer(Talker):
+    """A stage that reaches the evidence file and does something to it."""
+
+    def __init__(self, name: str, act) -> None:
+        super().__init__(name)
+        self.act = act
+
+    def spoken(self, task: str) -> str:
+        match = DIFF_PATH.search(task)
+        if match:
+            path = Path(match.group(1))
+            path.chmod(0o644)  # a writing agent can undo a permission bit
+            self.act(path)
+        return super().spoken(task)
+
+
+class CompleteDiffTests(RunCycleTestCase):
+    """The runtime hands a diff stage the whole diff, written by Git (#88)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.repo = change_repository(Path(workspace.name))
+        # Every evidence directory the runtime makes goes here, so the test can
+        # see what is left once a stage ends.
+        self.scratch = self.home / "evidence"
+        self.scratch.mkdir(parents=True)
+        # The test's own home sits in the system temporary directory, which a
+        # real run refuses. Name a writable root elsewhere so the rest applies.
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        self.writable_elsewhere = str(Path(elsewhere.name) / "tmp")
+        patcher = mock.patch.object(rc, "writable_temporary_roots",
+                                    return_value=(self.writable_elsewhere,))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.expected = git(self.repo, "diff", "main...HEAD")
+
+    def assert_the_whole_diff(self, prompt: str, content: bytes | None) -> Path:
+        path = Path(DIFF_PATH.search(prompt).group(1))
+        self.assertEqual(self.expected, content)
+        lines = self.expected.count(b"\n")
+        self.assertGreater(lines, 400)
+        self.assertIn(f"{lines} lines", prompt)
+        self.assertIn(hashlib.sha256(self.expected).hexdigest(), prompt)
+        self.assertIn(git(self.repo, "rev-parse", "HEAD").decode().strip(), prompt)
+        self.assertFalse(ex._paths_overlap(str(path), str(self.repo)))
+        self.assertFalse(path.exists())
+        return path
+
+    def test_every_diff_stage_reads_the_complete_diff_and_it_is_gone_after(self) -> None:
+        implementer = Reader("codex")
+        reviewer = Reader("claude", [block("CHANGES_REQUESTED"), APPROVED])
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        read = reviewer.read + implementer.read
+        self.assertEqual(3, len(read))  # review, rereview, resolve
+        paths = {self.assert_the_whole_diff(prompt, content) for prompt, content in read}
+        self.assertEqual(3, len(paths))
+        self.assertEqual([], list(self.scratch.iterdir()))
+        # A scripted adapter is not a CLI this layer starts: nothing to grant.
+        self.assertTrue(all("read_dirs" not in kw for kw in reviewer.dispatch_kwargs))
+
+    def test_the_isolated_claude_clone_is_granted_the_diff_directory(self) -> None:
+        implementer = Talker("codex")
+        reviewer = ReadingClaude()
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        [seen] = reviewer.seen
+        path = self.assert_the_whole_diff(seen["prompt"], seen["content"])
+        self.assertEqual(["--add-dir", str(path.parent)], seen["argv"][-2:])
+        # The reviewer ran in its disposable clone, and the diff is outside it.
+        self.assertNotEqual(ex._canonical_path(str(self.repo)),
+                            ex._canonical_path(seen["cwd"]))
+        self.assertFalse(ex._paths_overlap(str(path), seen["cwd"]))
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_with_no_base_that_resolves_no_file_is_written_and_the_prompt_says_so(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+
+        self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                       change_bases=("origin/nowhere",), start_from="review",
+                       change_request_id="4")
+
+        [(prompt, content)] = reviewer.read
+        self.assertIsNone(content)
+        self.assertIn(rc.NO_DIFF_FILE, prompt)
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_the_implementation_is_not_given_a_diff(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+
+        self.run_cycle(implementer, reviewer, cwd=str(self.repo), change_bases=("main",))
+
+        self.assertNotIn("Complete diff", implementer.dispatched[0])
+        self.assertIn("Complete diff", reviewer.read[0][0])
+
+    def test_a_stage_that_changes_its_evidence_stops_the_cycle(self) -> None:
+        """REV-001: a writing stage can reach the file, so the hash is the boundary."""
+        implementer = Tamperer("codex", lambda path: path.write_bytes(b"shorter\n"))
+        reviewer = Reader("claude", [block("CHANGES_REQUESTED"), APPROVED])
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(["review", "resolve"], [stage.role for stage in report.stages])
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("was changed during the stage", report.stopped_because)
+        self.assertEqual(1, len(reviewer.read))  # no rereview judged the altered diff
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_a_stage_that_removes_its_evidence_stops_the_cycle(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Tamperer("claude", lambda path: path.unlink())
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("was removed during the stage", report.stopped_because)
+        self.assertIsNone(report.verdict)
+
+    def test_the_diff_file_is_read_only(self) -> None:
+        directory = rc.diff_directory(str(self.repo))
+        self.addCleanup(ex._remove_workspace, str(directory))
+
+        artifact = rc.write_diff_artifact(str(self.repo), ("main",), directory)
+
+        self.assertEqual(0, artifact.path.stat().st_mode & 0o222)
+        self.assertIsNone(artifact.changed())
+
+    def test_an_evidence_directory_inside_the_workspace_is_not_used(self) -> None:
+        inside = self.repo / "state"
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(inside)}):
+            self.assertIsNone(rc.diff_directory(str(self.repo)))
+        self.assertFalse(inside.exists())  # refused before anything was made
+
+    def test_an_evidence_root_in_a_writable_temporary_directory_is_refused(self) -> None:
+        """REV-001: `CODE_CYCLE_HOME` under `/tmp` or `$TMPDIR` is writable by Codex."""
+        writable = Path(self.writable_elsewhere)
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(writable / "state")}):
+            self.assertIsNone(rc.diff_directory(str(self.repo)))
+        self.assertFalse(writable.exists())  # refused before anything was made
+
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(writable / "state")}):
+            self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                           change_bases=("main",), start_from="review",
+                           change_request_id="4")
+        [(prompt, content)] = reviewer.read
+        self.assertIsNone(content)
+        self.assertIn(rc.NO_DIFF_FILE, prompt)
+
+    def test_the_real_writable_roots_are_the_temporary_directories(self) -> None:
+        roots = REAL_WRITABLE_ROOTS()
+        self.assertIn(tempfile.gettempdir(), roots)
+        if os.name == "posix":
+            self.assertIn("/tmp", roots)
+
+    def test_evidence_lives_beside_host_state_not_in_the_temporary_directory(self) -> None:
+        """REV-001: Codex's `workspace-write` may write `/tmp` and `$TMPDIR`."""
+        directory = rc.diff_directory(str(self.repo))
+        self.addCleanup(ex._remove_workspace, str(directory))
+
+        self.assertEqual(self.scratch, directory.parent)
+        self.assertEqual(tm.default_database_path().parent / "evidence", directory.parent)
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": "", "XDG_CONFIG_HOME": "",
+                                          "APPDATA": ""}):
+            self.assertFalse(ex._paths_overlap(str(rc.evidence_root()),
+                                               tempfile.gettempdir()))

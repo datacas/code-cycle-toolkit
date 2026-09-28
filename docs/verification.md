@@ -9,6 +9,69 @@ The toolkit counts something as verified only after it has run it. This page exp
 3. **Nothing is invented.** Commands come from what the project defines (lockfiles, manifests, task runners, CI). If a command doesn't exist, it isn't run.
 4. **Verification doesn't edit code** unless you ask.
 5. **A pass that couldn't run isn't a passed check.** A missing delegated skill is reported as a degraded pass.
+6. **Compacted output isn't evidence.** A stage judges the whole diff and cites uncompacted output. When it can't obtain either, the affected part is unverified. See [Complete evidence](#complete-evidence).
+
+## Complete evidence
+
+A host can change what an agent sees of a command's output. A command-rewriting
+hook may compact `git diff`, test runs, or other output before the agent reads
+it, and the only trace is a marker in the middle of the text. A review that
+approves a shortened diff has not read the change it approved.
+
+Measured on this repository with RTK 0.48, whose Claude Code hook turns
+`git diff` into `rtk git diff` transparently (`git diff b9dbc54 91ba1dd`, the
+PR #74 merge):
+
+| Command | Lines |
+|---|---|
+| `git diff` through the hook | 495, with markers such as `... (100 additions truncated)` |
+| raw (`rtk proxy git diff`) | 764 |
+| `git diff --output=<file>` through the hook | 764 (the file is written by Git, unfiltered) |
+
+In the same test, `gh` comment reads and exit codes were intact. The rule has two
+layers:
+
+- **The runtime supplies the diff.** When `run_cycle` dispatches `review`,
+  `resolve`, or `rereview`, it writes `git diff <base>...HEAD` itself, through
+  `subprocess` and `--output`, which no host hook rewrites. The base is the first
+  of `change_bases_of` that resolves, the same resolution the change signals
+  use. The file goes in a fresh directory under `evidence/`, beside the
+  telemetry database (`CODE_CYCLE_HOME`, or the user configuration directory).
+  That is outside the workspace and Claude's disposable review clone. It is
+  also outside the system temporary directory, which Codex's `workspace-write`
+  sandbox may write. If `CODE_CYCLE_HOME` puts it inside the workspace, `/tmp`,
+  or `$TMPDIR`, no file is written and the prompt says so. The prompt names the file, the base, merge base and head
+  SHAs, the line count, and the SHA-256. The file is removed when the stage
+  ends. When no base resolves, no file is written and the prompt says so; the
+  stage never receives a partial file.
+
+  How far the evidence is protected depends on the executor:
+
+  | Executor | Reads the file | Can the stage change it? |
+  |---|---|---|
+  | Codex, any stage | Its sandbox reads the whole file system | No; the operating system sandbox writes only its workspace and temporary directories |
+  | Claude, non-writing stage | Granted the directory with `--add-dir` | Not prevented. Claude has no sandbox here, and an added directory is editable |
+  | Claude, writing stage | Not granted; falls back to the skill's rules | Not granted, but not sandboxed either |
+
+  For every executor the file is read-only, and after the stage the runtime
+  checks its SHA-256 again. A changed or missing file stops the cycle as
+  `stage_not_completed` before the stage's verdict is read. What this can't
+  catch is a Claude stage that changes the file and restores it before it
+  exits. For a review stage that matters, because the cycle acts on its
+  verdict. No runtime can prove which bytes an agent read. For Codex the
+  sandbox makes this case impossible. For Claude it is an accepted limit:
+  Claude reviews remain trusted, with their capabilities unchanged and no
+  secondary confirmation required. They are not runtime-verifiable against an
+  edit to the evidence that is restored before the stage exits.
+- **The skills state the rule.** Every skill that reads a diff or cites output
+  carries the shared `## Complete evidence` section, for manual runs and for
+  evidence other than the diff. A truncation or summary marker, or output
+  shorter than its own header counts, makes the output incomplete. Diffs are
+  read from a file Git wrote, or through the host's raw mode. When complete
+  output can't be obtained, the affected part is unverified, never checked.
+
+This section decides whether output is complete. [Evidence levels](#evidence-levels)
+decides who produced it; the two don't overlap.
 
 ## Evidence levels
 

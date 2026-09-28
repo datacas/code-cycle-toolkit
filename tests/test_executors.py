@@ -597,6 +597,65 @@ class WorkingDirectoryTests(unittest.TestCase):
         self.assertIsNone(seen["cwd"])
 
 
+class ReadDirectoryTests(unittest.TestCase):
+    """Evidence written outside the workspace must be readable by the stage (#88)."""
+
+    def argv(self, adapter, target, **kw) -> list[str]:
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("{}")
+
+        adapter.dispatch(target, "review", cwd="/repo/api", runner=runner, **kw)
+        return seen["argv"]
+
+    def test_claude_is_granted_the_directory_last_so_nothing_positional_follows(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
+
+        argv = self.argv(ex.ClaudeAdapter(), target, read_dirs=("/tmp/code-cycle-diff-x",))
+
+        self.assertEqual(["--add-dir", "/tmp/code-cycle-diff-x"], argv[-2:])
+        self.assertEqual("review", argv[2])
+
+    def test_claude_without_evidence_is_granted_nothing(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
+
+        self.assertNotIn("--add-dir", self.argv(ex.ClaudeAdapter(), target))
+
+    def test_a_writing_stage_is_never_granted_the_evidence_directory(self) -> None:
+        """Claude's added directories are editable under `acceptEdits` (REV-001)."""
+        seen = {}
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["argv"] = argv
+            return completed("{}")
+
+        result = ex.dispatch(
+            decision(target=router.parse_target("claude:anthropic/claude-sonnet-5 high")),
+            "resolve", ex.Registry([ex.ClaudeAdapter()]), writes=True,
+            policy=ex.ReadinessPolicy.ATTEMPT, cwd="/repo/api", runner=runner,
+            read_dirs=("/tmp/code-cycle-diff-x",),
+            probes={"claude": ex.ProbeResult(
+                "claude", ex.Availability.AUTHENTICATED, "credential present",
+                provable_ceiling=ex.Availability.AUTHENTICATED,
+            )},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIn("acceptEdits", seen["argv"])
+        self.assertNotIn("--add-dir", seen["argv"])
+        self.assertNotIn("/tmp/code-cycle-diff-x", seen["argv"])
+
+    def test_codex_read_only_sandbox_already_reads_it_and_keeps_the_task_last(self) -> None:
+        argv = self.argv(ex.CodexAdapter(), TARGET, writes=False,
+                         read_dirs=("/tmp/code-cycle-diff-x",))
+
+        self.assertNotIn("--add-dir", argv)
+        self.assertEqual(["-s", "read-only"], argv[argv.index("-s"):argv.index("-s") + 2])
+        self.assertEqual("review", argv[-1])
+
+
 class OrcaDispatchTests(unittest.TestCase):
     """The backend that can actually report which model it launched."""
 
