@@ -594,7 +594,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
 | `verdict` | `tests_basis` | whenever the verdict records `tests_passed`; this evidence-level token is required (schema 8) |
 | `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
-| `verdict` | `boundary_verified` | the stage reported a test outcome or conclusion and a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change (schema 9) |
+| `verdict` | `boundary_verified` | a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change, and the stage either reported a test outcome or conclusion or completed code work (`IMPLEMENTED`, `RESOLVED`, `PARTIALLY_RESOLVED`) without one, which records `false`; a stage without a test report that did no code work, such as a review, a blocked stage, or a `no_code_change` resolution, records nothing (schema 9) |
 | `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
 | `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |

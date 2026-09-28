@@ -1067,6 +1067,10 @@ def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
 
 
 EVIDENCE_LEVELS = frozenset({"static", "test", "boundary"})
+#: Statuses of a stage that completed code work. Only these can leave a required
+#: boundary run known to be missing; a review reports no tests, and a blocked
+#: stage changed nothing.
+CODE_WORK_STATUSES = frozenset({"IMPLEMENTED", "RESOLVED", "PARTIALLY_RESOLVED"})
 
 
 def _tests(payload: dict | None, *, boundary_rule: bool | None = None) -> dict:
@@ -1079,12 +1083,20 @@ def _tests(payload: dict | None, *, boundary_rule: bool | None = None) -> dict:
     successful `boundary` evidence entry exists, and a missing one caps a
     `verified` conclusion at `verified_with_reservations`. When none is
     required, nothing new is recorded. The runtime runs no boundary check.
+
+    A stage that completed code work but reported no test outcome still records
+    `boundary_verified: false` when a run was required: that is known, not
+    unknown. A review, a blocked stage, and a no-code resolution record nothing.
     """
     result = _test_outcome(payload)
-    if not result:
-        return result
-    tests = payload["tests"]
+    tests = payload.get("tests") if payload else None
+    tests = tests if isinstance(tests, dict) else {}
     if not (tests.get("boundary") == "required" or boundary_rule is True):
+        return result
+    if not result:
+        if (_status_of(payload or {}) in CODE_WORK_STATUSES
+                and tests.get("reason") != "no_code_change"):
+            result["boundary_verified"] = False
         return result
     # A passing agent-reported outcome already proves the evidence list is
     # well-formed and that every entry in it, boundary ones included, exited 0.

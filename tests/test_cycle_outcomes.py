@@ -510,11 +510,33 @@ class TestsReportedTests(unittest.TestCase):
         self.assertNotIn("boundary_verified", rc._tests(payload, boundary_rule=None))
         self.assertNotIn("boundary_verified", rc._tests(payload, boundary_rule=False))
 
-    def test_a_stage_with_no_test_report_records_no_boundary(self) -> None:
-        self.assertEqual({}, rc._tests({"status": "BLOCKED"}, boundary_rule=True))
-        self.assertEqual({}, rc._tests({"status": "RESOLVED", "tests": {
-            "ran": False, "reason": "no_code_change", "boundary": "required",
-        }}, boundary_rule=True))
+    def test_code_work_without_a_test_report_records_a_missing_boundary(self) -> None:
+        """REV-001: required and not reported is known, not unknown."""
+        for payload in (
+            {"status": "IMPLEMENTED"},
+            {"status": "resolved", "tests": {"ran": False}},
+            {"status": "PARTIALLY_RESOLVED", "tests": {"passed": "yes"}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual({"boundary_verified": False},
+                                 rc._tests(payload, boundary_rule=True))
+        self.assertEqual({"boundary_verified": False}, rc._tests({
+            "status": "IMPLEMENTED", "tests": {"ran": False, "boundary": "required"},
+        }))
+
+    def test_stages_that_changed_no_code_record_no_boundary(self) -> None:
+        for payload in (
+            {"status": "BLOCKED"},
+            {"status": "APPROVED"},
+            {"status": "CHANGES_REQUESTED", "tests": {"ran": False}},
+            {"status": "RESOLVED", "tests": {
+                "ran": False, "reason": "no_code_change", "boundary": "required"}},
+            None,
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual({}, rc._tests(payload, boundary_rule=True))
+        self.assertEqual({}, rc._tests({"status": "IMPLEMENTED"}, boundary_rule=None))
+        self.assertEqual({}, rc._tests({"status": "IMPLEMENTED"}, boundary_rule=False))
 
     def test_tests_that_never_ran_record_nothing(self) -> None:
         for payload in (

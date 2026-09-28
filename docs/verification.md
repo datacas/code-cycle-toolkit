@@ -71,6 +71,9 @@ required and no successful `boundary` entry exists, the runtime records
 unverified items and residual risk. When the driver observed the change, the
 runtime applies the path rule itself, so a verifier that states
 `not_required` for a migration still gets `boundary_verified: false`.
+A stage that completed code work but reported no test outcome also records
+`boundary_verified: false` when a run was required. Without a test report, a
+review, a blocked stage, or a `no_code_change` resolution records nothing.
 `boundary: not_required` records nothing new. The runtime never runs a
 boundary check.
 
