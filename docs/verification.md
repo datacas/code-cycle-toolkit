@@ -59,8 +59,10 @@ layers:
   catch is a Claude stage that changes the file and restores it before it
   exits. For a review stage that matters, because the cycle acts on its
   verdict. No runtime can prove which bytes an agent read. For Codex the
-  sandbox makes this case impossible; for Claude it is an open limit of this
-  toolkit, not a guarantee.
+  sandbox makes this case impossible. For Claude it is an accepted limit:
+  Claude reviews remain trusted, with their capabilities unchanged and no
+  secondary confirmation required. They are not runtime-verifiable against an
+  edit to the evidence that is restored before the stage exits.
 - **The skills state the rule.** Every skill that reads a diff or cites output
   carries the shared `## Complete evidence` section, for manual runs and for
   evidence other than the diff. A truncation or summary marker, or output
