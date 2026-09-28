@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -100,13 +101,14 @@ class StatsTests(unittest.TestCase):
     def test_a_legacy_test_outcome_without_a_basis_reads_as_claimed(self) -> None:
         row_id = self.store.record_stage("owner/repo", "legacy-task", "implement",
                                          record_kind="verdict")
-        with sqlite3.connect(self.database) as connection:
-            row = connection.execute("SELECT payload FROM stages WHERE id = ?",
-                                     (row_id,)).fetchone()
-            payload = json.loads(row[0])
-            payload["tests_passed"] = True
-            connection.execute("UPDATE stages SET payload = ? WHERE id = ?",
-                               (json.dumps(payload), row_id))
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                row = connection.execute("SELECT payload FROM stages WHERE id = ?",
+                                         (row_id,)).fetchone()
+                payload = json.loads(row[0])
+                payload["tests_passed"] = True
+                connection.execute("UPDATE stages SET payload = ? WHERE id = ?",
+                                   (json.dumps(payload), row_id))
 
         report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
                                  repo_id="owner/repo", now=self.as_of())
