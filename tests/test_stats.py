@@ -98,6 +98,98 @@ class StatsTests(unittest.TestCase):
         self.assertIn("verified externally: 0 passed, 1 failed", markdown)
         self.assertIn("Agent conclusion tokens (separate from evidence level)", markdown)
 
+    def test_forecast_accuracy_pairs_implement_verdict_with_first_review_dispatch(self) -> None:
+        for index in range(10):
+            cycle = f"forecast-cycle-{index}"
+            self.store.record_stage(
+                "owner/repo", f"forecast-task-{index}", "implement",
+                record_kind="verdict", cycle_id=cycle,
+                forecast_changed_files_count=4,
+                forecast_changed_lines_estimate=180,
+                forecast_has_tests=index < 7,
+                forecast_touches_api=True,
+            )
+            self.store.record_stage(
+                "owner/repo", f"forecast-task-{index}", "review",
+                record_kind="dispatch", cycle_id=cycle,
+                changed_files_count=4 if index < 5 else 5,
+                changed_lines_estimate=(
+                    180 if index < 4 else 200 if index < 7
+                    else 260 if index < 9 else 400
+                ),
+                has_tests=(index < 7) != (index == 6),
+                touches_api=True,
+            )
+            if index == 0:
+                self.store.record_stage(
+                    "owner/repo", f"forecast-task-{index}", "review",
+                    record_kind="dispatch", cycle_id=cycle,
+                    changed_files_count=999, changed_lines_estimate=0,
+                    has_tests=False, touches_api=False,
+                )
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", days=None, now=self.as_of())
+        accuracy = report["summary"]["forecast_accuracy"]
+        markdown = stats.render_markdown(report)
+
+        self.assertEqual(10, accuracy["paired_cycles"])
+        self.assertEqual({"passed": 9, "total": 10, "minimum": 10, "value": 0.9},
+                         accuracy["flags"]["has_tests"])
+        self.assertEqual(5, accuracy["counts"]["changed_files_count"]["bands"]["exact"]["passed"])
+        self.assertEqual(
+            5, accuracy["counts"]["changed_files_count"]["bands"]["within_25_percent"]["passed"]
+        )
+        self.assertEqual(4, accuracy["counts"]["changed_lines_estimate"]["bands"]["exact"]["passed"])
+        self.assertEqual(
+            3, accuracy["counts"]["changed_lines_estimate"]["bands"]["within_25_percent"]["passed"]
+        )
+        self.assertEqual(
+            2, accuracy["counts"]["changed_lines_estimate"]["bands"]["within_50_percent"]["passed"]
+        )
+        self.assertEqual(
+            1, accuracy["counts"]["changed_lines_estimate"]["bands"]["over_50_percent"]["passed"]
+        )
+        self.assertIn("### Forecast accuracy", markdown)
+        self.assertIn("changed_lines_estimate` error bands", markdown)
+
+    def test_forecast_accuracy_is_unknown_below_minimum_and_without_a_pair(self) -> None:
+        for index in range(9):
+            cycle = f"forecast-cycle-{index}"
+            self.store.record_stage(
+                "owner/repo", f"forecast-task-{index}", "implement",
+                record_kind="verdict", cycle_id=cycle,
+                forecast_changed_files_count=4,
+                forecast_has_tests=True,
+            )
+            self.store.record_stage(
+                "owner/repo", f"forecast-task-{index}", "review",
+                record_kind="dispatch", cycle_id=cycle,
+                changed_files_count=4, has_tests=True,
+            )
+        self.store.record_stage(
+            "owner/repo", "forecast-only-task", "implement",
+            record_kind="verdict", cycle_id="forecast-only-cycle",
+            forecast_changed_files_count=4,
+            forecast_has_tests=True,
+        )
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", days=None, now=self.as_of())
+        accuracy = report["summary"]["forecast_accuracy"]
+        markdown = stats.render_markdown(report)
+
+        self.assertIsNone(accuracy["flags"]["has_tests"]["value"])
+        self.assertEqual(9, accuracy["paired_cycles"])
+        self.assertEqual("unknown (9/10 observations)", next(
+            line.removeprefix("- `has_tests`: ") for line in markdown.splitlines()
+            if line.startswith("- `has_tests`: ")
+        ))
+        self.assertIn("changed_files_count` error bands: unknown (9/10 observations)", markdown)
+
+        empty_report = stats.aggregate([], repo_id="owner/repo", days=None, now=self.as_of())
+        self.assertIn("no cycle has both an implementation forecast", stats.render_markdown(empty_report))
+
     def test_a_legacy_test_outcome_without_a_basis_reads_as_claimed(self) -> None:
         row_id = self.store.record_stage("owner/repo", "legacy-task", "implement",
                                          record_kind="verdict")

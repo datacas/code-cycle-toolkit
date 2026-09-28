@@ -219,6 +219,15 @@ they were searched, and the fix shape. When the decision is
 When the structured result is emitted, it carries the same decision in the
 `diagnosis` object described under *Structured result*.
 
+At the end of diagnosis, before the first edit, make a best-effort
+implementation forecast using only these `ChangeSignals` names:
+`changed_files_count`, `changed_lines_estimate`, `has_tests`,
+`touches_dependencies`, `touches_database`, `touches_auth`, `touches_api`,
+`touches_migrations`, and `touches_ci`. Include known values in the structured
+result's `forecast` object and omit unknown values. This estimate is produced
+after the implementer has already been routed; it is historical metadata and
+must not change the implementation or its routing.
+
 **Record the work units.** The pull request body also carries a *Work units*
 table with one row per planned unit and these columns: behaviour, files, tests,
 verification, and rollback. State the rollback boundary accurately:
@@ -335,6 +344,17 @@ ORCHESTRATION_RESULT
       { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
       { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
     ]
+  },
+  "forecast": {
+    "changed_files_count": 4,
+    "changed_lines_estimate": 180,
+    "has_tests": true,
+    "touches_dependencies": false,
+    "touches_database": false,
+    "touches_auth": false,
+    "touches_api": true,
+    "touches_migrations": false,
+    "touches_ci": false
   },
   "work_units": [
     {
