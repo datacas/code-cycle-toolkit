@@ -1070,8 +1070,9 @@ def _tests(payload: dict | None) -> dict:
 
     A result without evidence remains a claim. A present evidence list must be
     well-formed, contain a successful `test` entry, and contain no failed
-    command before it can support `passed: true`. Incomplete or contradictory
-    evidence fails closed. The conclusion is kept separately from its basis.
+    command before it can support `passed: true`. An agent conclusion of
+    `not_verified` or `failed` also vetoes a reported pass. The conclusion is
+    kept separately from its evidence basis.
     """
     tests = payload.get("tests") if payload else None
     if not isinstance(tests, dict):
@@ -1087,6 +1088,8 @@ def _tests(payload: dict | None) -> dict:
     passed = tests.get("passed")
     if not isinstance(passed, bool):
         return result
+    if passed and conclusion in {"not_verified", "failed"}:
+        passed = False
     evidence = tests.get("evidence")
     if (passed is False and tests.get("ran") is not True
             and _status_of(payload) == "BLOCKED"

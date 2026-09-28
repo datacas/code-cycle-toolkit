@@ -116,6 +116,26 @@ class StatsTests(unittest.TestCase):
         self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
                          report["summary"]["verification"]["by_basis"]["claimed"])
 
+    def test_latest_test_report_does_not_inherit_an_earlier_conclusion(self) -> None:
+        cycle_id = "cycle-paired-report"
+        self.store.record_stage("owner/repo", "task-paired-report", "implement",
+                                record_kind="verdict", cycle_id=cycle_id,
+                                verification="failed")
+        self.store.record_stage("owner/repo", "task-paired-report", "resolve",
+                                record_kind="verdict", cycle_id=cycle_id,
+                                tests_passed=True, tests_basis="claimed")
+
+        verification = stats.aggregate(
+            stats._read_rows(self.database, "owner/repo"),
+            repo_id="owner/repo", now=self.as_of(),
+        )["summary"]["verification"]
+
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         verification["by_basis"]["claimed"])
+        self.assertEqual(0, verification["conclusions_measured"])
+        self.assertEqual(1, verification["conclusions_not_reported"])
+        self.assertEqual(0, verification["conclusions"]["failed"])
+
     def add_head(self, task: str, role: str, status: str, **checks) -> None:
         self.store.record_stage("owner/repo", task, role, status=status,
                                 record_kind="verdict",

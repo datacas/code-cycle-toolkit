@@ -490,11 +490,13 @@ class CycleRecorder:
             if role == "review" and self.first_review_status is None:
                 self.first_review_status = status
             self.final_review_status = status
-        if fields.get("tests_passed") is not None:
-            self.tests_passed = fields["tests_passed"]
-            self.tests_basis = fields["tests_basis"]
-        if fields.get("verification") is not None:
-            self.verification = fields["verification"]
+        if (fields.get("tests_passed") is not None
+                or fields.get("verification") is not None):
+            # Test outcome and conclusion belong to one report. A later stage
+            # that reports only one must not inherit the other's stale value.
+            self.tests_passed = fields.get("tests_passed")
+            self.tests_basis = fields.get("tests_basis")
+            self.verification = fields.get("verification")
         return row
 
     def next_iteration(self) -> int:

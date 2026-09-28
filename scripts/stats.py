@@ -328,8 +328,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
     findings, findings_measured = Counter(), Counter()
     fallbacks = _fallback_stage_count(current, stages)
     model_resolutions = Counter()
-    test_outcomes_by_cycle: dict[str, dict] = {}
-    conclusions_by_cycle: dict[str, str] = {}
+    verification_by_cycle: dict[str, dict] = {}
     confidence = Counter()
     jev_agreement = Counter()
     jev_status = Counter()
@@ -348,14 +347,19 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         tests_passed = payload.get("tests_passed")
         cycle_key = payload.get("cycle_id") or row["task_id"]
         conclusion = payload.get("verification")
-        if isinstance(conclusion, str) and conclusion in VERIFICATION_CONCLUSIONS:
-            conclusions_by_cycle[cycle_key] = conclusion
-        if isinstance(tests_passed, bool):
-            basis = payload.get("tests_basis", "claimed")
-            if isinstance(basis, str) and basis in TEST_BASES:
-                test_outcomes_by_cycle[cycle_key] = {
-                    "passed": tests_passed, "basis": basis,
-                }
+        if any(key in payload for key in ("tests_passed", "tests_basis", "verification")):
+            # Keep both dimensions from the same latest stage report. If it
+            # omits one, do not pair it with a value from an earlier stage.
+            report = {}
+            if isinstance(conclusion, str) and conclusion in VERIFICATION_CONCLUSIONS:
+                report["conclusion"] = conclusion
+            if isinstance(tests_passed, bool):
+                basis = payload.get("tests_basis", "claimed")
+                if isinstance(basis, str) and basis in TEST_BASES:
+                    report["test_outcome"] = {
+                        "passed": tests_passed, "basis": basis,
+                    }
+            verification_by_cycle[cycle_key] = report
         for key in FINDING_FIELDS:
             value = payload.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
@@ -403,6 +407,16 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         model_resolutions["matched"] + model_resolutions["mismatch_known"]
         + model_resolutions["mismatch_unrecognized"]
     )
+    test_outcomes_by_cycle = {
+        cycle: report["test_outcome"]
+        for cycle, report in verification_by_cycle.items()
+        if "test_outcome" in report
+    }
+    conclusions_by_cycle = {
+        cycle: report["conclusion"]
+        for cycle, report in verification_by_cycle.items()
+        if "conclusion" in report
+    }
     tests_by_basis = {
         basis: {
             "passed": sum(outcome["passed"] for outcome in test_outcomes_by_cycle.values()

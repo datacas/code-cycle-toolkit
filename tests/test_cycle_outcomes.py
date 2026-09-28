@@ -91,6 +91,23 @@ class ReconstructionTests(CycleTestCase):
         self.assertIs(True, outcome["final_approved"])
 
 
+class VerificationReportPairingTests(CycleTestCase):
+    def test_later_test_outcome_does_not_inherit_an_earlier_conclusion(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+        recorder.stage("implement", "work")
+        recorder.record_verdict("implement", "IMPLEMENTED", verification="failed")
+        recorder.stage("resolve", "resolve")
+        recorder.record_verdict("resolve", "RESOLVED", tests_passed=True,
+                                tests_basis="claimed")
+        recorder.close("HUMAN_INTERVENTION")
+
+        outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
+
+        self.assertIs(True, outcome["tests_passed"])
+        self.assertEqual("claimed", outcome["tests_basis"])
+        self.assertNotIn("verification", outcome)
+
+
 class UnknownIsNotDefaultTests(CycleTestCase):
     def test_a_cycle_that_never_reached_a_verdict_is_not_judged(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
@@ -355,6 +372,19 @@ class TestsReportedTests(unittest.TestCase):
             "tests_passed": True, "tests_basis": "agent_reported",
             "verification": "verified_with_reservations",
         }, rc._tests(payload))
+
+    def test_failed_conclusion_vetoes_a_reported_pass(self) -> None:
+        evidence = [{"level": "test", "command": "pytest tests/test_x.py",
+                     "exit_code": 0, "executed": 14}]
+        for conclusion in ("failed", "not_verified"):
+            with self.subTest(conclusion=conclusion):
+                self.assertEqual({
+                    "tests_passed": False, "tests_basis": "agent_reported",
+                    "verification": conclusion,
+                }, rc._tests({"status": "IMPLEMENTED", "tests": {
+                    "ran": True, "passed": True, "conclusion": conclusion,
+                    "evidence": evidence,
+                }}))
 
     def test_failing_or_incomplete_evidence_never_records_a_pass(self) -> None:
         cases = (
