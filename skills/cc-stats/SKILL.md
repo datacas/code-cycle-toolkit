@@ -123,7 +123,9 @@ Test outcomes are counted per cycle and grouped by evidence level:
 Show an agent claim as claimed and an agent-supplied command result as reported;
 use “verified” for outcomes only at the runtime-observed or externally-verified
 levels. Show the agent's conclusion tokens separately from evidence levels.
-Historical test outcomes without `tests_basis` count as `claimed`. CI on stage
+Historical test outcomes without `tests_basis` count as `claimed`. Boundary
+verification is a rate among the cycles whose change required a boundary run;
+cycles that did not require one are left out, not counted as verified. CI on stage
 heads sets each implementation or resolution verdict against the checks of the
 head it pushed: green, failed, pending, or without checks, by the status the
 stage claimed. A head that reported no checks is not counted. When no dispatch

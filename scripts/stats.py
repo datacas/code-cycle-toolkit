@@ -347,12 +347,15 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         tests_passed = payload.get("tests_passed")
         cycle_key = payload.get("cycle_id") or row["task_id"]
         conclusion = payload.get("verification")
-        if any(key in payload for key in ("tests_passed", "tests_basis", "verification")):
+        if any(key in payload for key in ("tests_passed", "tests_basis", "verification",
+                                          "boundary_verified")):
             # Keep both dimensions from the same latest stage report. If it
             # omits one, do not pair it with a value from an earlier stage.
             report = {}
             if isinstance(conclusion, str) and conclusion in VERIFICATION_CONCLUSIONS:
                 report["conclusion"] = conclusion
+            if isinstance(payload.get("boundary_verified"), bool):
+                report["boundary_verified"] = payload["boundary_verified"]
             if isinstance(tests_passed, bool):
                 basis = payload.get("tests_basis", "claimed")
                 if isinstance(basis, str) and basis in TEST_BASES:
@@ -429,6 +432,10 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         for basis in TEST_BASE_ORDER
     }
     conclusions = Counter(conclusions_by_cycle.values())
+    boundary_by_cycle = [
+        report["boundary_verified"] for report in verification_by_cycle.values()
+        if "boundary_verified" in report
+    ]
     verification_groups = {
         row["payload"].get("cycle_id") or row["task_id"] for row in current
     }
@@ -473,6 +480,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                 "not_reported": len(verification_groups) - len(test_outcomes_by_cycle),
                 "conclusions_measured": len(conclusions_by_cycle),
                 "conclusions_not_reported": len(verification_groups) - len(conclusions_by_cycle),
+                "boundary": _rate(sum(boundary_by_cycle), len(boundary_by_cycle)),
             },
             "stage_checks": _stage_checks(current),
             "duration_ms": {
@@ -697,6 +705,12 @@ def render_markdown(report: dict) -> str:
             f"- Agent conclusion tokens (separate from evidence level): {conclusions}; "
             f"{verification['conclusions_measured']} reported, "
             f"{verification['conclusions_not_reported']} not reported"
+        )
+    boundary = verification["boundary"]
+    if boundary["total"]:
+        lines.append(
+            f"- Boundary verification, among cycles that required it: "
+            f"**{_format_rate(boundary)}**"
         )
     checks = summary["stage_checks"]
     if checks["measured"]:

@@ -65,7 +65,7 @@ from router import (
     load_profiles,
     load_routing_strategy,
 )
-from stage_signals import collect_change_signals
+from stage_signals import boundary_rule_fired, collect_change_signals
 from telemetry import (
     CYCLE_STARTS,
     VERIFICATION_CONCLUSIONS,
@@ -738,7 +738,8 @@ def run_cycle(
         if reported.status:
             recorder.record_verdict(role, reported.status,
                                     **_findings(reported.payload, role),
-                                    **_tests(reported.payload),
+                                    **_tests(reported.payload, boundary_rule=(
+                                        boundary_rule_fired(recorder.latest_change))),
                                     **_checks(reported.payload))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
@@ -1065,7 +1066,38 @@ def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
     return expected == set(blocking)
 
 
-def _tests(payload: dict | None) -> dict:
+EVIDENCE_LEVELS = frozenset({"static", "test", "boundary"})
+
+
+def _tests(payload: dict | None, *, boundary_rule: bool | None = None) -> dict:
+    """The test outcome, plus whether a required boundary run has evidence.
+
+    `boundary_required = deterministic_rule OR verifier_judgement`: the agent's
+    `tests.boundary` can require a run the observed change did not, and
+    `boundary_rule`, the rule fired on the observed change, cannot be switched
+    off by it. When a run is required, `boundary_verified` records whether a
+    successful `boundary` evidence entry exists, and a missing one caps a
+    `verified` conclusion at `verified_with_reservations`. When none is
+    required, nothing new is recorded. The runtime runs no boundary check.
+    """
+    result = _test_outcome(payload)
+    if not result:
+        return result
+    tests = payload["tests"]
+    if not (tests.get("boundary") == "required" or boundary_rule is True):
+        return result
+    # A passing agent-reported outcome already proves the evidence list is
+    # well-formed and that every entry in it, boundary ones included, exited 0.
+    verified = (result.get("tests_passed") is True
+                and result.get("tests_basis") == "agent_reported"
+                and any(item.get("level") == "boundary" for item in tests["evidence"]))
+    result["boundary_verified"] = verified
+    if not verified and result.get("verification") == "verified":
+        result["verification"] = "verified_with_reservations"
+    return result
+
+
+def _test_outcome(payload: dict | None) -> dict:
     """Read the agent's test outcome and classify the evidence it supplied.
 
     A result without evidence remains a claim. A present evidence list must be
@@ -1113,7 +1145,7 @@ def _tests(payload: dict | None) -> dict:
             command = item.get("command")
             exit_code = item.get("exit_code")
             executed = item.get("executed")
-            if (not isinstance(level, str) or level not in {"static", "test"}
+            if (not isinstance(level, str) or level not in EVIDENCE_LEVELS
                     or not isinstance(command, str) or not command.strip()
                     or not isinstance(exit_code, int) or isinstance(exit_code, bool)
                     or "executed" not in item

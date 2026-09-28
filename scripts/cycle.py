@@ -288,6 +288,10 @@ class CycleRecorder:
         self.tests_passed: bool | None = None
         self.tests_basis: str | None = None
         self.verification: str | None = None
+        self.boundary_verified: bool | None = None
+        # The change signals the latest stage was routed knowing, kept so its
+        # verdict can apply the boundary rule. `None` when nothing was observed.
+        self.latest_change: ChangeSignals | None = None
         # An observer of the rules' choice, never a selector: nothing it
         # returns reaches `route()` or a dispatch. `None` means no shadow at
         # all, so a disabled one costs no client, no key read and no I/O.
@@ -354,6 +358,7 @@ class CycleRecorder:
             if self.change_observer is not None and role in CHANGE_OBSERVED_ROLES
             else None
         )
+        self.latest_change = change
         for attempt in range(2):
             signals = self._pre_routing(role, change)
             eligible = self.registry.compatible_executors(
@@ -491,12 +496,14 @@ class CycleRecorder:
                 self.first_review_status = status
             self.final_review_status = status
         if (fields.get("tests_passed") is not None
-                or fields.get("verification") is not None):
+                or fields.get("verification") is not None
+                or fields.get("boundary_verified") is not None):
             # Test outcome and conclusion belong to one report. A later stage
             # that reports only one must not inherit the other's stale value.
             self.tests_passed = fields.get("tests_passed")
             self.tests_basis = fields.get("tests_basis")
             self.verification = fields.get("verification")
+            self.boundary_verified = fields.get("boundary_verified")
         return row
 
     def next_iteration(self) -> int:
@@ -559,6 +566,8 @@ class CycleRecorder:
             )
         if self.verification is not None:
             outcome["verification"] = self.verification
+        if self.boundary_verified is not None:
+            outcome["boundary_verified"] = self.boundary_verified
         if self.repeated_findings is not None:
             outcome["repeated_findings"] = self.repeated_findings
         return outcome

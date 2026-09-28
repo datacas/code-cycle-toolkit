@@ -7,6 +7,18 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `cc-verify` decides when a change needs a run at the real boundary:
+  `boundary_required = deterministic_rule OR verifier_judgement`. The rule
+  fires on changed paths classified as api, auth, database, or migrations by
+  the same classifier as the `touches_*` signals; the verifier may add CLI,
+  subprocess/adapter, provider, and runtime-configuration areas and never
+  remove the rule. It lists what counts as boundary evidence per area. The
+  evidence record gains `level: boundary` and the result states
+  `boundary: required|not_required`. A required run without boundary
+  evidence caps the conclusion at `verified_with_reservations`; the driver
+  applies the path rule to the observed change as well. Telemetry schema 9
+  adds the verdict and cycle flag `boundary_verified`, absent when no run was
+  required, and `cc-stats` reports the rate among cycles that required one.
 - The resolve → rereview loop detects a finding that survives a claimed fix:
   a resolution publishes its `REV-xxx` ID as `resolved` or `not_applicable`
   and the next review reopens it. `review_contract.claimed_fix_survivals` is

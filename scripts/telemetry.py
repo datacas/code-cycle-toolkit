@@ -58,7 +58,9 @@ from pathlib import Path
 #: payload-only; an older row reads as unknown.
 #: 8: test outcomes carry `tests_basis`, the evidence level they rest on, and
 #: verdicts carry the agent's separate `verification` conclusion.
-SCHEMA_VERSION = 8
+#: 9: a verdict whose change required a boundary run carries
+#: `boundary_verified`; one that did not require it carries nothing new.
+SCHEMA_VERSION = 9
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -253,6 +255,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     # the evidence level and agent conclusion for a test outcome (schema 8)
     "tests_basis": ("token", TEST_BASES),
     "verification": ("token", VERIFICATION_CONCLUSIONS),
+    # whether a required boundary run has evidence; absent when not required (schema 9)
+    "boundary_verified": ("flag", None),
     "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
     "final_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
     "first_pass_approved": ("flag", None),
@@ -363,14 +367,14 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
     "verdict": frozenset({
         "status", "findings_total", "findings_blocking", "findings_critical",
         "findings_high", "findings_medium", "findings_low", "tests_passed",
-        "tests_basis", "verification",
+        "tests_basis", "verification", "boundary_verified",
         "checks_passed", "checks_failed", "checks_pending",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",
         "first_pass_approved", "resolution_needed", "resolution_rounds",
         "final_approved", "tests_passed", "tests_basis", "verification",
-        "fallback_stages", "contract_violations", "stop_reason",
+        "boundary_verified", "fallback_stages", "contract_violations", "stop_reason",
     }),
 }
 

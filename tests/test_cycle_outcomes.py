@@ -107,6 +107,28 @@ class VerificationReportPairingTests(CycleTestCase):
         self.assertEqual("claimed", outcome["tests_basis"])
         self.assertNotIn("verification", outcome)
 
+    def test_the_latest_boundary_result_reaches_the_cycle_and_is_not_inherited(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+        recorder.stage("implement", "work")
+        recorder.record_verdict("implement", "IMPLEMENTED", tests_passed=True,
+                                tests_basis="agent_reported",
+                                verification="verified_with_reservations",
+                                boundary_verified=False)
+        recorder.close("HUMAN_INTERVENTION")
+        outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
+        self.assertIs(False, outcome["boundary_verified"])
+
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+        recorder.stage("implement", "work")
+        recorder.record_verdict("implement", "IMPLEMENTED", tests_passed=True,
+                                tests_basis="agent_reported", boundary_verified=False)
+        recorder.stage("resolve", "resolve")
+        recorder.record_verdict("resolve", "RESOLVED", tests_passed=True,
+                                tests_basis="agent_reported")
+        recorder.close("HUMAN_INTERVENTION")
+        outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
+        self.assertNotIn("boundary_verified", outcome)
+
 
 class UnknownIsNotDefaultTests(CycleTestCase):
     def test_a_cycle_that_never_reached_a_verdict_is_not_judged(self) -> None:
@@ -118,7 +140,7 @@ class UnknownIsNotDefaultTests(CycleTestCase):
 
         for absent in ("first_pass_approved", "resolution_needed", "resolution_rounds",
                        "final_approved", "first_review_status", "tests_passed",
-                       "tests_basis", "verification"):
+                       "tests_basis", "verification", "boundary_verified"):
             with self.subTest(field=absent):
                 self.assertNotIn(absent, outcome)
         self.assertEqual(0, outcome["contract_violations"])
@@ -264,7 +286,7 @@ class DriverTests(RunCycleTestCase):
         """REV-001: a documented outcome nothing writes is a promise, not data."""
         payload = {
             "status": "CHANGES_REQUESTED",
-            "tests": {"passed": False, "conclusion": "failed"},
+            "tests": {"passed": False, "conclusion": "failed", "boundary": "required"},
             "checks": {"passed": 4, "failed": 1, "pending": 0},
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
         }
@@ -417,6 +439,82 @@ class TestsReportedTests(unittest.TestCase):
         self.assertEqual({}, rc._tests({"status": "RESOLVED", "tests": {
             "ran": False, "reason": "no_code_change", "passed": True,
         }}))
+
+    BOUNDARY_EVIDENCE = [
+        {"level": "test", "command": "pytest tests/test_x.py", "exit_code": 0,
+         "executed": 14},
+        {"level": "boundary", "command": "./bin/tool migrate --dry-run",
+         "exit_code": 0, "executed": None},
+    ]
+    UNIT_EVIDENCE = BOUNDARY_EVIDENCE[:1]
+
+    def test_a_required_boundary_without_boundary_evidence_is_capped(self) -> None:
+        """#86: required and not run is never `verified`."""
+        self.assertEqual({
+            "tests_passed": True, "tests_basis": "agent_reported",
+            "verification": "verified_with_reservations",
+            "boundary_verified": False,
+        }, rc._tests({"status": "IMPLEMENTED", "tests": {
+            "ran": True, "passed": True, "conclusion": "verified",
+            "boundary": "required", "evidence": self.UNIT_EVIDENCE,
+        }}))
+
+    def test_a_required_boundary_with_boundary_evidence_is_verified(self) -> None:
+        self.assertEqual({
+            "tests_passed": True, "tests_basis": "agent_reported",
+            "verification": "verified", "boundary_verified": True,
+        }, rc._tests({"status": "IMPLEMENTED", "tests": {
+            "ran": True, "passed": True, "conclusion": "verified",
+            "boundary": "required", "evidence": self.BOUNDARY_EVIDENCE,
+        }}))
+
+    def test_a_failed_boundary_run_is_neither_a_pass_nor_verified(self) -> None:
+        evidence = [self.BOUNDARY_EVIDENCE[0],
+                    {**self.BOUNDARY_EVIDENCE[1], "exit_code": 2}]
+        self.assertEqual({
+            "tests_passed": False, "tests_basis": "agent_reported",
+            "verification": "verified_with_reservations", "boundary_verified": False,
+        }, rc._tests({"status": "IMPLEMENTED", "tests": {
+            "ran": True, "passed": True, "conclusion": "verified",
+            "boundary": "required", "evidence": evidence,
+        }}))
+
+    def test_a_claimed_boundary_run_is_not_boundary_evidence(self) -> None:
+        self.assertEqual({
+            "tests_passed": True, "tests_basis": "claimed",
+            "verification": "verified_with_reservations", "boundary_verified": False,
+        }, rc._tests({"status": "IMPLEMENTED", "tests": {
+            "passed": True, "conclusion": "verified", "boundary": "required",
+        }}))
+
+    def test_a_boundary_not_required_records_nothing_new(self) -> None:
+        for declared in ("not_required", None, "maybe", []):
+            with self.subTest(boundary=declared):
+                tests = {"ran": True, "passed": True, "conclusion": "verified",
+                         "evidence": self.UNIT_EVIDENCE}
+                if declared is not None:
+                    tests["boundary"] = declared
+                self.assertEqual({
+                    "tests_passed": True, "tests_basis": "agent_reported",
+                    "verification": "verified",
+                }, rc._tests({"status": "IMPLEMENTED", "tests": tests}))
+
+    def test_the_verifier_cannot_switch_off_a_fired_rule(self) -> None:
+        payload = {"status": "IMPLEMENTED", "tests": {
+            "ran": True, "passed": True, "conclusion": "verified",
+            "boundary": "not_required", "evidence": self.UNIT_EVIDENCE,
+        }}
+        result = rc._tests(payload, boundary_rule=True)
+        self.assertIs(False, result["boundary_verified"])
+        self.assertEqual("verified_with_reservations", result["verification"])
+        self.assertNotIn("boundary_verified", rc._tests(payload, boundary_rule=None))
+        self.assertNotIn("boundary_verified", rc._tests(payload, boundary_rule=False))
+
+    def test_a_stage_with_no_test_report_records_no_boundary(self) -> None:
+        self.assertEqual({}, rc._tests({"status": "BLOCKED"}, boundary_rule=True))
+        self.assertEqual({}, rc._tests({"status": "RESOLVED", "tests": {
+            "ran": False, "reason": "no_code_change", "boundary": "required",
+        }}, boundary_rule=True))
 
     def test_tests_that_never_ran_record_nothing(self) -> None:
         for payload in (

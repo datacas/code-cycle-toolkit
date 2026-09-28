@@ -123,7 +123,9 @@ created. Never merge a pull request or close unrelated issues.
    `tests.evidence` entries identical to the `cc-verify` record. The published
    PR's *Verification* section repeats those entries and labels them
    agent-reported. Do not describe agent-reported evidence as runtime-observed
-   or externally verified. Do not call an unchecked implementation complete.
+   or externally verified. When `cc-verify`'s *Boundary verification* requires
+   a run at the real boundary, perform it or say why it did not run. Do not
+   call an unchecked implementation complete.
 8. Review the accumulated diff for scope, accidental files, secrets, debug
    output, generated artifacts, and missing tests.
 9. Commit each unit separately when the repository's workflow allows multiple
@@ -328,6 +330,7 @@ ORCHESTRATION_RESULT
     "ran": true,
     "passed": true,
     "conclusion": "verified_with_reservations",
+    "boundary": "required",
     "evidence": [
       { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
       { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
@@ -373,10 +376,10 @@ prevents completion. Use `FAILED` for an unexpected technical failure. Set
 `tests.passed: false` means tests ran and failed. When no test ran — for
 example, the work stopped as `BLOCKED` before any code changed — report
 `"tests": { "ran": false }` or omit `tests`, never `passed: false`. When tests
-ran, include the `cc-verify` conclusion token and its evidence list, preserving
-the exact commands, exit codes, and executed counts. Keep `passed` for
-compatibility; an older result with `passed: true` and no evidence is only a
-claim. A `BLOCKED` result whose tests did run and fail says so with
+ran, include the `cc-verify` conclusion token, its `boundary` value, and its
+evidence list, preserving the exact commands, exit codes, and executed counts.
+Keep `passed` for compatibility; an older result with `passed: true` and no
+evidence is only a claim. A `BLOCKED` result whose tests did run and fail says so with
 `"ran": true`.
 
 `diagnosis` records the outcome of *Diagnose before editing* with closed values
