@@ -31,6 +31,52 @@ not raise its evidence level. Missing or contradictory evidence never becomes
 a verified test outcome. Older telemetry rows without `tests_basis` are read
 as `claimed`.
 
+## Boundary verification
+
+Some changes need one run where the code is actually used, not only a green
+suite. `cc-verify` decides it with the security gate's shape:
+
+```text
+boundary_required = deterministic_rule OR verifier_judgement
+```
+
+The rule fires on changed paths classified as `api`, `auth`, `database`, or
+`migrations`, the same classes as the `touches_*` change signals
+(`stage_signals.boundary_rule_areas`). The verifier may add CLI entry points,
+subprocess and adapter code, provider integrations, and runtime configuration;
+it cannot remove what the rule fired. `cc-verify` lists what counts as a
+boundary run for each area, and boundary runs write only to the disposable
+workspace.
+
+A required boundary run appears as an evidence entry with `level: boundary`:
+
+```json
+{
+  "conclusion": "verified",
+  "boundary": "required",
+  "evidence": [
+    { "level": "test", "command": "python3 -m unittest tests.test_config", "exit_code": 0, "executed": 9 },
+    { "level": "boundary", "command": "python3 -m app.cli sync --config config.yml --dry-run", "exit_code": 0, "executed": null }
+  ]
+}
+```
+
+A non-zero boundary command fails the test outcome like any other command.
+An expected failure, such as the malformed-configuration case, is recorded as
+a command that checks the failure and exits 0 when it occurs. When the run is
+required and no successful `boundary` entry exists, the runtime records
+`boundary_verified: false` and caps a `verified` conclusion at
+`verified_with_reservations`; the reason (`environment`, `cost`, or
+`out_of_scope`) is listed under *Not verified*, where reviewers already read
+unverified items and residual risk. When the driver observed the change, the
+runtime applies the path rule itself, so a verifier that states
+`not_required` for a migration still gets `boundary_verified: false`.
+A stage that completed code work but reported no test outcome also records
+`boundary_verified: false` when a run was required. Without a test report, a
+review, a blocked stage, or a `no_code_change` resolution records nothing.
+`boundary: not_required` records nothing new. The runtime never runs a
+boundary check.
+
 ## What each stage verifies
 
 | Stage | Verifies |
@@ -111,7 +157,8 @@ uses `"tests": { "ran": false, "reason": "no_code_change" }`, never
 `cc-stats` groups outcomes by basis. It labels `claimed` as claimed and
 `agent_reported` as reported; it uses “verified” for test outcomes only when
 their basis is `runtime_observed` or `externally_verified`. Agent conclusion
-tokens are shown separately from those evidence levels.
+tokens are shown separately from those evidence levels. It also shows the
+boundary verification rate among the cycles that required a boundary run.
 
 A verdict row also records `checks_passed`, `checks_failed` and `checks_pending` when the stage reported all three counts for its own head. Counts for a different head, or an incomplete set, record nothing. `cc-stats` sets each implementation and resolution head against its CI, so it can show how often a `RESOLVED` head was actually green. The check names stay in the PR comment. See [Telemetry](telemetry.md).
 

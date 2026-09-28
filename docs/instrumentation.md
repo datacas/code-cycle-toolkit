@@ -594,12 +594,14 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
 | `verdict` | `tests_basis` | whenever the verdict records `tests_passed`; this evidence-level token is required (schema 8) |
 | `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
+| `verdict` | `boundary_verified` | a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change, and the stage either reported a test outcome or conclusion or completed code work (`IMPLEMENTED`, `RESOLVED`, `PARTIALLY_RESOLVED`) without one, which records `false`; a stage without a test report that did no code work, such as a review, a blocked stage, or a `no_code_change` resolution, records nothing (schema 9) |
 | `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
 | `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
 | `cycle` | `tests_passed`, `tests_basis` | a verdict recorded a test result; the latest result and its evidence level win (schema 8) |
 | `cycle` | `verification` | a verdict supplied a conclusion token; the latest one wins (schema 8) |
+| `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 | `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |

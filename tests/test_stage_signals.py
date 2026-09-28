@@ -129,6 +129,38 @@ class ClassifierTests(unittest.TestCase):
         self.assertIs(False, fields["has_tests"])
 
 
+class BoundaryRuleTests(unittest.TestCase):
+    """#86: the boundary rule reads the same classes the `touches_*` flags do."""
+
+    def test_a_changed_migration_requires_a_boundary_run(self) -> None:
+        self.assertEqual({"database", "migrations"},
+                         ss.boundary_rule_areas(["migrations/0003_add_index.py"]))
+        self.assertTrue(ss.boundary_required(["migrations/0003_add_index.py"]))
+
+    def test_the_rule_areas_are_the_signal_classes(self) -> None:
+        for path, flag in (("src/api/users.py", "touches_api"),
+                           ("app/auth/token.py", "touches_auth"),
+                           ("db/schema.sql", "touches_database"),
+                           ("db/migrate/001_init.rb", "touches_migrations")):
+            with self.subTest(path=path):
+                signals = ss.derive_change_signals(f"1\t0\t{path}\0")
+                self.assertIs(True, getattr(signals, flag))
+                self.assertIs(True, ss.boundary_rule_fired(signals))
+                self.assertTrue(ss.boundary_rule_areas([path]))
+
+    def test_other_changes_fire_nothing_and_unknown_stays_unknown(self) -> None:
+        self.assertEqual(frozenset(), ss.boundary_rule_areas(["README.md", "", "app.py"]))
+        self.assertIs(False, ss.boundary_rule_fired(ss.derive_change_signals("1\t0\tapp.py\0")))
+        self.assertIsNone(ss.boundary_rule_fired(None))
+        self.assertIsNone(ss.boundary_rule_fired(ss.ChangeSignals()))
+
+    def test_judgement_adds_areas_and_never_removes_the_rule(self) -> None:
+        self.assertFalse(ss.boundary_required(["app.py"]))
+        self.assertTrue(ss.boundary_required(["app.py"], verifier_areas={"cli"}))
+        self.assertFalse(ss.boundary_required(["app.py"], verifier_areas={"anything"}))
+        self.assertTrue(ss.boundary_required(["migrations/1.sql"], verifier_areas=()))
+
+
 @unittest.skipUnless(shutil.which("git"), "git is required")
 class CollectorTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -321,6 +353,26 @@ class DriverSignalTests(RunCycleTestCase):
         review = [row for row in self.rows() if row["role"] == "review"]
         self.assertNotIn("prior_findings_total", review[0]["payload"])
         self.assertEqual(1, review[1]["payload"]["findings_high"])
+
+
+    def test_an_observed_rule_area_requires_a_boundary_the_verifier_waived(self) -> None:
+        """#86: the driver applies the rule to the change the stage was routed on."""
+        reviewer = Talker("claude", block("APPROVED", tests={
+            "ran": True, "passed": True, "conclusion": "verified",
+            "boundary": "not_required",
+            "evidence": [{"level": "test", "command": "pytest", "exit_code": 0,
+                          "executed": 3}],
+        }))
+        change = ss.derive_change_signals("4\t0\tmigrations/0002.sql\0")
+        with unittest.mock.patch.object(rc, "collect_change_signals",
+                                        return_value=change):
+            self.run_cycle(Talker("codex"), reviewer, start_from="review",
+                           change_request_id="4", change_bases=("main",))
+        verdict = [row for row in self.rows()
+                   if row["role"] == "review"
+                   and row["payload"].get("record_kind") == "verdict"][0]["payload"]
+        self.assertIs(False, verdict["boundary_verified"])
+        self.assertEqual("verified_with_reservations", verdict["verification"])
 
 
 class FieldValidationTests(unittest.TestCase):

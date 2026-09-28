@@ -107,10 +107,50 @@ what you would create and ask first. Never create it silently.
    - exercise the affected endpoints;
    - validate status codes, payloads, and error responses;
    - check authentication and authorization where they apply.
-10. Summarise what ran, what passed, what failed, what could not be verified
+10. Decide whether a boundary run is required, as *Boundary verification*
+    describes, and perform it when it is.
+11. Summarise what ran, what passed, what failed, what could not be verified
     and why, and the residual risks.
 
-`cc-run` handles starting the application when steps 8 and 9 need it.
+`cc-run` handles starting the application when steps 8, 9, and 10 need it.
+
+## Boundary verification
+
+A passing test suite does not show that a change works where it is used. Some
+changes need one run at the real boundary. Decide it with a union:
+
+```text
+boundary_required = deterministic_rule OR verifier_judgement
+```
+
+The deterministic rule fires when a changed path looks like API, authentication
+or authorization, database, or migration code: an `api`, `routes`,
+`controllers`, `endpoints`, `handlers`, or `graphql` directory, or an OpenAPI,
+Swagger, or `.proto` file; a path word such as `auth`, `oauth`, `login`,
+`session`, `permission`, `password`, `credential`, `jwt`, or `rbac`; a `db` or
+`database` directory, or a `.sql` or `.prisma` file; a `migrations`,
+`migration`, `migrate`, or `alembic` directory. Your judgement may add CLI entry points,
+subprocess and adapter code, provider integrations, and runtime configuration
+loading. It may never remove an area the rule fired.
+
+| Area | Boundary evidence |
+|---|---|
+| API | a real request against the running application: status, payload, and an error case |
+| Authentication or authorization | the allowed request **and** the denied one |
+| Migrations or database | apply on a disposable database and check the resulting state; roll back when the project defines it |
+| CLI | invoke the real entry point with real arguments; check the exit code and output |
+| Subprocess, adapter, or provider | exercise the process boundary against a fake binary or the real one, including a non-zero exit |
+| Runtime configuration | load the real file through the real loader, including a malformed case |
+
+Boundary runs write only to the disposable workspace: a scratch database, a
+temporary directory, a fake binary. They never write to shared data.
+
+When a boundary run is required but did not run, the conclusion is at most
+`verified_with_reservations`, never `verified`. Name the reason: `environment`,
+`cost`, or `out_of_scope`. The stop conditions still apply: an unavailable
+database or service stops the run and asks, and is not downgraded to a
+reservation. When no area applies, state `not_required`; this is not a
+requirement to run an end-to-end suite.
 
 ## Output format
 
@@ -146,10 +186,12 @@ End the report with this machine-readable record:
 ```text
 VERIFICATION_RESULT
 {
-  "conclusion": "verified_with_reservations",
+  "conclusion": "verified",
+  "boundary": "required",
   "evidence": [
     { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
-    { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
+    { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 },
+    { "level": "boundary", "command": "python -m app.cli sync --dry-run", "exit_code": 0, "executed": null }
   ]
 }
 END_VERIFICATION_RESULT
@@ -157,7 +199,10 @@ END_VERIFICATION_RESULT
 
 List each executed command once with its exact command, exit status, and the
 number of tests executed when applicable (`null` when no count applies). Use
-`static` for static checks and `test` for test suites. The conclusion is the
+`static` for static checks, `test` for test suites, and `boundary` for a run at
+the real boundary. State `boundary` as `required` or `not_required`. When it is
+`required` and no `boundary` entry succeeded, the conclusion is not `verified`,
+and the reason goes under *Not verified*. The conclusion is the
 agent's judgement; the record does not prove that a command ran. A caller that
 reads this report may classify its evidence as `agent_reported`, never as
 `runtime_observed` or `externally_verified`.

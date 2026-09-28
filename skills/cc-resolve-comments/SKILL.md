@@ -384,7 +384,9 @@ usable record for the next run.
 For every executed verification command, carry the same `cc-verify` evidence
 entry into the structured `tests.evidence` list and the published change-request
 *Verification* section. Label these results agent-reported; the resolver did
-not independently observe the commands running.
+not independently observe the commands running. When `cc-verify`'s *Boundary
+verification* requires a run at the real boundary for the fixed code, perform
+it or say why it did not run.
 
 ## Mandatory post-change workflow
 
@@ -599,6 +601,7 @@ ORCHESTRATION_RESULT
     "ran": true,
     "passed": true,
     "conclusion": "verified_with_reservations",
+    "boundary": "required",
     "evidence": [
       { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
       { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
@@ -622,8 +625,8 @@ required executed check passed. When a justified resolution requires no code
 change and runs no tests, report `"tests": { "ran": false, "reason":
 "no_code_change" }`; never report `passed: true` for that case. Reserve
 `tests.passed: false` for executed checks that failed. When tests ran, include
-the `cc-verify` conclusion token and evidence list; an older result with only
-`passed: true` remains a claim.
+the `cc-verify` conclusion token, `boundary` value, and evidence list; an older
+result with only `passed: true` remains a claim.
 
 `finding_outcomes` mirrors the dispositions already published in the comment and
 adds the dimension `resolved_findings` and `unresolved_findings` cannot carry:

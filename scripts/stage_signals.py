@@ -178,6 +178,46 @@ def _areas(path: str) -> set[str]:
     return areas
 
 
+#: The change areas whose paths alone require a verification run at the real
+#: boundary. They are the same classes `touches_*` reports, read from the same
+#: classifier: there is one path classifier, not a second copy for verification.
+BOUNDARY_RULE_AREAS = frozenset({"api", "auth", "database", "migrations"})
+
+#: What the verifier's judgement may add to the rule. It may never remove an
+#: area the rule fired; paths cannot tell a CLI entry point or an adapter apart.
+BOUNDARY_JUDGEMENT_AREAS = frozenset({"cli", "subprocess", "provider", "configuration"})
+
+
+def boundary_rule_areas(paths) -> frozenset[str]:
+    """The rule areas the changed paths touch; empty when none of them does."""
+    areas: set[str] = set()
+    for path in paths:
+        if path:
+            areas |= _areas(path)
+    return frozenset(areas & BOUNDARY_RULE_AREAS)
+
+
+def boundary_rule_fired(signals: "ChangeSignals | None") -> bool | None:
+    """Whether observed change signals fire the boundary rule; `None` if unknown."""
+    if signals is None:
+        return None
+    flags = (signals.touches_api, signals.touches_auth,
+             signals.touches_database, signals.touches_migrations)
+    if all(flag is None for flag in flags):
+        return None
+    return any(flags)
+
+
+def boundary_required(paths, verifier_areas=()) -> bool:
+    """`deterministic_rule OR verifier_judgement`, the security gate's shape.
+
+    The verifier's areas are ORed in: they can require a boundary run the paths
+    did not, and they cannot switch off one the paths did.
+    """
+    added = set(verifier_areas) & (BOUNDARY_RULE_AREAS | BOUNDARY_JUDGEMENT_AREAS)
+    return bool(boundary_rule_areas(paths)) or bool(added)
+
+
 def parse_numstat(output: str) -> list[tuple[str, int | None]]:
     """Paths and line counts from `git diff --numstat -z --no-renames`.
 

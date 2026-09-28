@@ -36,7 +36,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 | Row | Written | Holds |
 |---|---|---|
 | `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
-| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed |
+| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed |
 | `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
 
@@ -51,7 +51,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 
 **Unknown is not zero.** A signal or outcome nobody observed is left out, never stored as `0`, `false`, or "failed". An `implement` stage has no diff signals, because no diff exists yet. A cycle without a closing row is *unknown*, not failed.
 
-The field-by-field schema, correlation keys, and schema versions 1–8 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+The field-by-field schema, correlation keys, and schema versions 1–9 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 
 ## What is never recorded
 
@@ -75,6 +75,7 @@ Every field, column or payload key, goes through one typed gate (`telemetry.FIEL
 - **Rules versus Jev:** agreement and outcome comparisons from shadow rows.
 - **Cycle outcomes:** how runs ended and why they stopped, how many rounds they took, how many had a finding that survived a claimed fix, and whether tests ran. Cycles recorded before schema 7 show an unknown stop reason.
 - **Test evidence:** per-cycle outcomes grouped by `claimed`, `agent_reported`, `runtime_observed`, and `externally_verified`, plus the agent's conclusion tokens as a separate breakdown. Historical rows without a basis count as `claimed`.
+- **Boundary verification:** how many cycles whose change required a boundary run had evidence of one. Cycles that did not require one are left out.
 
 ## Reading it with `cc-stats`
 

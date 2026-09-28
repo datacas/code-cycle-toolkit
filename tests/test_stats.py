@@ -136,6 +136,30 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(1, verification["conclusions_not_reported"])
         self.assertEqual(0, verification["conclusions"]["failed"])
 
+    def test_boundary_rate_counts_only_cycles_that_required_it(self) -> None:
+        for index in range(12):
+            fields = {} if index >= 10 else {"boundary_verified": index < 7}
+            self.store.record_stage(
+                "owner/repo", f"task-boundary-{index}", "implement",
+                record_kind="verdict", cycle_id=f"cycle-boundary-{index}",
+                tests_passed=True, tests_basis="agent_reported", **fields,
+            )
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        self.assertEqual({"passed": 7, "total": 10, "minimum": 10, "value": 0.7},
+                         report["summary"]["verification"]["boundary"])
+        self.assertIn("Boundary verification, among cycles that required it: **7/10 (70%)**",
+                      stats.render_markdown(report))
+
+    def test_no_boundary_line_when_no_cycle_required_one(self) -> None:
+        self.add_task("task-without-boundary", "APPROVED")
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        self.assertEqual(0, report["summary"]["verification"]["boundary"]["total"])
+        self.assertNotIn("Boundary verification", stats.render_markdown(report))
+
     def add_head(self, task: str, role: str, status: str, **checks) -> None:
         self.store.record_stage("owner/repo", task, role, status=status,
                                 record_kind="verdict",
