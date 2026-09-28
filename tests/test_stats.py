@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -33,7 +35,8 @@ class StatsTests(unittest.TestCase):
         self.store.record_stage(repo, task, "implement", profile="cheap_coder",
                                 duration_ms=1000, cost_usd=0.125)
         self.store.record_stage(repo, task, "review", profile="senior_reviewer",
-                                status=status, findings_high=1, tests_passed=status == "APPROVED")
+                                status=status, findings_high=1,
+                                tests_passed=status == "APPROVED", tests_basis="claimed")
 
     def test_report_aggregates_rates_and_never_returns_task_ids(self) -> None:
         for index in range(10):
@@ -50,10 +53,88 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(10, report["summary"]["findings"]["high"]["count"])
         self.assertEqual(10, report["summary"]["duration_ms"]["measured"])
         self.assertEqual(1.25, report["summary"]["cost_usd"]["total"])
-        self.assertEqual({"passed": 7, "failed": 3, "measured": 10, "not_reported": 0},
-                         report["summary"]["verification"])
+        verification = report["summary"]["verification"]
+        self.assertEqual({"passed": 7, "failed": 3, "measured": 10},
+                         verification["by_basis"]["claimed"])
+        self.assertEqual(10, verification["measured"])
+        self.assertEqual(0, verification["not_reported"])
         self.assertNotIn("PRIVATE-TASK", serialized)
         self.assertNotIn("OTHER-REPO-TASK", serialized)
+
+    def test_verification_reports_each_basis_and_separate_agent_conclusions(self) -> None:
+        cases = (
+            ("claimed", True, "verified"),
+            ("agent_reported", True, "verified"),
+            ("runtime_observed", True, "verified_with_reservations"),
+            ("externally_verified", False, "failed"),
+        )
+        for index, (basis, passed, conclusion) in enumerate(cases):
+            self.store.record_stage(
+                "owner/repo", f"task-{index}", "implement", record_kind="verdict",
+                cycle_id=f"cycle-{index}", tests_passed=passed,
+                tests_basis=basis, verification=conclusion,
+            )
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+        verification = report["summary"]["verification"]
+        markdown = stats.render_markdown(report)
+
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         verification["by_basis"]["claimed"])
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         verification["by_basis"]["agent_reported"])
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         verification["by_basis"]["runtime_observed"])
+        self.assertEqual({"passed": 0, "failed": 1, "measured": 1},
+                         verification["by_basis"]["externally_verified"])
+        self.assertEqual({
+            "verified": 2, "verified_with_reservations": 1,
+            "not_verified": 0, "failed": 1,
+        }, verification["conclusions"])
+        self.assertIn("claimed by agent: 1 passed, 0 failed", markdown)
+        self.assertIn("reported by agent: 1 passed, 0 failed", markdown)
+        self.assertIn("verified by runtime: 1 passed, 0 failed", markdown)
+        self.assertIn("verified externally: 0 passed, 1 failed", markdown)
+        self.assertIn("Agent conclusion tokens (separate from evidence level)", markdown)
+
+    def test_a_legacy_test_outcome_without_a_basis_reads_as_claimed(self) -> None:
+        row_id = self.store.record_stage("owner/repo", "legacy-task", "implement",
+                                         record_kind="verdict")
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                row = connection.execute("SELECT payload FROM stages WHERE id = ?",
+                                         (row_id,)).fetchone()
+                payload = json.loads(row[0])
+                payload["tests_passed"] = True
+                connection.execute("UPDATE stages SET payload = ? WHERE id = ?",
+                                   (json.dumps(payload), row_id))
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         report["summary"]["verification"]["by_basis"]["claimed"])
+
+    def test_latest_test_report_does_not_inherit_an_earlier_conclusion(self) -> None:
+        cycle_id = "cycle-paired-report"
+        self.store.record_stage("owner/repo", "task-paired-report", "implement",
+                                record_kind="verdict", cycle_id=cycle_id,
+                                verification="failed")
+        self.store.record_stage("owner/repo", "task-paired-report", "resolve",
+                                record_kind="verdict", cycle_id=cycle_id,
+                                tests_passed=True, tests_basis="claimed")
+
+        verification = stats.aggregate(
+            stats._read_rows(self.database, "owner/repo"),
+            repo_id="owner/repo", now=self.as_of(),
+        )["summary"]["verification"]
+
+        self.assertEqual({"passed": 1, "failed": 0, "measured": 1},
+                         verification["by_basis"]["claimed"])
+        self.assertEqual(0, verification["conclusions_measured"])
+        self.assertEqual(1, verification["conclusions_not_reported"])
+        self.assertEqual(0, verification["conclusions"]["failed"])
 
     def add_head(self, task: str, role: str, status: str, **checks) -> None:
         self.store.record_stage("owner/repo", task, role, status=status,
@@ -328,8 +409,8 @@ class StatsTests(unittest.TestCase):
 
         self.assertIn("Cost: not measured", stats.render_markdown(report))
         self.assertIsNone(report["summary"]["findings"]["critical"]["count"])
-        self.assertIsNone(report["summary"]["verification"]["passed"])
-        self.assertIn("Test verification, per cycle: not reported for 1 cycle(s)",
+        self.assertEqual(0, report["summary"]["verification"]["measured"])
+        self.assertIn("Test outcomes by evidence level, per cycle: not reported for 1 cycle(s)",
                       stats.render_markdown(report))
 
     def record_cycle(self, index: int, *, closed: bool = True,

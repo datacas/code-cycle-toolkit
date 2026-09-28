@@ -14,6 +14,10 @@ from pathlib import Path
 from run_cycle import CycleDriverError, load_config, repository_of
 from telemetry import (
     MINIMUM_SAMPLE,
+    TEST_BASES,
+    TEST_BASE_ORDER,
+    VERIFICATION_CONCLUSIONS,
+    VERIFICATION_CONCLUSION_ORDER,
     TelemetryError,
     default_database_path,
     started_at_implement,
@@ -324,7 +328,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
     findings, findings_measured = Counter(), Counter()
     fallbacks = _fallback_stage_count(current, stages)
     model_resolutions = Counter()
-    verification_by_cycle: dict[str, bool] = {}
+    verification_by_cycle: dict[str, dict] = {}
     confidence = Counter()
     jev_agreement = Counter()
     jev_status = Counter()
@@ -342,8 +346,20 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         payload = row["payload"]
         tests_passed = payload.get("tests_passed")
         cycle_key = payload.get("cycle_id") or row["task_id"]
-        if isinstance(tests_passed, bool):
-            verification_by_cycle[cycle_key] = tests_passed
+        conclusion = payload.get("verification")
+        if any(key in payload for key in ("tests_passed", "tests_basis", "verification")):
+            # Keep both dimensions from the same latest stage report. If it
+            # omits one, do not pair it with a value from an earlier stage.
+            report = {}
+            if isinstance(conclusion, str) and conclusion in VERIFICATION_CONCLUSIONS:
+                report["conclusion"] = conclusion
+            if isinstance(tests_passed, bool):
+                basis = payload.get("tests_basis", "claimed")
+                if isinstance(basis, str) and basis in TEST_BASES:
+                    report["test_outcome"] = {
+                        "passed": tests_passed, "basis": basis,
+                    }
+            verification_by_cycle[cycle_key] = report
         for key in FINDING_FIELDS:
             value = payload.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
@@ -391,8 +407,28 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
         model_resolutions["matched"] + model_resolutions["mismatch_known"]
         + model_resolutions["mismatch_unrecognized"]
     )
-    verification = Counter("passed" if passed else "failed"
-                            for passed in verification_by_cycle.values())
+    test_outcomes_by_cycle = {
+        cycle: report["test_outcome"]
+        for cycle, report in verification_by_cycle.items()
+        if "test_outcome" in report
+    }
+    conclusions_by_cycle = {
+        cycle: report["conclusion"]
+        for cycle, report in verification_by_cycle.items()
+        if "conclusion" in report
+    }
+    tests_by_basis = {
+        basis: {
+            "passed": sum(outcome["passed"] for outcome in test_outcomes_by_cycle.values()
+                          if outcome["basis"] == basis),
+            "failed": sum(not outcome["passed"] for outcome in test_outcomes_by_cycle.values()
+                          if outcome["basis"] == basis),
+            "measured": sum(outcome["basis"] == basis
+                            for outcome in test_outcomes_by_cycle.values()),
+        }
+        for basis in TEST_BASE_ORDER
+    }
+    conclusions = Counter(conclusions_by_cycle.values())
     verification_groups = {
         row["payload"].get("cycle_id") or row["task_id"] for row in current
     }
@@ -428,10 +464,15 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                 for name in ("critical", "high", "medium", "low")
             },
             "verification": {
-                "passed": verification["passed"] if verification else None,
-                "failed": verification["failed"] if verification else None,
-                "measured": sum(verification.values()),
-                "not_reported": len(verification_groups) - sum(verification.values()),
+                "by_basis": tests_by_basis,
+                "conclusions": {
+                    conclusion: conclusions[conclusion]
+                    for conclusion in VERIFICATION_CONCLUSION_ORDER
+                },
+                "measured": len(test_outcomes_by_cycle),
+                "not_reported": len(verification_groups) - len(test_outcomes_by_cycle),
+                "conclusions_measured": len(conclusions_by_cycle),
+                "conclusions_not_reported": len(verification_groups) - len(conclusions_by_cycle),
             },
             "stage_checks": _stage_checks(current),
             "duration_ms": {
@@ -623,14 +664,40 @@ def render_markdown(report: dict) -> str:
     )
     verification = summary["verification"]
     if verification["measured"]:
+        basis_labels = {
+            "claimed": "claimed by agent",
+            "agent_reported": "reported by agent",
+            "runtime_observed": "verified by runtime",
+            "externally_verified": "verified externally",
+        }
+        by_level = "; ".join(
+            f"{basis_labels[basis]}: {counts['passed']} passed, {counts['failed']} failed"
+            for basis, counts in verification["by_basis"].items()
+            if counts["measured"]
+        )
         lines.append(
-            f"- Test verification, per cycle: **{verification['passed']} passed, "
-            f"{verification['failed']} failed**; {verification['measured']} reported, "
-            f"{verification['not_reported']} not reported"
+            f"- Test outcomes by evidence level, per cycle: {by_level}; "
+            f"{verification['measured']} measured, {verification['not_reported']} not reported"
         )
     else:
-        lines.append(f"- Test verification, per cycle: not reported for "
+        lines.append(f"- Test outcomes by evidence level, per cycle: not reported for "
                      f"{verification['not_reported']} cycle(s)")
+    if verification["conclusions_measured"]:
+        conclusion_labels = {
+            "verified": "verified",
+            "verified_with_reservations": "verified with reservations",
+            "not_verified": "not verified",
+            "failed": "failed",
+        }
+        conclusions = ", ".join(
+            f"{conclusion_labels[token]} {count}"
+            for token, count in verification["conclusions"].items()
+        )
+        lines.append(
+            f"- Agent conclusion tokens (separate from evidence level): {conclusions}; "
+            f"{verification['conclusions_measured']} reported, "
+            f"{verification['conclusions_not_reported']} not reported"
+        )
     checks = summary["stage_checks"]
     if checks["measured"]:
         per_status = "; ".join(

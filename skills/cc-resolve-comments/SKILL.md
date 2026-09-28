@@ -381,6 +381,11 @@ Fix applied. Verification pending: environment unavailable (<reason>).
 Give the concrete reason. "Environment unavailable" with no cause is not a
 usable record for the next run.
 
+For every executed verification command, carry the same `cc-verify` evidence
+entry into the structured `tests.evidence` list and the published change-request
+*Verification* section. Label these results agent-reported; the resolver did
+not independently observe the commands running.
+
 ## Mandatory post-change workflow
 
 After the fixes are locally coherent:
@@ -590,7 +595,15 @@ ORCHESTRATION_RESULT
       "line": 123
     }
   ],
-  "tests": { "passed": true },
+  "tests": {
+    "ran": true,
+    "passed": true,
+    "conclusion": "verified_with_reservations",
+    "evidence": [
+      { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
+      { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
+    ]
+  },
   "checks": {
     "head_sha": "89abcdef0123456789abcdef0123456789abcdef",
     "passed": 4,
@@ -604,11 +617,13 @@ END_ORCHESTRATION_RESULT
 ```
 
 Use `issue_number: null` when no numeric issue alias exists. Use `issue_id:
-null` when no work item is linked. Set `tests.passed: true` only
-when every required executed check passed, including the valid case where no
-test is required because every resolution is a justified no-code decision.
-Reserve `tests.passed: false` for executed checks that failed; when none ran,
-report `"tests": { "ran": false }` or omit `tests`.
+null` when no work item is linked. Set `tests.passed: true` only when every
+required executed check passed. When a justified resolution requires no code
+change and runs no tests, report `"tests": { "ran": false, "reason":
+"no_code_change" }`; never report `passed: true` for that case. Reserve
+`tests.passed: false` for executed checks that failed. When tests ran, include
+the `cc-verify` conclusion token and evidence list; an older result with only
+`passed: true` remains a claim.
 
 `finding_outcomes` mirrors the dispositions already published in the comment and
 adds the dimension `resolved_findings` and `unresolved_findings` cannot carry:

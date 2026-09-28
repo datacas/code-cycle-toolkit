@@ -105,6 +105,16 @@ def result_for_role(role: str, status: str = "CHANGES_REQUESTED") -> dict:
     payload = {"skill": skill, "status": status}
     if role == "implement" and status == "IMPLEMENTED":
         payload["change_request_id"] = "4"
+        if os.environ.get("FAKE_TEST_EVIDENCE") == "1":
+            payload["tests"] = {
+                "ran": True,
+                "passed": True,
+                "conclusion": "verified_with_reservations",
+                "evidence": [
+                    {"level": "test", "command": "python -m unittest",
+                     "exit_code": 0, "executed": 12},
+                ],
+            }
     if role == "review" and status != "BLOCKED":
         findings = ([
             {"id": "REV-001", "severity": "high", "status": "open",

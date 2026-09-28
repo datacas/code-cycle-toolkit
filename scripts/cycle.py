@@ -286,6 +286,8 @@ class CycleRecorder:
         self.first_review_status: str | None = None
         self.final_review_status: str | None = None
         self.tests_passed: bool | None = None
+        self.tests_basis: str | None = None
+        self.verification: str | None = None
         # An observer of the rules' choice, never a selector: nothing it
         # returns reaches `route()` or a dispatch. `None` means no shadow at
         # all, so a disabled one costs no client, no key read and no I/O.
@@ -488,8 +490,13 @@ class CycleRecorder:
             if role == "review" and self.first_review_status is None:
                 self.first_review_status = status
             self.final_review_status = status
-        if fields.get("tests_passed") is not None:
-            self.tests_passed = fields["tests_passed"]
+        if (fields.get("tests_passed") is not None
+                or fields.get("verification") is not None):
+            # Test outcome and conclusion belong to one report. A later stage
+            # that reports only one must not inherit the other's stale value.
+            self.tests_passed = fields.get("tests_passed")
+            self.tests_basis = fields.get("tests_basis")
+            self.verification = fields.get("verification")
         return row
 
     def next_iteration(self) -> int:
@@ -546,7 +553,12 @@ class CycleRecorder:
                 final_approved=self.final_review_status == "APPROVED",
             )
         if self.tests_passed is not None:
-            outcome["tests_passed"] = self.tests_passed
+            outcome.update(
+                tests_passed=self.tests_passed,
+                tests_basis=self.tests_basis,
+            )
+        if self.verification is not None:
+            outcome["verification"] = self.verification
         if self.repeated_findings is not None:
             outcome["repeated_findings"] = self.repeated_findings
         return outcome

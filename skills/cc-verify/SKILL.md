@@ -134,12 +134,33 @@ what you would create and ask first. Never create it silently.
 
 ### Conclusion
 
-State exactly one of:
+Choose exactly one token for the agent's conclusion:
 
-- Verified
-- Verified with reservations
-- Not verified
-- Failed
+- `verified`
+- `verified_with_reservations`
+- `not_verified`
+- `failed`
+
+End the report with this machine-readable record:
+
+```text
+VERIFICATION_RESULT
+{
+  "conclusion": "verified_with_reservations",
+  "evidence": [
+    { "level": "static", "command": "ruff check .", "exit_code": 0, "executed": null },
+    { "level": "test", "command": "pytest tests/test_x.py", "exit_code": 0, "executed": 14 }
+  ]
+}
+END_VERIFICATION_RESULT
+```
+
+List each executed command once with its exact command, exit status, and the
+number of tests executed when applicable (`null` when no count applies). Use
+`static` for static checks and `test` for test suites. The conclusion is the
+agent's judgement; the record does not prove that a command ran. A caller that
+reads this report may classify its evidence as `agent_reported`, never as
+`runtime_observed` or `externally_verified`.
 
 Absence of execution is never success, and a skipped check is never a passed
 one.

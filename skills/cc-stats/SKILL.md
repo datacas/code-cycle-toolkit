@@ -118,12 +118,17 @@ Do not include them in telemetry stage, dispatch, role, or profile counts.
 
 Cycle outcomes count each correlated cycle once by its final status. A cycle
 with no closing record in the period is unknown, never finished or failed.
-Test verification is also counted per cycle. CI on stage heads sets each implementation or
-resolution verdict against the checks of the head it pushed: green, failed,
-pending, or without checks, by the status the stage claimed. A head that
-reported no checks is not counted. When no dispatch reported the
-model it ran, model drift is not measured and the report names how many
-dispatches did not report one.
+Test outcomes are counted per cycle and grouped by evidence level:
+`claimed`, `agent_reported`, `runtime_observed`, and `externally_verified`.
+Show an agent claim as claimed and an agent-supplied command result as reported;
+use “verified” for outcomes only at the runtime-observed or externally-verified
+levels. Show the agent's conclusion tokens separately from evidence levels.
+Historical test outcomes without `tests_basis` count as `claimed`. CI on stage
+heads sets each implementation or resolution verdict against the checks of the
+head it pushed: green, failed, pending, or without checks, by the status the
+stage claimed. A head that reported no checks is not counted. When no dispatch
+reported the model it ran, model drift is not measured and the report names how
+many dispatches did not report one.
 
 The component opens the local SQLite database read-only, scopes every query to
 the configured repository selector, and emits aggregates only. Never inspect

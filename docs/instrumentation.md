@@ -592,11 +592,14 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | Source | Fields | Written when |
 |---|---|---|
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
+| `verdict` | `tests_basis` | whenever the verdict records `tests_passed`; this evidence-level token is required (schema 8) |
+| `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
 | `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
 | `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
-| `cycle` | `tests_passed` | a verdict recorded `tests_passed`; the latest one wins |
+| `cycle` | `tests_passed`, `tests_basis` | a verdict recorded a test result; the latest result and its evidence level win (schema 8) |
+| `cycle` | `verification` | a verdict supplied a conclusion token; the latest one wins (schema 8) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 | `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |
@@ -629,8 +632,13 @@ verdict carries no review outcome at all — not unapproved, not zero rounds —
 and a review that reported `BLOCKED` settles nothing. A `tests` value that is
 not a boolean `passed` is not a test result, and neither is one that says no
 test ran: `tests.ran: false`, or a `BLOCKED` stage reporting `passed: false`
-without `ran: true`, records no `tests_passed` at all. A stage that stopped
-before touching code has nothing to report as failed.
+without `ran: true` or an evidence list, records no `tests_passed` at all. A
+stage that stopped before touching code has nothing to report as failed. When
+a test outcome is recorded, `tests_basis` is mandatory; the write gate refuses
+an outcome without one. A historical row with `tests_passed` but no basis
+reads as `claimed`.
+Contradictory evidence records the failing result at `agent_reported`, never a
+pass. The `verification` token records the agent's conclusion separately.
 `Telemetry.cycle_outcome(repo_id, cycle_id)` reassembles a run from these rows and reports `closed: false` for one
 that never wrote its closing row, whose outcome is then unknown rather than
 failed. `resolution_rounds` counts the `resolve` stages the run attempted.

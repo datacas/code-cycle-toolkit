@@ -149,6 +149,22 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual("gpt-6-sol", review["model_requested"])
         self.assertIsNone(review["model_resolved"])
 
+    def test_agent_reported_test_evidence_survives_an_installed_cycle(self) -> None:
+        result = self.run_cycle(FAKE_TEST_EVIDENCE="1")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = self.rows()
+        implement_verdict = next(row for row in rows
+                                 if row["role"] == "implement" and row["status"])
+        verdict = json.loads(implement_verdict["payload"])
+        cycle = json.loads(rows[-1]["payload"])
+
+        self.assertEqual(True, verdict["tests_passed"])
+        self.assertEqual("agent_reported", verdict["tests_basis"])
+        self.assertEqual("verified_with_reservations", verdict["verification"])
+        self.assertEqual("agent_reported", cycle["tests_basis"])
+        self.assertEqual("verified_with_reservations", cycle["verification"])
+
     def test_a_second_round_is_recorded_as_a_second_round(self) -> None:
         """The review asks for changes once, so the cycle resolves and re-reviews."""
         result = self.run_cycle(FAKE_ROUNDS=str(self.root / "rounds"))
