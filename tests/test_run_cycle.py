@@ -155,6 +155,58 @@ class RunCycleTestCase(unittest.TestCase):
         return self.store.rows("owner/api")
 
 
+class ImplementationForecastTests(RunCycleTestCase):
+    def test_implement_forecast_is_recorded_only_on_its_verdict(self) -> None:
+        forecast = {
+            "changed_files_count": 4,
+            "changed_lines_estimate": 180,
+            "has_tests": True,
+            "touches_dependencies": False,
+            "touches_database": False,
+            "touches_auth": False,
+            "touches_api": True,
+            "touches_migrations": False,
+            "touches_ci": False,
+        }
+        self.run_cycle(Talker("codex", block("IMPLEMENTED", forecast=forecast)),
+                       Talker("claude", block("APPROVED", forecast=forecast)))
+
+        rows = self.rows()
+        verdict = next(row for row in rows
+                       if row["role"] == "implement"
+                       and row["payload"].get("record_kind") == "verdict")
+        self.assertEqual({f"forecast_{key}": value for key, value in forecast.items()},
+                         {key: verdict["payload"][key] for key in verdict["payload"]
+                          if key.startswith("forecast_")})
+        self.assertTrue(all(not any(key.startswith("forecast_") for key in row["payload"])
+                            for row in rows if row is not verdict))
+
+    def test_missing_forecast_records_no_forecast_fields(self) -> None:
+        self.run_cycle(Talker("codex", block("IMPLEMENTED")),
+                       Talker("claude", block("APPROVED")))
+
+        self.assertTrue(all(not any(key.startswith("forecast_") for key in row["payload"])
+                            for row in self.rows()))
+
+    def test_malformed_forecast_is_refused_without_stopping_the_cycle(self) -> None:
+        for value in ("four", tm._UPPER_COUNT + 1):
+            with self.subTest(value=value):
+                self.setUp()
+                report = self.run_cycle(
+                    Talker("codex", block("IMPLEMENTED", forecast={
+                        "changed_files_count": value,
+                    })),
+                    Talker("claude", block("APPROVED")),
+                )
+
+                self.assertEqual(rc.APPROVED_END, report.status)
+                verdict = next(row for row in self.rows()
+                               if row["role"] == "implement"
+                               and row["payload"].get("record_kind") == "verdict")
+                self.assertFalse(any(key.startswith("forecast_")
+                                     for key in verdict["payload"]))
+
+
 class RoutingStrategyTests(RunCycleTestCase):
     def test_unknown_strategy_is_rejected_while_loading_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -539,6 +539,9 @@ tell a count read off a diff from a difficulty somebody typed.
 
 The temporal rule is the point. An `implement` stage is routed before any diff
 exists, so it carries no change signals at all rather than an empty change.
+Its implementation forecast, when supplied, is recorded later on the implement
+verdict with a `forecast_` prefix; it is a post-routing claim, never a
+pre-routing signal.
 `prior_findings_*` are the counts of the latest verdict before the stage — the
 review's for a resolution, never the one the stage itself goes on to report —
 and a verdict that reported no findings leaves them unknown rather than
@@ -592,6 +595,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | Source | Fields | Written when |
 |---|---|---|
 | `verdict` | `status`, `findings_total`, `findings_blocking`, `findings_<severity>`, `tests_passed` | the stage's structured result is read |
+| `verdict` | `forecast_changed_files_count`, `forecast_changed_lines_estimate`, `forecast_has_tests`, `forecast_touches_*` | the implement result supplied known forecast values after routing and before edits (schema 10) |
 | `verdict` | `tests_basis` | whenever the verdict records `tests_passed`; this evidence-level token is required (schema 8) |
 | `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
 | `verdict` | `boundary_verified` | a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change, and the stage either reported a test outcome or conclusion or completed code work (`IMPLEMENTED`, `RESOLVED`, `PARTIALLY_RESOLVED`) without one, which records `false`; a stage without a test report that did no code work, such as a review, a blocked stage, or a `no_code_change` resolution, records nothing (schema 9) |
@@ -606,6 +610,12 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `status`, `iterations` | always |
 | `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
+
+Forecast accuracy pairs those implement verdict fields with the observed change
+signals on the first `review` dispatch in the same `cycle_id`. Flag accuracy is
+agreement; file and line errors use exact, within-25%, within-50%, and over-50%
+bands relative to the observed count. Each measure stays unknown below ten
+paired observations.
 
 Finding counts are read from the result shape for the stage: `findings` for an
 initial review, `new_findings` plus `verified_findings` for a rereview, and

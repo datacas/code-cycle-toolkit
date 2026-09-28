@@ -307,6 +307,88 @@ def _stage_checks(rows: list[dict]) -> dict:
     }
 
 
+FORECAST_FLAGS = (
+    "has_tests", "touches_dependencies", "touches_database", "touches_auth",
+    "touches_api", "touches_migrations", "touches_ci",
+)
+FORECAST_COUNTS = ("changed_files_count", "changed_lines_estimate")
+FORECAST_ERROR_BANDS = (
+    "exact", "within_25_percent", "within_50_percent", "over_50_percent",
+)
+
+
+def _forecast_accuracy(rows: list[dict], minimum: int) -> dict:
+    """Compare implement forecasts with the first observed review dispatch."""
+    forecasts: dict[str, dict] = {}
+    observations: dict[str, dict] = {}
+    for row in rows:
+        payload = row.get("payload") or {}
+        cycle_id = payload.get("cycle_id")
+        if not isinstance(cycle_id, str) or not cycle_id:
+            continue
+        kind, role = payload.get("record_kind"), row.get("role")
+        if (kind == "verdict" and role == "implement"
+                and any(f"forecast_{name}" in payload
+                        for name in (*FORECAST_FLAGS, *FORECAST_COUNTS))):
+            forecasts.setdefault(cycle_id, payload)
+        elif kind == "dispatch" and role == "review":
+            # Rows are read in recorded order, so the first entry is the first
+            # review routing knew the implementation's observed change signals.
+            observations.setdefault(cycle_id, payload)
+
+    flag_agreements = {name: [] for name in FORECAST_FLAGS}
+    count_errors = {name: [] for name in FORECAST_COUNTS}
+    paired_cycles = set()
+    for cycle_id, forecast in forecasts.items():
+        observed = observations.get(cycle_id)
+        if observed is None:
+            continue
+        for name in FORECAST_FLAGS:
+            key = f"forecast_{name}"
+            expected = forecast.get(key)
+            actual = observed.get(name)
+            if isinstance(expected, bool) and isinstance(actual, bool):
+                flag_agreements[name].append(expected == actual)
+                paired_cycles.add(cycle_id)
+        for name in FORECAST_COUNTS:
+            key = f"forecast_{name}"
+            expected, actual = forecast.get(key), observed.get(name)
+            if (isinstance(expected, int) and not isinstance(expected, bool)
+                    and isinstance(actual, int) and not isinstance(actual, bool)):
+                if actual == 0:
+                    error = 0.0 if expected == 0 else None
+                else:
+                    error = abs(expected - actual) / actual
+                band = (
+                    "exact" if error == 0 else
+                    "within_25_percent" if error is not None and error <= 0.25 else
+                    "within_50_percent" if error is not None and error <= 0.5 else
+                    "over_50_percent"
+                )
+                count_errors[name].append(band)
+                paired_cycles.add(cycle_id)
+
+    return {
+        "paired_cycles": len(paired_cycles),
+        "minimum": minimum,
+        "flags": {
+            name: _rate(sum(agreements), len(agreements), minimum)
+            for name, agreements in flag_agreements.items()
+        },
+        "counts": {
+            name: {
+                "measured": len(errors),
+                "minimum": minimum,
+                "bands": {
+                    band: _rate(sum(error == band for error in errors), len(errors), minimum)
+                    for band in FORECAST_ERROR_BANDS
+                },
+            }
+            for name, errors in count_errors.items()
+        },
+    }
+
+
 def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
               now: datetime | None = None, minimum: int = MINIMUM_SAMPLE) -> dict:
     """Build a JSON-safe report without returning raw telemetry rows."""
@@ -482,6 +564,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
                 "conclusions_not_reported": len(verification_groups) - len(conclusions_by_cycle),
                 "boundary": _rate(sum(boundary_by_cycle), len(boundary_by_cycle)),
             },
+            "forecast_accuracy": _forecast_accuracy(current, minimum),
             "stage_checks": _stage_checks(current),
             "duration_ms": {
                 "measured": len(durations),
@@ -656,6 +739,31 @@ def render_markdown(report: dict) -> str:
                 lines.append(f"| {name} | {item['count']} | {item['measured']} | {_bar(item['count'], maximum)} |")
     else:
         lines.append("No review reported finding counts; severities are unknown.")
+
+    forecast = summary["forecast_accuracy"]
+    lines += ["", "### Forecast accuracy", ""]
+    if not forecast["paired_cycles"]:
+        lines.append("Unknown: no cycle has both an implementation forecast and observed review signals.")
+    else:
+        for name, result in forecast["flags"].items():
+            if result["value"] is None:
+                detail = f"unknown ({result['total']}/{result['minimum']} observations)"
+            else:
+                detail = f"{result['passed']}/{result['total']} agree ({result['value']:.0%})"
+            lines.append(f"- `{name}`: {detail}")
+        for name, result in forecast["counts"].items():
+            measured = result["measured"]
+            if measured < result["minimum"]:
+                lines.append(
+                    f"- `{name}` error bands: unknown "
+                    f"({measured}/{result['minimum']} observations)"
+                )
+            else:
+                bands = "; ".join(
+                    f"{band.replace('_', ' ')} {counts['passed']}/{counts['total']}"
+                    for band, counts in result["bands"].items()
+                )
+                lines.append(f"- `{name}` error bands: {bands}")
 
     lines += ["", "### Operations", ""]
     lines.append(
