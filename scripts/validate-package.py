@@ -54,6 +54,14 @@ SHARED_REVIEW_SECTIONS = (
 HEAD_PUSHING_SKILLS = ("cc-implement-issue", "cc-resolve-comments")
 SHARED_HEAD_SECTIONS = ("## Checks of the pushed head",)
 
+# The skills that read a diff or cite command output as evidence share one rule
+# for when that output is complete. A host may compact what an agent sees.
+EVIDENCE_SKILLS = (
+    "cc-code-review", "cc-implement-issue", "cc-initial-review", "cc-pr-review",
+    "cc-rereview", "cc-resolve-comments", "cc-security-review", "cc-verify",
+)
+SHARED_EVIDENCE_SECTIONS = ("## Complete evidence",)
+
 # Every skill repeats these two sections verbatim, for the same reason.
 SHARED_ALL_SECTIONS = ("## Repository conventions",)
 # cc-run publishes no GitHub artefact, so it states the language rule in its own
@@ -534,6 +542,7 @@ def validate_package(root: Path) -> list[str]:
         )
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
         check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
+        check_shared_sections(root, EVIDENCE_SKILLS, SHARED_EVIDENCE_SECTIONS, errors)
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
         check_repeated_findings_ladder(root, errors)

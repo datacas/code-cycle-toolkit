@@ -9,6 +9,47 @@ The toolkit counts something as verified only after it has run it. This page exp
 3. **Nothing is invented.** Commands come from what the project defines (lockfiles, manifests, task runners, CI). If a command doesn't exist, it isn't run.
 4. **Verification doesn't edit code** unless you ask.
 5. **A pass that couldn't run isn't a passed check.** A missing delegated skill is reported as a degraded pass.
+6. **Compacted output isn't evidence.** A stage judges the whole diff and cites uncompacted output. When it can't obtain either, the affected part is unverified. See [Complete evidence](#complete-evidence).
+
+## Complete evidence
+
+A host can change what an agent sees of a command's output. A command-rewriting
+hook may compact `git diff`, test runs, or other output before the agent reads
+it, and the only trace is a marker in the middle of the text. A review that
+approves a shortened diff has not read the change it approved.
+
+Measured on this repository with RTK 0.48, whose Claude Code hook turns
+`git diff` into `rtk git diff` transparently (`git diff b9dbc54 91ba1dd`, the
+PR #74 merge):
+
+| Command | Lines |
+|---|---|
+| `git diff` through the hook | 495, with markers such as `... (100 additions truncated)` |
+| raw (`rtk proxy git diff`) | 764 |
+| `git diff --output=<file>` through the hook | 764 (the file is written by Git, unfiltered) |
+
+In the same test, `gh` comment reads and exit codes were intact. The rule has two
+layers:
+
+- **The runtime supplies the diff.** When `run_cycle` dispatches `review`,
+  `resolve`, or `rereview`, it writes `git diff <base>...HEAD` itself, through
+  `subprocess` and `--output`, which no host hook rewrites. The base is the first
+  of `change_bases_of` that resolves, the same resolution the change signals
+  use. The file goes in a fresh temporary directory outside the workspace and
+  outside Claude's disposable review clone. The prompt names the file, the base,
+  merge base and head SHAs, the line count, and the SHA-256; a Claude stage is
+  granted the directory with `--add-dir`, and Codex's sandbox already reads it.
+  The file is removed when the stage ends. When no base resolves, no file is
+  written and the prompt says so; the stage never receives a partial file.
+- **The skills state the rule.** Every skill that reads a diff or cites output
+  carries the shared `## Complete evidence` section, for manual runs and for
+  evidence other than the diff. A truncation or summary marker, or output
+  shorter than its own header counts, makes the output incomplete. Diffs are
+  read from a file Git wrote, or through the host's raw mode. When complete
+  output can't be obtained, the affected part is unverified, never checked.
+
+This section decides whether output is complete. [Evidence levels](#evidence-levels)
+decides who produced it; the two don't overlap.
 
 ## Evidence levels
 

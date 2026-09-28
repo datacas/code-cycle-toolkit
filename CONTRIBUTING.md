@@ -74,6 +74,7 @@ with them. Several sections are therefore duplicated verbatim:
 | `### Where the block goes` | the same three |
 | `### The PR comment is the machine-readable record` | the same three |
 | `## Checks of the pushed head` | `cc-implement-issue`, `cc-resolve-comments` |
+| `## Complete evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` |
 
 Editing one copy means editing all of them. The validator compares the copies
 byte for byte and fails on drift, which is the whole point: these sections

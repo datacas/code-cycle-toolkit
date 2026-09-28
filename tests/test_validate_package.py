@@ -56,6 +56,33 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "has drifted between skills")
 
+    def test_rejects_complete_evidence_drift(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-verify" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("never as checked.", text)
+        path.write_text(text.replace("never as checked.", "or as checked.", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "shared section '## Complete evidence' has drifted between skills")
+
+    def test_rejects_a_skill_missing_complete_evidence(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-security-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("## Complete evidence\n", "## Evidence\n", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors,
+            "skills/cc-security-review/SKILL.md: missing shared section '## Complete evidence'",
+        )
+
     @unittest.skipIf(
         os.name == "nt",
         "On NTFS a colon opens an alternate data stream instead of creating a file, "

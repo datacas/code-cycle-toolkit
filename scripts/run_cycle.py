@@ -40,16 +40,19 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
 from cycle_status import CycleStatusWriter
-from executors import DispatchResult, ReadinessPolicy, Registry
+from executors import DispatchResult, ReadinessPolicy, Registry, _paths_overlap
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from review_contract import (
     RESOLUTION_RUN,
@@ -176,6 +179,18 @@ CONTESTED_DIRECTIVE = (
     "procedure when one is available. Do not publish them as not_applicable "
     "again without evidence the re-review did not have; otherwise report "
     "PARTIALLY_RESOLVED and state that the finding is contested."
+)
+
+#: The stages that judge the accumulated diff, and so receive it as a file.
+#: The runtime writes it through `subprocess`, which no host hook rewrites; the
+#: agent's own `git diff` may pass through one that shortens it.
+DIFF_ROLES = frozenset({"review", "resolve", "rereview"})
+
+#: What a diff stage is told when no base resolved: no file, and no pretence.
+NO_DIFF_FILE = (
+    "Complete diff: the runtime resolved no base for this change and wrote no "
+    "diff file. Obtain the complete diff yourself as the skill's Complete "
+    "evidence section describes."
 )
 
 #: A finding ID that may be put into a later stage's prompt.
@@ -426,7 +441,7 @@ def readable(text: str, limit: int = REASON_LIMIT) -> str:
 
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             *, change_request_id: str | None = None,
-            local_only: bool = False) -> str:
+            local_only: bool = False, evidence: str = "") -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -438,10 +453,106 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
+    if evidence:
+        parts.append(evidence)
     if local_only:
         parts.append(LOCAL_ONLY_REQUEST)
     parts.append(STRUCTURED_REQUEST)
     return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class DiffArtifact:
+    """The complete accumulated diff, written by Git to a file.
+
+    `lines` and `sha256` are of the bytes Git wrote, so an agent can confirm it
+    read all of it rather than a view some tool shortened on the way.
+    """
+
+    path: Path
+    base: str
+    merge_base: str
+    head: str
+    lines: int
+    sha256: str
+
+    def prompt(self) -> str:
+        return (
+            f"Complete diff: the runtime wrote the accumulated diff of this change "
+            f"to `{self.path}` (base `{self.base}`, merge base `{self.merge_base}`, "
+            f"head `{self.head}`, {self.lines} lines, SHA-256 `{self.sha256}`). "
+            "That file is the diff under review: confirm its line count, and read "
+            "it in sections. If the change request's head is not "
+            f"`{self.head}`, or the file cannot be read, it does not describe this "
+            "change; obtain the complete diff as the skill's Complete evidence "
+            "section describes."
+        )
+
+
+def write_diff_artifact(cwd: str | None, bases: tuple[str, ...] | None,
+                        directory: Path, *, timeout: int = 60) -> DiffArtifact | None:
+    """Write `git diff <base>...HEAD` for the first base that resolves.
+
+    Git writes the file itself (`--output`), so nothing between it and the disk
+    can shorten it. Both ends are pinned to commits first: the file describes
+    one head, the one the prompt names. Returns `None`, with nothing left in
+    `directory`, when no base resolves or Git fails; a partial file is never
+    handed on.
+    """
+    head = _git_line(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], timeout)
+    if head is None:
+        return None
+    path = directory / "accumulated.diff"
+    for base in bases or ():
+        merge_base = _git_line(cwd, ["merge-base", base, head], timeout)
+        if merge_base is None:
+            continue
+        try:
+            completed = subprocess.run(
+                ["git", "diff", "--no-color", "--no-ext-diff",
+                 f"--output={path}", f"{merge_base}...{head}"],
+                cwd=cwd, capture_output=True, timeout=timeout, check=False,
+            )
+            content = path.read_bytes() if completed.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            content = None
+        if content is None:
+            path.unlink(missing_ok=True)
+            continue
+        return DiffArtifact(
+            path=path, base=base, merge_base=merge_base, head=head,
+            lines=content.count(b"\n"),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+    return None
+
+
+def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else None
+
+
+def diff_directory(cwd: str | None) -> Path | None:
+    """A fresh directory for one stage's diff, outside the workspace.
+
+    The system temporary directory: readable from Codex's read-only sandbox and
+    from Claude's disposable review clone, and inside neither. When it overlaps
+    the workspace (a `TMPDIR` inside the checkout), there is no directory: a
+    file there would be a change the review then sees.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="code-cycle-diff-"))
+    workspace = cwd or "."
+    if _paths_overlap(str(directory), workspace):
+        shutil.rmtree(directory, ignore_errors=True)
+        return None
+    return directory
 
 
 def validate_local_only_cwd(cwd: str | None) -> None:
@@ -696,10 +807,26 @@ def run_cycle(
 
     def run(role: str, instruction: str = "", *,
             change_request_id: str | None = None) -> tuple[StageOutcome, Reported]:
-        outcome = recorder.stage(
-            role, compose(role, repo_id, task_id, instruction,
-                          change_request_id=change_request_id, local_only=local_only),
-                                 **dispatch_kwargs)
+        evidence = ""
+        stage_kwargs = dispatch_kwargs
+        directory = diff_directory(cwd) if role in DIFF_ROLES else None
+        try:
+            if role in DIFF_ROLES:
+                artifact = (write_diff_artifact(cwd, change_bases, directory)
+                            if directory is not None else None)
+                evidence = artifact.prompt() if artifact is not None else NO_DIFF_FILE
+                if artifact is not None:
+                    stage_kwargs = {**dispatch_kwargs, "read_dirs": (str(directory),)}
+            outcome = recorder.stage(
+                role, compose(role, repo_id, task_id, instruction,
+                              change_request_id=change_request_id,
+                              local_only=local_only, evidence=evidence),
+                **stage_kwargs)
+        finally:
+            # The diff lives for its stage only. A later stage writes its own,
+            # from the head that stage will judge.
+            if directory is not None:
+                shutil.rmtree(directory, ignore_errors=True)
         report.stages.append(outcome)
         reported = read_structured_result(outcome.result)
         status_writer.stage_finished(outcome.result, reported.status)

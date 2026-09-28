@@ -571,10 +571,21 @@ class NativeAdapter(Adapter):
             if isinstance(delta, dict) and isinstance(delta.get("text"), str):
                 callback(text=delta["text"])
 
+    def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
+        """`argv`, able to read `read_dirs` as well as its own directory.
+
+        The runtime puts evidence outside every workspace, such as the complete
+        diff a review judges. This CLI's sandbox already reads the whole file
+        system, so the default adds nothing; an adapter confined to its
+        directory widens the reading and never the writing.
+        """
+        return argv
+
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
+                 read_dirs: tuple[str, ...] = (),
                  on_progress=None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
@@ -596,6 +607,7 @@ class NativeAdapter(Adapter):
         else:
             argv = (self.argv(target, task, cwd, writes, True)
                     if publishes else self.argv(target, task, cwd, writes))
+        argv = self.readable(argv, read_dirs)
         try:
             if on_progress is not None and runner is _run:
                 completed = runner(
@@ -1023,13 +1035,21 @@ class ClaudeAdapter(NativeAdapter):
                  timeout: int = 3600, runner=_run, writes: bool = False,
                  publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
+                 read_dirs: tuple[str, ...] = (),
                  on_progress=None) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
-            on_progress=on_progress,
+            read_dirs=read_dirs, on_progress=on_progress,
         )
+
+    def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
+        # A non-interactive Claude reads only inside its working directory
+        # without asking, and nobody is there to answer. `--add-dir` is the
+        # documented way to grant another one; it takes several values, so it
+        # goes last, where nothing positional follows it.
+        return argv + ["--add-dir", *read_dirs] if read_dirs else argv
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
@@ -1492,6 +1512,12 @@ def dispatch(
     kw.pop("workspace", None)
     if isinstance(adapter, NativeAdapter) and on_progress is not None:
         kw["on_progress"] = on_progress
+    # Evidence the runtime wrote outside the workspace. Only a native CLI is
+    # started here and can be granted a directory; Orca's worker runs where
+    # Orca puts it, and its prompt already says what to do without the file.
+    read_dirs = tuple(kw.pop("read_dirs", ()) or ())
+    if isinstance(adapter, NativeAdapter) and read_dirs:
+        kw["read_dirs"] = read_dirs
 
     started = clock()
     if (workspace_policy is WorkspacePolicy.READ_ONLY

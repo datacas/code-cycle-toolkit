@@ -8,14 +8,17 @@ executor whose structured block is delimited, parseable and not a result.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1606,3 +1609,165 @@ class RepeatedFindingTests(RunCycleTestCase):
 
         self.assertTrue(all("rm -rf" not in prompt
                             for prompt in self.resolve_prompts(implementer)))
+
+
+def git(repo: Path, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false", *args],
+        check=True, capture_output=True,
+    ).stdout
+
+
+def change_repository(root: Path) -> Path:
+    """A `main` and a feature branch one commit ahead of it."""
+    repo = root / "checkout"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "kept.py").write_text("".join(f"line {n}\n" for n in range(400)))
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "base")
+    git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "kept.py").write_text("".join(f"changed {n}\n" for n in range(400)))
+    (repo / "added.py").write_text("print('new')\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "change")
+    return repo
+
+
+DIFF_PATH = re.compile(r"accumulated diff of this change to `([^`]+)`")
+
+
+class ReadingClaude(ex.ClaudeAdapter):
+    """The real Claude adapter, with a runner that reads the diff it was given."""
+
+    requires_publication_preflight = False
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    def probe(self):
+        return ex.ProbeResult(self.name, ex.Availability.READY, "scripted")
+
+    def dispatch(self, target, task, **kw):
+        def runner(argv, timeout=None, cwd=None, **_):
+            prompt = argv[2]
+            match = DIFF_PATH.search(prompt)
+            path = Path(match.group(1)) if match else None
+            self.seen.append({
+                "argv": argv, "cwd": cwd, "prompt": prompt, "path": path,
+                "content": path.read_bytes() if path is not None else None,
+            })
+            return subprocess.CompletedProcess(argv, 0, APPROVED, "")
+        return super().dispatch(target, task, runner=runner, **kw)
+
+
+class Reader(Talker):
+    """A scripted executor that reads the diff file while its stage runs."""
+
+    def __init__(self, name: str, answers: list[str] | None = None) -> None:
+        super().__init__(name)
+        self.answers = list(answers or [])
+        self.read: list[tuple[str, bytes | None]] = []
+
+    def spoken(self, task: str) -> str:
+        match = DIFF_PATH.search(task)
+        self.read.append((task, Path(match.group(1)).read_bytes() if match else None))
+        if "cc-resolve-comments" in task:
+            return block("RESOLVED")
+        return self.answers.pop(0) if self.answers else APPROVED
+
+
+class CompleteDiffTests(RunCycleTestCase):
+    """The runtime hands a diff stage the whole diff, written by Git (#88)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.repo = change_repository(Path(workspace.name))
+        # Every temporary directory the runtime makes goes here, so the test
+        # can see what is left once a stage ends.
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        patcher = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.expected = git(self.repo, "diff", "main...HEAD")
+
+    def assert_the_whole_diff(self, prompt: str, content: bytes | None) -> Path:
+        path = Path(DIFF_PATH.search(prompt).group(1))
+        self.assertEqual(self.expected, content)
+        lines = self.expected.count(b"\n")
+        self.assertGreater(lines, 400)
+        self.assertIn(f"{lines} lines", prompt)
+        self.assertIn(hashlib.sha256(self.expected).hexdigest(), prompt)
+        self.assertIn(git(self.repo, "rev-parse", "HEAD").decode().strip(), prompt)
+        self.assertFalse(ex._paths_overlap(str(path), str(self.repo)))
+        self.assertFalse(path.exists())
+        return path
+
+    def test_every_diff_stage_reads_the_complete_diff_and_it_is_gone_after(self) -> None:
+        implementer = Reader("codex")
+        reviewer = Reader("claude", [block("CHANGES_REQUESTED"), APPROVED])
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        read = reviewer.read + implementer.read
+        self.assertEqual(3, len(read))  # review, rereview, resolve
+        paths = {self.assert_the_whole_diff(prompt, content) for prompt, content in read}
+        self.assertEqual(3, len(paths))
+        self.assertEqual([], list(self.scratch.iterdir()))
+        # A scripted adapter is not a CLI this layer starts: nothing to grant.
+        self.assertTrue(all("read_dirs" not in kw for kw in reviewer.dispatch_kwargs))
+
+    def test_the_isolated_claude_clone_is_granted_the_diff_directory(self) -> None:
+        implementer = Talker("codex")
+        reviewer = ReadingClaude()
+
+        report = self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                                change_bases=("main",), start_from="review",
+                                change_request_id="4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        [seen] = reviewer.seen
+        path = self.assert_the_whole_diff(seen["prompt"], seen["content"])
+        self.assertEqual(["--add-dir", str(path.parent)], seen["argv"][-2:])
+        # The reviewer ran in its disposable clone, and the diff is outside it.
+        self.assertNotEqual(ex._canonical_path(str(self.repo)),
+                            ex._canonical_path(seen["cwd"]))
+        self.assertFalse(ex._paths_overlap(str(path), seen["cwd"]))
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_with_no_base_that_resolves_no_file_is_written_and_the_prompt_says_so(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+
+        self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                       change_bases=("origin/nowhere",), start_from="review",
+                       change_request_id="4")
+
+        [(prompt, content)] = reviewer.read
+        self.assertIsNone(content)
+        self.assertIn(rc.NO_DIFF_FILE, prompt)
+        self.assertEqual([], list(self.scratch.iterdir()))
+
+    def test_the_implementation_is_not_given_a_diff(self) -> None:
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+
+        self.run_cycle(implementer, reviewer, cwd=str(self.repo), change_bases=("main",))
+
+        self.assertNotIn("Complete diff", implementer.dispatched[0])
+        self.assertIn("Complete diff", reviewer.read[0][0])
+
+    def test_a_temporary_directory_inside_the_workspace_is_not_used(self) -> None:
+        inside = self.repo / "tmp"
+        inside.mkdir()
+        with mock.patch.object(tempfile, "tempdir", str(inside)):
+            self.assertIsNone(rc.diff_directory(str(self.repo)))
+        self.assertEqual([], list(inside.iterdir()))

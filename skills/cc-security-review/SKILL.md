@@ -51,6 +51,26 @@ Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-te
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
 
+## Complete evidence
+
+What a stage judges must be complete: the diff under review, and any output it
+cites as evidence, such as a test failure, a check state, or a command result.
+
+1. When the invocation names a diff file with its line count and hash, that file
+   is the diff under review. Confirm its line count and read it in sections; the
+   rules below then cover the rest of the evidence.
+2. A host may compact or summarise command output before you see it. Treat
+   output that carries a truncation or summary marker (`truncated`, `omitted`,
+   `... more`), or that is shorter than its own header counts, as incomplete.
+3. Read a diff through a path the host does not rewrite. Have Git write it to a
+   file outside the working tree (`git diff <base>...HEAD --output=<file>`) and
+   read that file in sections, or use the host's documented raw mode. Size it
+   with `--stat` first, then read it per file rather than all at once.
+4. Evidence is the command's exit status plus the relevant uncompacted lines. A
+   compacted summary may guide where to look; it is never cited as the result.
+5. When complete output cannot be obtained, say so and treat the affected part
+   as unverified, never as checked.
+
 ## Principles
 
 - Never claim the system is secure.
