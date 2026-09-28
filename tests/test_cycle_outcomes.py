@@ -289,10 +289,17 @@ class DriverTests(RunCycleTestCase):
             "tests": {"passed": False, "conclusion": "failed", "boundary": "required"},
             "checks": {"passed": 4, "failed": 1, "pending": 0},
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
+            "forecast": {
+                "changed_files_count": 4, "changed_lines_estimate": 180,
+                "has_tests": True, "touches_dependencies": False,
+                "touches_database": False, "touches_auth": False,
+                "touches_api": True, "touches_migrations": False,
+                "touches_ci": False,
+            },
         }
 
         emitted = {"status", *rc._findings(payload, "resolve"), *rc._tests(payload),
-                   *rc._checks(payload)}
+                   *rc._checks(payload), *rc._forecast(payload)}
 
         self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)
 

@@ -60,7 +60,7 @@ from pathlib import Path
 #: verdicts carry the agent's separate `verification` conclusion.
 #: 9: a verdict whose change required a boundary run carries
 #: `boundary_verified`; one that did not require it carries nothing new.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -233,6 +233,16 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "changed_sql_files": ("count", None),
     "changed_markdown_files": ("count", None),
     "changed_other_files": ("count", None),
+    # implementation forecast: a post-routing claim, never a routing signal
+    "forecast_changed_files_count": ("count", None),
+    "forecast_changed_lines_estimate": ("count", None),
+    "forecast_has_tests": ("flag", None),
+    "forecast_touches_dependencies": ("flag", None),
+    "forecast_touches_database": ("flag", None),
+    "forecast_touches_auth": ("flag", None),
+    "forecast_touches_api": ("flag", None),
+    "forecast_touches_migrations": ("flag", None),
+    "forecast_touches_ci": ("flag", None),
     "prior_findings_total": ("count", None),
     "prior_findings_blocking": ("count", None),
     "prior_findings_critical": ("count", None),
@@ -299,6 +309,7 @@ FIELD_LIMITS: dict[str, tuple[int, int]] = {
             "changed_java_files", "changed_csharp_files", "changed_ruby_files",
             "changed_php_files", "changed_shell_files", "changed_sql_files",
             "changed_markdown_files", "changed_other_files",
+            "forecast_changed_files_count", "forecast_changed_lines_estimate",
             "prior_findings_total", "prior_findings_blocking",
             "prior_findings_critical", "prior_findings_high",
             "prior_findings_medium", "prior_findings_low",
@@ -368,6 +379,10 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "status", "findings_total", "findings_blocking", "findings_critical",
         "findings_high", "findings_medium", "findings_low", "tests_passed",
         "tests_basis", "verification", "boundary_verified",
+        "forecast_changed_files_count", "forecast_changed_lines_estimate",
+        "forecast_has_tests", "forecast_touches_dependencies",
+        "forecast_touches_database", "forecast_touches_auth", "forecast_touches_api",
+        "forecast_touches_migrations", "forecast_touches_ci",
         "checks_passed", "checks_failed", "checks_pending",
     }),
     "cycle": frozenset({

@@ -738,6 +738,7 @@ def run_cycle(
         if reported.status:
             recorder.record_verdict(role, reported.status,
                                     **_findings(reported.payload, role),
+                                    **(_forecast(reported.payload) if role == "implement" else {}),
                                     **_tests(reported.payload, boundary_rule=(
                                         boundary_rule_fired(recorder.latest_change))),
                                     **_checks(reported.payload))
@@ -1016,6 +1017,37 @@ def _findings(payload: dict | None, role: str) -> dict:
         for severity in SEVERITIES:
             out[f"findings_{severity}"] = severities.count(severity)
     return out
+
+
+FORECAST_SIGNAL_FIELDS = (
+    "changed_files_count", "changed_lines_estimate", "has_tests",
+    "touches_dependencies", "touches_database", "touches_auth", "touches_api",
+    "touches_migrations", "touches_ci",
+)
+
+
+def _forecast(payload: dict | None) -> dict:
+    """Read a bounded implementation forecast without making it routing input.
+
+    A malformed forecast is refused as a whole, while the ordinary verdict and
+    the cycle continue. This keeps untrusted structured output from breaking a
+    run or leaving a misleading partial prediction behind.
+    """
+    forecast = payload.get("forecast") if isinstance(payload, dict) else None
+    if not isinstance(forecast, dict):
+        return {}
+    fields = {}
+    try:
+        for name in FORECAST_SIGNAL_FIELDS:
+            value = forecast.get(name)
+            if name not in forecast or value is None:
+                continue
+            key = f"forecast_{name}"
+            validate_reference(key, value)
+            fields[key] = value
+    except TelemetryError:
+        return {}
+    return fields
 
 
 def _valid_findings(entries: list, statuses: set[str]) -> list | None:

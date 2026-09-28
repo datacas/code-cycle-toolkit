@@ -114,6 +114,30 @@ class StorageTests(TelemetryTestCase):
         self.assertIs(True, payload["security_audit_ran"])
         self.assertEqual("both", payload["security_gate_half"])
 
+    def test_forecasts_are_typed_bounded_outcomes_and_never_pre_routing_signals(self) -> None:
+        fields = {
+            "forecast_changed_files_count": 4,
+            "forecast_changed_lines_estimate": 180,
+            "forecast_has_tests": True,
+            "forecast_touches_dependencies": False,
+            "forecast_touches_database": False,
+            "forecast_touches_auth": False,
+            "forecast_touches_api": True,
+            "forecast_touches_migrations": False,
+            "forecast_touches_ci": False,
+        }
+        self.store.record_stage("repo", "forecast", "implement", record_kind="verdict", **fields)
+        payload = self.store.rows()[0]["payload"]
+
+        self.assertEqual(fields, {key: payload[key] for key in fields})
+        self.assertTrue(set(fields) <= tm.OUTCOME_FIELDS["verdict"])
+        self.assertTrue(set(fields).isdisjoint(
+            set().union(*tm.PRE_ROUTING_SIGNALS.values())))
+        for bad in ("four", tm._UPPER_COUNT + 1):
+            with self.subTest(value=bad), self.assertRaises(tm.TelemetryError):
+                self.store.record_stage("repo", "bad-forecast", "implement",
+                                        forecast_changed_files_count=bad)
+
     def test_none_is_allowed_as_an_absent_measurement(self) -> None:
         self.store.record_stage("repo", "t1", "implement", cost_usd=None)
 
