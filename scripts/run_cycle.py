@@ -562,15 +562,33 @@ def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
     return value if completed.returncode == 0 and value else None
 
 
+def evidence_root() -> Path:
+    """Where stage evidence lives: beside the other host-local state.
+
+    Not the system temporary directory. Codex's `workspace-write` sandbox may
+    write `/tmp` and `$TMPDIR` as well as its workspace, so evidence there could
+    be changed by the stage it is evidence for. Every Codex sandbox reads the
+    whole file system and writes none of this, which the operating system
+    enforces. Claude has no such boundary; the hash check after the stage is
+    what covers it.
+    """
+    return default_database_path().parent / "evidence"
+
+
 def diff_directory(cwd: str | None) -> Path | None:
     """A fresh directory for one stage's diff, outside the workspace.
 
-    The system temporary directory: readable from Codex's read-only sandbox and
-    from Claude's disposable review clone, and inside neither. When it overlaps
-    the workspace (a `TMPDIR` inside the checkout), there is no directory: a
-    file there would be a change the review then sees.
+    Readable from Codex's sandboxes and from Claude's disposable review clone,
+    and inside neither. When it overlaps the workspace (a `CODE_CYCLE_HOME`
+    inside the checkout), or cannot be made, there is no directory: a file in
+    the workspace would be a change the review then sees.
     """
-    directory = Path(tempfile.mkdtemp(prefix="code-cycle-diff-"))
+    try:
+        root = evidence_root()
+        root.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="diff-", dir=root))
+    except OSError:
+        return None
     workspace = cwd or "."
     if _paths_overlap(str(directory), workspace):
         shutil.rmtree(directory, ignore_errors=True)
@@ -836,7 +854,9 @@ def run_cycle(
         stage_kwargs = dispatch_kwargs
         artifact = None
         tampered = None
-        directory = diff_directory(cwd) if role in DIFF_ROLES else None
+        # No base to measure against means no file, so no directory either.
+        directory = (diff_directory(cwd)
+                     if role in DIFF_ROLES and change_bases else None)
         try:
             if role in DIFF_ROLES:
                 artifact = (write_diff_artifact(cwd, change_bases, directory)

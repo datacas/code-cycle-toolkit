@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -133,6 +134,11 @@ class RunCycleTestCase(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
+        # Host-local state, including each stage's evidence, stays in the test.
+        self.home = Path(temporary.name) / "home"
+        patcher = mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_cycle(self, implementer, reviewer, **kw):
         telemetry = kw.pop("telemetry", self.store)
@@ -1754,14 +1760,10 @@ class CompleteDiffTests(RunCycleTestCase):
         workspace = tempfile.TemporaryDirectory()
         self.addCleanup(workspace.cleanup)
         self.repo = change_repository(Path(workspace.name))
-        # Every temporary directory the runtime makes goes here, so the test
-        # can see what is left once a stage ends.
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        self.scratch = Path(scratch.name)
-        patcher = mock.patch.object(tempfile, "tempdir", str(self.scratch))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Every evidence directory the runtime makes goes here, so the test can
+        # see what is left once a stage ends.
+        self.scratch = self.home / "evidence"
+        self.scratch.mkdir(parents=True)
         self.expected = git(self.repo, "diff", "main...HEAD")
 
     def assert_the_whole_diff(self, prompt: str, content: bytes | None) -> Path:
@@ -1871,9 +1873,20 @@ class CompleteDiffTests(RunCycleTestCase):
         self.assertEqual(0, artifact.path.stat().st_mode & 0o222)
         self.assertIsNone(artifact.changed())
 
-    def test_a_temporary_directory_inside_the_workspace_is_not_used(self) -> None:
-        inside = self.repo / "tmp"
-        inside.mkdir()
-        with mock.patch.object(tempfile, "tempdir", str(inside)):
+    def test_an_evidence_directory_inside_the_workspace_is_not_used(self) -> None:
+        inside = self.repo / "state"
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(inside)}):
             self.assertIsNone(rc.diff_directory(str(self.repo)))
-        self.assertEqual([], list(inside.iterdir()))
+        self.assertEqual([], list((inside / "evidence").iterdir()))
+
+    def test_evidence_lives_beside_host_state_not_in_the_temporary_directory(self) -> None:
+        """REV-001: Codex's `workspace-write` may write `/tmp` and `$TMPDIR`."""
+        directory = rc.diff_directory(str(self.repo))
+        self.addCleanup(ex._remove_workspace, str(directory))
+
+        self.assertEqual(self.scratch, directory.parent)
+        self.assertEqual(tm.default_database_path().parent / "evidence", directory.parent)
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": "", "XDG_CONFIG_HOME": "",
+                                          "APPDATA": ""}):
+            self.assertFalse(ex._paths_overlap(str(rc.evidence_root()),
+                                               tempfile.gettempdir()))

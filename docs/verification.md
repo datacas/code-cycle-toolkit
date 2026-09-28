@@ -35,16 +35,32 @@ layers:
   `resolve`, or `rereview`, it writes `git diff <base>...HEAD` itself, through
   `subprocess` and `--output`, which no host hook rewrites. The base is the first
   of `change_bases_of` that resolves, the same resolution the change signals
-  use. The file goes in a fresh temporary directory outside the workspace and
-  outside Claude's disposable review clone. The prompt names the file, the base,
-  merge base and head SHAs, the line count, and the SHA-256. A Claude stage that
-  doesn't write is granted the directory with `--add-dir`; a writing stage is
-  granted nothing, because an added directory is editable too. Codex's sandbox
-  already reads it. The file is read-only, and after the stage the runtime
-  checks its SHA-256 again: a changed or missing file stops the cycle as
-  `stage_not_completed` before the stage's verdict is read. The file is removed
-  when the stage ends. When no base resolves, no file is written and the prompt
-  says so; the stage never receives a partial file.
+  use. The file goes in a fresh directory under `evidence/`, beside the
+  telemetry database (`CODE_CYCLE_HOME`, or the user configuration directory).
+  That is outside the workspace and Claude's disposable review clone. It is
+  also outside the system temporary directory, which Codex's `workspace-write`
+  sandbox may write. The prompt names the file, the base, merge base and head
+  SHAs, the line count, and the SHA-256. The file is removed when the stage
+  ends. When no base resolves, no file is written and the prompt says so; the
+  stage never receives a partial file.
+
+  How far the evidence is protected depends on the executor:
+
+  | Executor | Reads the file | Can the stage change it? |
+  |---|---|---|
+  | Codex, any stage | Its sandbox reads the whole file system | No; the operating system sandbox writes only its workspace and temporary directories |
+  | Claude, non-writing stage | Granted the directory with `--add-dir` | Not prevented. Claude has no sandbox here, and an added directory is editable |
+  | Claude, writing stage | Not granted; falls back to the skill's rules | Not granted, but not sandboxed either |
+
+  For every executor the file is read-only, and after the stage the runtime
+  checks its SHA-256 again. A changed or missing file stops the cycle as
+  `stage_not_completed` before the stage's verdict is read. What this can't
+  catch is a Claude stage that changes the file and restores it before it
+  exits. Only that stage reads the file, and the file is gone afterwards, so
+  such a stage has misled only itself. That is indistinguishable from not
+  reading the file at all, which no runtime can prove either way. The guarantee
+  is that the runtime supplied the complete diff and that nothing downstream
+  sees an altered one. What the agent read stays the agent's claim.
 - **The skills state the rule.** Every skill that reads a diff or cites output
   carries the shared `## Complete evidence` section, for manual runs and for
   evidence other than the diff. A truncation or summary marker, or output
