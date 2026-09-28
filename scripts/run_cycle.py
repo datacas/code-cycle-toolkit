@@ -42,6 +42,7 @@ import argparse
 import difflib
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -194,9 +195,10 @@ DIFF_ROLES = frozenset({"review", "resolve", "rereview"})
 
 #: What a diff stage is told when no base resolved: no file, and no pretence.
 NO_DIFF_FILE = (
-    "Complete diff: the runtime resolved no base for this change and wrote no "
-    "diff file. Obtain the complete diff yourself as the skill's Complete "
-    "evidence section describes."
+    "Complete diff: the runtime wrote no diff file for this stage, because no "
+    "base resolved or no evidence location lies outside every writable root. "
+    "Obtain the complete diff yourself as the skill's Complete evidence "
+    "section describes."
 )
 
 #: A finding ID that may be put into a later stage's prompt.
@@ -575,25 +577,36 @@ def evidence_root() -> Path:
     return default_database_path().parent / "evidence"
 
 
+def writable_temporary_roots() -> tuple[str, ...]:
+    """The temporary directories a Codex `workspace-write` sandbox may write.
+
+    `$TMPDIR` (what `tempfile` resolves) and, on POSIX, `/tmp`.
+    """
+    roots = [tempfile.gettempdir()]
+    if os.name == "posix":
+        roots.append("/tmp")
+    return tuple(roots)
+
+
 def diff_directory(cwd: str | None) -> Path | None:
-    """A fresh directory for one stage's diff, outside the workspace.
+    """A fresh directory for one stage's diff, outside every writable root.
 
     Readable from Codex's sandboxes and from Claude's disposable review clone,
-    and inside neither. When it overlaps the workspace (a `CODE_CYCLE_HOME`
-    inside the checkout), or cannot be made, there is no directory: a file in
-    the workspace would be a change the review then sees.
+    and inside neither. When the evidence root overlaps the workspace or a
+    temporary directory a stage may write (a `CODE_CYCLE_HOME` pointed at
+    either), or cannot be made, there is no directory and so no file: evidence
+    a stage can rewrite is not evidence. Checked before anything is created.
     """
+    root = evidence_root()
+    workspace = cwd or "."
+    if any(_paths_overlap(str(root), writable)
+           for writable in (workspace, *writable_temporary_roots())):
+        return None
     try:
-        root = evidence_root()
         root.mkdir(parents=True, exist_ok=True)
-        directory = Path(tempfile.mkdtemp(prefix="diff-", dir=root))
+        return Path(tempfile.mkdtemp(prefix="diff-", dir=root))
     except OSError:
         return None
-    workspace = cwd or "."
-    if _paths_overlap(str(directory), workspace):
-        shutil.rmtree(directory, ignore_errors=True)
-        return None
-    return directory
 
 
 def validate_local_only_cwd(cwd: str | None) -> None:

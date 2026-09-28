@@ -39,7 +39,8 @@ layers:
   telemetry database (`CODE_CYCLE_HOME`, or the user configuration directory).
   That is outside the workspace and Claude's disposable review clone. It is
   also outside the system temporary directory, which Codex's `workspace-write`
-  sandbox may write. The prompt names the file, the base, merge base and head
+  sandbox may write. If `CODE_CYCLE_HOME` puts it inside the workspace, `/tmp`,
+  or `$TMPDIR`, no file is written and the prompt says so. The prompt names the file, the base, merge base and head
   SHAs, the line count, and the SHA-256. The file is removed when the stage
   ends. When no base resolves, no file is written and the prompt says so; the
   stage never receives a partial file.
@@ -56,11 +57,10 @@ layers:
   checks its SHA-256 again. A changed or missing file stops the cycle as
   `stage_not_completed` before the stage's verdict is read. What this can't
   catch is a Claude stage that changes the file and restores it before it
-  exits. Only that stage reads the file, and the file is gone afterwards, so
-  such a stage has misled only itself. That is indistinguishable from not
-  reading the file at all, which no runtime can prove either way. The guarantee
-  is that the runtime supplied the complete diff and that nothing downstream
-  sees an altered one. What the agent read stays the agent's claim.
+  exits. For a review stage that matters, because the cycle acts on its
+  verdict. No runtime can prove which bytes an agent read. For Codex the
+  sandbox makes this case impossible; for Claude it is an open limit of this
+  toolkit, not a guarantee.
 - **The skills state the rule.** Every skill that reads a diff or cites output
   carries the shared `## Complete evidence` section, for manual runs and for
   evidence other than the diff. A truncation or summary marker, or output

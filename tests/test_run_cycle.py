@@ -1693,6 +1693,9 @@ def change_repository(root: Path) -> Path:
     return repo
 
 
+#: Captured before any test patches it.
+REAL_WRITABLE_ROOTS = rc.writable_temporary_roots
+
 DIFF_PATH = re.compile(r"accumulated diff of this change to `([^`]+)`")
 
 
@@ -1764,6 +1767,15 @@ class CompleteDiffTests(RunCycleTestCase):
         # see what is left once a stage ends.
         self.scratch = self.home / "evidence"
         self.scratch.mkdir(parents=True)
+        # The test's own home sits in the system temporary directory, which a
+        # real run refuses. Name a writable root elsewhere so the rest applies.
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        self.writable_elsewhere = str(Path(elsewhere.name) / "tmp")
+        patcher = mock.patch.object(rc, "writable_temporary_roots",
+                                    return_value=(self.writable_elsewhere,))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.expected = git(self.repo, "diff", "main...HEAD")
 
     def assert_the_whole_diff(self, prompt: str, content: bytes | None) -> Path:
@@ -1877,7 +1889,30 @@ class CompleteDiffTests(RunCycleTestCase):
         inside = self.repo / "state"
         with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(inside)}):
             self.assertIsNone(rc.diff_directory(str(self.repo)))
-        self.assertEqual([], list((inside / "evidence").iterdir()))
+        self.assertFalse(inside.exists())  # refused before anything was made
+
+    def test_an_evidence_root_in_a_writable_temporary_directory_is_refused(self) -> None:
+        """REV-001: `CODE_CYCLE_HOME` under `/tmp` or `$TMPDIR` is writable by Codex."""
+        writable = Path(self.writable_elsewhere)
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(writable / "state")}):
+            self.assertIsNone(rc.diff_directory(str(self.repo)))
+        self.assertFalse(writable.exists())  # refused before anything was made
+
+        implementer = Talker("codex")
+        reviewer = Reader("claude")
+        with mock.patch.dict(os.environ, {"CODE_CYCLE_HOME": str(writable / "state")}):
+            self.run_cycle(implementer, reviewer, cwd=str(self.repo),
+                           change_bases=("main",), start_from="review",
+                           change_request_id="4")
+        [(prompt, content)] = reviewer.read
+        self.assertIsNone(content)
+        self.assertIn(rc.NO_DIFF_FILE, prompt)
+
+    def test_the_real_writable_roots_are_the_temporary_directories(self) -> None:
+        roots = REAL_WRITABLE_ROOTS()
+        self.assertIn(tempfile.gettempdir(), roots)
+        if os.name == "posix":
+            self.assertIn("/tmp", roots)
 
     def test_evidence_lives_beside_host_state_not_in_the_temporary_directory(self) -> None:
         """REV-001: Codex's `workspace-write` may write `/tmp` and `$TMPDIR`."""
