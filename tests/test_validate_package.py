@@ -67,20 +67,20 @@ class ValidatePackageTests(unittest.TestCase):
         errors = VALIDATOR.validate_package(package)
 
         self.assert_error_contains(
-            errors, "shared section '## Complete evidence' has drifted between skills")
+            errors, "shared section '### Complete evidence' has drifted between skills")
 
     def test_rejects_a_skill_missing_complete_evidence(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-security-review" / "SKILL.md"
         text = path.read_text(encoding="utf-8")
-        path.write_text(text.replace("## Complete evidence\n", "## Evidence\n", 1),
+        path.write_text(text.replace("### Complete evidence\n", "### Evidence\n", 1),
                         encoding="utf-8")
 
         errors = VALIDATOR.validate_package(package)
 
         self.assert_error_contains(
             errors,
-            "skills/cc-security-review/SKILL.md: missing shared section '## Complete evidence'",
+            "skills/cc-security-review/SKILL.md: missing shared section '### Complete evidence'",
         )
 
     def test_rejects_workspace_tools_section_drift(self) -> None:
@@ -120,14 +120,14 @@ class ValidatePackageTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn("Semantic navigation", text)
         path.write_text(
-            text.replace("Semantic navigation", "Serena semantic navigation", 1),
+            text.replace("Semantic navigation", "Context7 semantic navigation", 1),
             encoding="utf-8",
         )
 
         errors = VALIDATOR.validate_package(package)
 
         self.assert_error_contains(
-            errors, "product name 'Serena' in shared workspace-tools section"
+            errors, "product name 'Context7' in shared workspace-tools section"
         )
 
     @unittest.skipIf(

@@ -43,7 +43,7 @@ Every skill:
 
 Provider parameters (`issue_provider=`, `code_host=`, `repository=`/`repo=`) are accepted by every skill that touches a provider. See [Providers](provider-contract.md).
 
-For workspace-tool capabilities, recommended host integrations, and their limits, see [Optional workspace tools](workspace-tools.md), planned in issue #90.
+For workspace-tool capabilities, recommended host integrations, and their limits, see the [guide tracked in issue #90](https://github.com/datacas/code-cycle-toolkit/issues/90).
 
 ---
 

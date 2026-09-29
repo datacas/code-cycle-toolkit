@@ -60,7 +60,7 @@ EVIDENCE_SKILLS = (
     "cc-code-review", "cc-implement-issue", "cc-initial-review", "cc-pr-review",
     "cc-rereview", "cc-resolve-comments", "cc-security-review", "cc-verify",
 )
-SHARED_EVIDENCE_SECTIONS = ("## Complete evidence",)
+SHARED_EVIDENCE_SECTIONS = ("### Complete evidence",)
 
 # Code and evidence stages need the full workspace-tool guidance. The two
 # orchestrators use only its host-availability and memory-safety rules because
@@ -68,8 +68,14 @@ SHARED_EVIDENCE_SECTIONS = ("## Complete evidence",)
 WORKSPACE_TOOL_SKILLS = EVIDENCE_SKILLS
 WORKSPACE_TOOL_ORCHESTRATORS = ("cc-orchestrator", "cc-orca-orchestrator")
 SHARED_WORKSPACE_TOOL_SECTIONS = ("## Workspace tools and evidence",)
-WORKSPACE_TOOL_PRODUCT_NAME = re.compile(
-    r"(?i)\b(?:Serena|AgentMemory|Graphify|RTK|context-mode)\b"
+WORKSPACE_TOOL_PRODUCT_NAMES = (
+    "Serena", "AgentMemory", "Graphify", "RTK", "context-mode", "Context7",
+)
+# Illustrative known product names from workspace-tool guidance and repository
+# instructions. Keep this scan section-scoped so recommendation docs may name
+# tools; extend the list as those recommendations change.
+WORKSPACE_TOOL_PRODUCT_PATTERNS = tuple(
+    re.compile(rf"(?i)\b{re.escape(name)}\b") for name in WORKSPACE_TOOL_PRODUCT_NAMES
 )
 
 # Every skill repeats these two sections verbatim, for the same reason.
@@ -497,6 +503,15 @@ def check_shared_sections(
             )
 
 
+def forbidden_content_matches(text: str, patterns: tuple[re.Pattern, ...] | list[re.Pattern]):
+    matches = []
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            matches.append((pattern, match))
+    return matches
+
+
 def check_workspace_tool_sections(root: Path, errors: list[str]) -> None:
     groups = (WORKSPACE_TOOL_SKILLS, WORKSPACE_TOOL_ORCHESTRATORS)
     for skills in groups:
@@ -510,8 +525,9 @@ def check_workspace_tool_sections(root: Path, errors: list[str]) -> None:
             )
             if section is None:
                 continue
-            match = WORKSPACE_TOOL_PRODUCT_NAME.search(section)
-            if match:
+            for _, match in forbidden_content_matches(
+                section, WORKSPACE_TOOL_PRODUCT_PATTERNS
+            ):
                 errors.append(
                     f"skills/{skill}/SKILL.md: product name {match.group(0)!r} "
                     "in shared workspace-tools section"
@@ -650,9 +666,8 @@ def validate_package(root: Path) -> list[str]:
         # The public repository URL is expected release metadata, not a private
         # project reference.
         text = PUBLIC_REPOSITORY_REFERENCE.sub("", text)
-        for pattern in PRIVATE_PATTERNS:
-            if pattern.search(text):
-                errors.append(f"possible private data in {path.relative_to(root)}: {pattern.pattern}")
+        for pattern, _ in forbidden_content_matches(text, PRIVATE_PATTERNS):
+            errors.append(f"possible private data in {path.relative_to(root)}: {pattern.pattern}")
 
     return errors
 
