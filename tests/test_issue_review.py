@@ -415,7 +415,9 @@ class DriverTests(RunCycleTestCase):
         self.cycle([spoken(result("NEEDS_REFINEMENT", uncertainties=[uncertainty()],
                                   summary="SECRET-PROSE summary"))])
 
-        with sqlite3.connect(self.store.path) as connection:
+        # Closed explicitly: a connection used only as a context manager stays
+        # open, and Windows cannot remove the database file under it.
+        with contextlib.closing(sqlite3.connect(self.store.path)) as connection:
             dump = "\n".join(str(row) for row in connection.execute("SELECT * FROM stages"))
         self.assertNotIn("SECRET-PROSE", dump)
         self.assertNotIn("IR-001", dump)

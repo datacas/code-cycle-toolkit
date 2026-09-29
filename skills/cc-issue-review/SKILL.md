@@ -1,6 +1,6 @@
 ---
 name: cc-issue-review
-description: Use this skill to decide, before any implementation starts, whether a GitHub, Plane, or Jira work item is ready to implement, by comparing it and its linked work with the current repository and returning READY, NEEDS_REFINEMENT, or BLOCKED with evidence, confidence, and suggested issue edits. It is read-only: it never edits the work item, comments, labels, or changes code.
+description: Use this skill to decide, before any implementation starts, whether a GitHub, Plane, or Jira work item is ready to implement, by comparing it and its linked work with the current repository and returning READY, NEEDS_REFINEMENT, or BLOCKED with evidence, confidence, and suggested issue edits. It is read-only and never edits the work item, comments, labels, or changes code.
 ---
 
 # Issue Review
