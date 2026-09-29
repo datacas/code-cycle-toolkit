@@ -185,6 +185,10 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 
 → Full key-by-key reference with defaults: [Configuration](docs/configuration.md)
 
+## Optional workspace tools
+
+The skills work better when the host offers semantic code navigation (Serena), persistent memory (AgentMemory), a repository knowledge graph (Graphify), output compaction (RTK), large-output processing (context-mode), or current library documentation (Context7). These tools are recommended, external, and optional: no installer or `npx skills` installs them, and their absence is never an error. The skills state capability preferences without naming products, and each tool's own host integration does the routing. → [Optional workspace tools](docs/workspace-tools.md)
+
 ## What it does not do
 
 - **Merge.** The final merge is always a human decision.
@@ -208,6 +212,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 | [Configuration](docs/configuration.md) | Every `.code-cycle.yml` key, parameter, flag, and variable |
 | [Providers](docs/provider-contract.md) | Issue provider and code host contract |
 | [Telemetry and `cc-stats`](docs/telemetry.md) | What is recorded, where, and how to read it |
+| [Optional workspace tools](docs/workspace-tools.md) | Recommended host tools, how stages use them, privacy, pitfalls |
 | [Role workspace policy](docs/role-workspace-policy.md) | What each stage may write |
 | [Instrumentation internals](docs/instrumentation.md) | Design reference for the record, routing, and telemetry |
 

@@ -19,6 +19,7 @@ From nothing to a first reviewed pull request. No knowledge of the architecture 
 | Codex CLI and/or Claude Code CLI | `run_cycle.py` dispatching | Codex CLI 0.138.0 or later for stages that publish. |
 | Orca | `cc-orca-orchestrator` only | Installed and authenticated separately. |
 | `codex-plugin-cc` + Codex | Claude + Codex mode only | Installed separately inside Claude Code. |
+| Workspace tools (Serena, AgentMemory, Graphify, RTK, context-mode, Context7) | nothing; optional | Recommended, not installed by any installer or `npx skills`, and never checked. Their absence is not an error. See [Optional workspace tools](workspace-tools.md). |
 
 The toolkit contains no credentials. Keep them in the provider CLI, connector, or agent host, never in a skill file or `.code-cycle.yml`.
 

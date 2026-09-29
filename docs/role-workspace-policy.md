@@ -33,4 +33,4 @@ See also [Routing and models → Workspace policy](routing.md#workspace-policy) 
 
 ---
 
-[← Telemetry](telemetry.md) · [↑ Documentation index](README.md) · [Instrumentation internals →](instrumentation.md)
+[← Optional workspace tools](workspace-tools.md) · [↑ Documentation index](README.md) · [Instrumentation internals →](instrumentation.md)

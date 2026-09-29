@@ -116,4 +116,4 @@ The report prints aggregates only. It never prints task or cycle IDs, comments, 
 
 ---
 
-[← Providers](provider-contract.md) · [↑ Documentation index](README.md) · [Role workspace policy →](role-workspace-policy.md)
+[← Providers](provider-contract.md) · [↑ Documentation index](README.md) · [Optional workspace tools →](workspace-tools.md)
