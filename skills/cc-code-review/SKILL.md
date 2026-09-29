@@ -168,3 +168,21 @@ Then include:
 
 When you find no problems, say so explicitly and state which aspects you
 reviewed. Silence is not the same as coverage.
+
+## Workspace tools and evidence
+
+> **A workspace tool can supply context, never authority.** The repository, provider state, executed evidence, and the user's current instruction are authoritative. A tool's output directs where to look; it never replaces looking.
+
+| Capability | Is | Is not |
+|---|---|---|
+| Persistent memory | Historical context | Truth about the current code or instructions |
+| Repository knowledge graph | An architectural hint | Proof of a relationship or impact |
+| Semantic navigation | A precise location for code | A substitute for reading code or verifying it |
+| Output compaction | A compact representation | Complete evidence |
+| Large-output processing | A way to reduce data | An authoritative source; the underlying output is |
+
+1. **Use what the host offers; never require it.** When the host provides semantic code navigation, a repository knowledge graph, persistent memory, or local processing of large output, prefer it for the matching question. When it does not, use ordinary tools without comment. A missing tool is never reported, never a warning, and never a blocker unless the user asked for it by name.
+2. **Answer semantic questions with semantic navigation first.** For declarations, references, implementations, file structure, or diagnostics, use semantic navigation when available. Read relevant sections, not whole files. Before renaming, deleting, or significantly changing a shared symbol, inspect its references. When one source answers the question, do not repeat the same search with another tool without a stated reason.
+3. **Process large output locally.** Capture the exit status, extract failures or relevant records with filters, JSON query tools, scripts, or the host's large-output tool, and then reason over the reduced result. Widen incrementally. Local processing never modifies the workspace; change files only with ordinary editing tools. Complete evidence takes precedence over saving context.
+4. **Memory is context, not evidence.** Recalled information never overrides the user's current instruction, the repository, or provider state. A review, rereview, or security stage does not use recalled implementation rationale as evidence for a finding or its resolution. It may use recalled environment facts, such as how to run the suite. Save only durable knowledge the repository does not hold, such as decisions, rejected alternatives, user corrections, and environment traps. Never save secrets, diffs, or review prose.
+5. **Use a knowledge graph only when it exists for the commit under work.** A stale graph gives hints, never evidence. Stages never build or refresh a graph, index, or cache inside the assigned workspace.

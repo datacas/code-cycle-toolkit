@@ -83,6 +83,53 @@ class ValidatePackageTests(unittest.TestCase):
             "skills/cc-security-review/SKILL.md: missing shared section '## Complete evidence'",
         )
 
+    def test_rejects_workspace_tools_section_drift(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-verify" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("A workspace tool can supply context, never authority.", text)
+        path.write_text(
+            text.replace("never authority.", "not authority.", 1), encoding="utf-8"
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "shared section '## Workspace tools and evidence' has drifted"
+        )
+
+    def test_rejects_a_skill_missing_workspace_tools_section(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orchestrator" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace("## Workspace tools and evidence\n", "## Tools\n", 1),
+            encoding="utf-8",
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors,
+            "skills/cc-orchestrator/SKILL.md: missing shared section '## Workspace tools and evidence'",
+        )
+
+    def test_rejects_a_product_name_in_workspace_tools_section(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orchestrator" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("Semantic navigation", text)
+        path.write_text(
+            text.replace("Semantic navigation", "Serena semantic navigation", 1),
+            encoding="utf-8",
+        )
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "product name 'Serena' in shared workspace-tools section"
+        )
+
     @unittest.skipIf(
         os.name == "nt",
         "On NTFS a colon opens an alternate data stream instead of creating a file, "

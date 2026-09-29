@@ -62,6 +62,16 @@ EVIDENCE_SKILLS = (
 )
 SHARED_EVIDENCE_SECTIONS = ("## Complete evidence",)
 
+# Code and evidence stages need the full workspace-tool guidance. The two
+# orchestrators use only its host-availability and memory-safety rules because
+# they coordinate stages without inspecting code.
+WORKSPACE_TOOL_SKILLS = EVIDENCE_SKILLS
+WORKSPACE_TOOL_ORCHESTRATORS = ("cc-orchestrator", "cc-orca-orchestrator")
+SHARED_WORKSPACE_TOOL_SECTIONS = ("## Workspace tools and evidence",)
+WORKSPACE_TOOL_PRODUCT_NAME = re.compile(
+    r"(?i)\b(?:Serena|AgentMemory|Graphify|RTK|context-mode)\b"
+)
+
 # Every skill repeats these two sections verbatim, for the same reason.
 SHARED_ALL_SECTIONS = ("## Repository conventions",)
 # cc-run publishes no GitHub artefact, so it states the language rule in its own
@@ -487,6 +497,27 @@ def check_shared_sections(
             )
 
 
+def check_workspace_tool_sections(root: Path, errors: list[str]) -> None:
+    groups = (WORKSPACE_TOOL_SKILLS, WORKSPACE_TOOL_ORCHESTRATORS)
+    for skills in groups:
+        check_shared_sections(root, skills, SHARED_WORKSPACE_TOOL_SECTIONS, errors)
+        for skill in skills:
+            path = root / "skills" / skill / "SKILL.md"
+            if not path.is_file():
+                continue
+            section = extract_section(
+                path.read_text(encoding="utf-8"), SHARED_WORKSPACE_TOOL_SECTIONS[0]
+            )
+            if section is None:
+                continue
+            match = WORKSPACE_TOOL_PRODUCT_NAME.search(section)
+            if match:
+                errors.append(
+                    f"skills/{skill}/SKILL.md: product name {match.group(0)!r} "
+                    "in shared workspace-tools section"
+                )
+
+
 def validate_package(root: Path) -> list[str]:
     root = root.resolve()
     skills_root = root / "skills"
@@ -543,6 +574,7 @@ def validate_package(root: Path) -> list[str]:
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
         check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
         check_shared_sections(root, EVIDENCE_SKILLS, SHARED_EVIDENCE_SECTIONS, errors)
+        check_workspace_tool_sections(root, errors)
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
         check_repeated_findings_ladder(root, errors)

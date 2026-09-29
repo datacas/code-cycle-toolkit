@@ -7,6 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Ten skills now share product-neutral rules for optional workspace tools:
+  code and evidence stages use semantic navigation and local output processing
+  when available, while the orchestrators apply the host-availability and
+  memory-safety rules. The validator checks both shared copies and rejects
+  product names in those sections.
 - The runtime hands every `review`, `resolve`, and `rereview` stage the complete
   accumulated diff as a file Git wrote itself, outside the workspace, with its
   base, head, line count, and SHA-256 in the prompt; a non-writing Claude stage
