@@ -217,8 +217,9 @@ change-request state handed to later stages.
 3. `orca orchestration run-create --objective "Work item <id>: implement and review
    until ready for manual merge" --json`. Keep the Run ID.
 4. Unless *Issue review before implementation* skips the stage, `task-create`
-   for `cc-issue-review` and `worker-start` it with the reviewer in a read-only
-   workspace, as *Issue review worker* describes. Wait for its `worker_done`,
+   for `cc-issue-review` and `worker-start` it with the reviewer in an isolated
+   review workspace, as *Issue review worker* describes; stop with `BLOCKED`
+   when Orca cannot provide one. Wait for its `worker_done`,
    read its result, and start no implementer until the gate says continue.
 5. `task-create` for the implementation of the work item.
 6. `worker-start --task <impl_task> --agent <implementer> --json` in the chosen

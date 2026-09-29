@@ -45,7 +45,7 @@ Downloads a release and runs the bundled installer for you. No clone needed. It 
 curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh
 
 # a specific version, or other installer options
-curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh -s -- --version v0.4.0
 curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.sh | sh -s -- --agent claude --scope project --project-dir .
 ```
 
@@ -54,10 +54,10 @@ curl -fsSL https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scr
 irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1 | iex
 
 # with parameters
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1))) -Version v0.3.0 -Agent claude
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1))) -Version v0.4.0 -Agent claude
 ```
 
-`--version` / `-Version` accepts `latest` (the default), `main`, or a tag such as `v0.3.0`. `CODE_CYCLE_VERSION` sets the same default. It needs `curl` and `tar` on Unix. As with any piped installer, you can download [`scripts/get.sh`](../scripts/get.sh) and read it first.
+`--version` / `-Version` accepts `latest` (the default), `main`, or a tag such as `v0.4.0`. `CODE_CYCLE_VERSION` sets the same default. It needs `curl` and `tar` on Unix. As with any piped installer, you can download [`scripts/get.sh`](../scripts/get.sh) and read it first.
 
 ### Option B: installer from a clone (skills + runtime)
 

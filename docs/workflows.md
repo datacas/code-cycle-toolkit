@@ -183,7 +183,7 @@ The full discovery, handoff, and failure rules are in the [adapter contract](../
 
 **When:** you use Orca and want every stage to run as a supervised worker in its own terminal, or you want a **paired-review calibration**.
 
-**What it does:** runs `cc-provider-bootstrap`, creates an Orca Run, then one Task per stage ([issue review →] implement → initial review → resolve ↔ rereview). It starts or reuses workers, waits for `worker_done`, reads each `ORCHESTRATION_RESULT`, and branches only on its functional status. All workers share one worktree and one PR branch, except the issue-review worker, which runs in a read-only review workspace and must finish, unchanged, with a confirmed `READY` before the implementer starts. It applies the same [issue review gate](review-cycle.md#issue-review-before-implementation) as `cc-orchestrator`. The coordinator itself never edits code, reviews, or judges a finding.
+**What it does:** runs `cc-provider-bootstrap`, creates an Orca Run, then one Task per stage ([issue review →] implement → initial review → resolve ↔ rereview). It starts or reuses workers, waits for `worker_done`, reads each `ORCHESTRATION_RESULT`, and branches only on its functional status. All workers share one worktree and one PR branch, except the issue-review worker, which runs in its own isolated review workspace (the run stops `BLOCKED` when Orca cannot provide one; it never falls back to the shared worktree) and must finish, unchanged, with a confirmed `READY` before the implementer starts. It applies the same [issue review gate](review-cycle.md#issue-review-before-implementation) as `cc-orchestrator`. The coordinator itself never edits code, reviews, or judges a finding.
 
 **Inputs:**
 

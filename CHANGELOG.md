@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
 ### Added
 
 - `cc-issue-review`, a read-only readiness pass before implementation. It
@@ -35,8 +37,12 @@ All notable changes to this project are documented here. This project follows
   an unconfirmed `READY` escalates once to `senior_reviewer`, and
   `NEEDS_REFINEMENT`, `BLOCKED`, or an unreadable result stops before
   implementation with the findings and proposed issue edits shown. The Orca
-  orchestrator dispatches the stage as a worker in a read-only review workspace
-  and checks that workspace is unchanged before starting the implementer.
+  orchestrator dispatches the stage as a worker in its own isolated review
+  workspace, stops `BLOCKED` when Orca cannot provide one rather than falling
+  back to the shared worktree, and checks that workspace is unchanged before
+  starting the implementer. Under the fixed `single_agent` and `claude_codex`
+  modes, an unconfirmed `READY` stops with `HUMAN_INTERVENTION`, because
+  neither mode assigns a distinct `senior_reviewer`.
   `off` keeps the previous flow, and neither orchestrator touches the work item.
 - The package validator refuses a skill frontmatter value that strict YAML
   would reject: an unquoted value containing `: ` or ` #`. The skills CLI
