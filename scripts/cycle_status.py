@@ -156,6 +156,7 @@ class CycleStatusWriter:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._stage_started: float | None = None
+        self._last_progress: tuple[str, int, str | None] | None = None
         self._status = {
             "cycle_id": cycle_id,
             "repo": repo,
@@ -192,6 +193,7 @@ class CycleStatusWriter:
                 "activity": None,
                 "finished": False,
             }
+            self._last_progress = (_duration(0), 0, None)
             snapshot = dict(self._status["stage"])
         self._write()
         if self.verbose:
@@ -211,11 +213,13 @@ class CycleStatusWriter:
             self._refresh_elapsed(stage)
         self._write()
 
-    def stage_finished(self, result, status: str | None) -> None:
+    def stage_finished(self, result, status: str | None, *,
+                       findings: str | None = None,
+                       warnings: list[str] | None = None) -> float | None:
         with self._lock:
             stage = self._status.get("stage")
             if not isinstance(stage, dict):
-                return
+                return None
             self._refresh_elapsed(stage)
             stage["duration_seconds"] = stage.pop("elapsed_seconds", 0)
             stage["outcome"] = result.outcome.value if result else "blocked"
@@ -224,6 +228,10 @@ class CycleStatusWriter:
             usage = _usage_summary(result)
             if usage:
                 stage["usage"] = usage
+            if findings:
+                stage["findings"] = findings
+            if warnings:
+                stage["warnings"] = list(warnings)
             snapshot = dict(stage)
             self._stage_started = None
         self._write()
@@ -238,6 +246,11 @@ class CycleStatusWriter:
                 parts.append(f"{snapshot['tool_count']} tools")
             self._print(f"[{datetime.now().astimezone().strftime('%H:%M')}] "
                         + " · ".join(parts))
+            if findings:
+                self._print(f"           {findings}")
+            for warning in warnings or []:
+                self._print(f"           warning: {warning}")
+        return snapshot["duration_seconds"]
 
     def finish(self, status: str) -> None:
         with self._lock:
@@ -262,10 +275,24 @@ class CycleStatusWriter:
                     snapshot = dict(stage)
                 else:
                     snapshot = None
+                if snapshot is not None:
+                    progress = (
+                        _duration(snapshot.get("elapsed_seconds", 0)),
+                        int(snapshot.get("tool_count", 0)),
+                        snapshot.get("activity"),
+                    )
+                    previous = self._last_progress
+                    changed = progress != previous
+                    activity_changed = previous is None or progress[2] != previous[2]
+                    if changed:
+                        self._last_progress = progress
+                else:
+                    changed = False
+                    activity_changed = False
             self._write()
-            if self.verbose and snapshot is not None:
+            if self.verbose and snapshot is not None and changed:
                 self._print(_stage_line(snapshot, progress=True))
-                if snapshot.get("activity"):
+                if activity_changed and snapshot.get("activity"):
                     self._print(f"        └ {json.dumps(snapshot['activity'], ensure_ascii=False)}")
 
     def _print(self, value: str) -> None:

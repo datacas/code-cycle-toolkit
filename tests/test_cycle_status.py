@@ -18,9 +18,10 @@ class CycleStatusTests(unittest.TestCase):
     def test_status_is_written_atomically_and_reader_shows_start_and_finish(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "telemetry.sqlite"
+            done_output = io.StringIO()
             writer = cycle_status.CycleStatusWriter(
                 database, "cycle-test", "owner/repo", "ISSUE-7",
-                progress_interval=10,
+                progress_interval=10, verbose=True, stream=done_output,
             )
             writer.start()
             initial = json.loads(writer.path.read_text(encoding="utf-8"))
@@ -56,12 +57,20 @@ class CycleStatusTests(unittest.TestCase):
                     value = "succeeded"
                 outcome = Outcome()
 
-            writer.stage_finished(Result(), "IMPLEMENTED")
+            writer.stage_finished(
+                Result(), "IMPLEMENTED",
+                findings="findings: 1 open (1 high)",
+                warnings=["review clone left a warning"],
+            )
             writer.finish("READY_FOR_MANUAL_MERGE")
             completed = json.loads(writer.path.read_text(encoding="utf-8"))
             self.assertTrue(completed["finished"])
             self.assertTrue(completed["stage"]["finished"])
             self.assertEqual("IMPLEMENTED", completed["stage"]["status"])
+            self.assertEqual("findings: 1 open (1 high)", completed["stage"]["findings"])
+            self.assertEqual(["review clone left a warning"], completed["stage"]["warnings"])
+            self.assertIn("findings: 1 open (1 high)", done_output.getvalue())
+            self.assertIn("warning: review clone left a warning", done_output.getvalue())
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
