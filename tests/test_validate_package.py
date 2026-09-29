@@ -191,6 +191,27 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "no longer documents the triage line kind")
 
+    def test_rejects_a_description_that_is_not_valid_yaml(self) -> None:
+        """#110: `It is read-only: it never ...` made the skills CLI skip a skill."""
+        for fragment in ("It is read-only: it never", "read-only #1 rule"):
+            with self.subTest(fragment=fragment):
+                errors = self.edit_issue_review_skill(
+                    "It is read-only and never", fragment)
+
+                self.assert_error_contains(errors, "is not valid YAML")
+
+    def test_a_quoted_description_may_contain_a_colon(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-issue-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        start = text.index("description: ") + len("description: ")
+        end = text.index("\n", start)
+        quoted = '"' + text[start:end].replace("It is read-only and never",
+                                                "It is read-only: it never") + '"'
+        path.write_text(text[:start] + quoted + text[end:], encoding="utf-8")
+
+        self.assertEqual([], VALIDATOR.validate_package(package))
+
     def test_rejects_known_fixed_language_output(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-initial-review" / "SKILL.md"

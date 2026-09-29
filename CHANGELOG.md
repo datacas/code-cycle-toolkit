@@ -25,6 +25,9 @@ All notable changes to this project are documented here. This project follows
   only: the readiness verdict fields, the `escalated` signal, and the cycle's
   `issue_review` decision. The validator checks the skill's tables and example
   against the runtime's result check.
+- The package validator refuses a skill frontmatter value that strict YAML
+  would reject: an unquoted value containing `: ` or ` #`. The skills CLI
+  silently skipped such a skill while the validator passed it.
 
 - `docs/workspace-tools.md` documents the optional workspace tools (Serena,
   AgentMemory, Graphify, RTK, context-mode, and Context7): what each is for,

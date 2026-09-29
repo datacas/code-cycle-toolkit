@@ -209,7 +209,15 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
         key = key.strip()
         if key not in ALLOWED_FRONTMATTER:
             raise ValueError(f"unsupported frontmatter field: {key}")
-        values[key] = value.strip().strip("'\"")
+        value = value.strip()
+        # A plain (unquoted) YAML scalar ends at `: ` or ` #`. This line-based
+        # reader would accept the value, while a real YAML parser, such as the
+        # skills CLI, rejects it or cuts it short and skips the skill.
+        if value and value[0] not in "'\"" and (": " in value or " #" in value):
+            raise ValueError(
+                f"frontmatter field {key!r} is not valid YAML: an unquoted value "
+                "cannot contain ': ' or ' #'; rephrase it or quote it")
+        values[key] = value.strip("'\"")
 
     for required in ("name", "description"):
         if not values.get(required):
