@@ -73,6 +73,28 @@ def orca_context(**kwargs):
     )
 
 
+def git(cwd, *args):
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def git_repo(test):
+    """A committed repository that lives as long as `test`."""
+    temporary = tempfile.TemporaryDirectory()
+    test.addCleanup(temporary.cleanup)
+    repo = Path(temporary.name) / "source"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Cycle Test")
+    git(repo, "config", "user.email", "cycle@example.invalid")
+    (repo / "tracked.txt").write_text("reviewed\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-qm", "initial")
+    return repo
+
+
 class ProbeHonestyTests(unittest.TestCase):
     """A probe reports what it demonstrated, never what it hopes."""
 
@@ -749,11 +771,15 @@ class OrcaDispatchTests(unittest.TestCase):
             return self.receipt()
 
         adapter = ex.OrcaAdapter()
+        implementer = git_repo(self)
         routing = router.RoutingDecision(
             "reviewer", self.TARGET, router.RoutingMode.PRODUCTION)
         result = ex.dispatch(
             routing, "review it", ex.Registry([adapter]), writes=False,
-            cwd="/repo/implementer", context=orca_context(), runner=runner,
+            cwd=str(implementer), runner=runner,
+            context=orca_context(review_workspace=ex.OrcaReviewWorkspace(
+                path="/repo/review", implementer_path=str(implementer),
+                isolation="disposable")),
             probes={"orca": ex.ProbeResult("orca", ex.Availability.READY, "test")},
         )
 
@@ -1078,23 +1104,10 @@ class PermissionTests(unittest.TestCase):
 
 
     def _git(self, cwd, *args):
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args], check=True,
-            capture_output=True, text=True,
-        ).stdout.strip()
+        return git(cwd, *args)
 
     def _git_repo(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        repo = Path(temporary.name) / "source"
-        repo.mkdir()
-        self._git(repo, "init", "-q")
-        self._git(repo, "config", "user.name", "Cycle Test")
-        self._git(repo, "config", "user.email", "cycle@example.invalid")
-        (repo / "tracked.txt").write_text("reviewed\n", encoding="utf-8")
-        self._git(repo, "add", "tracked.txt")
-        self._git(repo, "commit", "-qm", "initial")
-        return repo
+        return git_repo(self)
 
     def test_remote_ref_errors_do_not_expose_embedded_credentials(self) -> None:
         remote_url = "https://user:secret@example.invalid/repo.git"
@@ -1910,6 +1923,162 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual("claude", result.executor)
         self.assertEqual([], codex.dispatched)
         self.assertEqual(1, len(claude.dispatched))
+
+
+# A stand-in agent. It prints what every adapter here accepts as a finished
+# run, and, when asked, writes to the reviewed checkout either itself or from a
+# separate process it starts, which is what an MCP server or a hook is.
+FAKE_AGENT = """import os, subprocess, sys
+target = os.environ.get("CYCLE_TEST_WRITE")
+mode = os.environ.get("CYCLE_TEST_MODE", "none")
+code = "import sys; open(sys.argv[1], 'a').write('mutated\\\\n')"
+if target and mode == "agent":
+    open(target, "a").write("mutated\\n")
+elif target and mode == "child":
+    subprocess.run([sys.executable, "-c", code, target], check=True)
+with open(os.environ["CYCLE_TEST_ARGV"], "w") as handle:
+    handle.write("\\0".join(sys.argv[1:]))
+print("{}")
+"""
+
+
+class ReadOnlyVerificationTests(unittest.TestCase):
+    """Read-only is about the result: whatever wrote, a changed tree fails."""
+
+    CODEX = router.parse_target("codex:openai/gpt-6-sol high")
+    CLAUDE = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+    ORCA = router.parse_target("orca:openai/gpt-6-luna high")
+
+    def setUp(self) -> None:
+        self.repo = git_repo(self)
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.agent = Path(scratch.name) / "fake_agent.py"
+        self.agent.write_text(FAKE_AGENT, encoding="utf-8")
+        self.argv_file = Path(scratch.name) / "argv"
+
+    def dispatch(self, executor: str, mode: str, **kw):
+        """Dispatch a review on `executor` whose agent writes as `mode` says."""
+        env = {"CYCLE_TEST_MODE": mode, "CYCLE_TEST_ARGV": str(self.argv_file),
+               "CYCLE_TEST_WRITE": str(self.repo / "tracked.txt")}
+        probes = {executor: ex.ProbeResult(executor, ex.Availability.READY, "test")}
+        if executor == "orca":
+            adapter, target = ex.OrcaAdapter(), self.ORCA
+
+            def runner(argv, timeout=None, cwd=None):
+                subprocess.run([sys.executable, str(self.agent)], check=True,
+                               capture_output=True)
+                return completed(json.dumps({"ok": True, "result": {
+                    "state": "ready", "launch": {"effective": {"model": target.model}}}}))
+
+            kw.update(runner=runner, context=orca_context(
+                review_workspace=ex.OrcaReviewWorkspace(
+                    path=tempfile.gettempdir() + "/cycle-review-elsewhere",
+                    implementer_path=str(self.repo), isolation="disposable")))
+        else:
+            base = ex.CodexAdapter if executor == "codex" else ex.ClaudeAdapter
+            target = self.CODEX if executor == "codex" else self.CLAUDE
+            agent = str(self.agent)
+
+            class Launched(base):
+                # The interpreter starts the fake, so no platform needs to
+                # execute a script directly.
+                def argv(self, *args, **kwargs):
+                    return [sys.executable, agent, *super().argv(*args, **kwargs)[1:]]
+
+            adapter = Launched()
+        kw.setdefault("cwd", str(self.repo))
+        with patch.dict(ex.os.environ, env):
+            return ex.dispatch(
+                router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+                "review it", ex.Registry([adapter]), writes=False, probes=probes, **kw,
+            )
+
+    def test_a_codex_stage_that_changes_nothing_stays_enforced(self) -> None:
+        result = self.dispatch("codex", "none")
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("enforced", result.artifacts["read_only_mode"])
+        self.assertEqual(result.artifacts["workspace_fingerprint_before"],
+                         result.artifacts["workspace_fingerprint_after"])
+        argv = self.argv_file.read_text(encoding="utf-8").split("\0")
+        self.assertEqual("read-only", argv[argv.index("-s") + 1])
+        self.assertFalse({"--dangerously-bypass-approvals-and-sandbox", "--yolo",
+                          "--full-auto"} & set(argv))
+
+    def test_a_codex_stage_that_writes_is_a_contract_violation(self) -> None:
+        """The sandbox flag confines the agent's own commands, not a process
+        the host launched for it, so the flag alone proves nothing."""
+        for mode in ("agent", "child"):
+            with self.subTest(mode=mode):
+                git(self.repo, "checkout", "--", "tracked.txt")
+
+                result = self.dispatch("codex", mode)
+
+                self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+                self.assertNotIn("read_only_mode", result.artifacts)
+                self.assertIn("read-only contract violation", result.detail)
+
+    def test_every_adapter_fails_a_stage_that_writes_the_checkout(self) -> None:
+        for executor in ("codex", "claude", "orca"):
+            for mode in ("agent", "child"):
+                with self.subTest(executor=executor, mode=mode):
+                    git(self.repo, "checkout", "--", "tracked.txt")
+
+                    result = self.dispatch(executor, mode)
+
+                    self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+                    self.assertNotIn("read_only_mode", result.artifacts)
+                    self.assertNotEqual(result.artifacts["workspace_fingerprint_before"],
+                                        result.artifacts["workspace_fingerprint_after"])
+
+    def test_a_dirty_checkout_is_compared_not_refused(self) -> None:
+        (self.repo / "tracked.txt").write_text("in progress\n", encoding="utf-8")
+        (self.repo / "untracked.txt").write_text("new\n", encoding="utf-8")
+
+        self.assertEqual("enforced",
+                         self.dispatch("codex", "none").artifacts["read_only_mode"])
+        # A second edit to an already-modified file leaves the status unchanged.
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION,
+                         self.dispatch("codex", "child").outcome)
+
+    def test_an_unreadable_checkout_fails_closed_before_the_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as plain:
+            result = self.dispatch("codex", "none", cwd=plain)
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("read_only_verification", result.missing_capability)
+        self.assertFalse(self.argv_file.exists())
+
+    def test_an_unverifiable_checkout_after_the_stage_is_a_violation(self) -> None:
+        real = ex._checkout_fingerprint
+        calls = []
+
+        def fingerprint(path):
+            calls.append(path)
+            if len(calls) > 1:
+                raise ex.ExecutorError("git is gone")
+            return real(path)
+
+        with patch.object(ex, "_checkout_fingerprint", side_effect=fingerprint):
+            result = self.dispatch("codex", "none")
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertIn("could not verify", result.detail)
+        self.assertNotIn("read_only_mode", result.artifacts)
+
+    def test_the_check_knows_no_executor_tool_or_product(self) -> None:
+        import inspect
+
+        self.assertEqual(["cwd", "call"],
+                         list(inspect.signature(ex._verified_read_only).parameters))
+        self.assertEqual(["path"],
+                         list(inspect.signature(ex._checkout_fingerprint).parameters))
+        source = "".join(inspect.getsource(function).replace(function.__doc__, "")
+                         for function in (ex._verified_read_only,
+                                          ex._checkout_fingerprint))
+        for name in ("codex", "claude", "orca", "serena", ".name", "executor"):
+            self.assertNotIn(name, source.lower())
 
 
 if __name__ == "__main__":
