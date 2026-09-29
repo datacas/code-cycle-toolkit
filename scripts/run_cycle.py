@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter
+from cycle_status import CycleStatusWriter, _duration
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -477,18 +477,11 @@ def readable(text: str, limit: int = REASON_LIMIT) -> str:
     return cleaned[:limit].rstrip() + "\u2026"
 
 
-def _duration(seconds: float) -> str:
-    total = max(0, int(seconds))
-    minutes, remainder = divmod(total, 60)
-    return f"{minutes}m{remainder:02d}s" if minutes else f"{remainder}s"
-
-
 def _findings_line(role: str, findings: dict[str, int]) -> str | None:
     total = findings.get("findings_total")
     if total is None or role not in {"review", "rereview"}:
         return None
-    label = "still open" if role == "rereview" else "open"
-    line = f"findings: {total} {label}"
+    line = f"findings: {total} open"
     severities = ("critical", "high", "medium", "low")
     if all(f"findings_{severity}" in findings for severity in severities):
         counts = [f"{findings[f'findings_{severity}']} {severity}"

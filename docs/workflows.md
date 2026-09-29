@@ -266,7 +266,7 @@ owner/api API-7: READY_FOR_MANUAL_MERGE
            findings: 1 open (1 high)
   round 1  resolve   cheap_coder    codex openai/gpt-6-luna high  succeeded RESOLVED 31s
   round 1  rereview  reviewer       claude anthropic/claude-sonnet-5 high succeeded APPROVED 10s
-           findings: 0 still open
+           findings: 0 open
 ```
 
 ## Rules every workflow shares
