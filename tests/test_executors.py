@@ -1999,6 +1999,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("enforced", result.artifacts["read_only_mode"])
+        self.assertEqual("verified", result.artifacts["read_only_verification"])
         self.assertEqual(result.artifacts["workspace_fingerprint_before"],
                          result.artifacts["workspace_fingerprint_after"])
         argv = self.argv_file.read_text(encoding="utf-8").split("\0")
@@ -2067,18 +2068,71 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertIn("could not verify", result.detail)
         self.assertNotIn("read_only_mode", result.artifacts)
 
-    def test_the_check_knows_no_executor_tool_or_product(self) -> None:
-        import inspect
+    def test_a_launched_stage_is_pending_until_its_completion_is_checked(self) -> None:
+        """Orca returns once its worker is alive, so a write after the receipt
+        is still the review's write: the launch alone verifies nothing."""
+        result = self.dispatch("orca", "none")
 
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertTrue(result.asynchronous)
+        self.assertEqual("pending", result.artifacts["read_only_verification"])
+        self.assertNotIn("workspace_fingerprint_after", result.artifacts)
+        self.assertNotIn("read_only_mode", result.artifacts)
+
+        # The worker writes after the receipt, and whoever sees it finish checks.
+        (self.repo / "tracked.txt").write_text("written later\n", encoding="utf-8")
+        finished = ex.verify_read_only_completion(result, str(self.repo))
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, finished.outcome)
+        self.assertNotIn("read_only_verification", finished.artifacts)
+        self.assertIn("read-only contract violation", finished.detail)
+
+    def test_a_launched_stage_that_changed_nothing_verifies_on_completion(self) -> None:
+        result = self.dispatch("orca", "none")
+
+        finished = ex.verify_read_only_completion(result, str(self.repo))
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, finished.outcome)
+        self.assertEqual("verified", finished.artifacts["read_only_verification"])
+        self.assertEqual(finished.artifacts["workspace_fingerprint_before"],
+                         finished.artifacts["workspace_fingerprint_after"])
+
+    def test_only_a_pending_result_is_checked_again(self) -> None:
+        result = self.dispatch("codex", "none")
+        (self.repo / "tracked.txt").write_text("after the stage\n", encoding="utf-8")
+
+        self.assertIs(result, ex.verify_read_only_completion(result, str(self.repo)))
+
+    def test_the_check_knows_no_executor_tool_or_product(self) -> None:
+        import ast
+        import inspect
+        import textwrap
+
+        functions = (ex._verified_read_only, ex.verify_read_only_completion,
+                     ex._compare_read_only, ex._read_only_violation,
+                     ex._checkout_fingerprint)
         self.assertEqual(["cwd", "call"],
                          list(inspect.signature(ex._verified_read_only).parameters))
         self.assertEqual(["path"],
                          list(inspect.signature(ex._checkout_fingerprint).parameters))
-        source = "".join(inspect.getsource(function).replace(function.__doc__, "")
-                         for function in (ex._verified_read_only,
-                                          ex._checkout_fingerprint))
-        for name in ("codex", "claude", "orca", "serena", ".name", "executor"):
-            self.assertNotIn(name, source.lower())
+        for function in functions:
+            with self.subTest(function=function.__name__):
+                self.assertFalse({"executor", "adapter", "target", "tool"}
+                                 & set(inspect.signature(function).parameters))
+                # The docstrings explain what is out of scope by name, so only
+                # the code is searched; they are removed from the tree rather
+                # than from the text, whose indentation varies by Python.
+                tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+                for node in ast.walk(tree):
+                    body = getattr(node, "body", None)
+                    if (isinstance(body, list) and body
+                            and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        body.pop(0)
+                code = ast.unparse(tree).lower()
+                for name in ("codex", "claude", "orca", "serena", ".name", "executor"):
+                    self.assertNotIn(name, code)
 
 
 if __name__ == "__main__":

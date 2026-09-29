@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -427,7 +428,11 @@ class DriverShadowTests(RunCycleTestCase):
                           if row["payload"].get("record_kind") == "shadow"])
 
     def test_shadow_without_a_key_records_unavailable_and_carries_on(self) -> None:
-        with unittest.mock.patch.dict("os.environ", {}, clear=True), \
+        # Only the keys go: clearing everything also hides `git` from a
+        # Windows runner, and the read-only check then fails closed.
+        without_keys = {name: value for name, value in os.environ.items()
+                        if name not in (js.API_KEY_ENV, js.LEGACY_API_KEY_ENV)}
+        with unittest.mock.patch.dict("os.environ", without_keys, clear=True), \
                 unittest.mock.patch("urllib.request.urlopen",
                                     side_effect=AssertionError("network")):
             report = self.run_cycle(Talker("codex", block("IMPLEMENTED")),

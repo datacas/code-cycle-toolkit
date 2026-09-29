@@ -892,6 +892,11 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
     closed: a checkout that cannot be fingerprinted before the stage returns a
     reason instead of a result, and one that cannot be fingerprinted after it
     is a violation.
+
+    A stage that only started work elsewhere has not finished when the call
+    returns, so the comparison then covers the launch and nothing more. Such a
+    result is marked `pending`, not verified, until `verify_read_only_completion`
+    compares again once the work is observed to be done.
     """
     checkout = cwd if isinstance(cwd, str) and cwd else os.getcwd()
     try:
@@ -902,17 +907,62 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
     artifacts = dict(result.artifacts)
     artifacts["workspace_head_before"] = before["head"]
     artifacts["workspace_fingerprint_before"] = before["fingerprint"]
+    if result.asynchronous and result.outcome is DispatchOutcome.SUCCEEDED:
+        try:
+            launched = _checkout_fingerprint(checkout)
+        except Exception as exc:
+            return _read_only_violation(
+                result, artifacts,
+                f"could not verify the read-only checkout after the launch: {exc}")
+        if launched != before:
+            artifacts["workspace_head_after"] = launched["head"]
+            artifacts["workspace_fingerprint_after"] = launched["fingerprint"]
+            return _read_only_violation(
+                result, artifacts,
+                "the branch, HEAD, index, or working tree changed while the "
+                "read-only stage was launched")
+        artifacts.pop("read_only_mode", None)
+        artifacts["read_only_verification"] = "pending"
+        return replace(result, artifacts=artifacts)
+    return _compare_read_only(result, artifacts, checkout, before["fingerprint"])
+
+
+def verify_read_only_completion(result: DispatchResult, cwd: str | None) -> DispatchResult:
+    """Finish the check that an asynchronous read-only stage left pending.
+
+    Whoever observes the started work finish calls this with the same
+    checkout. Anything but a pending result is returned unchanged.
+    """
+    artifacts = dict(result.artifacts)
+    if artifacts.get("read_only_verification") != "pending":
+        return result
+    checkout = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    return _compare_read_only(result, artifacts, checkout,
+                              artifacts.get("workspace_fingerprint_before"))
+
+
+def _compare_read_only(result: DispatchResult, artifacts: dict, checkout: str,
+                       before: str | None) -> DispatchResult:
     try:
         after = _checkout_fingerprint(checkout)
     except Exception as exc:
-        problem = f"could not verify the read-only checkout after the stage: {exc}"
-    else:
-        artifacts["workspace_head_after"] = after["head"]
-        artifacts["workspace_fingerprint_after"] = after["fingerprint"]
-        if after == before:
-            return replace(result, artifacts=artifacts)
-        problem = "the branch, HEAD, index, or working tree changed during a read-only stage"
+        return _read_only_violation(
+            result, artifacts,
+            f"could not verify the read-only checkout after the stage: {exc}")
+    artifacts["workspace_head_after"] = after["head"]
+    artifacts["workspace_fingerprint_after"] = after["fingerprint"]
+    if before is not None and after["fingerprint"] == before:
+        artifacts["read_only_verification"] = "verified"
+        return replace(result, artifacts=artifacts)
+    return _read_only_violation(
+        result, artifacts,
+        "the branch, HEAD, index, or working tree changed during a read-only stage")
+
+
+def _read_only_violation(result: DispatchResult, artifacts: dict,
+                         problem: str) -> DispatchResult:
     artifacts.pop("read_only_mode", None)
+    artifacts.pop("read_only_verification", None)
     if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and result.detail:
         detail = f"{result.detail}; {problem}"
     else:
@@ -1610,6 +1660,8 @@ def dispatch(
                 ),
             )
         result = adapter.dispatch(target, task, **kw)
+        if not adapter.completes_work and result.outcome is DispatchOutcome.SUCCEEDED:
+            result = replace(result, asynchronous=True)
         if workspace_policy is WorkspacePolicy.READ_ONLY and adapter.enforces_read_only:
             result = replace(result, artifacts={"read_only_mode": "enforced",
                                                 **result.artifacts})
