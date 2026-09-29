@@ -50,8 +50,10 @@ from router import (
     RoutingMode,
     RoutingStrategy,
     TaskSignals,
+    escalation_selector,
     models_from_profiles,
     route,
+    rule_selector,
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
 from telemetry import CYCLE_STARTS, Telemetry, routing_decision_fields, validate_reference
@@ -96,6 +98,9 @@ ROLE_CONTRACTS = {
         WorkspacePolicy.READ_ONLY, publishes=True,
         publication_permissions=("comment",),
     ),
+    # Judges the work item against the repository; it edits neither and
+    # publishes nothing, not even a comment on the item it judged.
+    "issue_review": RoleContract(WorkspacePolicy.READ_ONLY),
     "security": RoleContract(WorkspacePolicy.READ_ONLY),
     "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
     "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
@@ -299,13 +304,19 @@ class CycleRecorder:
         self.stage_started = stage_started
         self.on_progress = on_progress
 
-    def stage(self, role: str, task: str, **dispatch_kwargs) -> StageOutcome:
+    def stage(self, role: str, task: str, *, escalated: bool = False,
+              **dispatch_kwargs) -> StageOutcome:
         """Route, dispatch and record. One call, no half-done state.
 
         Returns the outcome rather than raising on a blocked dispatch: a stage
         that could not run is a fact the caller has to act on, and it has
         already been written down by the time this returns.
+
+        `escalated` routes a role to its escalation profile instead of its rule
+        and records that it did, as a pre-routing signal: the reason for the
+        stronger profile was known before this routing.
         """
+        selector = escalation_selector if escalated else rule_selector
         outcome = StageOutcome(role=role, decision=None, result=None)  # type: ignore[arg-type]
         contract = role_contract(role)
         workspace_policy = contract.workspace_policy
@@ -361,6 +372,8 @@ class CycleRecorder:
         self.latest_change = change
         for attempt in range(2):
             signals = self._pre_routing(role, change)
+            if escalated:
+                signals["escalated"] = True
             eligible = self.registry.compatible_executors(
                 workspace_policy, **dispatch_kwargs,
             )
@@ -369,6 +382,7 @@ class CycleRecorder:
                 mode=self.mode, profiles=self.profiles,
                 eligible_executors=eligible,
                 strategy=self.routing_strategy,
+                selector=selector,
                 first_pass_rate=(
                     self.first_pass_rate.value
                     if self.first_pass_rate is not None and self.first_pass_rate.known

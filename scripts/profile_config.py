@@ -65,7 +65,9 @@ READ_ONLY_MODE = {
 DISPOSABLE_EXECUTORS = frozenset({"codex"})
 #: Roles by workspace contract, from `cycle.ROLE_CONTRACTS`.
 DISPOSABLE_ROLES = frozenset({"verify", "run"})
-READ_ONLY_ROLES = frozenset({"review", "rereview", "security", "bootstrap", "coordinate"})
+READ_ONLY_ROLES = frozenset({
+    "review", "rereview", "issue_review", "security", "bootstrap", "coordinate",
+})
 
 _LUNA = "codex:openai/gpt-6-luna"
 _SOL = "codex:openai/gpt-6-sol"

@@ -1,0 +1,7 @@
+{
+  "work_item": "92",
+  "signals": {"difficulty": 1, "verifiability": "auto", "security_sensitive": false},
+  "expected_decision": "skipped",
+  "expected_profile": null,
+  "result": null
+}

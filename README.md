@@ -21,7 +21,10 @@ Code Cycle Toolkit (`cc` = **Code Cycle**) is a set of portable Agent Skills plu
 
 ```mermaid
 flowchart LR
-    A([Work item<br/>GitHub · Plane · Jira]) --> B[Implement<br/>cc-implement-issue]
+    A([Work item<br/>GitHub · Plane · Jira]) -.-> R[Issue review, optional<br/>cc-issue-review]
+    R -- READY --> B
+    R -- NEEDS_REFINEMENT / BLOCKED --> H([Stop for a person])
+    A --> B[Implement<br/>cc-implement-issue]
     B --> C[Initial review<br/>cc-initial-review]
     C -- APPROVED --> F([Ready for<br/>manual merge])
     C -- CHANGES_REQUESTED --> D[Resolve findings<br/>cc-resolve-comments]
@@ -50,6 +53,7 @@ Pick the row that matches what you want to do.
 
 | I want to… | Use | Changes code? |
 |---|---|:---:|
+| check an issue is ready before implementing it | [`cc-issue-review`](docs/skills.md#cc-issue-review) | — |
 | implement an issue and open a pull request | [`cc-implement-issue`](docs/skills.md#cc-implement-issue) | ✅ |
 | review an existing pull request | [`cc-initial-review`](docs/skills.md#cc-initial-review) | — |
 | fix the findings a review left | [`cc-resolve-comments`](docs/skills.md#cc-resolve-comments) | ✅ |
@@ -141,10 +145,11 @@ that does and does not guarantee.
 
 ## Skills
 
-Fourteen skills in two layers. **Cycle skills** own the workflow: the change request, the finding IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes that cycle skills delegate to. Each one also works on its own.
+Fifteen skills in two layers. **Cycle skills** own the workflow: the change request, the finding IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes that cycle skills delegate to. Each one also works on its own.
 
 | Skill | Layer | Purpose | Changes code? |
 |---|---|---|:---:|
+| `cc-issue-review` | cycle | Decide, read-only, whether a work item is ready to implement | — |
 | `cc-implement-issue` | cycle | Implement a work item, verify it, open a pull request | ✅ |
 | `cc-initial-review` | cycle | Review the full pull-request diff, publish findings | — |
 | `cc-resolve-comments` | cycle | Triage findings, fix valid ones, verify, push | ✅ |
@@ -173,6 +178,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 | Provider health-check cache | `verification.cache_ttl` | [Configuration → Provider health](docs/configuration.md#provider-health-cache) |
 | Models, executors, effort, fallbacks | `profiles.<profile>.primary` / `.fallback` | [Routing → Profiles](docs/routing.md#profiles) |
 | Routing strategy | `routing.strategy` (`fixed` \| `measured`) | [Routing → Strategies](docs/routing.md#routing-strategies) |
+| Pre-implementation issue review | `issue_review.mode` (`auto` \| `off`), `--issue-review` | [Review lifecycle → Issue review](docs/review-cycle.md#issue-review-before-implementation) |
 | Jev shadow suggestions | `routing.jev.*`, `TYPESAFE_API_KEY` | [Routing → Jev](docs/routing.md#jev-shadow-mode) |
 | Who can advance findings | `review.trusted_authors` | [Review lifecycle → Trust](docs/review-cycle.md#trusted-authors) |
 | When the security audit always runs | `security_review.always_when.*` | [Configuration → Security](docs/configuration.md#security-review-rule) |
@@ -205,7 +211,7 @@ The skills work better when the host offers semantic code navigation (Serena), p
 |---|---|
 | [Getting started](docs/getting-started.md) | Requirements, installation, authentication, first run |
 | [Workflows](docs/workflows.md) | Every way to run the toolkit, and when to choose each |
-| [Skills reference](docs/skills.md) | All fourteen skills: inputs, outputs, statuses |
+| [Skills reference](docs/skills.md) | All fifteen skills: inputs, outputs, statuses |
 | [Review lifecycle](docs/review-cycle.md) | `REV-xxx` findings, severities, dispositions, run lines |
 | [Verification](docs/verification.md) | Evidence rules, stop conditions, CI reporting |
 | [Routing and models](docs/routing.md) | Profiles, executors, fallbacks, strategies, Jev, calibration |

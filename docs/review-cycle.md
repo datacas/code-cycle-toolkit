@@ -2,7 +2,27 @@
 
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
-**On this page:** [The loop](#the-loop) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
+**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
+
+## Issue review before implementation
+
+Before any code work, `run_cycle.py` can ask [`cc-issue-review`](skills.md#cc-issue-review) whether the work item is ready. It is a gate on the specification, not on code: it does not repeat the implementer's diagnosis (reproduction, mechanism, fix shape), and it cannot catch what only the diff will show.
+
+| Setting | Behaviour |
+|---|---|
+| `auto` (default) | A new cycle reviews its work item first, except a task declared trivial and not security-sensitive (`--difficulty 1` without `--security-sensitive`). The default difficulty is 2, so an unclassified task is reviewed. |
+| `off` | The original `implement → review → resolve → rereview` flow. |
+
+Set it with `code_cycle.issue_review.mode` or `--issue-review`; the flag wins. A cycle resumed with `--from review|resolve|rereview` never runs it.
+
+| Result | What the cycle does |
+|---|---|
+| `READY` with `high` or `medium` confidence and no unresolved material uncertainty | dispatches `implement` |
+| `READY` with `low` confidence or an unresolved material uncertainty | reviews once more on `senior_reviewer`; stops as `readiness_unconfirmed` when that pass does not confirm it, or when the first pass already ran on `senior_reviewer` |
+| `NEEDS_REFINEMENT` | stops as `needs_refinement` before `implement` and prints the findings, evidence, and proposed issue edits |
+| `BLOCKED`, a missing block, a block outside the contract, or a result whose `issue_id` names another work item | stops before `implement` (`stage_not_completed`) |
+
+Confidence is a category for evidence quality, never a calibrated probability. The stage is `read_only`, has no publication permission, and never edits, comments on, labels, or closes the work item: its proposed edits are printed for a person, and applying them needs separate authorization. Its findings are `IR-NNN`, with no `REV-xxx` identity, `status`, or `disposition`, so they never enter the change-request contract below.
 
 ## The loop
 
@@ -149,6 +169,8 @@ The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dis
 | Iteration limit | the resolve+rereview budget is spent: `max_iterations`, default `3` in `run_cycle.py` and `6` in the orchestrator skills | `iteration_limit` |
 | No progress | a rereview reports the same `head_sha` and the same open finding set as the review before it | `no_progress` |
 | Repeated findings | one `REV-xxx` ID survived a claimed fix twice | `repeated_findings` |
+
+Before the loop, an [issue review](#issue-review-before-implementation) can stop a new cycle as `needs_refinement` or `readiness_unconfirmed` without implementing anything.
 
 **A finding survives a claimed fix** when a resolution publishes its ID as `resolved` or `not_applicable` and the next review reopens it as `open` (`still_open` in a rereview's result). The claim is the status, never the disposition: a finding triaged `valid` and left `open` is no claim; one triaged `incorrect` and published `not_applicable` is one. Each claim is judged by the next review only, and within one run the last header for an ID is its position. These do not count:
 

@@ -36,8 +36,8 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 | Row | Written | Holds |
 |---|---|---|
 | `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
-| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed |
-| `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion |
+| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed; an `issue_review` verdict holds instead `READY`/`NEEDS_REFINEMENT`/`BLOCKED`, `readiness_result_valid`, and, when valid, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, and `readiness_uncertainties_material` |
+| `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion, and for a cycle that started at `implement`, `issue_review` (`off`, `skipped`, `dispatched`) |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
 
 **Pre-routing signals** are what the router could have known before it chose a profile. They are kept separate from outcomes so a future selector can be judged fairly:
@@ -46,14 +46,16 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 |---|---|
 | declared | `difficulty`, `verifiability`, `security_sensitive` |
 | read from the diff against `repository.default_branch` | changed file count; has tests; touches dependencies, database, auth, API, migrations, or CI; changed files per language (python, javascript, typescript, go, rust, java, csharp, ruby, php, shell, sql, markdown, other) |
-| from the cycle | prior findings (total, blocking, per severity), previous failed attempts, resolution round, repeated findings, `verification_available` |
+| from the cycle | prior findings (total, blocking, per severity), previous failed attempts, resolution round, repeated findings, `verification_available`, `escalated` (an issue review routed to its stronger profile) |
 | estimated | changed lines, test count |
 
 **Unknown is not zero.** A signal or outcome nobody observed is left out, never stored as `0`, `false`, or "failed". An `implement` stage has no diff signals, because no diff exists yet. A cycle without a closing row is *unknown*, not failed.
 
 An implementation `forecast` is a pre-edit claim made after implement routing, recorded only on the implement verdict as `forecast_*` outcomes and never used as pre-routing input.
 
-The field-by-field schema, correlation keys, and schema versions 1–10 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+Issue-review findings, uncertainties, evidence references, and proposed edits are printed for the operator and never stored: only their counts and closed tokens are. Rows from before schema 11 have no issue-review stage and read as they were written.
+
+The field-by-field schema, correlation keys, and schema versions 1–11 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 
 ## What is never recorded
 

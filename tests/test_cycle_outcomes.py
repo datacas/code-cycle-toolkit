@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import issue_review  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
 from test_cycle import CycleTestCase, ScriptedAdapter  # noqa: E402
@@ -298,8 +299,14 @@ class DriverTests(RunCycleTestCase):
             },
         }
 
+        readiness = issue_review.assess({
+            "skill": "cc-issue-review", "status": "READY", "issue_id": "API-7", "confidence": "high",
+            "dimensions": [], "findings": [], "uncertainties": [],
+        })
+
         emitted = {"status", *rc._findings(payload, "resolve"), *rc._tests(payload),
-                   *rc._checks(payload), *rc._forecast(payload)}
+                   *rc._checks(payload), *rc._forecast(payload),
+                   *readiness.telemetry_fields()}
 
         self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)
 

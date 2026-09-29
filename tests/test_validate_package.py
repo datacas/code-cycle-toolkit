@@ -191,6 +191,27 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "no longer documents the triage line kind")
 
+    def test_rejects_a_description_that_is_not_valid_yaml(self) -> None:
+        """#110: `It is read-only: it never ...` made the skills CLI skip a skill."""
+        for fragment in ("It is read-only: it never", "read-only #1 rule"):
+            with self.subTest(fragment=fragment):
+                errors = self.edit_issue_review_skill(
+                    "It is read-only and never", fragment)
+
+                self.assert_error_contains(errors, "is not valid YAML")
+
+    def test_a_quoted_description_may_contain_a_colon(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-issue-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        start = text.index("description: ") + len("description: ")
+        end = text.index("\n", start)
+        quoted = '"' + text[start:end].replace("It is read-only and never",
+                                                "It is read-only: it never") + '"'
+        path.write_text(text[:start] + quoted + text[end:], encoding="utf-8")
+
+        self.assertEqual([], VALIDATOR.validate_package(package))
+
     def test_rejects_known_fixed_language_output(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-initial-review" / "SKILL.md"
@@ -311,6 +332,35 @@ class ValidatePackageTests(unittest.TestCase):
         self.assertIn(old, text)
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
         return VALIDATOR.validate_package(package)
+
+    def edit_issue_review_skill(self, old: str, new: str) -> list[str]:
+        package = self.copy_package()
+        path = package / "skills" / "cc-issue-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return VALIDATOR.validate_package(package)
+
+    def test_rejects_an_issue_review_example_the_runtime_would_refuse(self) -> None:
+        errors = self.edit_issue_review_skill('"id": "IR-001"', '"id": "REV-001"')
+
+        self.assert_error_contains(errors, "must be an IR-NNN identifier")
+
+    def test_rejects_an_issue_review_example_with_a_review_disposition(self) -> None:
+        errors = self.edit_issue_review_skill(
+            '"blocks_readiness": true,', '"blocks_readiness": true, "disposition": "valid",')
+
+        self.assert_error_contains(errors, "carries keys outside the contract: disposition")
+
+    def test_rejects_dropping_an_issue_review_dimension(self) -> None:
+        errors = self.edit_issue_review_skill("| `operations` |", "| operations |")
+
+        self.assert_error_contains(errors, "does not define `operations`")
+
+    def test_rejects_dropping_an_issue_review_outcome(self) -> None:
+        errors = self.edit_issue_review_skill("| `NEEDS_REFINEMENT` |", "| NEEDS_REFINEMENT |")
+
+        self.assert_error_contains(errors, "does not define `NEEDS_REFINEMENT`")
 
     def test_rejects_an_orchestrator_without_the_repeated_findings_ladder(self) -> None:
         package = self.copy_package()

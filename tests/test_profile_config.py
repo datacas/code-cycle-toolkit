@@ -335,7 +335,7 @@ class ShowTests(unittest.TestCase):
             rows = {row["profile"]: row for row in json.loads(out)}
             self.assertEqual("config", rows["reviewer"]["primary_source"])
             self.assertEqual("default", rows["deep_coder"]["primary_source"])
-            self.assertEqual(["review", "rereview"], rows["reviewer"]["roles"])
+            self.assertEqual(["review", "rereview", "issue_review"], rows["reviewer"]["roles"])
             self.assertEqual({"codex": "enforced"}, rows["reviewer"]["read_only_mode"])
             self.assertEqual({}, rows["cheap_coder"]["read_only_mode"])
 
@@ -347,7 +347,7 @@ class ShowTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertIn("## Effective routing profiles (all toolkit defaults)",
                           out.getvalue())
-            self.assertIn("| `reviewer` | review, rereview |", out.getvalue())
+            self.assertIn("| `reviewer` | review, rereview, issue_review |", out.getvalue())
 
 
 if __name__ == "__main__":
