@@ -162,7 +162,7 @@ See [Workflows → cc-orchestrator](workflows.md#cc-orchestrator) and [Claude + 
 
 ### `cc-orca-orchestrator`
 
-The same cycle as Orca Runs, Tasks, and Workers, plus paired-review calibration. The issue review runs as a worker in a read-only review workspace, and the implementer starts only after its confirmed `READY`.
+The same cycle as Orca Runs, Tasks, and Workers, plus paired-review calibration. The issue review runs as a worker in its own isolated review workspace — the run stops `BLOCKED` when Orca cannot provide one, with no fallback to the shared worktree — and the implementer starts only after its confirmed `READY`.
 
 - **Inputs:** as `cc-orchestrator`, plus `implementer` (default `codex`), `reviewer` (default `claude`), `paired_review`, `campaign`.
 - **Statuses:** as `cc-orchestrator`.

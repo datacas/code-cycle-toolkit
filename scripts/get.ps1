@@ -5,7 +5,7 @@
 #
 # With options:
 #
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1))) -Version v0.3.0 -Agent claude
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/datacas/code-cycle-toolkit/main/scripts/get.ps1))) -Version v0.4.0 -Agent claude
 #
 # -Version latest|main|vX.Y.Z picks what to download (default: latest release,
 # or $env:CODE_CYCLE_VERSION). The other parameters are passed to

@@ -5,7 +5,7 @@
 **Take a work item from the issue tracker to a reviewed, verified pull request that is ready for a human to merge.**
 
 [![Validate package](https://github.com/datacas/code-cycle-toolkit/actions/workflows/validate.yml/badge.svg)](https://github.com/datacas/code-cycle-toolkit/actions/workflows/validate.yml)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Hosts](https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-555)
 
@@ -116,15 +116,15 @@ code_cycle:
 Use cc-orchestrator for issue 123. Stop at READY_FOR_MANUAL_MERGE.
 ```
 
-**5. What happens.** The orchestrator checks provider access. It then implements the issue on a branch, runs the tests, and opens a pull request. It reviews that pull request and publishes one consolidated comment with `REV-xxx` findings. It fixes valid findings and re-reviews, up to 6 rounds. It stops when the reviewed head is approved, checks pass, and no blocking finding remains.
+**5. What happens.** The orchestrator checks provider access. Unless the work is declared trivial and not security-sensitive, or you pass `issue_review=off`, it first checks read-only that the issue is ready to implement, and stops before any code work when it is not. It then implements the issue on a branch, runs the tests, and opens a pull request. It reviews that pull request and publishes one consolidated comment with `REV-xxx` findings. It fixes valid findings and re-reviews, up to 6 rounds. It stops when the reviewed head is approved, checks pass, and no blocking finding remains.
 
 **6. What you get.** An open pull request with a review trail in its comments, and a final status:
 
 | Status | Meaning | Your next step |
 |---|---|---|
 | `READY_FOR_MANUAL_MERGE` | Approved at the current head, checks passed | Review and merge it yourself |
-| `HUMAN_INTERVENTION` | Iteration limit hit, or no progress between rounds | Read the last review and decide |
-| `BLOCKED` | Missing access, information, or an external condition | Fix what the summary names and rerun |
+| `HUMAN_INTERVENTION` | The issue needs refinement or its readiness was not confirmed; or the iteration limit was hit, or no progress between rounds | Refine the issue with the proposed edits, or read the last review, and decide |
+| `BLOCKED` | Missing access, information, or an external condition, including one the issue review found | Fix what the summary names and rerun |
 | `FAILED` | Unexpected technical failure | Read the reported cause |
 
 ## Ways to use it
@@ -178,7 +178,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 | Provider health-check cache | `verification.cache_ttl` | [Configuration → Provider health](docs/configuration.md#provider-health-cache) |
 | Models, executors, effort, fallbacks | `profiles.<profile>.primary` / `.fallback` | [Routing → Profiles](docs/routing.md#profiles) |
 | Routing strategy | `routing.strategy` (`fixed` \| `measured`) | [Routing → Strategies](docs/routing.md#routing-strategies) |
-| Pre-implementation issue review | `issue_review.mode` (`auto` \| `off`), `--issue-review` | [Review lifecycle → Issue review](docs/review-cycle.md#issue-review-before-implementation) |
+| Pre-implementation issue review | `issue_review.mode` (`auto` \| `off`), `issue_review=`, `--issue-review` | [Review lifecycle → Issue review](docs/review-cycle.md#issue-review-before-implementation) |
 | Jev shadow suggestions | `routing.jev.*`, `TYPESAFE_API_KEY` | [Routing → Jev](docs/routing.md#jev-shadow-mode) |
 | Who can advance findings | `review.trusted_authors` | [Review lifecycle → Trust](docs/review-cycle.md#trusted-authors) |
 | When the security audit always runs | `security_review.always_when.*` | [Configuration → Security](docs/configuration.md#security-review-rule) |

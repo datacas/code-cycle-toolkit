@@ -6,7 +6,7 @@
 #
 # Options go after `sh -s --`:
 #
-#   curl -fsSL .../get.sh | sh -s -- --version v0.3.0
+#   curl -fsSL .../get.sh | sh -s -- --version v0.4.0
 #   curl -fsSL .../get.sh | sh -s -- --agent claude --scope project --project-dir .
 #
 # --version latest|main|vX.Y.Z picks what to download (default: latest

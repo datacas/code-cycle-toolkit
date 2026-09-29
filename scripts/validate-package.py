@@ -587,6 +587,7 @@ def check_issue_review_gate(root: Path, errors: list[str]) -> None:
             if phrase not in flattened:
                 errors.append(f"{where}: '## Workflow' does not state {phrase!r}")
 
+
 def validate_manifest(path: Path, expected_name: str) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
