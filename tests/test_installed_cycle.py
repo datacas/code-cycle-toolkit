@@ -90,7 +90,7 @@ class InstalledCycleTests(unittest.TestCase):
     def database(self) -> Path:
         return self.home / "state" / "telemetry.sqlite"
 
-    def run_cycle(self, **environment) -> subprocess.CompletedProcess:
+    def run_cycle(self, *arguments: str, **environment) -> subprocess.CompletedProcess:
         """Start the entrypoint exactly as a person installed it would."""
         env = {
             "HOME": str(self.home),
@@ -103,11 +103,16 @@ class InstalledCycleTests(unittest.TestCase):
              "--repo", "owner/api", "--task", "API-7",
              "--difficulty", "2", "--verifiability", "auto",
              "--cwd", str(self.project),
-             "--database", str(self.database)],
+             "--database", str(self.database), *arguments],
             env=env, capture_output=True, text=True,
         )
 
-    def rows(self) -> list[dict]:
+    def rows(self, *, issue_review: bool = False) -> list[dict]:
+        """The stored rows; the default issue review's rows only when asked."""
+        return [row for row in self.all_rows()
+                if issue_review or row["role"] != "issue_review"]
+
+    def all_rows(self) -> list[dict]:
         connection = sqlite3.connect(self.database)
         connection.row_factory = sqlite3.Row
         try:
@@ -129,6 +134,44 @@ class InstalledCycleTests(unittest.TestCase):
             [row["role"] for row in rows],
         )
         self.assertEqual("READY_FOR_MANUAL_MERGE", rows[-1]["status"])
+
+    def test_the_default_cycle_reviews_the_work_item_before_implementing(self) -> None:
+        result = self.run_cycle()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = self.rows(issue_review=True)
+        self.assertEqual(
+            ["issue_review", "issue_review", "implement", "implement",
+             "review", "review", "coordinate"],
+            [row["role"] for row in rows],
+        )
+        dispatch, verdict = rows[0], rows[1]
+        self.assertEqual("reviewer", dispatch["profile"])
+        self.assertEqual("succeeded", dispatch["outcome"])
+        self.assertEqual("READY", verdict["status"])
+        self.assertEqual("high", json.loads(verdict["payload"])["readiness_confidence"])
+        self.assertEqual("dispatched", json.loads(rows[-1]["payload"])["issue_review"])
+
+    def test_a_work_item_that_needs_refinement_is_not_implemented(self) -> None:
+        result = self.run_cycle(FAKE_READINESS="NEEDS_REFINEMENT")
+
+        self.assertEqual(1, result.returncode)
+        rows = self.rows(issue_review=True)
+        self.assertEqual(["issue_review", "issue_review", "coordinate"],
+                         [row["role"] for row in rows])
+        self.assertEqual("needs_refinement", json.loads(rows[-1]["payload"])["stop_reason"])
+        self.assertIn("IR-001", result.stdout)
+
+    def test_off_runs_the_original_cycle(self) -> None:
+        result = self.run_cycle("--issue-review", "off")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = self.rows(issue_review=True)
+        self.assertEqual(
+            ["implement", "implement", "review", "review", "coordinate"],
+            [row["role"] for row in rows],
+        )
+        self.assertEqual("off", json.loads(rows[-1]["payload"])["issue_review"])
 
     def test_the_rows_say_which_executor_and_model_actually_ran(self) -> None:
         self.run_cycle()
@@ -189,7 +232,9 @@ class InstalledCycleTests(unittest.TestCase):
         reroutes once, and all three facts survive: the attempt that was
         abandoned, the decision to fall back, and what the fallback did.
         """
-        result = self.run_cycle(FAKE_QUOTA="codex")
+        # Off, so the implementation is the first stage the exhausted window
+        # meets; the issue review would otherwise block on it first.
+        result = self.run_cycle("--issue-review", "off", FAKE_QUOTA="codex")
 
         self.assertEqual(1, result.returncode)
         implement = [row for row in self.rows() if row["role"] == "implement"]
@@ -227,7 +272,7 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual("succeeded", rows[0]["outcome"])
         self.assertEqual("BLOCKED", rows[1]["status"])
         self.assertEqual("HUMAN_INTERVENTION", rows[-1]["status"])
-        self.assertNotIn("review", result.stdout)
+        self.assertNotIn("\n  review ", result.stdout)
 
     def test_the_block_is_read_out_of_the_real_envelope(self) -> None:
         """Both fakes wrap their reply the way their CLI does, so a driver that

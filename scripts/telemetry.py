@@ -60,7 +60,11 @@ from pathlib import Path
 #: verdicts carry the agent's separate `verification` conclusion.
 #: 9: a verdict whose change required a boundary run carries
 #: `boundary_verified`; one that did not require it carries nothing new.
-SCHEMA_VERSION = 10
+#: 11: the optional `issue_review` stage. Its verdict carries the readiness
+#: fields below, its escalated dispatch carries `escalated`, and the cycle row
+#: carries `issue_review` and the stop reasons `needs_refinement` and
+#: `readiness_unconfirmed`. All payload-only; an older row has no such stage.
+SCHEMA_VERSION = 11
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -97,7 +101,15 @@ CYCLE_STARTS = ("implement", "review", "resolve", "rereview")
 STOP_REASONS = frozenset({
     "approved", "iteration_limit", "no_progress", "repeated_findings",
     "stage_not_completed", "dispatch_failed", "local_only",
+    "needs_refinement", "readiness_unconfirmed",
 })
+
+#: What a new cycle did about the optional issue review (schema 11).
+ISSUE_REVIEW_DECISIONS = frozenset({"off", "skipped", "dispatched"})
+
+#: The categorical confidence an issue review reports: evidence quality, never
+#: a probability.
+READINESS_CONFIDENCES = frozenset({"high", "medium", "low"})
 
 #: The profiles a shadow selector compares, which are the `implement` and
 #: `resolve` candidates in `router.ROLE_CANDIDATES`.
@@ -131,13 +143,13 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     # closed vocabularies
     "role": ("token", frozenset({
         "implement", "review", "rereview", "resolve", "verify", "run",
-        "bootstrap", "coordinate", "security", "triage",
+        "bootstrap", "coordinate", "security", "triage", "issue_review",
     })),
     "skill": ("token", frozenset({
         "cc-implement-issue", "cc-initial-review", "cc-resolve-comments",
         "cc-rereview", "cc-orchestrator", "cc-orca-orchestrator", "cc-pr-review",
         "cc-code-review", "cc-security-review", "cc-verify", "cc-run",
-        "cc-provider-bootstrap",
+        "cc-provider-bootstrap", "cc-issue-review",
     })),
     "profile": ("token", frozenset({
         "cheap_tool", "auxiliary_tool", "coordinator", "cheap_coder", "deep_coder", "reviewer",
@@ -157,7 +169,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "status": ("token", frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",
         "PARTIALLY_RESOLVED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
-        "HUMAN_INTERVENTION", "IN_PROGRESS",
+        "HUMAN_INTERVENTION", "IN_PROGRESS", "READY", "NEEDS_REFINEMENT",
     })),
     "missing_capability": ("token", frozenset({
         "operating_quota", "operating_availability", "proven_readiness",
@@ -277,6 +289,14 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "contract_violations": ("count", None),
     # why the cycle stopped where it did (schema 7)
     "stop_reason": ("token", STOP_REASONS),
+    # the optional issue review (schema 11)
+    "escalated": ("flag", None),
+    "issue_review": ("token", ISSUE_REVIEW_DECISIONS),
+    "readiness_result_valid": ("flag", None),
+    "readiness_confidence": ("token", READINESS_CONFIDENCES),
+    "readiness_findings_total": ("count", None),
+    "readiness_findings_blocking": ("count", None),
+    "readiness_uncertainties_material": ("count", None),
     # a shadow selector's suggestion, on `shadow` rows only (schema 4)
     "jev_status": ("token", frozenset({
         "suggested", "unavailable", "timeout", "rate_limited", "http_error",
@@ -316,6 +336,8 @@ FIELD_LIMITS: dict[str, tuple[int, int]] = {
             "previous_failed_attempts", "resolution_round",
             "repeated_findings", "stage_seq", "resolution_rounds", "fallback_stages",
             "contract_violations", "jev_duration_ms",
+            "readiness_findings_total", "readiness_findings_blocking",
+            "readiness_uncertainties_material",
         )
     },
 }
@@ -344,7 +366,7 @@ PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
         "prior_findings_critical", "prior_findings_high",
         "prior_findings_medium", "prior_findings_low",
         "verification_available", "previous_failed_attempts", "resolution_round",
-        "repeated_findings",
+        "repeated_findings", "escalated",
     }),
     "estimated": frozenset({"changed_lines_estimate", "test_count_estimate"}),
 }
@@ -384,12 +406,16 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "forecast_touches_database", "forecast_touches_auth", "forecast_touches_api",
         "forecast_touches_migrations", "forecast_touches_ci",
         "checks_passed", "checks_failed", "checks_pending",
+        "readiness_result_valid", "readiness_confidence",
+        "readiness_findings_total", "readiness_findings_blocking",
+        "readiness_uncertainties_material",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",
         "first_pass_approved", "resolution_needed", "resolution_rounds",
         "final_approved", "tests_passed", "tests_basis", "verification",
         "boundary_verified", "fallback_stages", "contract_violations", "stop_reason",
+        "issue_review",
     }),
 }
 

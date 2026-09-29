@@ -1,0 +1,51 @@
+{
+  "work_item": "91",
+  "signals": {"difficulty": 3, "verifiability": "partial", "security_sensitive": true},
+  "expected_decision": "dispatched",
+  "expected_profile": "senior_reviewer",
+  "hidden_change_classes": ["ignored", "index", "refs"],
+  "result": {
+    "skill": "cc-issue-review",
+    "status": "NEEDS_REFINEMENT",
+    "issue_provider": "github",
+    "issue_id": "91",
+    "code_host": "github",
+    "confidence": "medium",
+    "dimensions": ["applicability", "scope_architecture", "acceptance_verification", "compatibility", "security"],
+    "findings": [
+      {
+        "id": "IR-001",
+        "dimension": "acceptance_verification",
+        "severity": "high",
+        "blocks_readiness": true,
+        "evidence": [
+          {"kind": "work_item", "ref": "91"},
+          {"kind": "repository", "ref": "scripts/executors.py:_checkout_fingerprint"}
+        ],
+        "summary": "The invariant is that a read-only stage leaves the checkout unchanged, but the proposed detector compares only git status, which hides writes to ignored files, a re-staged change in the index, and moved refs.",
+        "proposed_change": "State which of ignored files, the index, HEAD and branch refs the detector covers, how each is observed, and which are deliberately excluded."
+      },
+      {
+        "id": "IR-002",
+        "dimension": "compatibility",
+        "severity": "medium",
+        "blocks_readiness": false,
+        "evidence": [
+          {"kind": "repository", "ref": "scripts/telemetry.py:FIELD_SPECS"}
+        ],
+        "summary": "A new missing capability token changes the telemetry vocabulary; the item does not say older rows stay readable.",
+        "proposed_change": "Require the token to be additive and older rows to parse unchanged."
+      }
+    ],
+    "uncertainties": [
+      {
+        "id": "IU-001",
+        "material": true,
+        "resolved": false,
+        "summary": "Whether a host tool that writes project metadata on startup must fail the stage or be ignored."
+      }
+    ],
+    "summary": "The detector's coverage is a decision the implementer would otherwise invent.",
+    "blocking": true
+  }
+}

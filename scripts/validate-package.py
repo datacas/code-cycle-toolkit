@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import issue_review  # noqa: E402
 import review_contract  # noqa: E402
 
 
@@ -17,6 +18,7 @@ NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ALLOWED_FRONTMATTER = {"name", "description", "license", "compatibility", "metadata"}
 
 CYCLE_SKILLS = {
+    "cc-issue-review",
     "cc-implement-issue",
     "cc-initial-review",
     "cc-resolve-comments",
@@ -57,8 +59,9 @@ SHARED_HEAD_SECTIONS = ("## Checks of the pushed head",)
 # The skills that read a diff or cite command output as evidence share one rule
 # for when that output is complete. A host may compact what an agent sees.
 EVIDENCE_SKILLS = (
-    "cc-code-review", "cc-implement-issue", "cc-initial-review", "cc-pr-review",
-    "cc-rereview", "cc-resolve-comments", "cc-security-review", "cc-verify",
+    "cc-code-review", "cc-implement-issue", "cc-initial-review", "cc-issue-review",
+    "cc-pr-review", "cc-rereview", "cc-resolve-comments", "cc-security-review",
+    "cc-verify",
 )
 SHARED_EVIDENCE_SECTIONS = ("### Complete evidence",)
 
@@ -206,7 +209,15 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
         key = key.strip()
         if key not in ALLOWED_FRONTMATTER:
             raise ValueError(f"unsupported frontmatter field: {key}")
-        values[key] = value.strip().strip("'\"")
+        value = value.strip()
+        # A plain (unquoted) YAML scalar ends at `: ` or ` #`. This line-based
+        # reader would accept the value, while a real YAML parser, such as the
+        # skills CLI, rejects it or cuts it short and skips the skill.
+        if value and value[0] not in "'\"" and (": " in value or " #" in value):
+            raise ValueError(
+                f"frontmatter field {key!r} is not valid YAML: an unquoted value "
+                "cannot contain ': ' or ' #'; rephrase it or quote it")
+        values[key] = value.strip("'\"")
 
     for required in ("name", "description"):
         if not values.get(required):
@@ -426,6 +437,46 @@ def check_implement_contract(root: Path, errors: list[str]) -> None:
     )
 
 
+ISSUE_REVIEW_SECTIONS = {
+    "## Dimensions": issue_review.DIMENSIONS,
+    "## Outcomes": issue_review.STATUSES,
+}
+
+
+def check_issue_review_contract(root: Path, errors: list[str]) -> None:
+    """Keep the issue-review skill and the runtime's reader of it in step.
+
+    The skill's tables define the tokens and its example is what an agent
+    copies; `issue_review.result_errors` is what the runtime accepts. Each
+    table row must define a token the runtime knows, and the example must pass
+    the runtime's own check, or the skill promises a result the gate refuses.
+    """
+    path = root / "skills" / issue_review.SKILL / "SKILL.md"
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    where = f"skills/{issue_review.SKILL}/SKILL.md"
+    for heading, tokens in ISSUE_REVIEW_SECTIONS.items():
+        section = extract_section(text, heading)
+        if section is None:
+            errors.append(f"{where}: missing section {heading!r}")
+            continue
+        for token in tokens:
+            if f"\n| `{token}` |" not in section:
+                errors.append(f"{where}: {heading!r} does not define `{token}`")
+    blocks = RESULT_BLOCK_RE.findall(extract_section(text, RESULT_SECTION) or "")
+    if not blocks:
+        errors.append(f"{where}: {RESULT_SECTION!r} prints no ORCHESTRATION_RESULT example")
+        return
+    try:
+        example = json.loads(blocks[0])
+    except json.JSONDecodeError as exc:
+        errors.append(f"{where}: result example is not strict JSON: {exc}")
+        return
+    errors.extend(f"{where}: result example: {problem}"
+                  for problem in issue_review.result_errors(example))
+
+
 ORCHESTRATOR_SKILLS = ("cc-orchestrator", "cc-orca-orchestrator")
 LADDER_SECTION = "### Repeated-findings ladder"
 #: What each orchestrator's ladder must state, in the words that define it:
@@ -593,6 +644,7 @@ def validate_package(root: Path) -> list[str]:
         check_workspace_tool_sections(root, errors)
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
+        check_issue_review_contract(root, errors)
         check_repeated_findings_ladder(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE

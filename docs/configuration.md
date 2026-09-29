@@ -73,7 +73,7 @@ code_cycle:
 
 ## `.code-cycle.yml` reference
 
-All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, and `routing` itself. It recognises the other keys and leaves them to the component that owns them.
+All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, `routing`, and `issue_review` itself. It recognises the other keys and leaves them to the component that owns them.
 
 | Key | Type / values | Default | Read by |
 |---|---|---|---|
@@ -91,6 +91,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.mode` | `disabled` · `shadow` | `disabled` | `run_cycle.py` |
 | `routing.jev.model` | `jev-latest` · `jev-x.y.z` (`typesafe-ai/jev` → `jev-latest`) | `jev-latest` | `run_cycle.py` |
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
+| `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py` |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
 | `security_review.always_when.files` | filename glob list | built-in defaults | same |
@@ -115,6 +116,10 @@ A configuration file that exists but can't be read (bad YAML, PyYAML missing, wr
 Target format: `executor:provider/model effort`, where executor is `codex`, `claude`, or `orca`. Profile names: `cheap_coder`, `deep_coder`, `reviewer`, `senior_reviewer`, `security`, `coordinator`, `auxiliary_tool`, `cheap_tool`. Models you declare here are also added to telemetry's accepted model set for this repository.
 
 Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [Routing and models](routing.md). To see the effective profiles or write this block with a preset, use [`cc-profile-config`](skills.md#cc-profile-config).
+
+### Issue review
+
+`issue_review.mode: auto` (the default) makes a new `run_cycle.py` cycle review its work item with `cc-issue-review` before implementing it, except a task declared trivial and not security-sensitive. `off` keeps the original flow. `--issue-review` overrides it for one run. Only a confirmed `READY` reaches implementation. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
 
 ### Review
 
@@ -201,7 +206,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `run_cycle.py`
 
-`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--max-iterations` (default 3) · `--cwd` · `--local-only` · `--timeout` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--max-iterations` (default 3) · `--cwd` · `--local-only` · `--timeout` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
 
 ### `stats.py` (used by `cc-stats`)
 

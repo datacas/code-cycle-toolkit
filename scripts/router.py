@@ -334,6 +334,9 @@ ROLE_CANDIDATES: dict[str, tuple[str, ...]] = {
     "resolve": ("cheap_coder", "deep_coder"),
     "review": ("reviewer", "senior_reviewer"),
     "rereview": ("reviewer", "senior_reviewer"),
+    # Judging a specification is review work: it reads and reports, and a
+    # high-risk item deserves the same stronger profile a high-risk diff gets.
+    "issue_review": ("reviewer", "senior_reviewer"),
     "security": ("security",),
     "coordinate": ("coordinator",),
     "verify": ("auxiliary_tool",),
@@ -366,11 +369,13 @@ def rule_selector(
 ) -> tuple[str, tuple[str, ...]]:
     """The default selector: choose the profile name for a role, and say why.
 
-    Only two rules escalate, and both come from declared signals rather than
+    Only these rules escalate, and all come from declared signals rather than
     from a model's opinion about its own work:
 
     - a security-sensitive change goes to the senior reviewer;
-    - difficulty 3 implementation work goes to the deeper coder.
+    - difficulty 3 implementation work goes to the deeper coder;
+    - an issue review of difficulty 3 or security-sensitive work goes to the
+      senior reviewer.
 
     Everything else stays where the plan put it. There is no evidence for finer
     rules, and inventing them would make the router look calibrated when it is
@@ -388,11 +393,44 @@ def rule_selector(
                 "security-sensitive change reviewed by the senior profile",
             )
         return "reviewer", ("ordinary change uses the standard reviewer",)
+    if role == "issue_review":
+        if signals.security_sensitive:
+            return "senior_reviewer", (
+                "security-sensitive work item reviewed by the senior profile",
+            )
+        if signals.difficulty >= 3:
+            return "senior_reviewer", (
+                "declared difficulty 3 work item reviewed by the senior profile",
+            )
+        return "reviewer", ("ordinary work item uses the standard reviewer",)
     if role in ("coordinate", "verify", "run", "bootstrap"):
         return ("coordinator" if role == "coordinate" else "auxiliary_tool"), (
             "a step whose result is judged by execution, not by judgement",
         )
     raise RouterError(f"unknown role: {role!r}")
+
+
+#: The stronger profile a role may be escalated to, by the runtime and only on
+#: that role's own validated result. Not a model's request for a bigger model:
+#: the rule that triggers it is the runtime's, and it applies at most once.
+ESCALATION_PROFILES: dict[str, str] = {"issue_review": "senior_reviewer"}
+
+
+def escalation_selector(
+    role: str, candidates: tuple[str, ...], signals: TaskSignals,
+) -> tuple[str, tuple[str, ...]]:
+    """Choose a role's escalation profile; every other role keeps its rule.
+
+    Delegating for the other roles keeps the cost estimate in `route()`, which
+    prices `implement` and `review` with the same selector, describing the cycle
+    the rules would actually run.
+    """
+    profile = ESCALATION_PROFILES.get(role)
+    if profile is None:
+        return rule_selector(role, candidates, signals)
+    return profile, (
+        "an unconfirmed readiness result escalates to the stronger profile",
+    )
 
 
 def select_profile(

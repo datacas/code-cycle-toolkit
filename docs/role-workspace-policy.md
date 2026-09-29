@@ -7,8 +7,13 @@ upgrade a role's permission through dispatch arguments.
 | Role | Policy | Repository mutation | Generated artifacts |
 | --- | --- | --- | --- |
 | `implement`, `resolve` | `workspace_write` | Allowed in the assigned workspace | Allowed |
-| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Forbidden | Forbidden in the assigned workspace |
+| `review`, `rereview`, `issue_review`, `security`, `bootstrap`, `coordinate` | `read_only` | Forbidden | Forbidden in the assigned workspace |
 | `verify`, `run` | `disposable` | Forbidden in the source workspace | Allowed only in the disposable workspace |
+
+`issue_review` reuses the `read_only` contract and has no publication
+permission: its prompt states that it publishes nothing, and it may not
+comment on, label, or edit the work item it judges. Like every `read_only`
+stage, its checkout is fingerprinted before and after the dispatch.
 
 `verify` and `run` must receive an `executors.DisposableWorkspace` and use its
 `path` as `cwd`. The contract rejects a missing workspace, a mismatched `cwd`,

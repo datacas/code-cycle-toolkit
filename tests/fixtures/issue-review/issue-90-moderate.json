@@ -1,0 +1,32 @@
+{
+  "work_item": "90",
+  "signals": {"difficulty": 2, "verifiability": "partial", "security_sensitive": false},
+  "expected_decision": "dispatched",
+  "expected_profile": "reviewer",
+  "result": {
+    "skill": "cc-issue-review",
+    "status": "READY",
+    "issue_provider": "github",
+    "issue_id": "90",
+    "code_host": "github",
+    "confidence": "high",
+    "dimensions": ["applicability", "existing_work", "scope_architecture", "acceptance_verification"],
+    "findings": [
+      {
+        "id": "IR-001",
+        "dimension": "scope_architecture",
+        "severity": "low",
+        "blocks_readiness": false,
+        "evidence": [
+          {"kind": "repository", "ref": "docs/README.md"},
+          {"kind": "change_request", "ref": "108"}
+        ],
+        "summary": "The new guide also needs an entry in the documentation index, which the item does not list.",
+        "proposed_change": "Add the documentation index to the files the item expects to change."
+      }
+    ],
+    "uncertainties": [],
+    "summary": "Scope, related work, and criteria are explicit; one advisory gap.",
+    "blocking": false
+  }
+}

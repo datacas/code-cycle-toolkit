@@ -208,7 +208,7 @@ Use cc-orca-orchestrator for issue 123 with implementer=codex reviewer=claude ma
 
 **When:** you want a cycle that is **routed by profile and recorded in telemetry**, started from a shell or a script.
 
-**What it does:** probes each executor once and labels the work from your flags. It then runs `implement → review → (resolve → rereview)*`, with every stage passing through the telemetry recorder, so no dispatch can happen without leaving a row. Each stage is dispatched to the Codex or Claude CLI chosen by [routing](routing.md) and told to invoke the matching skill. The review verdict is read from the structured result the stage is asked to emit, never from an exit code or prose. If the result is missing, the cycle stops.
+**What it does:** probes each executor once and labels the work from your flags. It then runs `[issue_review →] implement → review → (resolve → rereview)*`, with every stage passing through the telemetry recorder, so no dispatch can happen without leaving a row. Each stage is dispatched to the Codex or Claude CLI chosen by [routing](routing.md) and told to invoke the matching skill. The review verdict is read from the structured result the stage is asked to emit, never from an exit code or prose. If the result is missing, the cycle stops.
 
 ```bash
 python3 ~/.code-cycle/runtime/run_cycle.py \
@@ -226,6 +226,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--security-sensitive` | off | Routes review to `senior_reviewer` |
 | `--verification` | unknown | `available` / `unavailable`, recorded as a signal |
 | `--mode` | `production` | `calibration` never falls back and needs proven readiness |
+| `--issue-review` | `issue_review.mode`, else `auto` | `auto` reviews the work item before implementing it, except declared trivial, non-sensitive work; `off` keeps the original flow. See [Issue review](review-cycle.md#issue-review-before-implementation) |
 | `--from` | `implement` | Stage to start at: `implement`, `review`, `resolve`, or `rereview`; anything but `implement` resumes `--pr` |
 | `--pr` | — | Existing change request a resumed cycle works on; required by `--from review\|resolve\|rereview` |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
@@ -250,6 +251,8 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from rereview  # 
 ```
 
 The stages before `--from` are skipped. The rest run with the same routing, recording, and `--max-iterations` as a full cycle. `resolve` and `rereview` rely on the pull request's comments carrying the previous review; the stage recovers those findings through `review.trusted_authors`. Before anything is dispatched, the driver refuses `--from` without `--pr`, `--pr` without a resuming `--from`, and `--local-only` with a resume. It then reads the pull request with `gh` and stops with the reason unless it is open, its head branch still exists, and `--cwd` has that branch checked out at the pull request's head commit, so a stale or unpushed checkout is never reviewed or fixed in its place. Only GitHub pull requests can be resumed. A resumed run is a **new cycle** with its own `cycle_id`, and every row carries `started_from`, so its review never counts as a first pass.
+
+**Issue review:** in the default `auto` mode, a new cycle first runs `cc-issue-review` read-only and implements only on a confirmed `READY`. `NEEDS_REFINEMENT` stops before any code work and prints the findings, evidence, and proposed issue edits; nothing is posted to the work item. `--issue-review off` or `issue_review.mode: off` restores the original flow. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 

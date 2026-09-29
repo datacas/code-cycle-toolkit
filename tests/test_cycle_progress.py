@@ -40,6 +40,7 @@ class CycleProgressTests(unittest.TestCase):
             availability={"codex": ex.Availability.READY,
                           "claude": ex.Availability.READY},
             profiles=self.profiles,
+            issue_review="off",
             **options,
         )
 

@@ -532,6 +532,7 @@ could have supplied.
 | observed | `prior_findings_total`, `prior_findings_blocking`, `prior_findings_<severity>` | the latest verdict recorded before the stage |
 | observed | `previous_failed_attempts`, `resolution_round`, `verification_available` | the cycle's own state, and `--verification` when given |
 | observed | `repeated_findings` | the finding IDs that survived at least one claimed fix earlier in this cycle (schema 7) |
+| observed | `escalated` | the runtime routed an `issue_review` to its escalation profile because the previous pass did not confirm `READY` (schema 11) |
 | estimated | `changed_lines_estimate`, `test_count_estimate` | added plus deleted text lines; added lines that look like a test definition |
 
 `telemetry.PRE_ROUTING_SIGNALS` holds the same classification, so a query can
@@ -600,6 +601,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
 | `verdict` | `boundary_verified` | a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change, and the stage either reported a test outcome or conclusion or completed code work (`IMPLEMENTED`, `RESOLVED`, `PARTIALLY_RESOLVED`) without one, which records `false`; a stage without a test report that did no code work, such as a review, a blocked stage, or a `no_code_change` resolution, records nothing (schema 9) |
 | `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
+| `verdict` | `readiness_result_valid`, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, `readiness_uncertainties_material` | an `issue_review` reported a status; the last four only when its result passed `issue_review.result_errors` (schema 11) |
 | `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
 | `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
@@ -608,7 +610,8 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7) |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11 |
+| `cycle` | `issue_review` | the cycle started at `implement`: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
 
 Forecast accuracy pairs those implement verdict fields with the observed change

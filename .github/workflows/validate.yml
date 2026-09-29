@@ -10,7 +10,8 @@ permissions:
 
 env:
   EXPECTED_SKILLS: >-
-    cc-implement-issue cc-initial-review cc-resolve-comments cc-rereview
+    cc-issue-review cc-implement-issue cc-initial-review cc-resolve-comments
+    cc-rereview
     cc-orchestrator cc-orca-orchestrator cc-pr-review cc-code-review
     cc-security-review cc-verify cc-run cc-provider-bootstrap cc-stats
     cc-profile-config
