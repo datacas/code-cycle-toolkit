@@ -7,6 +7,15 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `docs/workspace-tools.md` documents the optional workspace tools (Serena,
+  AgentMemory, Graphify, RTK, context-mode, and Context7): what each is for,
+  its fallback, that no installer installs or checks them, how dispatched
+  stages see them, a privacy note also linked from `SECURITY.md`, and known
+  pitfalls. It is linked from the README, the documentation index, and the
+  getting-started requirements. The shared `## Workspace tools and evidence`
+  section adds a product-neutral library-documentation capability: current
+  documentation for an external dependency is a reference, and the project's
+  pinned version and observed behaviour stay authoritative.
 - Ten skills now share product-neutral rules for optional workspace tools:
   code and evidence stages use semantic navigation and local output processing
   when available, while the orchestrators apply the host-availability and

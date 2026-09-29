@@ -47,3 +47,8 @@ location without reproducing its value.
 Keep credentials in GitHub CLI and the agent host. Never place a token in a
 skill file: skills are copied into other repositories and may be committed
 there.
+
+Optional host tools, such as memory or output-processing tools, may capture
+dispatched sessions, including prompts and code, through their own hooks. That
+is the host's configuration and falls outside the toolkit's telemetry
+guarantees. See [Optional workspace tools → Privacy](docs/workspace-tools.md#privacy).

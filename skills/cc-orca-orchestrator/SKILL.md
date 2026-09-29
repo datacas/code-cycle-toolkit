@@ -629,9 +629,10 @@ created yet, `reviewed_head_sha: null` when no review completed, and the real
 | Semantic navigation | A precise location for code | A substitute for reading code or verifying it |
 | Output compaction | A compact representation | Complete evidence |
 | Large-output processing | A way to reduce data | An authoritative source; the underlying output is |
+| Library documentation | A current reference for an external dependency | Truth about the version installed; the project's pinned version and observed behaviour are |
 
 These orchestrators use only rules 1 and 4 from the full guidance: host
 availability and memory safety.
 
-1. **Use what the host offers; never require it.** When the host provides semantic code navigation, a repository knowledge graph, persistent memory, or local processing of large output, prefer it for the matching question. When it does not, use ordinary tools without comment. A missing tool is never reported, never a warning, and never a blocker unless the user asked for it by name.
+1. **Use what the host offers; never require it.** When the host provides semantic code navigation, a repository knowledge graph, persistent memory, local processing of large output, or current documentation for an external library, prefer it for the matching question. When it does not, use ordinary tools without comment. A missing tool is never reported, never a warning, and never a blocker unless the user asked for it by name.
 2. **Memory is context, not evidence.** Recalled information never overrides the user's current instruction, the repository, or provider state. A review, rereview, or security stage does not use recalled implementation rationale as evidence for a finding or its resolution. It may use recalled environment facts, such as how to run the suite. Save only durable knowledge the repository does not hold, such as decisions, rejected alternatives, user corrections, and environment traps. Never save secrets, diffs, or review prose.

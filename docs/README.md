@@ -22,6 +22,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 | 7 | [Configuration](configuration.md) | look up every `.code-cycle.yml` key, invocation parameter, CLI flag, and environment variable |
 | 8 | [Providers](provider-contract.md) | combine GitHub, Plane, or Jira with GitHub or Bitbucket |
 | 9 | [Telemetry and `cc-stats`](telemetry.md) | know what is recorded locally and read the report |
+| 10 | [Optional workspace tools](workspace-tools.md) | know which host tools help, what they are not, and how dispatched stages see them |
 
 ## Reference and design
 
