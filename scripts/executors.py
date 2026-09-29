@@ -846,6 +846,136 @@ def _remote_ref_fingerprint(root: str) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _checkout_fingerprint(path: str) -> dict:
+    """What a read-only stage must leave exactly as it found it.
+
+    HEAD, the branch ref, the porcelain status including every untracked file,
+    the staged blob IDs, and a digest of each changed or untracked file's
+    bytes. The status alone would miss a second edit to a file that was already
+    dirty, and a read-only stage is not required to start from a clean tree.
+    Ignored files are left out because nobody commits them; file contents are
+    digested and never kept.
+    """
+    root = _git_output(path, "rev-parse", "--show-toplevel")
+    head = _git_output(root, "rev-parse", "HEAD")
+    branch = _git_output(root, "rev-parse", "--symbolic-full-name", "HEAD")
+    status = _git_output(root, "status", "--porcelain", "--untracked-files=all")
+    staged = _git_output(root, "diff", "--cached", "--raw", "--no-abbrev", "--no-renames")
+    changed = _git_output(
+        root, "ls-files", "-z", "--modified", "--others", "--exclude-standard",
+    )
+    files = []
+    for relative in sorted(set(filter(None, changed.split("\0")))):
+        full = os.path.join(root, relative)
+        if os.path.islink(full):
+            files.append((relative, "link", os.readlink(full)))
+        elif os.path.isfile(full):
+            digest = hashlib.sha256()
+            with open(full, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            files.append((relative, "file", digest.hexdigest()))
+        else:
+            files.append((relative, "absent", ""))
+    encoded = json.dumps([head, branch, status, staged, files], separators=(",", ":"))
+    return {"root": root, "head": head, "branch": branch,
+            "fingerprint": hashlib.sha256(encoded.encode("utf-8")).hexdigest()}
+
+
+def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
+    """Run a read-only stage and prove afterwards that its checkout is unchanged.
+
+    The contract is about the result, not the cause: a write by the agent's
+    shell, an MCP server, a plugin, a hook or anything they spawn changes the
+    same repository state. So this takes no executor, tool or product, and an
+    adapter's sandbox is defence in depth, never a reason to skip it. It fails
+    closed: a checkout that cannot be fingerprinted before the stage returns a
+    reason instead of a result, and one that cannot be fingerprinted after it
+    is a violation.
+
+    Only a stage that succeeded and finished its work can be `verified`. One
+    that started work elsewhere, or ended any other way, such as a timeout
+    that can leave the worker or its children running, still fails on an
+    observed change, but an unchanged checkout then proves nothing about what
+    may still write to it. Such a result is marked `pending` until
+    `verify_read_only_completion` compares again once the work is known to
+    have stopped.
+    """
+    checkout = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    try:
+        before = _checkout_fingerprint(checkout)
+    except Exception as exc:
+        return f"could not fingerprint the read-only checkout {checkout}: {exc}"
+    result = call()
+    artifacts = dict(result.artifacts)
+    artifacts["workspace_head_before"] = before["head"]
+    artifacts["workspace_fingerprint_before"] = before["fingerprint"]
+    finished = (result.outcome is DispatchOutcome.SUCCEEDED
+                and not result.asynchronous)
+    if not finished:
+        try:
+            returned = _checkout_fingerprint(checkout)
+        except Exception as exc:
+            return _read_only_violation(
+                result, artifacts,
+                f"could not verify the read-only checkout after the dispatch: {exc}")
+        if returned != before:
+            artifacts["workspace_head_after"] = returned["head"]
+            artifacts["workspace_fingerprint_after"] = returned["fingerprint"]
+            return _read_only_violation(
+                result, artifacts,
+                "the branch, HEAD, index, or working tree changed during a "
+                "read-only stage")
+        artifacts.pop("read_only_mode", None)
+        artifacts["read_only_verification"] = "pending"
+        return replace(result, artifacts=artifacts)
+    return _compare_read_only(result, artifacts, checkout, before["fingerprint"])
+
+
+def verify_read_only_completion(result: DispatchResult, cwd: str | None) -> DispatchResult:
+    """Finish the check that an asynchronous read-only stage left pending.
+
+    Whoever observes the started work finish calls this with the same
+    checkout. Anything but a pending result is returned unchanged.
+    """
+    artifacts = dict(result.artifacts)
+    if artifacts.get("read_only_verification") != "pending":
+        return result
+    checkout = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    return _compare_read_only(result, artifacts, checkout,
+                              artifacts.get("workspace_fingerprint_before"))
+
+
+def _compare_read_only(result: DispatchResult, artifacts: dict, checkout: str,
+                       before: str | None) -> DispatchResult:
+    try:
+        after = _checkout_fingerprint(checkout)
+    except Exception as exc:
+        return _read_only_violation(
+            result, artifacts,
+            f"could not verify the read-only checkout after the stage: {exc}")
+    artifacts["workspace_head_after"] = after["head"]
+    artifacts["workspace_fingerprint_after"] = after["fingerprint"]
+    if before is not None and after["fingerprint"] == before:
+        artifacts["read_only_verification"] = "verified"
+        return replace(result, artifacts=artifacts)
+    return _read_only_violation(
+        result, artifacts,
+        "the branch, HEAD, index, or working tree changed during a read-only stage")
+
+
+def _read_only_violation(result: DispatchResult, artifacts: dict,
+                         problem: str) -> DispatchResult:
+    artifacts.pop("read_only_mode", None)
+    artifacts.pop("read_only_verification", None)
+    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and result.detail:
+        detail = f"{result.detail}; {problem}"
+    else:
+        detail = "read-only contract violation: " + problem
+    return replace(result, outcome=DispatchOutcome.CONTRACT_VIOLATION,
+                   missing_capability=None, detail=detail, artifacts=artifacts)
+
+
 def _remove_read_only_path(function, path, exc_info, root=None) -> None:
     # Removal needs a writable parent, and on Windows a writable entry. chmod
     # follows links, and a reviewer can point one anywhere, so a link is never
@@ -1525,23 +1655,38 @@ def dispatch(
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 
-    started = clock()
-    if (workspace_policy is WorkspacePolicy.READ_ONLY
-            and target.executor == "claude" and not adapter.enforces_read_only):
-        result = _isolated_review_dispatch(
-            adapter, target, task, cwd=kw.get("cwd"),
-            dispatch_call=lambda prompt, isolated_cwd: adapter.dispatch(
-                target, prompt, **{**kw, "cwd": isolated_cwd, "writes": False},
-            ),
-        )
-    else:
+    def run_stage() -> DispatchResult:
+        if (workspace_policy is WorkspacePolicy.READ_ONLY
+                and target.executor == "claude" and not adapter.enforces_read_only):
+            return _isolated_review_dispatch(
+                adapter, target, task, cwd=kw.get("cwd"),
+                dispatch_call=lambda prompt, isolated_cwd: adapter.dispatch(
+                    target, prompt, **{**kw, "cwd": isolated_cwd, "writes": False},
+                ),
+            )
         result = adapter.dispatch(target, task, **kw)
-    elapsed = max(0, round((clock() - started) * 1000))
+        if not adapter.completes_work and result.outcome is DispatchOutcome.SUCCEEDED:
+            result = replace(result, asynchronous=True)
+        if workspace_policy is WorkspacePolicy.READ_ONLY and adapter.enforces_read_only:
+            result = replace(result, artifacts={"read_only_mode": "enforced",
+                                                **result.artifacts})
+        return result
+
+    started = clock()
     if workspace_policy is WorkspacePolicy.READ_ONLY:
-        artifacts = dict(result.artifacts)
-        if adapter.enforces_read_only:
-            artifacts.setdefault("read_only_mode", "enforced")
-        result = replace(result, artifacts=artifacts)
+        # Every read-only stage, on every executor: the sandbox flag and the
+        # isolated clone narrow what can be written, and this proves nothing
+        # was. `enforced` survives only when the checkout is unchanged.
+        result = _verified_read_only(kw.get("cwd"), run_stage)
+        if isinstance(result, str):
+            return DispatchResult(
+                DispatchOutcome.BLOCKED, target.executor, target,
+                missing_capability="read_only_verification", detail=result,
+                readiness_policy=policy, dispatched_from=probe.availability,
+            )
+    else:
+        result = run_stage()
+    elapsed = max(0, round((clock() - started) * 1000))
     # From what the adapter is, not from what this result remembered to say.
     asynchronous = (result.asynchronous
                     or (not adapter.completes_work

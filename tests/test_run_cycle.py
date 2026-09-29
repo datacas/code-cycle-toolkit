@@ -494,6 +494,49 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertIsNone(dispatch["status"])
         self.assertEqual("BLOCKED", reported["status"])
 
+    def test_a_read_only_stage_that_mutates_the_checkout_stops_the_cycle(self) -> None:
+        """Its reviewer claims a sandbox, and a process it started still wrote
+        to the tree under review: the verdict it gives is about another diff."""
+
+        class Meddler(Talker):
+            def dispatch(self, target, task, **kw):
+                subprocess.run(
+                    [sys.executable, "-c",
+                     "import sys; open(sys.argv[1], 'a').write('meddled\\n')",
+                     str(Path(kw["cwd"]) / "kept.py")],
+                    check=True,
+                )
+                return super().dispatch(target, task, **kw)
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repo = change_repository(Path(temporary.name))
+        reviewer = Meddler("claude")
+
+        report = self.run_cycle(Talker("codex"), reviewer, cwd=str(repo))
+
+        self.assertEqual(1, len(reviewer.dispatched))
+        self.assertEqual("dispatch_failed", report.stop_reason)
+        self.assertIn("read-only contract violation", report.stopped_because)
+        review = next(row for row in self.rows() if row["role"] == "review")
+        self.assertEqual("contract_violation", review["outcome"])
+        self.assertIsNone(review["payload"]["read_only_mode"])
+
+    def test_an_unverifiable_read_only_checkout_blocks_and_is_recorded(self) -> None:
+        """Failing closed is a recorded BLOCKED, not an exception from the
+        store that ends the cycle without its row."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        reviewer = Talker("claude")
+
+        report = self.run_cycle(Talker("codex"), reviewer, cwd=temporary.name)
+
+        self.assertEqual([], reviewer.dispatched)
+        self.assertEqual("dispatch_failed", report.stop_reason)
+        review = next(row for row in self.rows() if row["role"] == "review")
+        self.assertEqual("blocked", review["outcome"])
+        self.assertEqual("read_only_verification", review["missing_capability"])
+
 
     def test_a_diagnosed_duplicate_stops_before_review_with_its_reason(self) -> None:
         """`stop_duplicate` needs no driver support: it is a BLOCKED like any

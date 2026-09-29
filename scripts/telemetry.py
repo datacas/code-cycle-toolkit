@@ -165,7 +165,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "bypass_acknowledgement", "trusted_directory", "orchestration_context",
         "provider_agent_mapping", "read_only_enforcement", "disposable_workspace",
         "review_workspace_isolation", "review_workspace_mismatch",
-        "review_workspace_conflict", "publication_access",
+        "review_workspace_conflict", "publication_access", "read_only_verification",
     })),
     "verifiability": ("token", frozenset({"auto", "partial", "human"})),
     "routing_strategy": ("token", frozenset({"fixed", "measured"})),
