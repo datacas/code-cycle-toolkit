@@ -93,9 +93,10 @@ pull request's comments, so nothing has to be carried between them by hand.
 
 1. Runs `cc-provider-bootstrap`; stops on `BLOCKED` or `FAILED` before creating anything.
 2. Labels the work (`difficulty`, `verifiability`, security sensitivity) **before** routing, so the routing can't be justified after the fact.
-3. Runs `cc-implement-issue`, then `cc-initial-review`. An implementation that stops `BLOCKED` on its diagnosis — a duplicate, a shared cause that should not be fixed in isolation, or a defect it could not reproduce — ends the cycle before review, with its reason shown.
-4. On `CHANGES_REQUESTED`, loops `cc-resolve-comments` → `cc-rereview`, passing each stage the previous structured result so `REV-xxx` IDs stay stable.
-5. Validates the exit conditions against the code host: the reviewed SHA equals the current head, required checks passed, no blocking finding is open, and the PR is still unmerged.
+3. Applies the [issue review gate](review-cycle.md#issue-review-before-implementation) unless `issue_review=off`: runs `cc-issue-review` read-only and implements only on a confirmed `READY`. `NEEDS_REFINEMENT`, `BLOCKED`, an unreadable result, or a `READY` that one `senior_reviewer` pass does not confirm stops before any code work and shows the findings, evidence, and proposed issue edits; nothing is posted to the work item. In `single_agent` and `claude_codex` modes, a distinct senior reviewer is not assigned for this stage, so an unconfirmed `READY` stops with `HUMAN_INTERVENTION` without a second pass.
+4. Runs `cc-implement-issue`, then `cc-initial-review`. An implementation that stops `BLOCKED` on its diagnosis — a duplicate, a shared cause that should not be fixed in isolation, or a defect it could not reproduce — ends the cycle before review, with its reason shown.
+5. On `CHANGES_REQUESTED`, loops `cc-resolve-comments` → `cc-rereview`, passing each stage the previous structured result so `REV-xxx` IDs stay stable.
+6. Validates the exit conditions against the code host: the reviewed SHA equals the current head, required checks passed, no blocking finding is open, and the PR is still unmerged.
 
 **Inputs:**
 
@@ -104,6 +105,7 @@ pull request's comments, so nothing has to be carried between them by hand.
 | `issue_id` | required | Work item; `issue_number` is a GitHub alias |
 | `issue_provider`, `code_host`, `repo` | resolved | See [Providers](provider-contract.md) |
 | `orchestration_mode` | `auto` | `auto`, `single_agent`, or `claude_codex` |
+| `issue_review` | `issue_review.mode`, else `auto` | `auto` reviews the work item first, except declared trivial, non-sensitive work; `off` keeps the original flow |
 | `max_iterations` | `6` | Resolve + rereview rounds; must be ≥ 1 |
 | `merge` | `manual` | Fixed. There is no automatic merge. |
 
@@ -181,7 +183,7 @@ The full discovery, handoff, and failure rules are in the [adapter contract](../
 
 **When:** you use Orca and want every stage to run as a supervised worker in its own terminal, or you want a **paired-review calibration**.
 
-**What it does:** runs `cc-provider-bootstrap`, creates an Orca Run, then one Task per stage (implement → initial review → resolve ↔ rereview). It starts or reuses workers, waits for `worker_done`, reads each `ORCHESTRATION_RESULT`, and branches only on its functional status. All workers share one worktree and one PR branch. The coordinator itself never edits code, reviews, or judges a finding.
+**What it does:** runs `cc-provider-bootstrap`, creates an Orca Run, then one Task per stage ([issue review →] implement → initial review → resolve ↔ rereview). It starts or reuses workers, waits for `worker_done`, reads each `ORCHESTRATION_RESULT`, and branches only on its functional status. All workers share one worktree and one PR branch, except the issue-review worker, which runs in a read-only review workspace and must finish, unchanged, with a confirmed `READY` before the implementer starts. It applies the same [issue review gate](review-cycle.md#issue-review-before-implementation) as `cc-orchestrator`. The coordinator itself never edits code, reviews, or judges a finding.
 
 **Inputs:**
 
@@ -191,6 +193,7 @@ The full discovery, handoff, and failure rules are in the [adapter contract](../
 | `implementer` | `codex` | Agent that writes code and resolves findings |
 | `reviewer` | `claude` | Agent that reviews and rereviews |
 | `max_iterations` | `6` | Resolve + rereview rounds |
+| `issue_review` | `issue_review.mode`, else `auto` | As in `cc-orchestrator` |
 | `paired_review` | `false` | Two blind reviewers over one commit (calibration) |
 | `campaign` | — | Required when `paired_review=true` |
 

@@ -516,6 +516,77 @@ def check_repeated_findings_ladder(root: Path, errors: list[str]) -> None:
                 errors.append(f"{where}: {LADDER_SECTION!r} does not state {phrase!r}")
 
 
+ISSUE_REVIEW_GATE_SECTION = "## Issue review before implementation"
+#: What the shared gate must state: the mode and its override, the skip rule,
+#: every outcome, the one escalation, and the read-only boundary. The section
+#: is also compared byte for byte, so the two orchestrators cannot drift apart.
+ISSUE_REVIEW_GATE_PHRASES = (
+    "`issue_review=auto|off`",
+    "`code_cycle.issue_review.mode`",
+    "`issue_review.dispatch_decision`",
+    "`issue_review.assess`",
+    "difficulty 1",
+    "Unknown risk is reviewed",
+    "never runs the stage",
+    "no publication permission",
+    "escalates once",
+    "`senior_reviewer`",
+    "a missing or malformed result",
+    "Never edit, comment on, label",
+) + tuple(f"`{status}`" for status in issue_review.STATUSES)
+ORCA_ISSUE_REVIEW_SECTION = "### Issue review worker"
+ORCA_ISSUE_REVIEW_PHRASES = (
+    "isolated review workspace",
+    "before any implementer starts",
+    "stop with `BLOCKED` before `worker-start`",
+    "never fall back to the current or shared worktree",
+)
+FIXED_MODE_ISSUE_REVIEW_PHRASES = (
+    "`single_agent` runs `cc-issue-review` in the current agent",
+    "`claude_codex` runs it in Claude",
+    "Neither mode assigns a distinct `senior_reviewer`",
+    "stop with `HUMAN_INTERVENTION` before implementation",
+    "do not route or ask the same executor a second time",
+)
+
+
+def check_issue_review_gate(root: Path, errors: list[str]) -> None:
+    """Both orchestrators must apply the issue-review gate the runtime applies.
+
+    `issue_review.dispatch_decision` and `issue_review.assess` define it; the
+    orchestrators apply it in prose, in one shared section. The Orca skill must
+    also say how its worker keeps that stage read-only.
+    """
+    check_shared_sections(root, ORCHESTRATOR_SKILLS, (ISSUE_REVIEW_GATE_SECTION,), errors)
+    required = {skill: {ISSUE_REVIEW_GATE_SECTION: ISSUE_REVIEW_GATE_PHRASES}
+                for skill in ORCHESTRATOR_SKILLS}
+    required["cc-orca-orchestrator"][ORCA_ISSUE_REVIEW_SECTION] = ORCA_ISSUE_REVIEW_PHRASES
+    for skill, sections in required.items():
+        path = root / "skills" / skill / "SKILL.md"
+        if not path.is_file():
+            continue
+        where = f"skills/{skill}/SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        for heading, phrases in sections.items():
+            section = extract_section(text, heading)
+            if section is None:
+                if heading != ISSUE_REVIEW_GATE_SECTION:
+                    errors.append(f"{where}: missing section {heading!r}")
+                continue
+            flattened = " ".join(section.split())
+            for phrase in phrases:
+                if phrase not in flattened:
+                    errors.append(f"{where}: {heading!r} does not state {phrase!r}")
+
+    orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"
+    if orchestrator_path.is_file():
+        where = "skills/cc-orchestrator/SKILL.md"
+        workflow = extract_section(orchestrator_path.read_text(encoding="utf-8"), "## Workflow")
+        flattened = " ".join((workflow or "").split())
+        for phrase in FIXED_MODE_ISSUE_REVIEW_PHRASES:
+            if phrase not in flattened:
+                errors.append(f"{where}: '## Workflow' does not state {phrase!r}")
+
 def validate_manifest(path: Path, expected_name: str) -> str:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -646,6 +717,7 @@ def validate_package(root: Path) -> list[str]:
         check_implement_contract(root, errors)
         check_issue_review_contract(root, errors)
         check_repeated_findings_ladder(root, errors)
+        check_issue_review_gate(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE
         orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"

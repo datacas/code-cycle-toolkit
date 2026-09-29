@@ -386,6 +386,62 @@ class ValidatePackageTests(unittest.TestCase):
 
         self.assert_error_contains(errors, "does not state '**Second survival**'")
 
+    def edit_orchestrator(self, skill: str, old: str, new: str) -> list[str]:
+        package = self.copy_package()
+        path = package / "skills" / skill / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return VALIDATOR.validate_package(package)
+
+    def test_rejects_an_orchestrator_without_the_issue_review_gate(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orchestrator", "## Issue review before implementation", "## Readiness")
+
+        self.assert_error_contains(
+            errors, "skills/cc-orchestrator/SKILL.md: missing shared section "
+                    "'## Issue review before implementation'")
+
+    def test_rejects_issue_review_gates_that_disagree(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orca-orchestrator", "escalates once:", "escalates twice:")
+
+        self.assert_error_contains(
+            errors, "'## Issue review before implementation' has drifted between skills")
+        self.assert_error_contains(
+            errors, "skills/cc-orca-orchestrator/SKILL.md: '## Issue review before "
+                    "implementation' does not state 'escalates once'")
+
+    def test_rejects_an_issue_review_gate_that_lost_the_off_setting(self) -> None:
+        package = self.copy_package()
+        for skill in VALIDATOR.ORCHESTRATOR_SKILLS:
+            path = package / "skills" / skill / "SKILL.md"
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("`issue_review=auto|off`", "`issue_review`", 1),
+                            encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "does not state '`issue_review=auto|off`'")
+
+    def test_rejects_an_orca_issue_review_worker_without_a_read_only_workspace(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orca-orchestrator", "isolated review workspace", "review workspace")
+
+        self.assert_error_contains(
+            errors, "'### Issue review worker' does not state 'isolated review workspace'")
+
+    def test_rejects_fixed_modes_without_a_distinct_senior_reviewer_stop(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orchestrator",
+            "Neither mode\n   assigns a distinct `senior_reviewer`",
+            "The modes assign a reviewer",
+        )
+
+        self.assert_error_contains(
+            errors, "'## Workflow' does not state "
+                    "'Neither mode assigns a distinct `senior_reviewer`'")
+
     def test_rejects_an_implement_result_example_that_is_not_json(self) -> None:
         errors = self.edit_implement_skill(
             '"related_items": ["130", "131"]', '"related_items": ["130", "131"],'

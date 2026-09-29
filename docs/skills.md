@@ -27,7 +27,7 @@ Fifteen skills in two layers. The source of truth for each one is its `skills/<n
 ```text
 cc-orchestrator / cc-orca-orchestrator
  ├─ cc-provider-bootstrap
- ├─ cc-issue-review ─────── (run_cycle.py, before implement; optional)
+ ├─ cc-issue-review ─────── (before implement; optional)
  ├─ cc-implement-issue ──── cc-verify ── cc-run
  ├─ cc-initial-review ───── cc-pr-review · cc-security-review* · cc-verify
  ├─ cc-resolve-comments ─── cc-code-review · cc-security-review* · cc-verify
@@ -61,7 +61,7 @@ Decides, before any code work, whether a work item is ready to implement. Read-o
 - **Statuses:** `READY` (no material decision left for the implementer to invent), `NEEDS_REFINEMENT` (a person must decide or clarify first), `BLOCKED` (evidence unavailable).
 - **Result:** closed shape with the reviewed `issue_id` (the runtime refuses a result about another work item), `confidence` (`high`, `medium`, `low` — evidence quality, not a probability), `dimensions`, `findings` (`IR-NNN`, dimension, severity, `blocks_readiness`, evidence references of kind `repository`, `work_item`, `change_request`, or `commit`, and an optional `proposed_change`), and `uncertainties` (`IU-NNN`, `material`, `resolved`). Findings never use `REV-xxx`, `status`, or `disposition`.
 - **Never:** edits, comments on, labels, or transitions the work item; changes code or the checkout; publishes anything. Applying its suggested edits needs separate authorization.
-- **In the runtime:** an optional stage before `implement`; see [Issue review before implementation](review-cycle.md#issue-review-before-implementation).
+- **In a cycle:** an optional stage before `implement` in `run_cycle.py` and in both orchestrators; see [Issue review before implementation](review-cycle.md#issue-review-before-implementation).
 
 ```text
 Use cc-issue-review for issue 123 and tell me whether it is ready to implement.
@@ -150,10 +150,10 @@ Use cc-rereview on pull request 456.
 
 Coordinates the whole cycle and never implements or judges anything itself.
 
-- **Inputs:** `issue_id`, provider fields, `orchestration_mode` (`auto` · `single_agent` · `claude_codex`), `max_iterations` (default 6).
+- **Inputs:** `issue_id`, provider fields, `orchestration_mode` (`auto` · `single_agent` · `claude_codex`), `issue_review` (`auto` · `off`, default `issue_review.mode`, else `auto`), `max_iterations` (default 6).
 - **Does:**
   1. runs provider bootstrap;
-  2. runs implement → review → (resolve → rereview)\*, passing structured state between stages;
+  2. runs [issue review →] implement → review → (resolve → rereview)\*, passing structured state between stages; implements only after a confirmed `READY` when the issue review runs;
   3. applies the iteration limit and the no-progress guard;
   4. validates the exit conditions on the code host.
 - **Statuses:** `READY_FOR_MANUAL_MERGE`, `HUMAN_INTERVENTION`, `BLOCKED`, `FAILED`.
@@ -162,7 +162,7 @@ See [Workflows → cc-orchestrator](workflows.md#cc-orchestrator) and [Claude + 
 
 ### `cc-orca-orchestrator`
 
-The same cycle as Orca Runs, Tasks, and Workers, plus paired-review calibration.
+The same cycle as Orca Runs, Tasks, and Workers, plus paired-review calibration. The issue review runs as a worker in a read-only review workspace, and the implementer starts only after its confirmed `READY`.
 
 - **Inputs:** as `cc-orchestrator`, plus `implementer` (default `codex`), `reviewer` (default `claude`), `paired_review`, `campaign`.
 - **Statuses:** as `cc-orchestrator`.
