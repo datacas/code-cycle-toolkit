@@ -997,7 +997,7 @@ def run_cycle(
             stopped = unfinished(outcome, reported, tampered)
             if stopped is not None:
                 return stopped
-            readiness = assess_readiness(reported.payload)
+            readiness = assess_readiness(reported.payload, task_id)
             report.readiness = readiness
             if reported.status:
                 recorder.record_verdict(ISSUE_REVIEW_ROLE, reported.status,

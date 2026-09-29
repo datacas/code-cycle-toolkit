@@ -279,8 +279,10 @@ ORCHESTRATION_RESULT
 END_ORCHESTRATION_RESULT
 ```
 
-`skill`, `status`, `confidence`, `dimensions`, `findings`, and `uncertainties`
-are required; `findings` and `uncertainties` may be empty lists. Keys outside
+`skill`, `status`, `issue_id`, `confidence`, `dimensions`, `findings`, and
+`uncertainties` are required; `findings` and `uncertainties` may be empty
+lists. `issue_id` is the work-item identifier exactly as the invocation named
+it; a runtime refuses a result that names another work item. Keys outside
 this example are refused, so do not add a `diagnosis`, `work_units`, finding
 `status`, or `disposition`. Uncertainty IDs are `IU-001`, `IU-002`, … and carry
 only `id`, `material`, `resolved`, and `summary`. `BLOCKED` still carries every

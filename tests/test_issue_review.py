@@ -38,7 +38,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "issue-review"
 def result(status: str = "READY", **fields) -> dict:
     """A valid issue-review result, adjusted by the test."""
     payload = {
-        "skill": "cc-issue-review", "status": status, "confidence": "high",
+        "skill": "cc-issue-review", "status": status, "issue_id": "API-7", "confidence": "high",
         "dimensions": ["applicability", "acceptance_verification"],
         "findings": [], "uncertainties": [],
     }
@@ -154,6 +154,36 @@ class GateTests(unittest.TestCase):
                         result(findings=[finding()]), {"status": "READY"}, None):
             with self.subTest(payload=payload):
                 self.assertEqual(ir.STOP, ir.assess(payload).gate)
+
+    def test_a_result_must_name_the_work_item_it_reviewed(self) -> None:
+        payload = result()
+        del payload["issue_id"]
+
+        self.assertIn("`issue_id` must name the work item that was reviewed",
+                      ir.result_errors(payload))
+        self.assertEqual(ir.STOP, ir.assess(payload, "API-7").gate)
+
+    def test_a_ready_for_another_work_item_does_not_continue(self) -> None:
+        """REV-001: a READY about item 123 said nothing about API-7."""
+        readiness = ir.assess(result(issue_id="123"), "API-7")
+
+        self.assertEqual(ir.STOP, readiness.gate)
+        self.assertFalse(readiness.valid)
+        self.assertIn("does not name the requested work item", readiness.explain())
+        self.assertNotIn("123", readiness.explain())
+
+    def test_the_requested_work_item_is_matched_by_its_identifier(self) -> None:
+        for reported, requested in (("API-7", "API-7"), ("api-7", "API-7"),
+                                    ("#123", "123"), ("123", "#123"),
+                                    ("ENG-123", "https://plane.example/ws/issues/ENG-123/"),
+                                    ("91", "https://github.com/owner/repo/issues/91")):
+            with self.subTest(reported=reported, requested=requested):
+                self.assertTrue(ir.names_work_item(reported, requested))
+        for reported, requested in (("123", "API-7"), ("12", "123"),
+                                    ("", "API-7"),
+                                    ("owner", "https://github.com/owner/repo/issues/91")):
+            with self.subTest(reported=reported, requested=requested):
+                self.assertFalse(ir.names_work_item(reported, requested))
 
     def test_telemetry_fields_are_counts_and_tokens(self) -> None:
         readiness = ir.assess(result("NEEDS_REFINEMENT", uncertainties=[uncertainty()]))
@@ -340,6 +370,15 @@ class DriverTests(RunCycleTestCase):
                 report = self.cycle([body])
                 self.assertFalse(self.implemented())
                 self.assertEqual("stage_not_completed", report.stop_reason)
+
+    def test_a_ready_for_another_work_item_stops_before_implementation(self) -> None:
+        """REV-001, through the runtime: the cycle asked about API-7."""
+        report = self.cycle([spoken(result(issue_id="123"))])
+
+        self.assertFalse(self.implemented())
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("does not name the requested work item", report.stopped_because)
+        self.assertIs(False, self.rows()[1]["payload"]["readiness_result_valid"])
 
     def test_a_malformed_ready_is_recorded_as_invalid(self) -> None:
         self.cycle([spoken({"status": "READY"})])

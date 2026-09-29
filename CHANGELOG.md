@@ -19,6 +19,8 @@ All notable changes to this project are documented here. This project follows
   with low confidence or an unresolved material uncertainty is reviewed once
   more on `senior_reviewer`, then stops as `readiness_unconfirmed`.
   `NEEDS_REFINEMENT` stops as `needs_refinement` and prints the findings.
+  A result must name the requested work item in `issue_id`; one about another
+  item stops before `implement`.
   `issue_review.mode: off` or `--issue-review off` keeps the original flow, and
   resumed cycles are unchanged. The stage uses the `read_only` workspace policy
   with no publication permission. Telemetry schema 11 adds counts and tokens

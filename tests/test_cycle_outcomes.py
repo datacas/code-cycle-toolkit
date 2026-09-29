@@ -300,7 +300,7 @@ class DriverTests(RunCycleTestCase):
         }
 
         readiness = issue_review.assess({
-            "skill": "cc-issue-review", "status": "READY", "confidence": "high",
+            "skill": "cc-issue-review", "status": "READY", "issue_id": "API-7", "confidence": "high",
             "dimensions": [], "findings": [], "uncertainties": [],
         })
 

@@ -69,7 +69,8 @@ RESULT_KEYS = frozenset({
     "uncertainties", "summary", "error", "blocking",
 })
 REQUIRED_RESULT_KEYS = frozenset({
-    "skill", "status", "confidence", "dimensions", "findings", "uncertainties",
+    "skill", "status", "issue_id", "confidence", "dimensions", "findings",
+    "uncertainties",
 })
 FINDING_KEYS = frozenset({
     "id", "dimension", "severity", "blocks_readiness", "evidence", "summary",
@@ -146,6 +147,8 @@ def result_errors(payload: object) -> list[str]:
         problems.append(f"keys outside the issue-review contract: {', '.join(extra)}")
     if payload.get("skill") != SKILL:
         problems.append(f"`skill` must be {SKILL}")
+    if not _text(payload.get("issue_id")) or len(payload["issue_id"]) > MAX_REFERENCE_LENGTH:
+        problems.append("`issue_id` must name the work item that was reviewed")
     status = payload.get("status")
     if status not in STATUSES:
         problems.append(f"`status` must be one of {', '.join(STATUSES)}")
@@ -314,12 +317,43 @@ class Readiness:
         return f"the issue review reported {self.status}"
 
 
-def assess(payload: dict | None) -> Readiness:
-    """Judge one result. Anything but a confirmed READY does not continue."""
+def _reference(value: str) -> str:
+    return value.strip().lstrip("#").casefold()
+
+
+def names_work_item(reported: str, requested: str) -> bool:
+    """Whether a result's `issue_id` names the work item the runtime asked about.
+
+    Case, surrounding space and a leading `#` do not matter. A work item given
+    as a provider URL matches the identifier in its last path segment, which is
+    where GitHub, Plane and Jira put it. Nothing else is inferred: an identifier
+    the runtime cannot tie to the request is a result about another item.
+    """
+    reported, requested = _reference(reported), _reference(requested)
+    if not reported:
+        return False
+    if reported == requested:
+        return True
+    if "://" in requested:
+        return requested.rstrip("/").rsplit("/", 1)[-1] == reported
+    return False
+
+
+def assess(payload: dict | None, work_item: str | None = None) -> Readiness:
+    """Judge one result. Anything but a confirmed READY does not continue.
+
+    With `work_item`, the result must also name that work item: a READY about
+    another item says nothing about this one.
+    """
     if payload is None:
         return Readiness(STOP, None, False,
                          problems=("no readable structured result",))
     problems = result_errors(payload)
+    if (not problems and work_item is not None
+            and not names_work_item(payload["issue_id"], work_item)):
+        # The reported value is not echoed: it is agent output, and this text
+        # reaches the operator's terminal.
+        problems.append("`issue_id` does not name the requested work item")
     status = payload.get("status") if isinstance(payload.get("status"), str) else None
     if problems:
         return Readiness(STOP, status, False, problems=tuple(problems))

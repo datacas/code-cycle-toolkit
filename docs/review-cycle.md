@@ -20,7 +20,7 @@ Set it with `code_cycle.issue_review.mode` or `--issue-review`; the flag wins. A
 | `READY` with `high` or `medium` confidence and no unresolved material uncertainty | dispatches `implement` |
 | `READY` with `low` confidence or an unresolved material uncertainty | reviews once more on `senior_reviewer`; stops as `readiness_unconfirmed` when that pass does not confirm it, or when the first pass already ran on `senior_reviewer` |
 | `NEEDS_REFINEMENT` | stops as `needs_refinement` before `implement` and prints the findings, evidence, and proposed issue edits |
-| `BLOCKED`, a missing block, or a block outside the contract | stops before `implement` (`stage_not_completed`) |
+| `BLOCKED`, a missing block, a block outside the contract, or a result whose `issue_id` names another work item | stops before `implement` (`stage_not_completed`) |
 
 Confidence is a category for evidence quality, never a calibrated probability. The stage is `read_only`, has no publication permission, and never edits, comments on, labels, or closes the work item: its proposed edits are printed for a person, and applying them needs separate authorization. Its findings are `IR-NNN`, with no `REV-xxx` identity, `status`, or `disposition`, so they never enter the change-request contract below.
 

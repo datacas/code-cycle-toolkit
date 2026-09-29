@@ -153,7 +153,7 @@ def readiness_result() -> dict:
     """An issue review's result: READY unless the environment says otherwise."""
     status = os.environ.get("FAKE_READINESS", "READY")
     payload = {
-        "skill": "cc-issue-review", "status": status, "confidence": "high",
+        "skill": "cc-issue-review", "status": status, "issue_id": "API-7", "confidence": "high",
         "dimensions": ["applicability", "acceptance_verification"],
         "findings": [], "uncertainties": [],
     }
