@@ -27,6 +27,17 @@ All notable changes to this project are documented here. This project follows
   only: the readiness verdict fields, the `escalated` signal, and the cycle's
   `issue_review` decision. The validator checks the skill's tables and example
   against the runtime's result check.
+- `cc-orchestrator` and `cc-orca-orchestrator` apply the same issue-review gate
+  before implementation, from a shared section the validator keeps identical
+  in both. `issue_review=auto|off` overrides `code_cycle.issue_review.mode`;
+  `auto` skips only work declared trivial and not security-sensitive. Only a
+  `READY` that `issue_review.assess` would confirm starts `cc-implement-issue`;
+  an unconfirmed `READY` escalates once to `senior_reviewer`, and
+  `NEEDS_REFINEMENT`, `BLOCKED`, or an unreadable result stops before
+  implementation with the findings and proposed issue edits shown. The Orca
+  orchestrator dispatches the stage as a worker in a read-only review workspace
+  and checks that workspace is unchanged before starting the implementer.
+  `off` keeps the previous flow, and neither orchestrator touches the work item.
 - The package validator refuses a skill frontmatter value that strict YAML
   would reject: an unquoted value containing `: ` or ` #`. The skills CLI
   silently skipped such a skill while the validator passed it.

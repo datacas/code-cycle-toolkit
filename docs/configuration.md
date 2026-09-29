@@ -91,7 +91,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.mode` | `disabled` · `shadow` | `disabled` | `run_cycle.py` |
 | `routing.jev.model` | `jev-latest` · `jev-x.y.z` (`typesafe-ai/jev` → `jev-latest`) | `jev-latest` | `run_cycle.py` |
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
-| `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py` |
+| `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
 | `security_review.always_when.files` | filename glob list | built-in defaults | same |
@@ -119,7 +119,7 @@ Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [
 
 ### Issue review
 
-`issue_review.mode: auto` (the default) makes a new `run_cycle.py` cycle review its work item with `cc-issue-review` before implementing it, except a task declared trivial and not security-sensitive. `off` keeps the original flow. `--issue-review` overrides it for one run. Only a confirmed `READY` reaches implementation. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
+`issue_review.mode: auto` (the default) makes a new `run_cycle.py`, `cc-orchestrator`, or `cc-orca-orchestrator` cycle review its work item with `cc-issue-review` before implementing it, except a task declared trivial and not security-sensitive. `off` keeps the original flow. `--issue-review`, or `issue_review=auto|off` in an orchestrator invocation, overrides it for one run. Only a confirmed `READY` reaches implementation. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
 
 ### Review
 

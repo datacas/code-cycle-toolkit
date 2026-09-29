@@ -6,14 +6,14 @@ How findings are created, tracked across rounds, and closed, and why the pull-re
 
 ## Issue review before implementation
 
-Before any code work, `run_cycle.py` can ask [`cc-issue-review`](skills.md#cc-issue-review) whether the work item is ready. It is a gate on the specification, not on code: it does not repeat the implementer's diagnosis (reproduction, mechanism, fix shape), and it cannot catch what only the diff will show.
+Before any code work, `run_cycle.py`, `cc-orchestrator`, and `cc-orca-orchestrator` can ask [`cc-issue-review`](skills.md#cc-issue-review) whether the work item is ready. It is a gate on the specification, not on code: it does not repeat the implementer's diagnosis (reproduction, mechanism, fix shape), and it cannot catch what only the diff will show.
 
 | Setting | Behaviour |
 |---|---|
 | `auto` (default) | A new cycle reviews its work item first, except a task declared trivial and not security-sensitive (`--difficulty 1` without `--security-sensitive`). The default difficulty is 2, so an unclassified task is reviewed. |
 | `off` | The original `implement → review → resolve → rereview` flow. |
 
-Set it with `code_cycle.issue_review.mode` or `--issue-review`; the flag wins. A cycle resumed with `--from review|resolve|rereview` never runs it.
+Set it with `code_cycle.issue_review.mode`, or for one run with `--issue-review` or the orchestrators' `issue_review=auto|off`; the override wins. A cycle resumed with `--from review|resolve|rereview`, or an orchestrator that resumes an existing change request, never runs it. The orchestrators stop as `HUMAN_INTERVENTION` where the runtime reports `needs_refinement` or `readiness_unconfirmed`, as `BLOCKED` on `BLOCKED`, and as `FAILED` on an unreadable result or a changed workspace.
 
 | Result | What the cycle does |
 |---|---|
