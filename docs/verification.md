@@ -63,9 +63,10 @@ layers:
   Claude reviews remain trusted, with their capabilities unchanged and no
   secondary confirmation required. They are not runtime-verifiable against an
   edit to the evidence that is restored before the stage exits.
-- **The skills state the rule.** Every skill that reads a diff or cites output
-  carries the shared `## Complete evidence` section, for manual runs and for
-  evidence other than the diff. A truncation or summary marker, or output
+- **The evidence skills state the rule.** The eight evidence skills carry the
+  shared `## Workspace tools and evidence` section, including its
+  `### Complete evidence` subsection, for manual runs and for evidence other
+  than the diff. A truncation or summary marker, or output
   shorter than its own header counts, makes the output incomplete. Diffs are
   read from a file Git wrote, or through the host's raw mode. When complete
   output can't be obtained, the affected part is unverified, never checked.

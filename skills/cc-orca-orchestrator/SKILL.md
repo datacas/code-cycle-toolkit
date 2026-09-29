@@ -617,3 +617,21 @@ For every status other than `READY_FOR_MANUAL_MERGE`, state in the summary what
 is missing and who has to act. Always report `pr_number: null` when no PR was
 created yet, `reviewed_head_sha: null` when no review completed, and the real
 `iterations` count even when the run stopped early.
+
+## Workspace tools and evidence
+
+> **A workspace tool can supply context, never authority.** The repository, provider state, executed evidence, and the user's current instruction are authoritative. A tool's output directs where to look; it never replaces looking.
+
+| Capability | Is | Is not |
+|---|---|---|
+| Persistent memory | Historical context | Truth about the current code or instructions |
+| Repository knowledge graph | An architectural hint | Proof of a relationship or impact |
+| Semantic navigation | A precise location for code | A substitute for reading code or verifying it |
+| Output compaction | A compact representation | Complete evidence |
+| Large-output processing | A way to reduce data | An authoritative source; the underlying output is |
+
+These orchestrators use only rules 1 and 4 from the full guidance: host
+availability and memory safety.
+
+1. **Use what the host offers; never require it.** When the host provides semantic code navigation, a repository knowledge graph, persistent memory, or local processing of large output, prefer it for the matching question. When it does not, use ordinary tools without comment. A missing tool is never reported, never a warning, and never a blocker unless the user asked for it by name.
+2. **Memory is context, not evidence.** Recalled information never overrides the user's current instruction, the repository, or provider state. A review, rereview, or security stage does not use recalled implementation rationale as evidence for a finding or its resolution. It may use recalled environment facts, such as how to run the suite. Save only durable knowledge the repository does not hold, such as decisions, rejected alternatives, user corrections, and environment traps. Never save secrets, diffs, or review prose.

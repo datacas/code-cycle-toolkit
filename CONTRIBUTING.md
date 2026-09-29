@@ -74,11 +74,12 @@ with them. Several sections are therefore duplicated verbatim:
 | `### Where the block goes` | the same three |
 | `### The PR comment is the machine-readable record` | the same three |
 | `## Checks of the pushed head` | `cc-implement-issue`, `cc-resolve-comments` |
-| `## Complete evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` |
+| `## Workspace tools and evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` (full rules); both orchestrators (rules 1 and 4) |
+| `### Complete evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` |
 
-Editing one copy means editing all of them. The validator compares the copies
-byte for byte and fails on drift, which is the whole point: these sections
-define a state-recovery contract that breaks silently when the copies disagree.
+Editing one copy means updating every copy in its listed group. The validator
+compares each group's copies byte for byte and rejects product names from the
+workspace-tools section, so these workflow contracts cannot drift silently.
 
 ## Adding a skill
 

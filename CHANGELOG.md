@@ -7,6 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- Ten skills now share product-neutral rules for optional workspace tools:
+  code and evidence stages use semantic navigation and local output processing
+  when available, while the orchestrators apply the host-availability and
+  memory-safety rules. The validator checks both shared copies and rejects
+  product names in those sections.
 - The runtime hands every `review`, `resolve`, and `rereview` stage the complete
   accumulated diff as a file Git wrote itself, outside the workspace, with its
   base, head, line count, and SHA-256 in the prompt; a non-writing Claude stage
@@ -14,10 +19,11 @@ All notable changes to this project are documented here. This project follows
   stage that changes or removes it stops the cycle before its verdict is read.
   A host hook that compacts `git diff` can no
   longer shorten what a runtime-driven review judges. With no resolvable base,
-  no file is written and the prompt says so. Eight skills share a new
-  `## Complete evidence` section: compacted or truncated output is incomplete,
-  diffs are read from a file Git wrote or in raw mode, and what cannot be read
-  completely is unverified. The validator fails on drift.
+  no file is written and the prompt says so. Eight skills share a
+  `### Complete evidence` subsection under `## Workspace tools and evidence`:
+  compacted or truncated output is incomplete, diffs are read from a file Git
+  wrote or in raw mode, and what cannot be read completely is unverified. The
+  validator fails on drift.
 - `cc-verify` decides when a change needs a run at the real boundary:
   `boundary_required = deterministic_rule OR verifier_judgement`. The rule
   fires on changed paths classified as api, auth, database, or migrations by
