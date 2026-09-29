@@ -426,10 +426,21 @@ class ValidatePackageTests(unittest.TestCase):
 
     def test_rejects_an_orca_issue_review_worker_without_a_read_only_workspace(self) -> None:
         errors = self.edit_orchestrator(
-            "cc-orca-orchestrator", "read-only review workspace", "review workspace")
+            "cc-orca-orchestrator", "isolated review workspace", "review workspace")
 
         self.assert_error_contains(
-            errors, "'### Issue review worker' does not state 'read-only review workspace'")
+            errors, "'### Issue review worker' does not state 'isolated review workspace'")
+
+    def test_rejects_fixed_modes_without_a_distinct_senior_reviewer_stop(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orchestrator",
+            "Neither mode\n   assigns a distinct `senior_reviewer`",
+            "The modes assign a reviewer",
+        )
+
+        self.assert_error_contains(
+            errors, "'## Workflow' does not state "
+                    "'Neither mode assigns a distinct `senior_reviewer`'")
 
     def test_rejects_an_implement_result_example_that_is_not_json(self) -> None:
         errors = self.edit_implement_skill(

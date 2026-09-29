@@ -536,8 +536,17 @@ ISSUE_REVIEW_GATE_PHRASES = (
 ) + tuple(f"`{status}`" for status in issue_review.STATUSES)
 ORCA_ISSUE_REVIEW_SECTION = "### Issue review worker"
 ORCA_ISSUE_REVIEW_PHRASES = (
-    "read-only review workspace",
+    "isolated review workspace",
     "before any implementer starts",
+    "stop with `BLOCKED` before `worker-start`",
+    "never fall back to the current or shared worktree",
+)
+FIXED_MODE_ISSUE_REVIEW_PHRASES = (
+    "`single_agent` runs `cc-issue-review` in the current agent",
+    "`claude_codex` runs it in Claude",
+    "Neither mode assigns a distinct `senior_reviewer`",
+    "stop with `HUMAN_INTERVENTION` before implementation",
+    "do not route or ask the same executor a second time",
 )
 
 
@@ -568,6 +577,15 @@ def check_issue_review_gate(root: Path, errors: list[str]) -> None:
             for phrase in phrases:
                 if phrase not in flattened:
                     errors.append(f"{where}: {heading!r} does not state {phrase!r}")
+
+    orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"
+    if orchestrator_path.is_file():
+        where = "skills/cc-orchestrator/SKILL.md"
+        workflow = extract_section(orchestrator_path.read_text(encoding="utf-8"), "## Workflow")
+        flattened = " ".join((workflow or "").split())
+        for phrase in FIXED_MODE_ISSUE_REVIEW_PHRASES:
+            if phrase not in flattened:
+                errors.append(f"{where}: '## Workflow' does not state {phrase!r}")
 
 def validate_manifest(path: Path, expected_name: str) -> str:
     try:

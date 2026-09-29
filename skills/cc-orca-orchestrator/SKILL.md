@@ -235,12 +235,15 @@ changes, until an exit condition or the iteration limit is reached.
 ### Issue review worker
 
 The issue-review worker writes nothing, so it does not need the shared PR
-branch, and no implementer exists yet to share it with. Give it an explicit
-read-only review workspace: its own worktree at the base branch head when the
-installed Orca contract provides one, otherwise the current worktree. Record
-that workspace's head SHA and `git status --porcelain --untracked-files=all`
-before `worker-start` and compare them after `worker_done`; a difference stops
-the run with `FAILED` before any implementer starts.
+branch, and no implementer exists yet to share it with. Give it an explicit,
+isolated review workspace: its own worktree at the base branch head. If the
+installed Orca contract cannot create and select that workspace, stop with
+`BLOCKED` before `worker-start`; never fall back to the current or shared
+worktree. Record the isolated workspace's head SHA and
+`git status --porcelain --untracked-files=all` before `worker-start` and compare
+them after `worker_done`; a difference stops the run with `FAILED` before any
+implementer starts. This comparison is a post-run check, not a substitute for
+workspace isolation.
 
 The escalation runs on `senior_reviewer` from `code_cycle.profiles`. Start that
 second worker with the agent and model the profile names; when the installed

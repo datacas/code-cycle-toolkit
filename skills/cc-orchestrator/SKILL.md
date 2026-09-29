@@ -398,6 +398,14 @@ change-request state handed to later stages.
    An execution mode named in the invocation, such as `single_agent` or
    `claude_codex`, fixes the executors for every stage and replaces the routing
    step. Say which of the two paths the run took; never mix them within one run.
+   These fixed assignments also govern issue review: `single_agent` runs
+   `cc-issue-review` in the current agent, and `claude_codex` runs it in Claude,
+   the coordinator that owns implementation in that adapter. Neither mode
+   assigns a distinct `senior_reviewer` for this new stage. If the first result
+   is an unconfirmed `READY`, stop with `HUMAN_INTERVENTION` before
+   implementation; do not route or ask the same executor a second time. A
+   future adapter may use a second pass only after its fixed mapping explicitly
+   selects a distinct senior reviewer and returns a durable result.
 5. Apply *Issue review before implementation*: unless the mode is `off` or the
    work is declared trivial and not security-sensitive, run `cc-issue-review`
    on the target routed for `issue_review` and continue only on a confirmed
