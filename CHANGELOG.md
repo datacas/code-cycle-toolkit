@@ -7,6 +7,25 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `cc-issue-review`, a read-only readiness pass before implementation. It
+  compares the work item and its linked work with the current repository,
+  evaluates only the relevant dimensions, and returns `READY`,
+  `NEEDS_REFINEMENT`, or `BLOCKED` with a categorical confidence, evidence-backed
+  `IR-NNN` findings, `IU-NNN` uncertainties, and suggested issue edits. It never
+  edits, comments on, or labels the work item, and it does not repeat the
+  implementer's diagnosis. `run_cycle.py` runs it before `implement` in the
+  default `auto` mode, except for work declared trivial and not
+  security-sensitive; only a confirmed `READY` dispatches `implement`. A `READY`
+  with low confidence or an unresolved material uncertainty is reviewed once
+  more on `senior_reviewer`, then stops as `readiness_unconfirmed`.
+  `NEEDS_REFINEMENT` stops as `needs_refinement` and prints the findings.
+  `issue_review.mode: off` or `--issue-review off` keeps the original flow, and
+  resumed cycles are unchanged. The stage uses the `read_only` workspace policy
+  with no publication permission. Telemetry schema 11 adds counts and tokens
+  only: the readiness verdict fields, the `escalated` signal, and the cycle's
+  `issue_review` decision. The validator checks the skill's tables and example
+  against the runtime's result check.
+
 - `docs/workspace-tools.md` documents the optional workspace tools (Serena,
   AgentMemory, Graphify, RTK, context-mode, and Context7): what each is for,
   its fallback, that no installer installs or checks them, how dispatched

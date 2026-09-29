@@ -15,6 +15,8 @@ an exhausted window, and a review that changes its mind on the second round:
     FAKE_SILENT=claude     that agent emits no structured block at all
     FAKE_SILENT_REVIEW=codex that agent omits only an initial-review result
     FAKE_BLOCKED=codex     that agent exits 0 reporting BLOCKED, as one did
+    FAKE_READINESS=<status> the issue review's status (default READY); the
+                           other variables leave the issue review alone
 
 It writes each CLI's real envelope — Codex NDJSON with `item.completed`, Claude
 one JSON object with `result` — because that is what a canary found the driver
@@ -147,6 +149,25 @@ def result_for_role(role: str, status: str = "CHANGES_REQUESTED") -> dict:
     return payload
 
 
+def readiness_result() -> dict:
+    """An issue review's result: READY unless the environment says otherwise."""
+    status = os.environ.get("FAKE_READINESS", "READY")
+    payload = {
+        "skill": "cc-issue-review", "status": status, "confidence": "high",
+        "dimensions": ["applicability", "acceptance_verification"],
+        "findings": [], "uncertainties": [],
+    }
+    if status == "NEEDS_REFINEMENT":
+        payload["findings"] = [{
+            "id": "IR-001", "dimension": "acceptance_verification",
+            "severity": "high", "blocks_readiness": True,
+            "evidence": [{"kind": "work_item", "ref": "API-7"}],
+            "summary": "The acceptance criteria name no observable result.",
+            "proposed_change": "State the observable result each criterion checks.",
+        }]
+    return payload
+
+
 def main(argv: list[str]) -> int:
     if "--version" in argv:
         # Exercise the current Codex permission-profile path in installed-cycle
@@ -166,6 +187,11 @@ def main(argv: list[str]) -> int:
             or (os.environ.get("FAKE_SILENT_REVIEW") == NAME
                 and "cc-initial-review" in prompt)):
         speak(model, said[0])
+        return 0
+
+    if "cc-issue-review" in prompt:
+        said += [BEGIN, json.dumps(readiness_result()), END]
+        speak(model, "\n".join(said))
         return 0
 
     status = "BLOCKED" if os.environ.get("FAKE_BLOCKED") == NAME else status_for(prompt)

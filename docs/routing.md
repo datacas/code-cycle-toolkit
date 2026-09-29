@@ -95,9 +95,12 @@ A target is one string: **`executor:provider/model effort`**.
 |---|---|---|
 | `implement`, `resolve` | `cheap_coder`, `deep_coder` | difficulty 3 → `deep_coder`, otherwise `cheap_coder` |
 | `review`, `rereview` | `reviewer`, `senior_reviewer` | security-sensitive → `senior_reviewer`, otherwise `reviewer` |
+| `issue_review` | `reviewer`, `senior_reviewer` | security-sensitive or difficulty 3 → `senior_reviewer`, otherwise `reviewer` |
 | `security` | `security` | always |
 | `coordinate` | `coordinator` | always |
 | `verify`, `run`, `bootstrap` | `auxiliary_tool` | always |
+
+One escalation is the runtime's, not a selector's: an issue review whose `READY` it cannot confirm is routed once more with `escalation_selector`, which names `senior_reviewer` for `issue_review` and defers to `rule_selector` for every other role. The escalated dispatch row carries `escalated: true`. The stage is skipped only for a declared trivial, non-sensitive task; see [Issue review before implementation](review-cycle.md#issue-review-before-implementation).
 
 There are no finer rules. The calibration campaigns so far produced one usable finding: an inexpensive implementer never passed review on the first attempt across five real work items. That isn't evidence enough for more rules. A selector can only return a name from the role's candidates. Availability, workspace policy, fallback, and dispatch stay outside it.
 
@@ -116,7 +119,7 @@ Each role has a fixed write permission. Only an executor that can **enforce** it
 | Role | Policy | Eligible executors |
 |---|---|---|
 | `implement`, `resolve` | `workspace_write` | Codex (`-s workspace-write`), Claude (`acceptEdits`), Orca |
-| `review`, `rereview`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (disposable clone, writes detected, not prevented), Orca (explicit review workspace) |
+| `review`, `rereview`, `issue_review`, `security`, `bootstrap`, `coordinate` | `read_only` | Codex (`-s read-only`), Claude (disposable clone, writes detected, not prevented), Orca (explicit review workspace) |
 | `verify`, `run` | `disposable` | Codex, confined to a disposable workspace |
 
 Codex records `read_only_mode = enforced` only when its sandbox was used *and* the checkout was verified unchanged afterwards. The sandbox confines the agent's own commands; tools the host configures, such as MCP servers, plugins, and hooks, run outside it. So the harness fingerprints the dispatch checkout before and after every `read_only` stage on every executor, and any change is a `contract_violation`, whatever wrote it. Claude records `read_only_mode = detected`: the harness creates an independent detached clone with its own Git object store at the reviewed HEAD, removes its remotes, and discards local edits. The harness requires a clean implementer checkout and checks its HEAD, working-tree fingerprint, and configured remote refs before and after review; a detected change fails the stage as a contract violation. Claude runs with its full tooling and its ordinary `gh` and `git` access, so it can publish its own comment. With Claude, read-only is watched, not enforced. The harness detects a write it can observe, but it cannot prevent or undo a remote write: a push, a merge, or a change to the change request. A push that is later restored before the stage ends also goes unseen. The maintainer has accepted this risk. Anyone who needs a full guarantee should review with Codex or give the reviewer read-only credentials. Publication access remains role-specific, and a reviewer may publish only the comment its role permits. Details are in [Role workspace policy](role-workspace-policy.md).

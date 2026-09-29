@@ -60,6 +60,18 @@ from executors import (
     _paths_overlap,
     _remove_workspace,
 )
+from issue_review import (
+    CONTINUE as READINESS_CONTINUE,
+    ROLE as ISSUE_REVIEW_ROLE,
+    SKILL as ISSUE_REVIEW_SKILL,
+    STOP as READINESS_STOP,
+    IssueReviewConfigError,
+    IssueReviewMode,
+    Readiness,
+    assess as assess_readiness,
+    dispatch_decision as issue_review_decision,
+    load_issue_review_mode,
+)
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from review_contract import (
     RESOLUTION_RUN,
@@ -68,6 +80,7 @@ from review_contract import (
     claimed_fix_survivals,
 )
 from router import (
+    ESCALATION_PROFILES,
     RouterError,
     RoutingMode,
     RoutingStrategy,
@@ -89,7 +102,7 @@ from telemetry import (
 CONFIG_NAME = ".code-cycle.yml"
 
 #: The keys under `code_cycle` this driver reads itself.
-DRIVER_KEYS = frozenset({"repository", "profiles", "routing"})
+DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review"})
 
 #: The keys under `code_cycle` that belong to a skill or another module. They
 #: are legitimate here and deliberately not interpreted: recognising a key is
@@ -114,6 +127,7 @@ ROUTING_KEYS = frozenset({"strategy", "jev"})
 
 #: The skill each role runs, as the executor is told to invoke it.
 SKILL_FOR_ROLE = {
+    ISSUE_REVIEW_ROLE: ISSUE_REVIEW_SKILL,
     "implement": "cc-implement-issue",
     "review": "cc-initial-review",
     "resolve": "cc-resolve-comments",
@@ -139,6 +153,15 @@ LOCAL_ONLY_REQUEST = (
     "merge, publish issue or review comments, or create a pull request."
 )
 
+#: What the one escalated issue review is told. Nothing from the first pass is
+#: repeated: its prose is untrusted, and the second pass judges independently.
+ESCALATED_ISSUE_REVIEW = (
+    "An earlier issue review of this work item reported READY without "
+    "confirming it: its confidence was low or a material uncertainty stayed "
+    "unresolved. Assess the work item independently, and report READY only "
+    "when no material decision would be left for the implementer to invent."
+)
+
 BEGIN, END = "ORCHESTRATION_RESULT", "END_ORCHESTRATION_RESULT"
 
 #: Everything a terminal acts on rather than shows: the C0 controls and DEL,
@@ -159,6 +182,8 @@ COMPLETES = {
     "resolve": frozenset({"RESOLVED", "PARTIALLY_RESOLVED"}),
     "review": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
     "rereview": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
+    # Necessary, not sufficient: `issue_review.assess` also has to confirm it.
+    ISSUE_REVIEW_ROLE: frozenset({"READY"}),
 }
 
 #: The stages that resume a change request instead of creating one.
@@ -244,6 +269,7 @@ def load_config(path: Path) -> dict:
     for key in (
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
+        "code_cycle.issue_review",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -280,7 +306,8 @@ def load_config(path: Path) -> dict:
     try:
         load_routing_strategy(config)
         load_jev_config(config)
-    except (RouterError, JevConfigError) as error:
+        load_issue_review_mode(config)
+    except (RouterError, JevConfigError, IssueReviewConfigError) as error:
         raise CycleDriverError(str(error)) from error
     return config
 
@@ -400,6 +427,10 @@ class CycleReport:
     #: The exit condition, one of `telemetry.STOP_REASONS`.
     stop_reason: str | None = None
     stages: list[StageOutcome] = field(default_factory=list)
+    #: The last issue review's judged result, when one ran. Its findings are
+    #: shown to whoever has to refine the work item; none of their prose is
+    #: recorded.
+    readiness: Readiness | None = None
 
     @property
     def approved(self) -> bool:
@@ -411,14 +442,36 @@ class CycleReport:
             result = stage.result
             ran = result.executor if result else "—"
             outcome = result.outcome.value if result else "blocked"
-            lines.append(f"  {stage.role:<9} {stage.decision.profile:<14} {ran:<7} {outcome}")
+            lines.append(f"  {stage.role:<12} {stage.decision.profile:<15} {ran:<7} {outcome}")
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
         if self.reason:
             # What the agent said, so a person can weigh it rather than pay for
             # another run to find out what it was.
             lines.append(f"  reason:  {self.reason}")
+        if self.readiness is not None and self.readiness.gate != READINESS_CONTINUE:
+            lines.extend(_readiness_lines(self.readiness))
         return "\n".join(lines)
+
+
+def _readiness_lines(readiness: Readiness) -> list[str]:
+    """An issue review's findings and open questions, made safe to print."""
+    lines = []
+    for finding in readiness.findings:
+        evidence = ", ".join(
+            f"{item['kind']}:{readable(item['ref'], 100)}" for item in finding["evidence"])
+        blocks = "blocks" if finding["blocks_readiness"] else "advisory"
+        lines.append(
+            f"  finding: {finding['id']} {finding['severity']} {blocks} "
+            f"{finding['dimension']}: {readable(finding['summary'])} [{evidence}]")
+        if finding.get("proposed_change"):
+            lines.append(f"    proposed: {readable(finding['proposed_change'])}")
+    for item in readiness.uncertainties:
+        weight = "material" if item["material"] else "minor"
+        state = "resolved" if item["resolved"] else "unresolved"
+        lines.append(f"  uncertainty: {item['id']} {weight} {state}: "
+                     f"{readable(item['summary'])}")
+    return lines
 
 
 def safe_reference(reference: str) -> bool:
@@ -802,8 +855,14 @@ def run_cycle(
     progress_interval: float = 60,
     start_from: str = "implement",
     change_request_id: str | None = None,
+    issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
 ) -> CycleReport:
-    """implement -> review -> (resolve -> rereview)*, every stage recorded.
+    """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
+
+    A cycle that starts at `implement` first reviews its work item when
+    `issue_review` is `auto` and the declared signals do not mark the task as
+    trivial and non-sensitive; only a confirmed `READY` reaches `implement`.
+    `off` runs the original flow. A resumed cycle never reviews the work item.
 
     `start_from` resumes an existing change request, `change_request_id`,
     instead: `review` runs a fresh initial review, `resolve` enters the loop
@@ -820,6 +879,7 @@ def run_cycle(
     stage. `shadow` injects an already-built observer instead, for tests.
     """
     validate_start(start_from, change_request_id, local_only=local_only)
+    issue_review = IssueReviewMode(issue_review)
     if shadow is None and jev is not None and jev.enabled:
         shadow = JevShadow(jev)
     if local_only:
@@ -860,7 +920,7 @@ def run_cycle(
         dispatch_kwargs["timeout"] = timeout
 
     def run(role: str, instruction: str = "", *,
-            change_request_id: str | None = None
+            change_request_id: str | None = None, escalated: bool = False,
             ) -> tuple[StageOutcome, Reported, str | None]:
         """Dispatch one stage; also say whether the evidence it was given changed."""
         evidence = ""
@@ -881,7 +941,7 @@ def run_cycle(
                 role, compose(role, repo_id, task_id, instruction,
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence),
-                **stage_kwargs)
+                escalated=escalated, **stage_kwargs)
             if artifact is not None:
                 tampered = artifact.changed()
         finally:
@@ -903,9 +963,59 @@ def run_cycle(
         report.stop_reason = stop_reason
         if reported is not None:
             report.reason = reported.reason
-        recorder.close(status, stop_reason=stop_reason)
+        recorder.close(status, stop_reason=stop_reason, **issue_review_fields)
         status_writer.finish(status)
         return report
+
+    def unfinished(outcome: StageOutcome, reported: Reported,
+                   tampered: str | None) -> CycleReport | None:
+        """Stop a stage whose dispatch did not finish here, before its report is read."""
+        # Before anything the stage reported is read: its verdict rests on
+        # evidence the runtime no longer vouches for.
+        if tampered is not None:
+            return stop(tampered, reported=reported)
+        if not outcome.succeeded:
+            return stop(_why(outcome), reported=reported,
+                        stop_reason="dispatch_failed")
+        if _started_elsewhere(outcome):
+            return stop(_elsewhere(outcome), reported=reported)
+        return None
+
+    def review_issue() -> CycleReport | None:
+        """The readiness gate: only a confirmed READY lets `implement` run.
+
+        A READY the runtime cannot confirm — low confidence, or a material
+        uncertainty left open — is reviewed once more on the stronger profile.
+        When that is not possible, or the second pass cannot confirm it either,
+        the cycle stops for a person rather than implementing on a guess.
+        """
+        escalated = False
+        while True:
+            outcome, reported, tampered = run(
+                ISSUE_REVIEW_ROLE, ESCALATED_ISSUE_REVIEW if escalated else "",
+                escalated=escalated)
+            stopped = unfinished(outcome, reported, tampered)
+            if stopped is not None:
+                return stopped
+            readiness = assess_readiness(reported.payload)
+            report.readiness = readiness
+            if reported.status:
+                recorder.record_verdict(ISSUE_REVIEW_ROLE, reported.status,
+                                        **readiness.telemetry_fields())
+            if readiness.gate == READINESS_CONTINUE:
+                return None
+            if readiness.gate == READINESS_STOP:
+                if not reported.readable:
+                    return stop(reported.explain(ISSUE_REVIEW_ROLE), reported=reported)
+                if readiness.valid and readiness.status == "NEEDS_REFINEMENT":
+                    return stop(readiness.explain(), reported=reported,
+                                stop_reason="needs_refinement")
+                return stop(readiness.explain(), reported=reported)
+            stronger = ESCALATION_PROFILES[ISSUE_REVIEW_ROLE]
+            if escalated or outcome.decision.profile == stronger:
+                return stop(readiness.explain(), reported=reported,
+                            stop_reason="readiness_unconfirmed")
+            escalated = True
 
     def advance(role: str, instruction: str = "", *,
                 change_request_id: str | None = None) -> tuple[Reported, CycleReport | None]:
@@ -917,15 +1027,9 @@ def run_cycle(
         """
         outcome, reported, tampered = run(role, instruction,
                                           change_request_id=change_request_id)
-        # Before anything the stage reported is read: its verdict rests on
-        # evidence the runtime no longer vouches for.
-        if tampered is not None:
-            return reported, stop(tampered, reported=reported)
-        if not outcome.succeeded:
-            return reported, stop(_why(outcome), reported=reported,
-                                  stop_reason="dispatch_failed")
-        if _started_elsewhere(outcome):
-            return reported, stop(_elsewhere(outcome), reported=reported)
+        stopped = unfinished(outcome, reported, tampered)
+        if stopped is not None:
+            return reported, stopped
         # The dispatch and the work are different facts. This records what the
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
@@ -956,9 +1060,20 @@ def run_cycle(
     history: list[RunStatuses] = []
     progress: list[tuple[str, frozenset[str]] | None] = []
 
+    # Recorded on the closing row of every cycle that could have reviewed its
+    # work item; a resumed cycle could not, and says nothing about it.
+    issue_review_fields = {}
+    if start_from == "implement":
+        issue_review_fields["issue_review"] = issue_review_decision(
+            issue_review, signals)
+
     reported = Reported()
     verdict = None
     if start_from == "implement":
+        if issue_review_fields["issue_review"] == "dispatched":
+            stopped = review_issue()
+            if stopped is not None:
+                return stopped
         reported, stopped = advance("implement")
         if stopped is not None:
             return stopped
@@ -1536,6 +1651,12 @@ def main(argv: list[str] | None = None) -> int:
                               "the change request named by --pr (default: implement)"))
     parser.add_argument("--pr", dest="change_request", default=None,
                         help="existing change request a resumed cycle works on")
+    parser.add_argument("--issue-review", choices=("auto", "off"), default=None,
+                        help=("review the work item before implementing it: auto "
+                              "reviews all but declared trivial, non-sensitive "
+                              "work; off keeps the original flow (default: "
+                              f"code_cycle.issue_review.mode in {CONFIG_NAME}, "
+                              "else auto). A resumed cycle never runs it"))
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
@@ -1575,6 +1696,8 @@ def main(argv: list[str] | None = None) -> int:
     change_bases = change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
+    issue_review = (IssueReviewMode(args.issue_review) if args.issue_review
+                    else load_issue_review_mode(config))
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
         report = run_cycle(
@@ -1600,6 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
             jev=jev,
             start_from=args.start_from,
             change_request_id=args.change_request,
+            issue_review=issue_review,
         )
     except CycleDriverError as error:
         parser.error(str(error))

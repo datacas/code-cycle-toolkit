@@ -142,6 +142,9 @@ class RunCycleTestCase(unittest.TestCase):
 
     def run_cycle(self, implementer, reviewer, **kw):
         telemetry = kw.pop("telemetry", self.store)
+        # The original flow, which these tests describe; the issue-review stage
+        # has its own tests, which ask for it.
+        kw.setdefault("issue_review", "off")
         profiles = kw.pop("profiles", router.load_profiles({"code_cycle": {
             # These scripted adapters declare an in-memory non-mutation
             # boundary, so tests of the driver can choose their reviewer while
@@ -917,6 +920,7 @@ code_cycle:
             registry=ex.Registry([codex, claude]),
             availability={"codex": ex.Availability.READY,
                           "claude": ex.Availability.READY},
+            issue_review="off",
         )
 
         implement = report.stages[0]
@@ -939,6 +943,7 @@ code_cycle:
             profiles=profiles,
             registry=ex.Registry([codex]),
             availability={"codex": ex.Availability.READY},
+            issue_review="off",
         )
 
         self.assertEqual("gpt-fictional-9", report.stages[0].decision.target.model)
@@ -954,6 +959,7 @@ code_cycle:
             registry=ex.Registry([Talker("codex"), Talker("claude")]),
             availability={"codex": ex.Availability.READY,
                           "claude": ex.Availability.READY},
+            issue_review="off",
         )
 
         implement = report.stages[0]
@@ -979,6 +985,7 @@ code_cycle:
             registry=ex.Registry([codex, claude]),
             availability={"codex": ex.Availability.READY,
                           "claude": ex.Availability.READY},
+            issue_review="off",
         )
 
         fallback = report.stages[0].attempts[1][0]

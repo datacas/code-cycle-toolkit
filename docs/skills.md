@@ -1,6 +1,6 @@
 # Skills reference
 
-Fourteen skills in two layers. The source of truth for each one is its `skills/<name>/SKILL.md`. This page summarises what you need to use them.
+Fifteen skills in two layers. The source of truth for each one is its `skills/<name>/SKILL.md`. This page summarises what you need to use them.
 
 **Cycle skills** own the workflow: the change request, the `REV-xxx` IDs, the published comments, and the merge boundary. **Supporting skills** are focused passes. Cycle skills call them as *delegated passes*: the pass returns its findings to the caller and doesn't publish. Invoked directly, a supporting skill reports to you, or publishes when that is its job.
 
@@ -8,6 +8,7 @@ Fourteen skills in two layers. The source of truth for each one is its `skills/<
 
 | Skill | Layer | Purpose | Changes code? | Usually invoked by | Use directly? |
 |---|---|---|:---:|---|:---:|
+| [`cc-issue-review`](#cc-issue-review) | cycle | Decide whether a work item is ready to implement | — | you, the runtime driver | ✅ |
 | [`cc-implement-issue`](#cc-implement-issue) | cycle | Implement a work item, verify, open a PR | ✅ | you, orchestrators | ✅ |
 | [`cc-initial-review`](#cc-initial-review) | cycle | Review the full PR diff, publish findings | — | you, orchestrators | ✅ |
 | [`cc-resolve-comments`](#cc-resolve-comments) | cycle | Triage findings, fix valid ones, verify, push | ✅ | you, orchestrators | ✅ |
@@ -26,6 +27,7 @@ Fourteen skills in two layers. The source of truth for each one is its `skills/<
 ```text
 cc-orchestrator / cc-orca-orchestrator
  ├─ cc-provider-bootstrap
+ ├─ cc-issue-review ─────── (run_cycle.py, before implement; optional)
  ├─ cc-implement-issue ──── cc-verify ── cc-run
  ├─ cc-initial-review ───── cc-pr-review · cc-security-review* · cc-verify
  ├─ cc-resolve-comments ─── cc-code-review · cc-security-review* · cc-verify
@@ -48,6 +50,22 @@ For workspace-tool capabilities, recommended host integrations, and their limits
 ---
 
 ## Cycle skills
+
+### `cc-issue-review`
+
+Decides, before any code work, whether a work item is ready to implement. Read-only.
+
+- **Input:** a work-item ID. Optional: provider, code host, repository, and the declared task signals.
+- **Does:** reads the work item, its comments, and linked items; compares them with the current code, documentation, and history; evaluates only the relevant dimensions — `applicability`, `existing_work`, `overlap_dependency`, `scope_architecture`, `acceptance_verification`, `compatibility`, `security`, `data`, `operations` — and reports evidence-backed findings, uncertainties, and suggested issue edits.
+- **Is not:** implementation diagnosis (reproduction, mechanism, fix shape stay in `cc-implement-issue`) or code review (findings that need the diff stay with the review stages).
+- **Statuses:** `READY` (no material decision left for the implementer to invent), `NEEDS_REFINEMENT` (a person must decide or clarify first), `BLOCKED` (evidence unavailable).
+- **Result:** closed shape with `confidence` (`high`, `medium`, `low` — evidence quality, not a probability), `dimensions`, `findings` (`IR-NNN`, dimension, severity, `blocks_readiness`, evidence references of kind `repository`, `work_item`, `change_request`, or `commit`, and an optional `proposed_change`), and `uncertainties` (`IU-NNN`, `material`, `resolved`). Findings never use `REV-xxx`, `status`, or `disposition`.
+- **Never:** edits, comments on, labels, or transitions the work item; changes code or the checkout; publishes anything. Applying its suggested edits needs separate authorization.
+- **In the runtime:** an optional stage before `implement`; see [Issue review before implementation](review-cycle.md#issue-review-before-implementation).
+
+```text
+Use cc-issue-review for issue 123 and tell me whether it is ready to implement.
+```
 
 ### `cc-implement-issue`
 
