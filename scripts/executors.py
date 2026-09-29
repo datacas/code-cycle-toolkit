@@ -893,10 +893,13 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
     reason instead of a result, and one that cannot be fingerprinted after it
     is a violation.
 
-    A stage that only started work elsewhere has not finished when the call
-    returns, so the comparison then covers the launch and nothing more. Such a
-    result is marked `pending`, not verified, until `verify_read_only_completion`
-    compares again once the work is observed to be done.
+    Only a stage that succeeded and finished its work can be `verified`. One
+    that started work elsewhere, or ended any other way, such as a timeout
+    that can leave the worker or its children running, still fails on an
+    observed change, but an unchanged checkout then proves nothing about what
+    may still write to it. Such a result is marked `pending` until
+    `verify_read_only_completion` compares again once the work is known to
+    have stopped.
     """
     checkout = cwd if isinstance(cwd, str) and cwd else os.getcwd()
     try:
@@ -907,20 +910,22 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
     artifacts = dict(result.artifacts)
     artifacts["workspace_head_before"] = before["head"]
     artifacts["workspace_fingerprint_before"] = before["fingerprint"]
-    if result.asynchronous and result.outcome is DispatchOutcome.SUCCEEDED:
+    finished = (result.outcome is DispatchOutcome.SUCCEEDED
+                and not result.asynchronous)
+    if not finished:
         try:
-            launched = _checkout_fingerprint(checkout)
+            returned = _checkout_fingerprint(checkout)
         except Exception as exc:
             return _read_only_violation(
                 result, artifacts,
-                f"could not verify the read-only checkout after the launch: {exc}")
-        if launched != before:
-            artifacts["workspace_head_after"] = launched["head"]
-            artifacts["workspace_fingerprint_after"] = launched["fingerprint"]
+                f"could not verify the read-only checkout after the dispatch: {exc}")
+        if returned != before:
+            artifacts["workspace_head_after"] = returned["head"]
+            artifacts["workspace_fingerprint_after"] = returned["fingerprint"]
             return _read_only_violation(
                 result, artifacts,
-                "the branch, HEAD, index, or working tree changed while the "
-                "read-only stage was launched")
+                "the branch, HEAD, index, or working tree changed during a "
+                "read-only stage")
         artifacts.pop("read_only_mode", None)
         artifacts["read_only_verification"] = "pending"
         return replace(result, artifacts=artifacts)

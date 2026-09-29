@@ -2097,6 +2097,55 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertEqual(finished.artifacts["workspace_fingerprint_before"],
                          finished.artifacts["workspace_fingerprint_after"])
 
+    def test_a_timed_out_stage_is_pending_not_verified(self) -> None:
+        """A timeout says the worker may still be alive; an unchanged tree at
+        that moment is no evidence about what it writes next."""
+        def timed_out(argv, timeout=None, cwd=None):
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        for executor, target, adapter, extra in (
+            ("orca", self.ORCA, ex.OrcaAdapter(), {"context": orca_context(
+                review_workspace=ex.OrcaReviewWorkspace(
+                    path=tempfile.gettempdir() + "/cycle-review-elsewhere",
+                    implementer_path=str(self.repo), isolation="disposable"))}),
+            ("codex", self.CODEX, ex.CodexAdapter(), {}),
+        ):
+            with self.subTest(executor=executor):
+                git(self.repo, "checkout", "--", "tracked.txt")
+                result = ex.dispatch(
+                    router.RoutingDecision("reviewer", target, router.RoutingMode.PRODUCTION),
+                    "review it", ex.Registry([adapter]), writes=False,
+                    cwd=str(self.repo), runner=timed_out,
+                    probes={executor: ex.ProbeResult(executor, ex.Availability.READY, "t")},
+                    **extra,
+                )
+
+                self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+                self.assertEqual("pending", result.artifacts["read_only_verification"])
+                self.assertNotIn("workspace_fingerprint_after", result.artifacts)
+                self.assertNotIn("read_only_mode", result.artifacts)
+
+                # The worker that outlived its timeout writes afterwards.
+                (self.repo / "tracked.txt").write_text("late\n", encoding="utf-8")
+                finished = ex.verify_read_only_completion(result, str(self.repo))
+
+                self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, finished.outcome)
+
+    def test_a_failed_stage_that_wrote_is_still_a_violation(self) -> None:
+        def failed_after_writing(argv, timeout=None, cwd=None):
+            (self.repo / "tracked.txt").write_text("partial\n", encoding="utf-8")
+            return completed(returncode=1, stderr="boom")
+
+        result = ex.dispatch(
+            router.RoutingDecision("reviewer", self.CODEX, router.RoutingMode.PRODUCTION),
+            "review it", ex.Registry([ex.CodexAdapter()]), writes=False,
+            cwd=str(self.repo), runner=failed_after_writing,
+            probes={"codex": ex.ProbeResult("codex", ex.Availability.READY, "t")},
+        )
+
+        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
+        self.assertNotIn("read_only_verification", result.artifacts)
+
     def test_only_a_pending_result_is_checked_again(self) -> None:
         result = self.dispatch("codex", "none")
         (self.repo / "tracked.txt").write_text("after the stage\n", encoding="utf-8")
