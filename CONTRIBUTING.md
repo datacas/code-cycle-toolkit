@@ -97,6 +97,25 @@ Keep a change focused on one concern. Describe what changed in the skills'
 behaviour, not only which files moved: these files are instructions, so a
 wording change can be a behaviour change.
 
+### Commit messages and pull request titles
+
+Use Conventional Commits for commit subjects and pull request titles. Pull
+requests are squash-merged, so the pull request title becomes the commit subject
+on `main`.
+
+Write the subject as `<type>(<optional scope>): <description>`. Use one of these
+types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`,
+`ci`, or `chore`. Keep the whole subject to 72 characters or fewer. Write the
+description in imperative English, without a final period or ellipsis. For
+example: `feat(install): add one-command installers for skills and runtime`.
+
+Add a body only when it provides useful context. For an incompatible change,
+include a `BREAKING CHANGE:` note in the body.
+
+This convention applies to pull request titles as well as commit subjects.
+Toolkit skills must follow the target repository's commit-message convention
+and output language; this repository's rule does not change their portability.
+
 ## Release checklist
 
 - Confirm that no repository-specific names, local paths, credentials, or customer data are present.
