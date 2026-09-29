@@ -56,6 +56,7 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("The scripted executor is working", rendered)
         self.assertIn("implement done · succeeded · IMPLEMENTED", rendered)
         self.assertIn("review done · succeeded · APPROVED", rendered)
+        self.assertLessEqual(rendered.count("implement ·"), 2)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
         output = io.StringIO()

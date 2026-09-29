@@ -524,6 +524,13 @@ class FunctionalStopTests(RunCycleTestCase):
         review = next(row for row in self.rows() if row["role"] == "review")
         self.assertEqual("contract_violation", review["outcome"])
         self.assertIsNone(review["payload"]["read_only_mode"])
+        rendered_review = next(
+            line for line in report.explain().splitlines()
+            if "round 0" in line and "review" in line
+        )
+        self.assertIn("contract_violation", rendered_review)
+        self.assertIn("—", rendered_review)
+        self.assertNotIn("APPROVED", rendered_review)
 
     def test_an_unverifiable_read_only_checkout_blocks_and_is_recorded(self) -> None:
         """Failing closed is a recorded BLOCKED, not an exception from the
@@ -816,6 +823,12 @@ class ReportedReasonTests(RunCycleTestCase):
 
         self.assertNotIn("\x1b", report.stopped_because)
         self.assertIn("cleared the screen", report.stopped_because)
+        rendered_implement = next(
+            line for line in report.explain().splitlines()
+            if "round 0" in line and "implement" in line
+        )
+        self.assertIn("failed", rendered_implement)
+        self.assertIn("—", rendered_implement)
 
     def test_a_very_long_reason_is_cut(self) -> None:
         """One line of a report, not a page of it."""
@@ -991,6 +1004,8 @@ code_cycle:
         fallback = report.stages[0].attempts[1][0]
         self.assertEqual("claude-opus-5-5", fallback.target.model)
         self.assertTrue(fallback.used_fallback)
+        self.assertIn("anthropic/claude-opus-5-5 high", report.explain())
+        self.assertIn("fallback", report.explain())
 
     def test_an_explicit_repository_wins_over_the_declared_one(self) -> None:
         self.write("""
@@ -1466,6 +1481,114 @@ class ChangeRequestCheckTests(unittest.TestCase):
         self.assertIn("on main, not on issue-72", str(refused.exception))
 
 
+class CycleReportPresentationTests(RunCycleTestCase):
+    def assert_report_has_no_control_bytes(self, report) -> None:
+        self.assertNotRegex(report.explain(), r"[\x00-\x09\x0b-\x1f\x7f]")
+
+    def test_blocked_stage_shows_successful_dispatch_and_reported_status(self) -> None:
+        report = self.run_cycle(
+            Talker("codex", block("BLOCKED", error="work item unavailable")),
+            Talker("claude"),
+        )
+        implement = next(line for line in report.explain().splitlines()
+                         if "implement" in line)
+
+        self.assertIn("succeeded", implement)
+        self.assertIn("BLOCKED", implement)
+        self.assert_report_has_no_control_bytes(report)
+
+    def test_summary_keeps_dispatch_status_and_sanitized_warnings_together(self) -> None:
+        class WarningTalker(Talker):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return ex.DispatchResult(
+                    result.outcome, result.executor, result.requested,
+                    model_resolved=result.model_resolved,
+                    detail="warning: isolated review clone edited\x1b[31m",
+                    artifacts={**result.artifacts,
+                               "warnings": ["cleanup needed\x00 after review"]},
+                    agent_output=result.agent_output,
+                )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            report = self.run_cycle(
+                WarningTalker("codex", block("IMPLEMENTED")),
+                Talker("claude", block("APPROVED")), verbose=True,
+            )
+        rendered = report.explain()
+        implement = next(line for line in rendered.splitlines()
+                         if "implement" in line and "round 0" in line)
+
+        self.assertIn("succeeded", implement)
+        self.assertIn("IMPLEMENTED", implement)
+        self.assertIn("round 0", implement)
+        self.assertIn("openai/gpt-6-luna high", implement)
+        self.assertIn("warning: isolated review clone edited[31m", rendered)
+        self.assertIn("warning: cleanup needed after review", rendered)
+        self.assertIn("warning: isolated review clone edited[31m", output.getvalue())
+        self.assertIn("warning: cleanup needed after review", output.getvalue())
+        self.assert_report_has_no_control_bytes(report)
+
+    def test_review_and_rereview_rows_show_status_findings_and_round(self) -> None:
+        finding = {
+            "id": "REV-001", "severity": "high", "status": "open",
+            "blocks_approval": True,
+        }
+
+        class Reviewer(Talker):
+            calls = 0
+
+            def spoken(self, task: str) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return block("CHANGES_REQUESTED", findings=[finding])
+                return block("APPROVED", new_findings=[], verified_findings=[
+                    {**finding, "status": "resolved"},
+                ])
+
+        report = self.run_cycle(Talker("codex"), Reviewer("claude"))
+        rendered = report.explain()
+
+        self.assertIn("round 0", rendered)
+        self.assertIn("CHANGES_REQUESTED", rendered)
+        self.assertIn("findings: 1 open (1 high)", rendered)
+        self.assertIn("round 1", rendered)
+        self.assertIn("RESOLVED", rendered)
+        self.assertIn("APPROVED", rendered)
+        self.assertIn("findings: 0 open", rendered)
+        self.assert_report_has_no_control_bytes(report)
+
+    def test_rereview_summary_does_not_call_new_findings_still_open(self) -> None:
+        previous = {
+            "id": "REV-001", "severity": "high", "status": "open",
+            "blocks_approval": True,
+        }
+        new = {
+            "id": "REV-002", "severity": "low", "status": "open",
+            "blocks_approval": False,
+        }
+
+        class Reviewer(Talker):
+            calls = 0
+
+            def spoken(self, task: str) -> str:
+                self.calls += 1
+                if self.calls == 1:
+                    return block("CHANGES_REQUESTED", findings=[previous])
+                return block("CHANGES_REQUESTED", head_sha="b" * 40,
+                             new_findings=[new], verified_findings=[
+                                 {**previous, "status": "resolved"},
+                             ])
+
+        report = self.run_cycle(Talker("codex"), Reviewer("claude"), max_iterations=1)
+        rendered = report.explain()
+
+        self.assertIn("findings: 1 open (1 low)", rendered)
+        self.assertNotIn("still open", rendered)
+        self.assert_report_has_no_control_bytes(report)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1552,6 +1675,14 @@ class RepeatedFindingTests(RunCycleTestCase):
         self.assertIn("REV-001", report.stopped_because)
         self.assertEqual(2, report.iterations)
         self.assertEqual("repeated_findings", self.closing()["stop_reason"])
+        rows = [row for row in report.explain().splitlines()
+                if "round " in row and ("resolve" in row or "rereview" in row)]
+        self.assertEqual(4, len(rows))
+        self.assertIn("round 1", rows[0])
+        self.assertIn("round 1", rows[1])
+        self.assertIn("round 2", rows[2])
+        self.assertIn("round 2", rows[3])
+        self.assertNotRegex(report.explain(), r"[\x00-\x09\x0b-\x1f\x7f]")
 
     def test_the_signal_is_recorded_before_each_resolution_and_rereview(self) -> None:
         implementer = Scripted("codex", resolutions=[claimed(), claimed()])

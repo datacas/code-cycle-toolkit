@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cycle import CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter
+from cycle_status import CycleStatusWriter, _duration
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -412,6 +412,17 @@ class Reported:
 
 
 @dataclass
+class StageReportDetails:
+    """Presentation facts captured while each stage result is still in hand."""
+
+    round: int
+    status: str | None
+    findings: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    duration_seconds: float | None = None
+
+
+@dataclass
 class CycleReport:
     """What the cycle did, and why it stopped there."""
 
@@ -427,6 +438,7 @@ class CycleReport:
     #: The exit condition, one of `telemetry.STOP_REASONS`.
     stop_reason: str | None = None
     stages: list[StageOutcome] = field(default_factory=list)
+    stage_details: list[StageReportDetails] = field(default_factory=list)
     #: The last issue review's judged result, when one ran. Its findings are
     #: shown to whoever has to refine the work item; none of their prose is
     #: recorded.
@@ -438,11 +450,29 @@ class CycleReport:
 
     def explain(self) -> str:
         lines = [f"{self.repo_id} {self.task_id}: {self.status}"]
-        for stage in self.stages:
+        for index, stage in enumerate(self.stages):
+            details = (self.stage_details[index]
+                       if index < len(self.stage_details) else StageReportDetails(0, None))
             result = stage.result
             ran = result.executor if result else "—"
             outcome = result.outcome.value if result else "blocked"
-            lines.append(f"  {stage.role:<12} {stage.decision.profile:<15} {ran:<7} {outcome}")
+            target = stage.decision.target
+            target_name = (f"{target.provider}/{target.model} {target.effort}"
+                           if target else "—")
+            fallback = " fallback" if stage.decision.used_fallback else ""
+            status = details.status or "—"
+            duration = (f"{_duration(details.duration_seconds)}"
+                        if details.duration_seconds is not None else "—")
+            lines.append(
+                f"  round {details.round:<2} {stage.role:<12} "
+                f"{stage.decision.profile:<15} {ran:<7} {target_name:<36}"
+                f"{fallback}  {outcome:<18} {status:<22} {duration}"
+            )
+            findings = _findings_line(stage.role, details.findings)
+            if findings:
+                lines.append(f"           {findings}")
+            lines.extend(f"           warning: {warning}"
+                         for warning in details.warnings)
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
         if self.reason:
@@ -498,6 +528,37 @@ def readable(text: str, limit: int = REASON_LIMIT) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit].rstrip() + "\u2026"
+
+
+def _findings_line(role: str, findings: dict[str, int]) -> str | None:
+    total = findings.get("findings_total")
+    if total is None or role not in {"review", "rereview"}:
+        return None
+    line = f"findings: {total} open"
+    severities = ("critical", "high", "medium", "low")
+    if all(f"findings_{severity}" in findings for severity in severities):
+        counts = [f"{findings[f'findings_{severity}']} {severity}"
+                  for severity in severities if findings[f"findings_{severity}"]]
+        if counts:
+            line += f" ({', '.join(counts)})"
+    return line
+
+
+def _stage_warnings(outcome: StageOutcome) -> list[str]:
+    result = outcome.result
+    if result is None:
+        return []
+    warnings = result.artifacts.get("warnings", [])
+    candidates = list(warnings) if isinstance(warnings, list) else [warnings]
+    detail = result.detail
+    if isinstance(detail, str) and detail.strip().casefold().startswith("warning:"):
+        candidates.append(detail.split(":", 1)[1])
+    cleaned = []
+    for candidate in candidates:
+        warning = readable(candidate)
+        if warning and warning not in cleaned:
+            cleaned.append(warning)
+    return cleaned
 
 
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
@@ -921,7 +982,7 @@ def run_cycle(
 
     def run(role: str, instruction: str = "", *,
             change_request_id: str | None = None, escalated: bool = False,
-            ) -> tuple[StageOutcome, Reported, str | None]:
+            ) -> tuple[StageOutcome, Reported, str | None, dict]:
         """Dispatch one stage; also say whether the evidence it was given changed."""
         evidence = ""
         stage_kwargs = dispatch_kwargs
@@ -951,8 +1012,21 @@ def run_cycle(
                 _remove_workspace(str(directory))
         report.stages.append(outcome)
         reported = read_structured_result(outcome.result)
-        status_writer.stage_finished(outcome.result, reported.status)
-        return outcome, reported, tampered
+        findings = _findings(reported.payload, role)
+        warnings = _stage_warnings(outcome)
+        reported_status = reported.status if outcome.succeeded else None
+        duration = status_writer.stage_finished(
+            outcome.result, reported_status,
+            findings=_findings_line(role, findings), warnings=warnings,
+        )
+        report.stage_details.append(StageReportDetails(
+            round=recorder.iteration,
+            status=reported_status,
+            findings=findings,
+            warnings=warnings,
+            duration_seconds=duration if outcome.result is not None else None,
+        ))
+        return outcome, reported, tampered, findings
 
     def stop(because: str, status: str = UNRESOLVED_END,
              reported: Reported | None = None, *,
@@ -991,7 +1065,7 @@ def run_cycle(
         """
         escalated = False
         while True:
-            outcome, reported, tampered = run(
+            outcome, reported, tampered, _ = run(
                 ISSUE_REVIEW_ROLE, ESCALATED_ISSUE_REVIEW if escalated else "",
                 escalated=escalated)
             stopped = unfinished(outcome, reported, tampered)
@@ -1025,8 +1099,8 @@ def run_cycle(
         condition that has to be remembered four times is one that will be
         missing from the fourth.
         """
-        outcome, reported, tampered = run(role, instruction,
-                                          change_request_id=change_request_id)
+        outcome, reported, tampered, findings = run(
+            role, instruction, change_request_id=change_request_id)
         stopped = unfinished(outcome, reported, tampered)
         if stopped is not None:
             return reported, stopped
@@ -1035,7 +1109,7 @@ def run_cycle(
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
             recorder.record_verdict(role, reported.status,
-                                    **_findings(reported.payload, role),
+                                    **findings,
                                     **(_forecast(reported.payload) if role == "implement" else {}),
                                     **_tests(reported.payload, boundary_rule=(
                                         boundary_rule_fired(recorder.latest_change))),
