@@ -503,6 +503,17 @@ def check_asking_contract(root: Path, errors: list[str]) -> None:
     runtime refuses.
     """
     check_shared_sections(root, ASKING_SKILLS, (ASKING_SECTION,), errors)
+    # A result that carries identifiers and status only would forbid the very
+    # prose a delegated stage's questions consist of.
+    for skill in ASKING_SKILLS:
+        skill_path = root / "skills" / skill / "SKILL.md"
+        if not skill_path.is_file():
+            continue
+        flattened = " ".join(skill_path.read_text(encoding="utf-8").split())
+        if ("identifiers and status only" in flattened
+                and "The one exception is `questions`" not in flattened):
+            errors.append(f"skills/{skill}/SKILL.md: its result allows identifiers "
+                          "and status only, with no exception for `questions`")
     path = root / "skills" / ASKING_SKILLS[0] / "SKILL.md"
     if not path.is_file():
         return

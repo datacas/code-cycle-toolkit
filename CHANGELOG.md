@@ -24,7 +24,9 @@ All notable changes to this project are documented here. This project follows
   finding, piece of evidence, and proposed edit at once. The shared *Asking the
   user* section in every cycle skill and `cc-provider-bootstrap` states the
   rule; stages return an optional `questions` list, which the issue review
-  already accepts and `run_cycle.py` prints before the details.
+  already accepts. `run_cycle.py` prints only the first question and saves the
+  rest, with the findings and evidence, to an owner-only decisions record beside
+  the telemetry database.
 
 ### Fixed
 

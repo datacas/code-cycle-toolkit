@@ -1264,6 +1264,9 @@ class ExplicitCalibrationTests(unittest.TestCase):
             def explain(self) -> str:
                 return "scripted"
 
+            def decisions_record(self) -> None:
+                return None
+
         def run_cycle(*args, **kw):
             seen.append(kw["mode"])
             return Report()

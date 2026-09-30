@@ -625,7 +625,10 @@ all open findings with `blocks_approval: true`.
 The serialised block carries identifiers and status only. It must not repeat
 narrative already published in the comment: no `title`, no `description`, no
 `summary`, no `reason`, no quoted evidence. `comment_url` is the pointer to
-that prose and is mandatory whenever a comment was published.
+that prose and is mandatory whenever a comment was published. The one
+exception is `questions`: when the review stops for a decision only the user
+can make, the block carries it as *Asking the user* describes, so the
+coordinator can ask it.
 
 ```text
 ORCHESTRATION_RESULT

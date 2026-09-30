@@ -13,6 +13,7 @@ import contextlib
 import copy
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -389,30 +390,30 @@ class DriverTests(RunCycleTestCase):
         self.assertEqual(rc.UNRESOLVED_END, report.status)
         self.assertEqual("needs_refinement", report.stop_reason)
         self.assertEqual("needs_refinement", self.cycle_row()["stop_reason"])
-        explained = report.explain()
-        self.assertIn("IR-001 high blocks acceptance_verification", explained)
-        self.assertIn("work_item:API-7", explained)
-        self.assertIn("proposed: SECRET-PROSE state the observable result", explained)
+        record = report.decisions_record()
+        self.assertEqual("IR-001", record["findings"][0]["id"])
+        self.assertEqual("API-7", record["findings"][0]["evidence"][0]["ref"])
+        self.assertEqual("SECRET-PROSE state the observable result",
+                         record["findings"][0]["proposed_change"])
 
-    def test_a_stop_leads_with_its_decisions_and_asks_them_in_order(self) -> None:
+    def test_a_stop_asks_only_its_first_question_and_prints_no_details(self) -> None:
+        """REV-001: the later questions and the findings wait for an answer."""
         report = self.cycle([spoken(result(
             "NEEDS_REFINEMENT", uncertainties=[uncertainty()],
             questions=[question(), question(id="Q-002", blocks=["IR-001", "IU-001"],
                                             recommended=None)]))])
 
-        lines = report.explain().splitlines()
-        decisions = lines.index("  decisions: 2 needed")
-        self.assertTrue(lines[decisions + 1].startswith("  question 1/2 Q-002: "))
-        self.assertEqual("    options: The exit status | The printed report | free text",
-                         lines[decisions + 2])
-        self.assertTrue(lines[decisions + 3].startswith("  question 2/2 Q-001: "))
-        self.assertEqual(
-            "    options: The exit status (recommended) | The printed report | free text",
-            lines[decisions + 4])
-        details = lines.index("  details (show on request):")
-        self.assertGreater(details, decisions + 4)
-        finding_line = next(i for i, line in enumerate(lines) if "finding: IR-001" in line)
-        self.assertGreater(finding_line, details)
+        explained = report.explain()
+        self.assertIn("  decisions: 2 needed\n  question 1/2 Q-002: SECRET-PROSE", explained)
+        self.assertIn("    options: The exit status | The printed report | free text\n"
+                      "  details: not saved", explained)
+        self.assertNotIn("Q-001", explained)
+        self.assertNotIn("(recommended)", explained)
+        self.assertNotIn("the criteria name no observable result", explained)
+        self.assertNotIn("state the observable result", explained)
+        self.assertNotIn("old rows", explained)
+        self.assertEqual(["Q-002", "Q-001"],
+                         [item["id"] for item in report.decisions_record()["questions"]])
 
     def test_a_stop_without_questions_names_what_has_to_be_decided(self) -> None:
         report = self.cycle([spoken(result("NEEDS_REFINEMENT",
@@ -420,7 +421,13 @@ class DriverTests(RunCycleTestCase):
 
         explained = report.explain()
         self.assertIn("  decisions: 2 needed\n  decide: IR-001, IU-001\n"
-                      "  details (show on request):", explained)
+                      "  details: not saved", explained)
+        self.assertNotIn("SECRET-PROSE", explained)
+
+    def test_a_continuing_cycle_has_no_decisions_record(self) -> None:
+        report = self.cycle()
+        self.assertIsNone(report.decisions_record())
+        self.assertNotIn("decisions:", report.explain())
 
     def test_no_question_prose_reaches_the_store(self) -> None:
         self.cycle([spoken(result("NEEDS_REFINEMENT", questions=[question()]))])
@@ -481,7 +488,8 @@ class DriverTests(RunCycleTestCase):
         self.assertEqual("readiness_unconfirmed", report.stop_reason)
         self.assertEqual(2, sum(1 for role, kind in self.roles()
                                 if role == "issue_review" and kind == "dispatch"))
-        self.assertIn("uncertainty: IU-001 material unresolved", report.explain())
+        self.assertIn("  decisions: 1 needed\n  decide: IU-001", report.explain())
+        self.assertEqual("IU-001", report.decisions_record()["uncertainties"][0]["id"])
 
     def test_high_risk_work_starts_on_the_stronger_profile_and_does_not_escalate(self) -> None:
         report = self.cycle([spoken(result(confidence="low"))],
@@ -646,6 +654,41 @@ class ConfigurationTests(unittest.TestCase):
                     rc.main(["--repo", "owner/api", "--task", "API-7", "--no-config",
                              "--database", str(Path(temporary.name) / "t.sqlite"), *argv])
                 self.assertIs(expected, run.call_args.kwargs["issue_review"])
+
+    def test_the_cli_prints_one_question_and_saves_the_rest(self) -> None:
+        """REV-001 at the boundary: what a person running the CLI sees."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Path(temporary.name) / "t.sqlite"
+        report = rc.CycleReport(repo_id="owner/api", task_id="API-7",
+                                status=rc.UNRESOLVED_END, verdict=None)
+        report.readiness = ir.assess(result(
+            "NEEDS_REFINEMENT", uncertainties=[uncertainty()],
+            questions=[question(), question(id="Q-002", blocks=["IU-001"],
+                                            prompt="SECRET-PROSE second decision")]))
+        output = io.StringIO()
+        with mock.patch.object(rc, "run_cycle", return_value=report), \
+                contextlib.redirect_stdout(output):
+            rc.main(["--repo", "owner/api", "--task", "API-7", "--no-config",
+                     "--database", str(database)])
+
+        printed = output.getvalue()
+        self.assertIn("question 1/2 Q-001:", printed)
+        self.assertNotIn("Q-002", printed)
+        self.assertNotIn("second decision", printed)
+        self.assertNotIn("the criteria name no observable result", printed)
+        saved = [path for path in (Path(temporary.name) / "decisions").iterdir()]
+        self.assertEqual(1, len(saved))
+        self.assertIn(f"  details: {saved[0]}", printed)
+        record = json.loads(saved[0].read_text(encoding="utf-8"))
+        self.assertEqual(["Q-001", "Q-002"], [item["id"] for item in record["questions"]])
+        self.assertEqual("IR-001", record["findings"][0]["id"])
+        self.assertEqual("IU-001", record["uncertainties"][0]["id"])
+        self.assertEqual(2, record["decisions"])
+        self.assertFalse((Path(temporary.name) / "status").exists()
+                         and any((Path(temporary.name) / "status").glob("decisions-*")))
+        if os.name == "posix":
+            self.assertEqual(0o600, saved[0].stat().st_mode & 0o777)
 
 
 if __name__ == "__main__":
