@@ -318,6 +318,45 @@ class InstalledCycleTests(unittest.TestCase):
                          [json.loads(row["payload"]).get("stop_reason")
                           for row in rows if row["role"] == "coordinate"])
 
+    def test_a_detached_cycle_returns_at_once_and_runs_in_its_own_session(self) -> None:
+        """The launch a host with a task time limit uses: nothing of it to kill."""
+        pidfile = self.root / "agent.pid"
+        argv, env = self.command("--issue-review", "off", "--detach",
+                                 FAKE_HANG="codex", FAKE_PIDFILE=str(pidfile))
+        started = time.monotonic()
+        launched = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertLess(time.monotonic() - started, 20)
+        lines = dict(line.split(": ", 1) for line in launched.stdout.splitlines())
+        cycle_pid = int(lines["detached"].rsplit(" ", 1)[1])
+        log = Path(lines["log"])
+        self.assertEqual(self.database.parent / "status", log.parent)
+        self.assertIn("cycle_status.py --follow --database", lines["follow"])
+
+        self.wait_for(pidfile)
+        self.assertNotEqual(os.getsid(0), os.getsid(cycle_pid))
+        self.assertEqual(cycle_pid, os.getpgid(cycle_pid))
+        os.kill(cycle_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 60
+        while "recorded in" not in log.read_text(encoding="utf-8"):
+            if time.monotonic() > deadline:
+                self.fail(f"the detached cycle wrote no report: {log.read_text()}")
+            time.sleep(0.1)
+
+        self.assertIn("interrupted by SIGTERM during implement", log.read_text(encoding="utf-8"))
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.rows() if row["role"] == "implement"])
+
+    def test_a_detached_cycle_is_refused_before_it_detaches(self) -> None:
+        """A mistake is reported to the person launching, not to a log file."""
+        argv, env = self.command("--detach", "--pr", "4")
+        refused = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("--pr names an existing change request", refused.stderr)
+        self.assertNotIn("detached:", refused.stdout)
+
     def test_nothing_reached_the_database_outside_the_repository(self) -> None:
         """The store is host state, not a file the project carries."""
         self.run_cycle()

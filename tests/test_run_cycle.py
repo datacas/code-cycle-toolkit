@@ -2183,3 +2183,11 @@ class InterruptibleTests(unittest.TestCase):
 
         self.assertEqual("SIGTERM", caught.exception.signal_name)
         self.assertIs(before, signal.getsignal(signal.SIGTERM))
+
+
+class DetachFlagTests(unittest.TestCase):
+    def test_the_detached_run_is_started_without_the_flag_or_its_abbreviations(self) -> None:
+        for argument in ("--detach", "--detac", "--det", "--de"):
+            self.assertTrue(rc._detach_flag(argument), argument)
+        for argument in ("--database", "--difficulty", "--d", "detach", "--detached"):
+            self.assertFalse(rc._detach_flag(argument), argument)

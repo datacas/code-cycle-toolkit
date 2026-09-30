@@ -45,16 +45,18 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter, _duration
+from cycle_status import CycleStatusWriter, _duration, status_directory
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -1754,6 +1756,48 @@ def interruptible():
             signal.signal(number, handler_before)
 
 
+def _detach_flag(argument: str) -> bool:
+    """`--detach` as argparse reads it, abbreviations included."""
+    return argument.startswith("--de") and "--detach".startswith(argument)
+
+
+def detach(arguments: list[str], database: str | None) -> int:
+    """Start this same cycle in its own session, and return at once.
+
+    A host that runs commands as tasks with a time limit, such as an agent's
+    background shell, stops the whole task when the limit is reached, and a
+    cycle routinely outlasts it. The detached run belongs to no such task: it
+    has its own session and process group, reads nothing from the terminal,
+    and writes its report to a log beside the status files that
+    `cycle_status.py` reads.
+    """
+    directory = status_directory(database)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log = directory / f"detached-{stamp}-{os.getpid()}.log"
+    options: dict = {}
+    if os.name == "nt":
+        options["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                    | subprocess.DETACHED_PROCESS)
+    else:
+        options["start_new_session"] = True
+    with open(log, "ab") as handle:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()),
+             *(argument for argument in arguments if not _detach_flag(argument))],
+            stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+            close_fds=True, **options,
+        )
+    follow = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
+              "--follow"]
+    if database:
+        follow += ["--database", database]
+    print(f"detached: run_cycle.py is running as process {process.pid}")
+    print(f"log: {log}")
+    print(f"follow: {subprocess.list2cmdline(follow) if os.name == 'nt' else shlex.join(follow)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_cycle",
@@ -1795,6 +1839,10 @@ def main(argv: list[str] | None = None) -> int:
                               "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
+    parser.add_argument("--detach", action="store_true",
+                        help=("start the cycle in its own session and return at once, "
+                              "so a host's task time limit cannot stop it; follow it "
+                              "with cycle_status.py and read its report in the printed log"))
     parser.add_argument("--verbose", action="store_true",
                         help="show stage starts, live progress, and stage results")
     parser.add_argument("--progress-interval", type=float, default=60,
@@ -1822,6 +1870,11 @@ def main(argv: list[str] | None = None) -> int:
             check_change_request(repo, args.change_request, args.cwd)
     except CycleDriverError as error:
         parser.error(str(error))
+
+    if args.detach:
+        # Everything that can be refused was refused above, where a person is
+        # still reading; the detached run repeats those checks on its own.
+        return detach(list(sys.argv[1:] if argv is None else argv), args.database)
 
     change_bases = change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.

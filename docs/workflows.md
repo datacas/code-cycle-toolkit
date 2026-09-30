@@ -236,6 +236,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
 | `--timeout` | adapter default (3600 s) | Seconds one dispatch may take |
+| `--detach` | off | Start the cycle in its own session and return at once, printing its process ID, a log path, and the `cycle_status.py --follow` command. Use it whenever an agent or another host that limits a task's time launches the cycle |
 | `--verbose` | off | Print stage starts, changed progress, and stage results as they happen; the final report is always printed |
 | `--progress-interval` | `60` seconds | Time between progress lines while a stage is running |
 | `--database` | [default path](telemetry.md#where-it-lives) | Telemetry database |
@@ -256,6 +257,19 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from rereview  # 
 The stages before `--from` are skipped. The rest run with the same routing, recording, and `--max-iterations` as a full cycle. `resolve` and `rereview` rely on the pull request's comments carrying the previous review; the stage recovers those findings through `review.trusted_authors`. Before anything is dispatched, the driver refuses `--from` without `--pr`, `--pr` without a resuming `--from`, and `--local-only` with a resume. It then reads the pull request with `gh` and stops with the reason unless it is open, its head branch still exists, and `--cwd` has that branch checked out at the pull request's head commit, so a stale or unpushed checkout is never reviewed or fixed in its place. Only GitHub pull requests can be resumed. A resumed run is a **new cycle** with its own `cycle_id`, and every row carries `started_from`, so its review never counts as a first pass.
 
 **Issue review:** in the default `auto` mode, a new cycle first runs `cc-issue-review` read-only and implements only on a confirmed `READY`. `NEEDS_REFINEMENT` stops before any code work and prints the findings, evidence, and proposed issue edits; nothing is posted to the work item. `--issue-review off` or `issue_review.mode: off` restores the original flow. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
+
+**Launching from an agent:** an agent host runs shell commands as tasks with a time limit, and a cycle routinely outlasts it. Claude Code, for example, stops a background command after 30 minutes unless it is given a longer limit, and stopping it also stops the executor the cycle started. Launch with `--detach` so the cycle has its own session and nothing of it belongs to the host's task:
+
+```bash
+python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --detach
+# detached: run_cycle.py is running as process 48213
+# log: ~/.config/code-cycle-toolkit/status/detached-20260930T101500Z-48210.log
+# follow: python3 ~/.code-cycle/runtime/cycle_status.py --follow
+```
+
+Every check that can refuse the run happens before it detaches, so a mistake is still printed where you launched it. The detached run's report and any error go to the log; follow its progress with `cycle_status.py`. Stop it with `kill <pid>`: like any other stop request, that is recorded.
+
+**Interrupted runs:** SIGTERM, SIGHUP, or Ctrl-C during a stage stops the executor the driver started, records that stage with the outcome `interrupted`, closes the cycle with the stop reason `interrupted`, marks its status file finished, and leaves the checkout exactly as it was. Only a `SIGKILL` still ends a run without a record.
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 

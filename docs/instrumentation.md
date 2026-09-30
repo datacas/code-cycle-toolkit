@@ -393,6 +393,8 @@ row with `stop_reason = interrupted`, marks the status file finished, and leaves
 the checkout as it was. Only a signal that can be caught is recorded: a
 `SIGKILL`, including one a host sends before that cleanup has finished, still
 ends the run without a row, and `cycle_outcome` then reads it as not closed.
+Launching with `--detach` keeps a host's task time limit from reaching the
+cycle at all.
 
 Which backend can confirm the model it ran differs, and this was established by
 running each one rather than by reading documentation:
