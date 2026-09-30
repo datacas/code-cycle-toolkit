@@ -52,7 +52,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
@@ -1846,13 +1846,16 @@ def detach(arguments: list[str], database: str | None) -> int:
             stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
             close_fds=True, **options,
         )
-    follow = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
-              "--follow"]
+    cursor = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    progress = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
+                "--line", "--since", cursor]
     if database:
-        follow += ["--database", database]
+        progress += ["--database", database]
     print(f"detached: run_cycle.py is running as process {process.pid}")
     print(f"log: {log}")
-    print(f"follow: {subprocess.list2cmdline(follow) if os.name == 'nt' else shlex.join(follow)}")
+    print(f"progress: {subprocess.list2cmdline(progress) if os.name == 'nt' else shlex.join(progress)}")
     return 0
 
 

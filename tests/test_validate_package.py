@@ -98,6 +98,19 @@ class ValidatePackageTests(unittest.TestCase):
             errors, "shared section '## Workspace tools and evidence' has drifted"
         )
 
+    def test_rejects_user_visible_progress_section_drift(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-orca-orchestrator" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("default it to\n3 minutes", text)
+        path.write_text(text.replace("3 minutes", "4 minutes", 1), encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "shared section '## User-visible progress' has drifted"
+        )
+
     def test_rejects_a_skill_missing_workspace_tools_section(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-orchestrator" / "SKILL.md"
