@@ -81,6 +81,10 @@ class DispatchOutcome(str, Enum):
     #: ran, and a different model answering is the promise being broken, not a
     #: detail to note in passing.
     CONTRACT_VIOLATION = "contract_violation"
+    #: The process running the cycle was told to stop while the executor ran:
+    #: a host that ends its task at a time limit, a closed terminal, Ctrl-C. The
+    #: stage neither finished nor failed on its own, and its result is unknown.
+    INTERRUPTED = "interrupted"
 
 
 class ExecutorError(ValueError):
@@ -311,10 +315,28 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
         raise subprocess.TimeoutExpired(
             argv, timeout, output="".join(stdout_lines), stderr="".join(stderr_lines),
         ) from exc
+    except BaseException:
+        # The cycle was interrupted while the agent ran. `subprocess.run`, on the
+        # path above, already stops its child on the way out; this one must too,
+        # or the agent keeps editing a checkout nothing supervises any more.
+        _stop_process(process)
+        raise
     stdout_thread.join()
     stderr_thread.join()
     return subprocess.CompletedProcess(argv, returncode,
                                        "".join(stdout_lines), "".join(stderr_lines))
+
+
+def _stop_process(process: subprocess.Popen, grace: float = 5) -> None:
+    """Ask a child to stop, then make it: an interrupted host rarely waits long."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _publication_preflight(cwd: str | None) -> tuple[bool, str]:

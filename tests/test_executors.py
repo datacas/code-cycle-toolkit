@@ -1566,6 +1566,36 @@ class AgentOutputTests(unittest.TestCase):
         self.assertEqual(["first" + chr(10), "second" + chr(10)], output)
         self.assertEqual("first" + chr(10) + "second" + chr(10), completed.stdout)
 
+    @unittest.skipUnless(hasattr(__import__("signal"), "SIGUSR1"), "needs POSIX signals")
+    def test_an_interrupted_streaming_run_stops_its_agent(self) -> None:
+        """The host stops the cycle; the agent it started must not keep going."""
+        import os
+        import signal
+        import threading
+
+        class Stop(BaseException):
+            pass
+
+        def interrupt(signum, frame):
+            raise Stop()
+
+        pids: list[int] = []
+        script = "import os, time; print(os.getpid(), flush=True); time.sleep(60)"
+        previous = signal.signal(signal.SIGUSR1, interrupt)
+        timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGUSR1))
+        try:
+            timer.start()
+            with self.assertRaises(Stop):
+                ex._run([sys.executable, "-c", script], timeout=30,
+                        on_output=lambda line: pids.append(int(line)))
+        finally:
+            timer.cancel()
+            signal.signal(signal.SIGUSR1, previous)
+
+        self.assertEqual(1, len(pids))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pids[0], 0)
+
     def test_the_block_survives_the_envelope_intact(self) -> None:
         """The whole point: escaped in the envelope, parseable once unwrapped."""
         raw = self.fixture("claude_output.json")

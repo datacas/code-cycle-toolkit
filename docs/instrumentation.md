@@ -385,6 +385,15 @@ ran; a different model answering is that promise broken, and the cycle must not
 advance on it. An executor that reports no model at all leaves the question
 open, which is a third answer rather than a quiet yes.
 
+A dispatch that was still running when the process driving it was told to stop
+— SIGTERM from a host ending its task at a time limit, SIGHUP from a closed
+terminal, Ctrl-C — is recorded with the outcome `interrupted` (schema 12). The
+driver stops the executor it started, writes that row and the cycle's closing
+row with `stop_reason = interrupted`, marks the status file finished, and leaves
+the checkout as it was. Only a signal that can be caught is recorded: a
+`SIGKILL`, including one a host sends before that cleanup has finished, still
+ends the run without a row, and `cycle_outcome` then reads it as not closed.
+
 Which backend can confirm the model it ran differs, and this was established by
 running each one rather than by reading documentation:
 
@@ -610,7 +619,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11 |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12 |
 | `cycle` | `issue_review` | the cycle started at `implement`: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
 

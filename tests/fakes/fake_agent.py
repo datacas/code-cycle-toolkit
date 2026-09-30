@@ -17,6 +17,9 @@ an exhausted window, and a review that changes its mind on the second round:
     FAKE_BLOCKED=codex     that agent exits 0 reporting BLOCKED, as one did
     FAKE_READINESS=<status> the issue review's status (default READY); the
                            other variables leave the issue review alone
+    FAKE_HANG=codex        that agent never finishes an implementation, as a
+                           long one looks to a host that stops it; with
+    FAKE_PIDFILE=<path>    it first writes its process ID there
 
 It writes each CLI's real envelope — Codex NDJSON with `item.completed`, Claude
 one JSON object with `result` — because that is what a canary found the driver
@@ -29,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 NAME = Path(sys.argv[0]).name
@@ -182,6 +186,14 @@ def main(argv: list[str]) -> int:
     model = flag(argv, "-m", "--model") or "unknown"
     prompt = prompt_of(argv)
     said = [f"prompt received: {prompt}"]
+
+    if os.environ.get("FAKE_HANG") == NAME and "cc-implement-issue" in prompt:
+        pidfile = os.environ.get("FAKE_PIDFILE")
+        if pidfile:
+            with open(pidfile, "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+        time.sleep(300)
+        return 1
 
     if (os.environ.get("FAKE_SILENT") == NAME
             or (os.environ.get("FAKE_SILENT_REVIEW") == NAME

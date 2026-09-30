@@ -64,7 +64,10 @@ from pathlib import Path
 #: fields below, its escalated dispatch carries `escalated`, and the cycle row
 #: carries `issue_review` and the stop reasons `needs_refinement` and
 #: `readiness_unconfirmed`. All payload-only; an older row has no such stage.
-SCHEMA_VERSION = 11
+#: 12: a dispatch the host interrupted is recorded with the outcome
+#: `interrupted`, and its cycle row with the stop reason `interrupted`. An
+#: older store has no such rows: its interrupted runs left none at all.
+SCHEMA_VERSION = 12
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -101,7 +104,7 @@ CYCLE_STARTS = ("implement", "review", "resolve", "rereview")
 STOP_REASONS = frozenset({
     "approved", "iteration_limit", "no_progress", "repeated_findings",
     "stage_not_completed", "dispatch_failed", "local_only",
-    "needs_refinement", "readiness_unconfirmed",
+    "needs_refinement", "readiness_unconfirmed", "interrupted",
 })
 
 #: What a new cycle did about the optional issue review (schema 11).
@@ -164,7 +167,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "unknown", "installed", "authenticated", "quota_exhausted", "ready",
     })),
     "outcome": ("token", frozenset({
-        "succeeded", "blocked", "failed", "contract_violation",
+        "succeeded", "blocked", "failed", "contract_violation", "interrupted",
     })),
     "status": ("token", frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",

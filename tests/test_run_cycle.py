@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import cycle  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import stats  # noqa: E402
@@ -127,6 +129,20 @@ class StreamingNative(ex.NativeAdapter):
             model_resolved=target.model,
             artifacts={"stdout": self.body}, agent_output=self.body,
         )
+
+
+class Interrupter(Talker):
+    """An executor the host stops partway through one named stage."""
+
+    def __init__(self, name: str, during: str = "cc-implement-issue") -> None:
+        super().__init__(name)
+        self.during = during
+
+    def dispatch(self, target, task, **kw):
+        if self.during in task:
+            self.dispatched.append(task)
+            raise cycle.CycleInterrupted("SIGTERM")
+        return super().dispatch(target, task, **kw)
 
 
 class RunCycleTestCase(unittest.TestCase):
@@ -2106,3 +2122,64 @@ class CompleteDiffTests(RunCycleTestCase):
                                           "APPDATA": ""}):
             self.assertFalse(ex._paths_overlap(str(rc.evidence_root()),
                                                tempfile.gettempdir()))
+
+
+class InterruptionTests(RunCycleTestCase):
+    """A host that stops the cycle must still leave a record of where."""
+
+    def dispatch_rows(self, role: str) -> list[dict]:
+        return [row for row in self.rows() if row["role"] == role
+                and row["payload"].get("record_kind") == "dispatch"]
+
+    def test_an_interrupted_stage_is_recorded_as_interrupted(self) -> None:
+        report = self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.dispatch_rows("implement")])
+        self.assertEqual([], self.dispatch_rows("review"))
+        self.assertEqual("interrupted", report.stop_reason)
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertIn("interrupted by SIGTERM during implement", report.stopped_because)
+        self.assertIn("interrupted", report.explain())
+
+    def test_the_cycle_row_says_it_was_interrupted(self) -> None:
+        self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        closing = [row for row in self.rows()
+                   if row["payload"].get("record_kind") == "cycle"]
+        self.assertEqual(["interrupted"],
+                         [row["payload"]["stop_reason"] for row in closing])
+
+    def test_the_status_file_no_longer_says_the_stage_is_running(self) -> None:
+        self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        [path] = (self.store.path.parent / "status").glob("*.json")
+        status = json.loads(path.read_text(encoding="utf-8"))
+        self.assertTrue(status["finished"])
+        self.assertEqual(rc.UNRESOLVED_END, status["status"])
+        self.assertTrue(status["stage"]["finished"])
+        self.assertEqual("interrupted", status["stage"]["outcome"])
+
+    def test_an_interrupted_review_keeps_the_implementation_before_it(self) -> None:
+        report = self.run_cycle(Talker("codex"), Interrupter("claude", "cc-initial-review"))
+
+        self.assertEqual(["succeeded"],
+                         [row["outcome"] for row in self.dispatch_rows("implement")])
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.dispatch_rows("review")])
+        self.assertIn("during review", report.stopped_because)
+
+
+@unittest.skipUnless(hasattr(signal, "SIGTERM") and os.name != "nt",
+                     "needs POSIX signal delivery to the current process")
+class InterruptibleTests(unittest.TestCase):
+    def test_a_stop_request_becomes_an_interruption_and_the_handler_is_restored(self) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+
+        with self.assertRaises(cycle.CycleInterrupted) as caught:
+            with rc.interruptible():
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+
+        self.assertEqual("SIGTERM", caught.exception.signal_name)
+        self.assertIs(before, signal.getsignal(signal.SIGTERM))
