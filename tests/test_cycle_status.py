@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,88 @@ import cycle_status  # noqa: E402
 
 
 class CycleStatusTests(unittest.TestCase):
+    def test_progress_line_has_the_fixed_fields_on_one_line(self) -> None:
+        line = cycle_status.format_progress_line({
+            "stage": {
+                "role": "implement",
+                "executor": "codex",
+                "provider": "openai",
+                "model": "gpt-6-luna",
+                "effort": "max",
+                "elapsed_seconds": 720,
+                "activity": "running the\ntest suite",
+                "finished": False,
+            },
+        })
+
+        self.assertRegex(
+            line,
+            r"^\[\d{2}:\d{2}\] implement · codex openai/gpt-6-luna max · "
+            r"12m00s · running the test suite$",
+        )
+        self.assertNotIn("\n", line)
+
+        done = cycle_status.format_progress_line({
+            "stage": {
+                "role": "implement",
+                "executor": "codex",
+                "provider": "openai",
+                "model": "gpt-6-luna",
+                "effort": "max",
+                "duration_seconds": 720,
+                "activity": "opening the pull request",
+                "status": "IMPLEMENTED",
+                "finished": True,
+            },
+        })
+        self.assertIn("implement done", done)
+        self.assertIn("IMPLEMENTED: opening the pull request", done)
+        self.assertNotIn("\n", done)
+
+    def test_line_mode_only_prints_statuses_newer_than_since(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            statuses = [
+                {
+                    "cycle_id": "old",
+                    "updated_at": "2026-09-30T11:00:00+00:00",
+                    "stage": {"role": "old-stage", "executor": "codex",
+                              "provider": "openai", "model": "old-model",
+                              "effort": "low", "elapsed_seconds": 60,
+                              "activity": "old activity", "finished": False},
+                },
+                {
+                    "cycle_id": "new",
+                    "updated_at": "2026-09-30T12:00:00+00:00",
+                    "stage": {"role": "new-stage", "executor": "claude",
+                              "provider": "anthropic", "model": "new-model",
+                              "effort": "high", "elapsed_seconds": 60,
+                              "activity": "new activity", "finished": False},
+                },
+            ]
+            for status in statuses:
+                (directory / f"{status['cycle_id']}.json").write_text(
+                    json.dumps(status), encoding="utf-8"
+                )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "cycle_status.py"),
+                 "--line", "--since", "2026-09-30T11:30:00Z",
+                 "--status-dir", str(directory)],
+                capture_output=True, text=True, check=False,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(1, len(lines))
+        self.assertIn("new-stage", lines[0])
+        self.assertNotIn("old-stage", result.stdout)
+
+    def test_since_requires_timezone_aware_iso_timestamp(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
+            cycle_status.main(["--line", "--since", "2026-09-30T11:30:00"])
+        self.assertIn("timestamp must include a timezone", output.getvalue())
+
     def test_heartbeat_suppresses_unchanged_progress_but_reports_activity_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = io.StringIO()

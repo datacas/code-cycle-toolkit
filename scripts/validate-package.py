@@ -71,6 +71,7 @@ SHARED_EVIDENCE_SECTIONS = ("### Complete evidence",)
 WORKSPACE_TOOL_SKILLS = EVIDENCE_SKILLS
 WORKSPACE_TOOL_ORCHESTRATORS = ("cc-orchestrator", "cc-orca-orchestrator")
 SHARED_WORKSPACE_TOOL_SECTIONS = ("## Workspace tools and evidence",)
+SHARED_PROGRESS_SECTIONS = ("## User-visible progress",)
 WORKSPACE_TOOL_PRODUCT_NAMES = (
     "Serena", "AgentMemory", "Graphify", "RTK", "context-mode", "Context7",
 )
@@ -736,6 +737,9 @@ def validate_package(root: Path) -> list[str]:
         check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
         check_shared_sections(root, EVIDENCE_SKILLS, SHARED_EVIDENCE_SECTIONS, errors)
         check_workspace_tool_sections(root, errors)
+        check_shared_sections(
+            root, WORKSPACE_TOOL_ORCHESTRATORS, SHARED_PROGRESS_SECTIONS, errors
+        )
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
         check_issue_review_contract(root, errors)

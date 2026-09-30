@@ -332,7 +332,8 @@ class InstalledCycleTests(unittest.TestCase):
         cycle_pid = int(lines["detached"].rsplit(" ", 1)[1])
         log = Path(lines["log"])
         self.assertEqual(self.database.parent / "status", log.parent)
-        self.assertIn("cycle_status.py --follow --database", lines["follow"])
+        self.assertIn("cycle_status.py --line --since", lines["progress"])
+        self.assertIn("--database", lines["progress"])
 
         self.wait_for(pidfile)
         self.assertNotEqual(os.getsid(0), os.getsid(cycle_pid))

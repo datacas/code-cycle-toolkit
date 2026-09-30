@@ -875,8 +875,10 @@ row still says `succeeded`, because it did.
 The runtime also writes one atomic status snapshot per cycle beside the
 telemetry database. `cycle_status.py` reads those snapshots from any terminal;
 the snapshot is updated while a dispatch runs and retained after the cycle
-finishes. `run_cycle.py --verbose` prints the same routing and activity fields
-to the launching terminal, with periodic updates controlled by
+finishes. `cycle_status.py --line --since <timestamp>` prints only updated
+snapshots, each as one user-facing line, for a host monitoring facility to
+relay. `run_cycle.py --verbose` prints the same routing and activity fields to
+the launching terminal, with periodic updates controlled by
 `--progress-interval`. This output is opt-in; without `--verbose`, the normal
 terminal output is unchanged.
 

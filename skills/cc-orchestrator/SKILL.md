@@ -357,6 +357,37 @@ never apply a proposed edit: that needs its own explicit authorization. Issue
 findings are `IR-NNN`; they never become `REV-xxx` findings and never enter the
 change-request state handed to later stages.
 
+## User-visible progress
+
+Keep the user informed while a cycle runs. At every stage start and end, and on
+periodic heartbeats while work is active, send one line in this format:
+
+```text
+[HH:MM] <stage> · <executor> <provider>/<model> <effort> · <elapsed> · <activity>
+```
+
+At completion, mark the stage as `done` and include its outcome or reported
+status. Keep `<activity>` to one short clause. Use the routed target for a
+dispatched stage and the current agent and host-reported model for in-agent
+work; use `unknown` only for details the host does not expose. The
+`progress_interval` invocation value sets the heartbeat cadence; default it to
+3 minutes. A different positive interval may be supplied by the caller.
+
+For a detached `run_cycle.py`, keep stage start and end lines immediate in the
+coordinator. Follow the status snapshots through the host's monitoring
+facility: keep an RFC 3339 UTC cursor, run
+`cycle_status.py --line --since <cursor>` at each scheduled wake-up, relay its
+lines verbatim, then advance the cursor to the check time even when it printed
+nothing. Use status-change wake-ups when the host supports them, plus the
+periodic heartbeat. Do not keep a foreground or background task open just to
+wait for progress. If the host only supports timed wake-ups, progress from the
+status file may be delayed by one interval; the coordinator still reports each
+stage transition as it happens.
+
+For in-agent work, including `single_agent` stages and Orca coordinator steps,
+emit the same start and end lines yourself. For each worker Task, emit the start
+line immediately before dispatch and the end line as soon as its result arrives.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs and request its

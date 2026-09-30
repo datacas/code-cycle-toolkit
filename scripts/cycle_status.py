@@ -116,6 +116,70 @@ def _stage_line(stage: dict, *, progress: bool = False) -> str:
     return f"[{timestamp}] " + " · ".join(str(part) for part in parts)
 
 
+def format_progress_line(status: dict) -> str:
+    """Format the latest cycle snapshot as one user-facing progress line."""
+    timestamp = datetime.now().astimezone().strftime("%H:%M")
+
+    def field(value, fallback: str) -> str:
+        if value is None:
+            return fallback
+        return _clean_activity(str(value)) or fallback
+
+    stage = status.get("stage")
+    if not isinstance(stage, dict):
+        state = "done" if status.get("finished") else "starting"
+        role = (field(status.get("status", "cycle"), "cycle")
+                if status.get("finished") else "cycle")
+        activity = field(
+            status.get("task") or "waiting for the first stage",
+            "waiting for the first stage",
+        )
+        return f"[{timestamp}] {role} {state} · {activity}"
+
+    role = field(stage.get("role", "stage"), "stage")
+    activity = stage.get("activity")
+    if stage.get("finished"):
+        role += " done"
+        outcome = stage.get("status") or stage.get("outcome")
+        if outcome and activity:
+            activity = f"{field(outcome, 'unknown')}: {activity}"
+        elif outcome:
+            activity = outcome
+    executor = field(stage.get("executor"), "unknown")
+    provider = field(stage.get("provider"), "")
+    model = field(stage.get("model"), "unknown")
+    target = f"{provider}/{model}" if provider else model
+    effort = field(stage.get("effort"), "unknown")
+    parts = [role, f"{executor} {target} {effort}"]
+    elapsed = stage.get("duration_seconds", stage.get("elapsed_seconds", 0))
+    parts.append(_duration(elapsed))
+    if activity:
+        cleaned = field(activity, "")
+        if cleaned:
+            parts.append(cleaned)
+    return f"[{timestamp}] " + " · ".join(parts)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO 8601, for example 2026-09-30T12:00:00Z") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone, for example 2026-09-30T12:00:00Z")
+    return parsed
+
+
+def _updated_after(status: dict, since: datetime) -> bool:
+    updated = status.get("updated_at")
+    if not isinstance(updated, str):
+        return False
+    try:
+        return _parse_timestamp(updated) > since
+    except ValueError:
+        return False
+
+
 def format_status(status: dict) -> str:
     """Format one saved cycle snapshot for a human terminal."""
     stage = status.get("stage")
@@ -348,6 +412,10 @@ def read_statuses(directory: str | Path) -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Show the status of code-cycle runs.")
     parser.add_argument("--follow", action="store_true", help="refresh until interrupted")
+    parser.add_argument("--line", action="store_true",
+                        help="print each cycle as one user-facing progress line")
+    parser.add_argument("--since", default=None,
+                        help="with --line, print snapshots updated after this ISO 8601 timestamp")
     parser.add_argument("--progress-interval", type=float, default=60,
                         help="seconds between refreshes when following (default: 60)")
     parser.add_argument("--database", default=None,
@@ -361,14 +429,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
+    if args.since and not args.line:
+        parser.error("--since requires --line")
+    try:
+        since = _parse_timestamp(args.since) if args.since else None
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.profiles:
         import profile_config
         return profile_config.main(["show", "--cwd", args.cwd])
     directory = status_directory(args.database, args.status_dir)
+    last_lines: dict[str, str] = {}
     try:
         while True:
             statuses = read_statuses(directory)
-            if statuses:
+            if args.line:
+                for status in statuses:
+                    line = format_progress_line(status)
+                    cycle_id = str(status.get("cycle_id", "cycle"))
+                    if (since is None or _updated_after(status, since)) and \
+                            last_lines.get(cycle_id) != line:
+                        print(line)
+                        last_lines[cycle_id] = line
+            elif statuses:
                 for status in statuses:
                     print(format_status(status))
             else:
