@@ -23,7 +23,7 @@ ACTIVITY_LIMIT = 500
 
 
 def _now() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _clean_activity(value: str) -> str:
@@ -118,23 +118,28 @@ def _stage_line(stage: dict, *, progress: bool = False) -> str:
 
 def format_progress_line(status: dict) -> str:
     """Format the latest cycle snapshot as one user-facing progress line."""
-    timestamp = datetime.now().astimezone().strftime("%H:%M")
+    updated_at = status.get("updated_at")
+    try:
+        timestamp = _parse_timestamp(updated_at).astimezone().strftime("%H:%M")
+    except (AttributeError, TypeError, ValueError):
+        timestamp = datetime.now().astimezone().strftime("%H:%M")
 
     def field(value, fallback: str) -> str:
         if value is None:
             return fallback
         return _clean_activity(str(value)) or fallback
 
+    if status.get("finished"):
+        outcome = field(status.get("status"), "unknown")
+        return f"[{timestamp}] cycle done · {outcome}"
+
     stage = status.get("stage")
     if not isinstance(stage, dict):
-        state = "done" if status.get("finished") else "starting"
-        role = (field(status.get("status", "cycle"), "cycle")
-                if status.get("finished") else "cycle")
         activity = field(
             status.get("task") or "waiting for the first stage",
             "waiting for the first stage",
         )
-        return f"[{timestamp}] {role} {state} · {activity}"
+        return f"[{timestamp}] cycle starting · {activity}"
 
     role = field(stage.get("role", "stage"), "stage")
     activity = stage.get("activity")

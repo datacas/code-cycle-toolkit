@@ -1847,7 +1847,7 @@ def detach(arguments: list[str], database: str | None) -> int:
             close_fds=True, **options,
         )
     cursor = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
-        timespec="seconds"
+        timespec="microseconds"
     ).replace("+00:00", "Z")
     progress = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
                 "--line", "--since", cursor]

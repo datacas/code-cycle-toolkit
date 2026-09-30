@@ -224,14 +224,17 @@ work; use `unknown` only for details the host does not expose. The
 
 For a detached `run_cycle.py`, keep stage start and end lines immediate in the
 coordinator. Follow the status snapshots through the host's monitoring
-facility: keep an RFC 3339 UTC cursor, run
-`cycle_status.py --line --since <cursor>` at each scheduled wake-up, relay its
-lines verbatim, then advance the cursor to the check time even when it printed
-nothing. Use status-change wake-ups when the host supports them, plus the
-periodic heartbeat. Do not keep a foreground or background task open just to
-wait for progress. If the host only supports timed wake-ups, progress from the
-status file may be delayed by one interval; the coordinator still reports each
-stage transition as it happens.
+facility. Before each scheduled check, capture the current UTC time as an
+RFC 3339 timestamp with subsecond precision and save it as the cursor for the
+next check. Run `cycle_status.py --line --since <previous-cursor>`, then relay
+its lines verbatim. Capturing the next cursor before reading ensures updates
+written during or after the check are included on the next wake-up. Use
+status-change wake-ups when the host supports them, plus the periodic heartbeat.
+Do not keep a foreground or background task open just to wait for progress. If
+the host only supports timed wake-ups, progress from the status file may be
+delayed by one interval; the coordinator still reports each stage transition as
+it happens. When a `cycle done` line appears, stop polling and report its final
+status.
 
 For in-agent work, including `single_agent` stages and Orca coordinator steps,
 emit the same start and end lines yourself. For each worker Task, emit the start

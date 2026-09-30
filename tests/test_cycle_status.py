@@ -17,6 +17,21 @@ import cycle_status  # noqa: E402
 
 
 class CycleStatusTests(unittest.TestCase):
+    def test_progress_line_uses_snapshot_time_and_reports_cycle_end(self) -> None:
+        updated_at = "2026-09-30T12:34:00.123456+00:00"
+        local_time = cycle_status._parse_timestamp(updated_at).astimezone().strftime("%H:%M")
+        line = cycle_status.format_progress_line({
+            "updated_at": updated_at,
+            "finished": True,
+            "status": "READY_FOR_MANUAL_MERGE",
+            "stage": {"role": "initial-review", "finished": True},
+        })
+
+        self.assertEqual(
+            f"[{local_time}] cycle done · READY_FOR_MANUAL_MERGE",
+            line,
+        )
+
     def test_progress_line_has_the_fixed_fields_on_one_line(self) -> None:
         line = cycle_status.format_progress_line({
             "stage": {
@@ -61,7 +76,7 @@ class CycleStatusTests(unittest.TestCase):
             statuses = [
                 {
                     "cycle_id": "old",
-                    "updated_at": "2026-09-30T11:00:00+00:00",
+                    "updated_at": "2026-09-30T11:00:00.000000+00:00",
                     "stage": {"role": "old-stage", "executor": "codex",
                               "provider": "openai", "model": "old-model",
                               "effort": "low", "elapsed_seconds": 60,
@@ -69,7 +84,7 @@ class CycleStatusTests(unittest.TestCase):
                 },
                 {
                     "cycle_id": "new",
-                    "updated_at": "2026-09-30T12:00:00+00:00",
+                    "updated_at": "2026-09-30T12:00:00.200000+00:00",
                     "stage": {"role": "new-stage", "executor": "claude",
                               "provider": "anthropic", "model": "new-model",
                               "effort": "high", "elapsed_seconds": 60,
@@ -82,7 +97,7 @@ class CycleStatusTests(unittest.TestCase):
                 )
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "cycle_status.py"),
-                 "--line", "--since", "2026-09-30T11:30:00Z",
+                 "--line", "--since", "2026-09-30T12:00:00.100000Z",
                  "--status-dir", str(directory)],
                 capture_output=True, text=True, check=False,
             )
@@ -154,6 +169,10 @@ class CycleStatusTests(unittest.TestCase):
             initial = json.loads(writer.path.read_text(encoding="utf-8"))
             self.assertFalse(initial["finished"])
             self.assertEqual("RUNNING", initial["status"])
+            self.assertRegex(
+                initial["updated_at"],
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}[+-]\d{2}:\d{2}$",
+            )
 
             class Target:
                 executor = "codex"
