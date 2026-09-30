@@ -489,8 +489,30 @@ class CycleReport:
 
 
 def _readiness_lines(readiness: Readiness) -> list[str]:
-    """An issue review's findings and open questions, made safe to print."""
-    lines = []
+    """An issue review's decisions first, then its findings, made safe to print.
+
+    Whoever relays this asks the questions one at a time and shows the details
+    only on request, so the details come last and say so.
+    """
+    if not readiness.valid:
+        return []
+    count = readiness.decisions
+    lines = [f"  decisions: {count} needed" if count else "  decisions: none reported"]
+    for position, question in enumerate(readiness.questions, 1):
+        options = " | ".join(
+            readable(option, 100) + (" (recommended)" if option == question["recommended"]
+                                     else "")
+            for option in question["options"])
+        lines.append(f"  question {position}/{count} {question['id']}: "
+                     f"{readable(question['prompt'])}")
+        lines.append(f"    options: {options} | free text")
+    if not readiness.questions and count:
+        pending = [item["id"] for item in readiness.findings if item["blocks_readiness"]]
+        pending += [item["id"] for item in readiness.uncertainties
+                    if item["material"] and not item["resolved"]]
+        lines.append(f"  decide: {', '.join(pending)}")
+    if readiness.findings or readiness.uncertainties:
+        lines.append("  details (show on request):")
     for finding in readiness.findings:
         evidence = ", ".join(
             f"{item['kind']}:{readable(item['ref'], 100)}" for item in finding["evidence"])

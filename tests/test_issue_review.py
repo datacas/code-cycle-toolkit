@@ -67,6 +67,14 @@ def uncertainty(**fields) -> dict:
     return value
 
 
+def question(**fields) -> dict:
+    value = {"id": "Q-001", "prompt": "SECRET-PROSE what should the criterion observe?",
+             "options": ["The exit status", "The printed report"],
+             "recommended": "The exit status", "blocks": ["IR-001"]}
+    value.update(fields)
+    return value
+
+
 def spoken(payload: dict) -> str:
     return f"ORCHESTRATION_RESULT\n{json.dumps(payload)}\nEND_ORCHESTRATION_RESULT"
 
@@ -125,6 +133,32 @@ class ResultShapeTests(unittest.TestCase):
             result("NEEDS_REFINEMENT", findings=[finding(), finding()])))
         self.assertNotEqual([], ir.result_errors(
             result(uncertainties=[uncertainty(material=False)] * 2)))
+
+    def test_questions_are_optional_and_validated_when_present(self) -> None:
+        self.assertEqual([], ir.result_errors(result("NEEDS_REFINEMENT",
+                                                     questions=[question()])))
+        self.assertTrue(ir.result_errors(result("NEEDS_REFINEMENT",
+                                                questions=[question(options=["one"])])))
+
+    def test_a_question_settles_something_the_result_reports(self) -> None:
+        problems = ir.result_errors(result("NEEDS_REFINEMENT",
+                                           questions=[question(blocks=["IR-009"])]))
+        self.assertEqual(["`questions[0]`.blocks names what the result does not report"],
+                         problems)
+        self.assertEqual([], ir.result_errors(result(
+            "NEEDS_REFINEMENT", uncertainties=[uncertainty()],
+            questions=[question(blocks=["IR-001", "IU-001"])])))
+
+    def test_questions_are_kept_in_asking_order(self) -> None:
+        readiness = ir.assess(result(
+            "NEEDS_REFINEMENT", uncertainties=[uncertainty()],
+            questions=[question(), question(id="Q-002", blocks=["IR-001", "IU-001"])]))
+        self.assertEqual(["Q-002", "Q-001"], [item["id"] for item in readiness.questions])
+        self.assertEqual(2, readiness.decisions)
+
+    def test_without_questions_the_decisions_are_what_blocks(self) -> None:
+        readiness = ir.assess(result("NEEDS_REFINEMENT", uncertainties=[uncertainty()]))
+        self.assertEqual(2, readiness.decisions)
 
     def test_something_that_is_not_an_object_is_refused(self) -> None:
         for payload in (None, [], "READY", 3):
@@ -359,6 +393,42 @@ class DriverTests(RunCycleTestCase):
         self.assertIn("IR-001 high blocks acceptance_verification", explained)
         self.assertIn("work_item:API-7", explained)
         self.assertIn("proposed: SECRET-PROSE state the observable result", explained)
+
+    def test_a_stop_leads_with_its_decisions_and_asks_them_in_order(self) -> None:
+        report = self.cycle([spoken(result(
+            "NEEDS_REFINEMENT", uncertainties=[uncertainty()],
+            questions=[question(), question(id="Q-002", blocks=["IR-001", "IU-001"],
+                                            recommended=None)]))])
+
+        lines = report.explain().splitlines()
+        decisions = lines.index("  decisions: 2 needed")
+        self.assertTrue(lines[decisions + 1].startswith("  question 1/2 Q-002: "))
+        self.assertEqual("    options: The exit status | The printed report | free text",
+                         lines[decisions + 2])
+        self.assertTrue(lines[decisions + 3].startswith("  question 2/2 Q-001: "))
+        self.assertEqual(
+            "    options: The exit status (recommended) | The printed report | free text",
+            lines[decisions + 4])
+        details = lines.index("  details (show on request):")
+        self.assertGreater(details, decisions + 4)
+        finding_line = next(i for i, line in enumerate(lines) if "finding: IR-001" in line)
+        self.assertGreater(finding_line, details)
+
+    def test_a_stop_without_questions_names_what_has_to_be_decided(self) -> None:
+        report = self.cycle([spoken(result("NEEDS_REFINEMENT",
+                                           uncertainties=[uncertainty()]))])
+
+        explained = report.explain()
+        self.assertIn("  decisions: 2 needed\n  decide: IR-001, IU-001\n"
+                      "  details (show on request):", explained)
+
+    def test_no_question_prose_reaches_the_store(self) -> None:
+        self.cycle([spoken(result("NEEDS_REFINEMENT", questions=[question()]))])
+
+        with contextlib.closing(sqlite3.connect(self.store.path)) as connection:
+            dump = "\n".join(str(row) for row in connection.execute("SELECT * FROM stages"))
+        self.assertNotIn("SECRET-PROSE", dump)
+        self.assertNotIn("Q-001", dump)
 
     def test_blocked_missing_and_malformed_results_stop_before_implementation(self) -> None:
         for body in (spoken(result("BLOCKED", confidence="low")), "no block at all",
