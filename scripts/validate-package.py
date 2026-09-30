@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import issue_review  # noqa: E402
 import review_contract  # noqa: E402
+import stop_questions  # noqa: E402
 
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -72,6 +73,21 @@ WORKSPACE_TOOL_SKILLS = EVIDENCE_SKILLS
 WORKSPACE_TOOL_ORCHESTRATORS = ("cc-orchestrator", "cc-orca-orchestrator")
 SHARED_WORKSPACE_TOOL_SECTIONS = ("## Workspace tools and evidence",)
 SHARED_PROGRESS_SECTIONS = ("## User-visible progress",)
+# Every skill that can stop for a person's decision asks it the same way, and
+# returns the same `questions` shape when it is delegated.
+ASKING_SKILLS = tuple(sorted(CYCLE_SKILLS | {"cc-provider-bootstrap"}))
+ASKING_SECTION = "## Asking the user"
+ASKING_PHRASES = (
+    "one at a time",
+    "two to four",
+    "recommended one first",
+    "free-text answer",
+    "Never ask with a wall of text",
+    "available on request",
+    "only after the user confirms it",
+    "never asks the user itself",
+    "`stop_questions.questions_errors`",
+)
 WORKSPACE_TOOL_PRODUCT_NAMES = (
     "Serena", "AgentMemory", "Graphify", "RTK", "context-mode", "Context7",
 )
@@ -478,6 +494,43 @@ def check_issue_review_contract(root: Path, errors: list[str]) -> None:
                   for problem in issue_review.result_errors(example))
 
 
+def check_asking_contract(root: Path, errors: list[str]) -> None:
+    """Keep the shared asking rule, and the shape it prints, in step with the runtime.
+
+    The section is compared byte for byte across the skills that can stop for a
+    decision; it must state the rule, and its example must pass
+    `stop_questions.questions_errors`, or the skills promise a shape the
+    runtime refuses.
+    """
+    check_shared_sections(root, ASKING_SKILLS, (ASKING_SECTION,), errors)
+    path = root / "skills" / ASKING_SKILLS[0] / "SKILL.md"
+    if not path.is_file():
+        return
+    where = f"skills/{ASKING_SKILLS[0]}/SKILL.md"
+    section = extract_section(path.read_text(encoding="utf-8"), ASKING_SECTION)
+    if section is None:
+        return
+    flattened = " ".join(section.split())
+    for phrase in ASKING_PHRASES:
+        if phrase not in flattened:
+            errors.append(f"{where}: {ASKING_SECTION!r} does not state {phrase!r}")
+    examples = FENCE_RE.findall(section)
+    if not examples:
+        errors.append(f"{where}: {ASKING_SECTION!r} prints no `questions` example")
+        return
+    try:
+        example = json.loads(examples[0])
+    except json.JSONDecodeError as exc:
+        errors.append(f"{where}: `questions` example is not strict JSON: {exc}")
+        return
+    questions = example.get("questions") if isinstance(example, dict) else None
+    if not questions:
+        errors.append(f"{where}: `questions` example shows no question")
+        return
+    errors.extend(f"{where}: `questions` example: {problem}"
+                  for problem in stop_questions.questions_errors(questions))
+
+
 ORCHESTRATOR_SKILLS = ("cc-orchestrator", "cc-orca-orchestrator")
 LADDER_SECTION = "### Repeated-findings ladder"
 #: What each orchestrator's ladder must state, in the words that define it:
@@ -743,6 +796,7 @@ def validate_package(root: Path) -> list[str]:
         check_record_contract(root, errors)
         check_implement_contract(root, errors)
         check_issue_review_contract(root, errors)
+        check_asking_contract(root, errors)
         check_repeated_findings_ladder(root, errors)
         check_issue_review_gate(root, errors)
         check_runtime_launch(root, errors)

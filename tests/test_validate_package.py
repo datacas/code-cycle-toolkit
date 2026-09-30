@@ -111,6 +111,75 @@ class ValidatePackageTests(unittest.TestCase):
             errors, "shared section '## User-visible progress' has drifted"
         )
 
+    def edit_every_asking_copy(self, package: Path, old: str, new: str) -> None:
+        for skill in VALIDATOR.ASKING_SKILLS:
+            path = package / "skills" / skill / "SKILL.md"
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(old, text, skill)
+            path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+    def test_rejects_asking_the_user_section_drift(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-rereview" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("**one at a time**", "**all together**", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "shared section '## Asking the user' has drifted")
+
+    def test_rejects_a_stage_that_stops_without_the_asking_rule(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-provider-bootstrap" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("## Asking the user\n", "## Questions\n", 1),
+                        encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors,
+            "skills/cc-provider-bootstrap/SKILL.md: missing shared section "
+            "'## Asking the user'")
+
+    def test_rejects_an_asking_rule_that_allows_a_wall_of_text(self) -> None:
+        package = self.copy_package()
+        self.edit_every_asking_copy(
+            package, "Never ask with a wall of\n   text.", "Keep it short.")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "does not state 'Never ask with a wall of text'")
+
+    def test_rejects_a_questions_example_the_runtime_refuses(self) -> None:
+        package = self.copy_package()
+        self.edit_every_asking_copy(
+            package, '"recommended": "The command\'s exit status"',
+            '"recommended": "Both"')
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "`questions` example: `questions[0]`.recommended must be null "
+            "or the first option")
+
+    def test_rejects_an_issue_review_question_that_settles_nothing_reported(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-issue-review" / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('"blocks": ["IR-001", "IU-001"]\n    }\n  ],\n  "summary"', text)
+        path.write_text(text.replace(
+            '"blocks": ["IR-001", "IU-001"]\n    }\n  ],\n  "summary"',
+            '"blocks": ["IR-009"]\n    }\n  ],\n  "summary"', 1), encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(
+            errors, "result example: `questions[0]`.blocks names what the result "
+            "does not report")
+
     def test_rejects_a_skill_missing_workspace_tools_section(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-orchestrator" / "SKILL.md"

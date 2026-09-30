@@ -19,10 +19,22 @@ Set it with `code_cycle.issue_review.mode`, or for one run with `--issue-review`
 |---|---|
 | `READY` with `high` or `medium` confidence and no unresolved material uncertainty | dispatches `implement` |
 | `READY` with `low` confidence or an unresolved material uncertainty | reviews once more on `senior_reviewer`; stops as `readiness_unconfirmed` when that pass does not confirm it, or when the first pass already ran on `senior_reviewer` |
-| `NEEDS_REFINEMENT` | stops as `needs_refinement` before `implement` and prints the findings, evidence, and proposed issue edits |
+| `NEEDS_REFINEMENT` | stops as `needs_refinement` before `implement`, prints one `decisions` line and the result's `questions` in asking order, then the findings, evidence, and proposed issue edits as details to show on request |
 | `BLOCKED`, a missing block, a block outside the contract, or a result whose `issue_id` names another work item | stops before `implement` (`stage_not_completed`) |
 
 Confidence is a category for evidence quality, never a calibrated probability. The stage is `read_only`, has no publication permission, and never edits, comments on, labels, or closes the work item: its proposed edits are printed for a person, and applying them needs separate authorization. Its findings are `IR-NNN`, with no `REV-xxx` identity, `status`, or `disposition`, so they never enter the change-request contract below.
+
+### Asking for decisions
+
+A stop that needs a person — `NEEDS_REFINEMENT`, a decision behind `HUMAN_INTERVENTION` or `BLOCKED`, a missing provider value, a `needs_clarification` finding — does not end with everything at once. Every cycle skill and `cc-provider-bootstrap` share one *Asking the user* section: one summary line with the number of decisions, then the questions **one at a time**, the one that settles the most first. Each has one or two sentences of context, two to four options with the recommended one first, and a free-text answer. The host's interactive question tool is used when it has one (`AskUserQuestion` in Claude Code, the coordinator's question channel in an orchestrated run); otherwise one numbered question per message. Findings, evidence, and proposed edits stay available on request.
+
+A delegated stage returns its questions as a `questions` list in its structured result, so the coordinator asks them without re-deriving them from prose:
+
+```json
+{ "id": "Q-001", "prompt": "…", "options": ["…", "…"], "recommended": "…", "blocks": ["IR-001", "IU-001"] }
+```
+
+`recommended` is `null` or the first option; `blocks` names what the answer settles, and in an issue-review result only its own `IR-NNN` and `IU-NNN` identifiers. `stop_questions.questions_errors` is the executable definition, and the validator checks the shared section's example against it. Answers go back to the resumed stage as explicit input; an edit to the work item is shown and applied only after confirmation.
 
 ## The loop
 
