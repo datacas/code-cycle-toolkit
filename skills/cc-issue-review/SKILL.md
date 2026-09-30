@@ -73,6 +73,65 @@ Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-te
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
 
+## Asking the user
+
+When a stop needs a person to decide something — a `NEEDS_REFINEMENT` or
+`HUMAN_INTERVENTION` stop, a `BLOCKED` stop that a decision would clear, a
+missing provider value, or a `needs_clarification` finding — ask, and do not
+end with the findings, evidence, and proposed edits in one block.
+
+1. Open with one line that says what stopped and how many decisions it needs.
+2. Ask the questions **one at a time**, in asking order: the question whose
+   `blocks` settles the most first, ties in the order the stage listed them.
+   Each question gives one or two sentences of context and two to four
+   concrete options with the recommended one first. A free-text answer is
+   always available. Ask the next question only after the previous answer.
+3. Use the host's interactive question mechanism when it has one, such as
+   `AskUserQuestion` in Claude Code or the equivalent in another host, and the
+   coordinator's question channel in an orchestrated run. When the host has
+   none, send one numbered question per message. Never ask with a wall of
+   text.
+4. Keep the complete findings, evidence, and proposed edits available on
+   request, in the published comment, a result file, or a later message, and
+   do not print them before the questions.
+5. When every question is answered, pass the answers to the resumed stage as
+   explicit input and continue from where the work stopped when they unblock
+   it. When the answers imply an edit to the work item, show the resulting edit
+   and apply it only after the user confirms it: an answer to a question is not
+   authorization to change the work item.
+6. A delegated stage never asks the user itself. It returns its questions in
+   its structured result as `questions`, and the coordinator asks them without
+   re-deriving them from prose.
+
+The `questions` list has this shape, and `stop_questions.questions_errors` is
+its executable definition:
+
+```text
+{
+  "questions": [
+    {
+      "id": "Q-001",
+      "prompt": "The acceptance criterion names no observable result. What should it check?",
+      "options": ["The command's exit status", "The printed report", "Both"],
+      "recommended": "The command's exit status",
+      "blocks": ["IR-001", "IU-001"]
+    }
+  ]
+}
+```
+
+- `id`: `Q-001`, `Q-002`, … within one result;
+- `prompt`: the context and the question, at most 600 characters;
+- `options`: two to four distinct answers, each at most 200 characters;
+- `recommended`: the first option, or `null` when nothing is recommended;
+- `blocks`: the identifiers the answer settles, such as findings,
+  uncertainties, stages, or provider values; a stage that reports findings or
+  uncertainties names only those it reports.
+
+`prompt` and `options` follow the selected output language; every key and
+identifier stays as written. A stop that needs no decision carries no
+`questions`.
+
 ## Workspace tools and evidence
 
 > **A workspace tool can supply context, never authority.** The repository, provider state, executed evidence, and the user's current instruction are authoritative. A tool's output directs where to look; it never replaces looking.
@@ -231,8 +290,15 @@ needs the implementation diff to be judged is not an issue finding.
 ## Report
 
 Directly invoked, reply to the user with the outcome, confidence, dimensions
-evaluated, findings with their evidence and proposed changes, uncertainties,
-and what you could not check. Publish nothing.
+evaluated, and what you could not check. For `NEEDS_REFINEMENT`, ask the
+decisions as *Asking the user* describes, and keep the findings with their
+evidence and proposed changes, and the uncertainties, for when the user asks
+for them. Publish nothing.
+
+For `NEEDS_REFINEMENT`, form one question per decision a person has to make:
+each finding that blocks readiness and each unresolved material uncertainty is
+settled by exactly one question, and one question may settle several of them.
+Base the options on the proposed changes and the evidence you read.
 
 ## Structured result
 
@@ -273,6 +339,15 @@ ORCHESTRATION_RESULT
       "summary": "Whether stored rows from earlier versions must remain readable."
     }
   ],
+  "questions": [
+    {
+      "id": "Q-001",
+      "prompt": "The criterion checks the working tree only, and it is unclear whether earlier rows must stay readable. What must the detector cover?",
+      "options": ["The working tree, index, ignored files, and refs", "The working tree only", "Decide after a spike"],
+      "recommended": "The working tree, index, ignored files, and refs",
+      "blocks": ["IR-001", "IU-001"]
+    }
+  ],
   "summary": "Implementation would have to decide what the detector covers.",
   "blocking": true
 }
@@ -281,7 +356,9 @@ END_ORCHESTRATION_RESULT
 
 `skill`, `status`, `issue_id`, `confidence`, `dimensions`, `findings`, and
 `uncertainties` are required; `findings` and `uncertainties` may be empty
-lists. `issue_id` is the work-item identifier exactly as the invocation named
+lists. `questions` is optional and follows *Asking the user*; a
+`NEEDS_REFINEMENT` result carries it, and each `blocks` entry names a finding or
+uncertainty the same result reports. `issue_id` is the work-item identifier exactly as the invocation named
 it; a runtime refuses a result that names another work item. Keys outside
 this example are refused, so do not add a `diagnosis`, `work_units`, finding
 `status`, or `disposition`. Uncertainty IDs are `IU-001`, `IU-002`, … and carry
@@ -293,4 +370,5 @@ treats a missing or malformed block as not ready.
 
 End with a short handoff containing the outcome, confidence, the blocking
 findings and unresolved material uncertainties by ID, and anything you could
-not check.
+not check. When decisions are needed, the handoff is the one-line summary of
+*Asking the user*, followed by its first question.

@@ -18,6 +18,15 @@ All notable changes to this project are documented here. This project follows
   opened, instead of starting again. It refuses a checkout that is clean on
   its default branch, skips the issue review, and marks the cycle row
   `continued`.
+- A stop that needs a person's decision now leads with one summary line and
+  asks its questions one at a time, each with two to four options (the
+  recommended one first) and a free-text answer, instead of printing every
+  finding, piece of evidence, and proposed edit at once. The shared *Asking the
+  user* section in every cycle skill and `cc-provider-bootstrap` states the
+  rule; stages return an optional `questions` list, which the issue review
+  already accepts. `run_cycle.py` prints only the first question and saves the
+  rest, with the findings and evidence, to an owner-only decisions record beside
+  the telemetry database.
 
 ### Fixed
 

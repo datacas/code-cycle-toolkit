@@ -32,6 +32,8 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
+import stop_questions
+
 #: The skill this stage runs, and the role it is recorded under.
 SKILL = "cc-issue-review"
 ROLE = "issue_review"
@@ -66,7 +68,7 @@ MAX_REFERENCE_LENGTH = 200
 RESULT_KEYS = frozenset({
     "skill", "status", "issue_provider", "issue_id", "issue_number",
     "code_host", "repo", "confidence", "dimensions", "findings",
-    "uncertainties", "summary", "error", "blocking",
+    "uncertainties", "questions", "summary", "error", "blocking",
 })
 REQUIRED_RESULT_KEYS = frozenset({
     "skill", "status", "issue_id", "confidence", "dimensions", "findings",
@@ -178,6 +180,12 @@ def result_errors(payload: object) -> list[str]:
     for index, item in enumerate(uncertainties):
         problems.extend(_uncertainty_errors(index, item, seen))
 
+    if "questions" in payload:
+        # A question settles findings or uncertainties this result reports.
+        known = frozenset(item.get("id") for item in (*findings, *uncertainties)
+                          if isinstance(item, dict) and isinstance(item.get("id"), str))
+        problems.extend(stop_questions.questions_errors(payload["questions"], known))
+
     if problems:
         return problems
     blocking = sum(1 for item in findings if item["blocks_readiness"])
@@ -284,6 +292,15 @@ class Readiness:
     problems: tuple[str, ...] = ()
     findings: tuple[dict, ...] = field(default_factory=tuple)
     uncertainties: tuple[dict, ...] = field(default_factory=tuple)
+    #: The decisions the review asks for, in asking order.
+    questions: tuple[dict, ...] = field(default_factory=tuple)
+
+    @property
+    def decisions(self) -> int:
+        """How many decisions the stop needs: its questions, or what they settle."""
+        if self.questions:
+            return len(self.questions)
+        return (self.findings_blocking or 0) + (self.uncertainties_material or 0)
 
     def telemetry_fields(self) -> dict:
         """Counts and tokens only: the prose stays in the report."""
@@ -376,4 +393,5 @@ def assess(payload: dict | None, work_item: str | None = None) -> Readiness:
         uncertainties_material=open_material,
         findings=findings,
         uncertainties=uncertainties,
+        questions=tuple(stop_questions.ask_order(payload.get("questions", []))),
     )

@@ -52,6 +52,65 @@ Keep enum-like JSON values such as `skill` and `status` unchanged. Write free-te
 values such as `summary`, `reason`, and `error` in the selected language. Preserve
 repository names, paths, references, commit SHAs, and command output verbatim.
 
+## Asking the user
+
+When a stop needs a person to decide something — a `NEEDS_REFINEMENT` or
+`HUMAN_INTERVENTION` stop, a `BLOCKED` stop that a decision would clear, a
+missing provider value, or a `needs_clarification` finding — ask, and do not
+end with the findings, evidence, and proposed edits in one block.
+
+1. Open with one line that says what stopped and how many decisions it needs.
+2. Ask the questions **one at a time**, in asking order: the question whose
+   `blocks` settles the most first, ties in the order the stage listed them.
+   Each question gives one or two sentences of context and two to four
+   concrete options with the recommended one first. A free-text answer is
+   always available. Ask the next question only after the previous answer.
+3. Use the host's interactive question mechanism when it has one, such as
+   `AskUserQuestion` in Claude Code or the equivalent in another host, and the
+   coordinator's question channel in an orchestrated run. When the host has
+   none, send one numbered question per message. Never ask with a wall of
+   text.
+4. Keep the complete findings, evidence, and proposed edits available on
+   request, in the published comment, a result file, or a later message, and
+   do not print them before the questions.
+5. When every question is answered, pass the answers to the resumed stage as
+   explicit input and continue from where the work stopped when they unblock
+   it. When the answers imply an edit to the work item, show the resulting edit
+   and apply it only after the user confirms it: an answer to a question is not
+   authorization to change the work item.
+6. A delegated stage never asks the user itself. It returns its questions in
+   its structured result as `questions`, and the coordinator asks them without
+   re-deriving them from prose.
+
+The `questions` list has this shape, and `stop_questions.questions_errors` is
+its executable definition:
+
+```text
+{
+  "questions": [
+    {
+      "id": "Q-001",
+      "prompt": "The acceptance criterion names no observable result. What should it check?",
+      "options": ["The command's exit status", "The printed report", "Both"],
+      "recommended": "The command's exit status",
+      "blocks": ["IR-001", "IU-001"]
+    }
+  ]
+}
+```
+
+- `id`: `Q-001`, `Q-002`, … within one result;
+- `prompt`: the context and the question, at most 600 characters;
+- `options`: two to four distinct answers, each at most 200 characters;
+- `recommended`: the first option, or `null` when nothing is recommended;
+- `blocks`: the identifiers the answer settles, such as findings,
+  uncertainties, stages, or provider values; a stage that reports findings or
+  uncertainties names only those it reports.
+
+`prompt` and `options` follow the selected output language; every key and
+identifier stays as written. A stop that needs no decision carries no
+`questions`.
+
 ## Scope
 
 Resolve these independent values:
@@ -195,7 +254,8 @@ that it was not persisted; do not silently create the file.
 2. Merge explicit values over configuration values, and configuration values
    over safe discovery. Preserve the distinction between the issue provider and
    the code host even when both happen to be GitHub.
-3. Ask one concise grouped question for the values that remain missing. In an
+3. Ask for the values that remain missing as *Asking the user* describes: one
+   value per question, with the candidates you found as its options. In an
    orchestrated run, use the host's coordinator question mechanism. Do not ask
    again for values already resolved and validated in the same run.
 4. Present the completed non-secret configuration and request confirmation

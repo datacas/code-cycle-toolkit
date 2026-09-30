@@ -443,10 +443,12 @@ class CycleReport:
     stop_reason: str | None = None
     stages: list[StageOutcome] = field(default_factory=list)
     stage_details: list[StageReportDetails] = field(default_factory=list)
-    #: The last issue review's judged result, when one ran. Its findings are
-    #: shown to whoever has to refine the work item; none of their prose is
-    #: recorded.
+    #: The last issue review's judged result, when one ran. Its findings go to
+    #: the decisions record for whoever has to refine the work item; none of
+    #: their prose is recorded in telemetry.
     readiness: Readiness | None = None
+    #: Where the full decisions record was saved, when it was.
+    decisions_path: Path | None = None
 
     @property
     def approved(self) -> bool:
@@ -484,27 +486,84 @@ class CycleReport:
             # another run to find out what it was.
             lines.append(f"  reason:  {self.reason}")
         if self.readiness is not None and self.readiness.gate != READINESS_CONTINUE:
-            lines.extend(_readiness_lines(self.readiness))
+            lines.extend(_readiness_lines(self.readiness, self.decisions_path))
         return "\n".join(lines)
 
+    def decisions_record(self) -> dict | None:
+        """What a stopped issue review needs decided, in full, or None.
 
-def _readiness_lines(readiness: Readiness) -> list[str]:
-    """An issue review's findings and open questions, made safe to print."""
-    lines = []
-    for finding in readiness.findings:
-        evidence = ", ".join(
-            f"{item['kind']}:{readable(item['ref'], 100)}" for item in finding["evidence"])
-        blocks = "blocks" if finding["blocks_readiness"] else "advisory"
-        lines.append(
-            f"  finding: {finding['id']} {finding['severity']} {blocks} "
-            f"{finding['dimension']}: {readable(finding['summary'])} [{evidence}]")
-        if finding.get("proposed_change"):
-            lines.append(f"    proposed: {readable(finding['proposed_change'])}")
-    for item in readiness.uncertainties:
-        weight = "material" if item["material"] else "minor"
-        state = "resolved" if item["resolved"] else "unresolved"
-        lines.append(f"  uncertainty: {item['id']} {weight} {state}: "
-                     f"{readable(item['summary'])}")
+        The report shows only the first question. This is the rest: every
+        question in asking order and the findings and uncertainties behind
+        them, for whoever asks the next question or shows the details on
+        request. It holds the stage's untrusted prose, never instructions.
+        """
+        readiness = self.readiness
+        if (readiness is None or not readiness.valid
+                or readiness.gate == READINESS_CONTINUE):
+            return None
+        return {
+            "repo": self.repo_id, "task": self.task_id, "status": self.status,
+            "review_status": readiness.status, "decisions": readiness.decisions,
+            "questions": list(readiness.questions),
+            "findings": list(readiness.findings),
+            "uncertainties": list(readiness.uncertainties),
+        }
+
+
+def save_decisions(report: CycleReport, directory: Path) -> Path | None:
+    """Write the report's decisions record beside the runtime's state, or None.
+
+    Not in the status directory: `cycle_status.py` reads every JSON file there
+    as a cycle. Readable by its owner only, because it holds a stage's prose.
+    A record that cannot be written leaves the report saying so, and never
+    fails the cycle.
+    """
+    record = report.decisions_record()
+    if record is None:
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = directory / f"decisions-{stamp}-{os.getpid()}.json"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+    except OSError:
+        return None
+    report.decisions_path = path
+    return path
+
+
+def _readiness_lines(readiness: Readiness, details: Path | None) -> list[str]:
+    """How many decisions a stop needs, and only the first question.
+
+    Whoever relays this asks one question at a time and shows the findings only
+    on request, so neither the later questions nor the details are printed:
+    they are in the decisions record, at `details`, when it could be saved.
+    """
+    if not readiness.valid:
+        return []
+    count = readiness.decisions
+    lines = [f"  decisions: {count} needed" if count else "  decisions: none reported"]
+    if readiness.questions:
+        question = readiness.questions[0]
+        options = " | ".join(
+            readable(option, 100) + (" (recommended)" if option == question["recommended"]
+                                     else "")
+            for option in question["options"])
+        lines.append(f"  question 1/{count} {question['id']}: "
+                     f"{readable(question['prompt'])}")
+        lines.append(f"    options: {options} | free text")
+    elif count:
+        pending = [item["id"] for item in readiness.findings if item["blocks_readiness"]]
+        pending += [item["id"] for item in readiness.uncertainties
+                    if item["material"] and not item["resolved"]]
+        lines.append(f"  decide: {', '.join(pending)}")
+    if readiness.findings or readiness.uncertainties or readiness.questions:
+        # The path is the runtime's own, so it is printed as it is.
+        lines.append(f"  details: {details}" if details is not None
+                     else "  details: not saved")
     return lines
 
 
@@ -1987,6 +2046,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    save_decisions(report, Path(telemetry.path).parent / "decisions")
     print(report.explain())
     print(f"recorded in {telemetry.path}")
     return 0 if report.status == APPROVED_END else 1

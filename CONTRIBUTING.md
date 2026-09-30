@@ -76,6 +76,7 @@ with them. Several sections are therefore duplicated verbatim:
 | `## Checks of the pushed head` | `cc-implement-issue`, `cc-resolve-comments` |
 | `## Workspace tools and evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-issue-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` (full rules); both orchestrators (rules 1 and 4) |
 | `## Issue review before implementation` | both orchestrators |
+| `## Asking the user` | every cycle skill and `cc-provider-bootstrap`; its `questions` example must pass `stop_questions.questions_errors` |
 | `### Complete evidence` | `cc-code-review`, `cc-implement-issue`, `cc-initial-review`, `cc-issue-review`, `cc-pr-review`, `cc-rereview`, `cc-resolve-comments`, `cc-security-review`, `cc-verify` |
 
 Editing one copy means updating every copy in its listed group. The validator
