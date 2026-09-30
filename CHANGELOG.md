@@ -5,6 +5,29 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- `run_cycle.py --detach` starts the cycle in its own session and returns at
+  once with its process ID, a log path beside the status files, and the
+  `cycle_status.py --follow` command. Every check that can refuse the run
+  happens first. An agent host that limits a task's time, such as Claude
+  Code's 30-minute default for background commands, can no longer stop a
+  cycle, and `cc-orchestrator` now tells agents to launch the runtime this way.
+- `run_cycle.py --continue --cwd <checkout>` continues an interrupted
+  implementation from its partial work, including a change request it already
+  opened, instead of starting again. It refuses a checkout that is clean on
+  its default branch, skips the issue review, and marks the cycle row
+  `continued`.
+
+### Fixed
+
+- A cycle stopped by SIGTERM, SIGHUP, or Ctrl-C now stops the executor it
+  started, records the running stage with the dispatch outcome `interrupted`,
+  closes the cycle with the stop reason `interrupted`, and marks its status
+  file finished. It used to exit on the spot with no row, a status file that
+  still said the stage was running, and an agent left editing the checkout.
+  Telemetry schema 12 adds `interrupted` and `continued`.
+
 ## [0.4.0] - 2026-09-29
 
 ### Added

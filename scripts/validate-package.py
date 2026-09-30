@@ -550,6 +550,28 @@ FIXED_MODE_ISSUE_REVIEW_PHRASES = (
 )
 
 
+#: What `cc-orchestrator` must tell an agent about launching the runtime. A
+#: cycle held in a host task outlives the task's time limit and dies with it.
+RUNTIME_LAUNCH_SECTION = "## Routing"
+RUNTIME_LAUNCH_PHRASES = (
+    "always start the runtime with `--detach`",
+    "Never hold the cycle in a foreground or background task of your own",
+    "`--continue --cwd <its checkout>`",
+)
+
+
+def check_runtime_launch(root: Path, errors: list[str]) -> None:
+    path = root / "skills" / "cc-orchestrator" / "SKILL.md"
+    if not path.is_file():
+        return
+    where = "skills/cc-orchestrator/SKILL.md"
+    section = extract_section(path.read_text(encoding="utf-8"), RUNTIME_LAUNCH_SECTION)
+    flattened = " ".join((section or "").split())
+    for phrase in RUNTIME_LAUNCH_PHRASES:
+        if phrase not in flattened:
+            errors.append(f"{where}: {RUNTIME_LAUNCH_SECTION!r} does not state {phrase!r}")
+
+
 def check_issue_review_gate(root: Path, errors: list[str]) -> None:
     """Both orchestrators must apply the issue-review gate the runtime applies.
 
@@ -719,6 +741,7 @@ def validate_package(root: Path) -> list[str]:
         check_issue_review_contract(root, errors)
         check_repeated_findings_ladder(root, errors)
         check_issue_review_gate(root, errors)
+        check_runtime_launch(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE
         orchestrator_path = root / "skills" / "cc-orchestrator" / "SKILL.md"
