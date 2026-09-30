@@ -241,6 +241,22 @@ python3 <runtime>/run_cycle.py --repo owner/name --task API-7 \
   --difficulty 2 --verifiability auto
 ```
 
+**Launching it from an agent.** An agent host runs each shell command as a task
+with a time limit, and a cycle routinely outlasts it: Claude Code, for example,
+stops a background command after 30 minutes by default, and the executor the
+cycle started stops with it. From an agent, always start the runtime with
+`--detach`. It refuses a bad invocation first, where you can still read the
+reason, then runs the cycle in its own session and returns at once with the
+process ID, a log path, and the `cycle_status.py --follow` command. Never hold
+the cycle in a foreground or background task of your own instead, and never
+raise a task's time limit as a substitute: detaching is what keeps a host limit
+from reaching the cycle. Follow it with `cycle_status.py`, read its final report
+from the log, and stop it with `kill <pid>`, which the runtime records as
+`interrupted`. When a stage was interrupted anyway, resume a review or
+resolution with `--from review|resolve|rereview --pr <n>` and an implementation
+with `--continue --cwd <its checkout>`; never start the work item again over
+work that is already there.
+
 It reads `.code-cycle.yml` from the working directory, so `code_cycle.profiles`
 is what routes and `code_cycle.repository.selector` supplies the repository when
 `--repo` is absent. A configuration that cannot be read stops the run rather

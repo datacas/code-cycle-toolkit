@@ -16,10 +16,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -90,22 +92,30 @@ class InstalledCycleTests(unittest.TestCase):
     def database(self) -> Path:
         return self.home / "state" / "telemetry.sqlite"
 
-    def run_cycle(self, *arguments: str, **environment) -> subprocess.CompletedProcess:
-        """Start the entrypoint exactly as a person installed it would."""
+    def command(self, *arguments: str, **environment) -> tuple[list[str], dict]:
+        """The entrypoint exactly as a person installed it would start it."""
         env = {
             "HOME": str(self.home),
             "PATH": f"{self.binaries}{os.pathsep}{os.environ.get('PATH', '')}",
             "CODEX_HOME": str(self.home / ".codex"),
             **environment,
         }
-        return subprocess.run(
-            [sys.executable, str(self.runtime / "run_cycle.py"),
-             "--repo", "owner/api", "--task", "API-7",
-             "--difficulty", "2", "--verifiability", "auto",
-             "--cwd", str(self.project),
-             "--database", str(self.database), *arguments],
-            env=env, capture_output=True, text=True,
-        )
+        return ([sys.executable, str(self.runtime / "run_cycle.py"),
+                 "--repo", "owner/api", "--task", "API-7",
+                 "--difficulty", "2", "--verifiability", "auto",
+                 "--cwd", str(self.project),
+                 "--database", str(self.database), *arguments], env)
+
+    def run_cycle(self, *arguments: str, **environment) -> subprocess.CompletedProcess:
+        argv, env = self.command(*arguments, **environment)
+        return subprocess.run(argv, env=env, capture_output=True, text=True)
+
+    def wait_for(self, path: Path, seconds: float = 30) -> None:
+        deadline = time.monotonic() + seconds
+        while not path.exists() or not path.read_text(encoding="utf-8").strip():
+            if time.monotonic() > deadline:
+                self.fail(f"{path} did not appear within {seconds}s")
+            time.sleep(0.1)
 
     def rows(self, *, issue_review: bool = False) -> list[dict]:
         """The stored rows; the default issue review's rows only when asked."""
@@ -283,6 +293,86 @@ class InstalledCycleTests(unittest.TestCase):
 
         self.assertEqual(["IMPLEMENTED", "APPROVED", "READY_FOR_MANUAL_MERGE"],
                          verdicts)
+
+    def test_a_stopped_cycle_records_where_it_stopped_and_stops_its_agent(self) -> None:
+        """What a host does at its time limit, done to a real process."""
+        pidfile = self.root / "agent.pid"
+        argv, env = self.command("--issue-review", "off",
+                                 FAKE_HANG="codex", FAKE_PIDFILE=str(pidfile))
+        process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        self.wait_for(pidfile)
+
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=60)
+
+        self.assertEqual(1, process.returncode, stderr)
+        self.assertIn("interrupted by SIGTERM during implement", stdout)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pidfile.read_text(encoding="utf-8")), 0)
+        rows = self.rows()
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in rows if row["role"] == "implement"])
+        self.assertEqual(["interrupted"],
+                         [json.loads(row["payload"]).get("stop_reason")
+                          for row in rows if row["role"] == "coordinate"])
+
+    def test_a_detached_cycle_returns_at_once_and_runs_in_its_own_session(self) -> None:
+        """The launch a host with a task time limit uses: nothing of it to kill."""
+        pidfile = self.root / "agent.pid"
+        argv, env = self.command("--issue-review", "off", "--detach",
+                                 FAKE_HANG="codex", FAKE_PIDFILE=str(pidfile))
+        started = time.monotonic()
+        launched = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertLess(time.monotonic() - started, 20)
+        lines = dict(line.split(": ", 1) for line in launched.stdout.splitlines())
+        cycle_pid = int(lines["detached"].rsplit(" ", 1)[1])
+        log = Path(lines["log"])
+        self.assertEqual(self.database.parent / "status", log.parent)
+        self.assertIn("cycle_status.py --follow --database", lines["follow"])
+
+        self.wait_for(pidfile)
+        self.assertNotEqual(os.getsid(0), os.getsid(cycle_pid))
+        self.assertEqual(cycle_pid, os.getpgid(cycle_pid))
+        os.kill(cycle_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 60
+        while "recorded in" not in log.read_text(encoding="utf-8"):
+            if time.monotonic() > deadline:
+                self.fail(f"the detached cycle wrote no report: {log.read_text()}")
+            time.sleep(0.1)
+
+        self.assertIn("interrupted by SIGTERM during implement", log.read_text(encoding="utf-8"))
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.rows() if row["role"] == "implement"])
+
+    def test_a_detached_cycle_is_refused_before_it_detaches(self) -> None:
+        """A mistake is reported to the person launching, not to a log file."""
+        argv, env = self.command("--detach", "--pr", "4")
+        refused = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("--pr names an existing change request", refused.stderr)
+        self.assertNotIn("detached:", refused.stdout)
+
+    def test_an_interrupted_implementation_continues_from_its_checkout(self) -> None:
+        refused = self.run_cycle("--continue")
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("nothing to continue", refused.stderr)
+
+        (self.project / "partial.txt").write_text("half done\n", encoding="utf-8")
+        continued = self.run_cycle("--continue")
+
+        self.assertEqual(0, continued.returncode, continued.stderr)
+        closing = [json.loads(row["payload"]) for row in self.all_rows()
+                   if row["role"] == "coordinate"]
+        self.assertEqual([True], [payload.get("continued") for payload in closing])
+        self.assertEqual([], self.all_rows_for("issue_review"))
+
+    def all_rows_for(self, role: str) -> list[dict]:
+        return [row for row in self.all_rows() if row["role"] == role]
 
     def test_nothing_reached_the_database_outside_the_repository(self) -> None:
         """The store is host state, not a file the project carries."""

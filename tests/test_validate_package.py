@@ -431,6 +431,15 @@ class ValidatePackageTests(unittest.TestCase):
         self.assert_error_contains(
             errors, "'### Issue review worker' does not state 'isolated review workspace'")
 
+    def test_rejects_an_orchestrator_that_does_not_detach_the_runtime(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-orchestrator", "always start the runtime with\n`--detach`",
+            "start the runtime")
+
+        self.assert_error_contains(
+            errors, "'## Routing' does not state "
+                    "'always start the runtime with `--detach`'")
+
     def test_rejects_fixed_modes_without_a_distinct_senior_reviewer_stop(self) -> None:
         errors = self.edit_orchestrator(
             "cc-orchestrator",

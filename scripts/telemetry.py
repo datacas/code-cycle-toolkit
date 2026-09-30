@@ -64,7 +64,12 @@ from pathlib import Path
 #: fields below, its escalated dispatch carries `escalated`, and the cycle row
 #: carries `issue_review` and the stop reasons `needs_refinement` and
 #: `readiness_unconfirmed`. All payload-only; an older row has no such stage.
-SCHEMA_VERSION = 11
+#: 12: a dispatch the host interrupted is recorded with the outcome
+#: `interrupted`, and its cycle row with the stop reason `interrupted`. An
+#: older store has no such rows: its interrupted runs left none at all. A
+#: cycle that continued an interrupted implementation carries `continued` on
+#: its cycle row, payload-only.
+SCHEMA_VERSION = 12
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -101,7 +106,7 @@ CYCLE_STARTS = ("implement", "review", "resolve", "rereview")
 STOP_REASONS = frozenset({
     "approved", "iteration_limit", "no_progress", "repeated_findings",
     "stage_not_completed", "dispatch_failed", "local_only",
-    "needs_refinement", "readiness_unconfirmed",
+    "needs_refinement", "readiness_unconfirmed", "interrupted",
 })
 
 #: What a new cycle did about the optional issue review (schema 11).
@@ -164,7 +169,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "unknown", "installed", "authenticated", "quota_exhausted", "ready",
     })),
     "outcome": ("token", frozenset({
-        "succeeded", "blocked", "failed", "contract_violation",
+        "succeeded", "blocked", "failed", "contract_violation", "interrupted",
     })),
     "status": ("token", frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",
@@ -289,6 +294,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "contract_violations": ("count", None),
     # why the cycle stopped where it did (schema 7)
     "stop_reason": ("token", STOP_REASONS),
+    # the cycle continued an interrupted implementation (schema 12)
+    "continued": ("flag", None),
     # the optional issue review (schema 11)
     "escalated": ("flag", None),
     "issue_review": ("token", ISSUE_REVIEW_DECISIONS),
@@ -415,7 +422,7 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "first_pass_approved", "resolution_needed", "resolution_rounds",
         "final_approved", "tests_passed", "tests_basis", "verification",
         "boundary_verified", "fallback_stages", "contract_violations", "stop_reason",
-        "issue_review",
+        "issue_review", "continued",
     }),
 }
 

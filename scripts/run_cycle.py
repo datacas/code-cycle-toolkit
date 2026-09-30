@@ -39,20 +39,24 @@ exactly like a finished one.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
-from cycle import CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter, _duration
+from cycle import CycleInterrupted, CycleRecorder, StageOutcome
+from cycle_status import CycleStatusWriter, _duration, status_directory
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -751,16 +755,22 @@ def validate_local_only_cwd(cwd: str | None) -> None:
 
 
 def validate_start(start_from: str, change_request_id: str | None,
-                   *, local_only: bool = False) -> None:
+                   *, local_only: bool = False, continue_work: bool = False) -> None:
     """Refuse a resume that cannot be honest, before anything is dispatched.
 
     A resumed cycle works on a change request somebody names: without one there
     is nothing to review, and guessing it from the work item would be a guess.
     A local-only run creates no change request, so it has nothing to resume.
+    `continue_work` resumes an interrupted implementation, which is the one
+    stage a change request cannot be resumed at.
     """
     if start_from not in CYCLE_STARTS:
         raise CycleDriverError(
             f"--from must be one of {', '.join(CYCLE_STARTS)}, not {start_from!r}")
+    if continue_work and start_from != "implement":
+        raise CycleDriverError(
+            f"--continue resumes an interrupted implementation; --from {start_from} "
+            "already resumes the change request without it")
     if start_from == "implement":
         if change_request_id is not None:
             raise CycleDriverError(
@@ -775,6 +785,52 @@ def validate_start(start_from: str, change_request_id: str | None,
     if local_only:
         raise CycleDriverError(
             f"--local-only stops after implementation; it cannot resume from {start_from}")
+
+
+#: What an implementation told to continue is told, in addition to its task.
+CONTINUE_IMPLEMENTATION = (
+    "A previous run of this implementation was interrupted before it finished. "
+    "Its partial work is in this checkout: the current branch, its commits, and "
+    "any uncommitted changes. Inspect them, and any open change request for this "
+    "work item, keep what is correct, and continue from there. Do not discard, "
+    "reset, or redo that work, and do not open a second change request when one "
+    "already exists."
+)
+
+
+def check_continuation(cwd: str | None, config: dict, *, run=subprocess.run) -> None:
+    """Refuse to continue an implementation when there is nothing to continue.
+
+    An interrupted implementation leaves its work in the checkout it was given:
+    uncommitted edits, or commits on a branch of its own. A clean checkout of
+    the default branch holds neither, and telling an agent to continue there
+    would send it looking for work that is not there. The checkout is named,
+    never assumed, because continuing in the wrong one would build on it.
+    """
+    if not cwd:
+        raise CycleDriverError("--continue needs --cwd: the checkout the interrupted run used")
+
+    def call(*arguments: str) -> str:
+        try:
+            done = run(["git", *arguments], capture_output=True, text=True, check=False,
+                       stdin=subprocess.DEVNULL, cwd=cwd)
+        except OSError as error:
+            raise CycleDriverError(f"--continue could not read {cwd}: {error}") from error
+        if done.returncode != 0:
+            raise CycleDriverError(
+                f"--continue could not read {cwd}: {readable(done.stderr or done.stdout, 200)}")
+        return done.stdout.strip()
+
+    branch = call("rev-parse", "--abbrev-ref", "HEAD")
+    changed = call("status", "--porcelain", "--untracked-files=all")
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    declared = repository.get("default_branch") if isinstance(repository, dict) else None
+    defaults = {declared} if isinstance(declared, str) and declared else {"main", "master"}
+    if not changed and (branch == "HEAD" or branch in defaults):
+        where = "a detached HEAD" if branch == "HEAD" else f"{branch}"
+        raise CycleDriverError(
+            f"--continue found nothing to continue: {cwd} is clean on {where}")
 
 
 def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
@@ -917,6 +973,7 @@ def run_cycle(
     start_from: str = "implement",
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
+    continue_work: bool = False,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -939,7 +996,8 @@ def run_cycle(
     Jev's suggestion beside the rules' choice; the rules still route every
     stage. `shadow` injects an already-built observer instead, for tests.
     """
-    validate_start(start_from, change_request_id, local_only=local_only)
+    validate_start(start_from, change_request_id, local_only=local_only,
+                   continue_work=continue_work)
     issue_review = IssueReviewMode(issue_review)
     if shadow is None and jev is not None and jev.enabled:
         shadow = JevShadow(jev)
@@ -1137,100 +1195,126 @@ def run_cycle(
     # Recorded on the closing row of every cycle that could have reviewed its
     # work item; a resumed cycle could not, and says nothing about it.
     issue_review_fields = {}
-    if start_from == "implement":
+    if continue_work:
+        # The interrupted run already passed, or skipped, the readiness gate.
+        issue_review_fields["continued"] = True
+    elif start_from == "implement":
         issue_review_fields["issue_review"] = issue_review_decision(
             issue_review, signals)
 
-    reported = Reported()
-    verdict = None
-    if start_from == "implement":
-        if issue_review_fields["issue_review"] == "dispatched":
-            stopped = review_issue()
+    def drive() -> CycleReport:
+        nonlocal change_request_id
+        reported = Reported()
+        verdict = None
+        if start_from == "implement":
+            if issue_review_fields.get("issue_review") == "dispatched":
+                stopped = review_issue()
+                if stopped is not None:
+                    return stopped
+            reported, stopped = advance(
+                "implement", CONTINUE_IMPLEMENTATION if continue_work else "")
             if stopped is not None:
                 return stopped
-        reported, stopped = advance("implement")
-        if stopped is not None:
-            return stopped
-        if local_only:
-            return stop(
-                "local-only run stops after implementation; no change request was created for review",
-                UNRESOLVED_END,
-                reported=reported,
-                stop_reason="local_only",
-            )
+            if local_only:
+                return stop(
+                    "local-only run stops after implementation; no change request was created for review",
+                    UNRESOLVED_END,
+                    reported=reported,
+                    stop_reason="local_only",
+                )
 
-        change_request_id = reported.change_request_id
-        if change_request_id is None:
-            return stop(
-                "implement completed without change_request_id or legacy pr_number; "
-                "stopping before review",
-                reported=reported,
-            )
+            change_request_id = reported.change_request_id
+            if change_request_id is None:
+                return stop(
+                    "implement completed without change_request_id or legacy pr_number; "
+                    "stopping before review",
+                    reported=reported,
+                )
 
-    if start_from in {"implement", "review"}:
-        reported, stopped = advance("review", change_request_id=change_request_id)
-        if stopped is not None:
-            return stopped
-        verdict = reported.status
-        report.verdict = verdict
-    elif start_from == "rereview":
-        reported, stopped = advance("rereview", "Re-review the change after the fixes.",
-                                    change_request_id=change_request_id)
-        if stopped is not None:
-            return stopped
-        verdict = reported.status
-        report.verdict = verdict
-    else:
-        # Resuming at the resolution: the change request's own comments carry
-        # the review it resolves, and the stage recovers those findings. The
-        # verdict is what this cycle acts on, not one it observed, so the
-        # report's verdict stays unset until a re-review gives one.
-        verdict = "CHANGES_REQUESTED"
+        if start_from in {"implement", "review"}:
+            reported, stopped = advance("review", change_request_id=change_request_id)
+            if stopped is not None:
+                return stopped
+            verdict = reported.status
+            report.verdict = verdict
+        elif start_from == "rereview":
+            reported, stopped = advance("rereview", "Re-review the change after the fixes.",
+                                        change_request_id=change_request_id)
+            if stopped is not None:
+                return stopped
+            verdict = reported.status
+            report.verdict = verdict
+        else:
+            # Resuming at the resolution: the change request's own comments carry
+            # the review it resolves, and the stage recovers those findings. The
+            # verdict is what this cycle acts on, not one it observed, so the
+            # report's verdict stays unset until a re-review gives one.
+            verdict = "CHANGES_REQUESTED"
 
-    while verdict == "CHANGES_REQUESTED":
-        survivals = claimed_fix_survivals(history)
-        recorder.repeated_findings = len(survivals)
-        repeated = sorted(finding for finding, count in survivals.items()
-                          if count >= SURVIVALS_BEFORE_STOP)
-        if repeated:
-            return stop(
-                f"{', '.join(repeated)} survived {SURVIVALS_BEFORE_STOP} claimed "
-                "fixes; stopping before another resolution",
-                reported=reported, stop_reason="repeated_findings")
-        if len(progress) >= 2 and progress[-1] is not None and progress[-1] == progress[-2]:
-            return stop(
-                "the re-review found the same head and the same open findings "
-                "as the previous review",
-                reported=reported, stop_reason="no_progress")
-        if recorder.iteration >= max_iterations:
-            break
-        recorder.next_iteration()
+        while verdict == "CHANGES_REQUESTED":
+            survivals = claimed_fix_survivals(history)
+            recorder.repeated_findings = len(survivals)
+            repeated = sorted(finding for finding, count in survivals.items()
+                              if count >= SURVIVALS_BEFORE_STOP)
+            if repeated:
+                return stop(
+                    f"{', '.join(repeated)} survived {SURVIVALS_BEFORE_STOP} claimed "
+                    "fixes; stopping before another resolution",
+                    reported=reported, stop_reason="repeated_findings")
+            if len(progress) >= 2 and progress[-1] is not None and progress[-1] == progress[-2]:
+                return stop(
+                    "the re-review found the same head and the same open findings "
+                    "as the previous review",
+                    reported=reported, stop_reason="no_progress")
+            if recorder.iteration >= max_iterations:
+                break
+            recorder.next_iteration()
 
-        instruction = "Resolve the findings from the review."
-        contested = sorted(finding for finding, count in survivals.items()
-                           if count >= SURVIVALS_BEFORE_DIRECTIVE)
-        if contested:
-            instruction = (f"{instruction} "
-                           f"{CONTESTED_DIRECTIVE.format(ids=', '.join(contested))}")
-        _, stopped = advance("resolve", instruction,
-                             change_request_id=change_request_id)
-        if stopped is not None:
-            return stopped
+            instruction = "Resolve the findings from the review."
+            contested = sorted(finding for finding, count in survivals.items()
+                               if count >= SURVIVALS_BEFORE_DIRECTIVE)
+            if contested:
+                instruction = (f"{instruction} "
+                               f"{CONTESTED_DIRECTIVE.format(ids=', '.join(contested))}")
+            _, stopped = advance("resolve", instruction,
+                                 change_request_id=change_request_id)
+            if stopped is not None:
+                return stopped
 
-        reported, stopped = advance("rereview", "Re-review the change after the fixes.",
-                                    change_request_id=change_request_id)
-        if stopped is not None:
-            return stopped
-        verdict = reported.status
-        report.verdict = verdict
+            reported, stopped = advance("rereview", "Re-review the change after the fixes.",
+                                        change_request_id=change_request_id)
+            if stopped is not None:
+                return stopped
+            verdict = reported.status
+            report.verdict = verdict
 
-    # The last stage's own account travels with every ending, not only the bad
-    # ones: a run that finished still said something about how.
-    if verdict == "APPROVED":
-        return stop("", APPROVED_END, reported=reported, stop_reason="approved")
-    return stop(f"still {verdict} after {recorder.iteration} round(s)",
-                reported=reported, stop_reason="iteration_limit")
+        # The last stage's own account travels with every ending, not only the bad
+        # ones: a run that finished still said something about how.
+        if verdict == "APPROVED":
+            return stop("", APPROVED_END, reported=reported, stop_reason="approved")
+        return stop(f"still {verdict} after {recorder.iteration} round(s)",
+                    reported=reported, stop_reason="iteration_limit")
 
+
+    def interrupted(interruption: CycleInterrupted) -> CycleReport:
+        """Close an interrupted cycle so its record says what happened."""
+        outcome = interruption.outcome
+        where = "between stages"
+        if outcome is not None:
+            where = f"during {outcome.role}"
+            report.stages.append(outcome)
+            duration = status_writer.stage_finished(outcome.result, None)
+            report.stage_details.append(StageReportDetails(
+                round=recorder.iteration, status=None, duration_seconds=duration))
+        return stop(
+            f"interrupted by {interruption.signal_name} {where}; the checkout "
+            "was left as it was",
+            stop_reason="interrupted")
+
+    try:
+        return drive()
+    except CycleInterrupted as interruption:
+        return interrupted(interruption)
 
 def _started_elsewhere(outcome: StageOutcome) -> bool:
     """Whether this stage launched work that finishes outside this process."""
@@ -1698,6 +1782,80 @@ def resolve_config(args) -> dict:
     return load_config(path) if path.is_file() else {}
 
 
+#: The requests to stop that end a cycle early: a host ending its task at a
+#: time limit, a closed terminal, Ctrl-C. Windows has no SIGHUP.
+INTERRUPT_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGHUP", "SIGINT")
+                          if hasattr(signal, name))
+
+
+@contextlib.contextmanager
+def interruptible():
+    """Turn the first request to stop into `CycleInterrupted`.
+
+    Without this, SIGTERM ends the interpreter on the spot: no row for the
+    running stage, a status file that says it is still running, and an agent
+    left editing the checkout with nothing supervising it.
+    """
+    previous = {}
+
+    def handler(signum, frame):
+        # Only the first. A second request during the cleanup would abandon
+        # the very record the first one is there to write.
+        for number in previous:
+            signal.signal(number, signal.SIG_IGN)
+        raise CycleInterrupted(signal.Signals(signum).name)
+
+    for number in INTERRUPT_SIGNALS:
+        previous[number] = signal.signal(number, handler)
+    try:
+        yield
+    finally:
+        for number, handler_before in previous.items():
+            signal.signal(number, handler_before)
+
+
+def _detach_flag(argument: str) -> bool:
+    """`--detach` as argparse reads it, abbreviations included."""
+    return argument.startswith("--de") and "--detach".startswith(argument)
+
+
+def detach(arguments: list[str], database: str | None) -> int:
+    """Start this same cycle in its own session, and return at once.
+
+    A host that runs commands as tasks with a time limit, such as an agent's
+    background shell, stops the whole task when the limit is reached, and a
+    cycle routinely outlasts it. The detached run belongs to no such task: it
+    has its own session and process group, reads nothing from the terminal,
+    and writes its report to a log beside the status files that
+    `cycle_status.py` reads.
+    """
+    directory = status_directory(database)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log = directory / f"detached-{stamp}-{os.getpid()}.log"
+    options: dict = {}
+    if os.name == "nt":
+        options["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
+                                    | subprocess.DETACHED_PROCESS)
+    else:
+        options["start_new_session"] = True
+    with open(log, "ab") as handle:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()),
+             *(argument for argument in arguments if not _detach_flag(argument))],
+            stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+            close_fds=True, **options,
+        )
+    follow = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
+              "--follow"]
+    if database:
+        follow += ["--database", database]
+    print(f"detached: run_cycle.py is running as process {process.pid}")
+    print(f"log: {log}")
+    print(f"follow: {subprocess.list2cmdline(follow) if os.name == 'nt' else shlex.join(follow)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_cycle",
@@ -1731,6 +1889,10 @@ def main(argv: list[str] | None = None) -> int:
                               "work; off keeps the original flow (default: "
                               f"code_cycle.issue_review.mode in {CONFIG_NAME}, "
                               "else auto). A resumed cycle never runs it"))
+    parser.add_argument("--continue", dest="continue_work", action="store_true",
+                        help=("continue an interrupted implementation from the partial "
+                              "work in --cwd instead of starting it again; skips the "
+                              "issue review"))
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
@@ -1739,6 +1901,10 @@ def main(argv: list[str] | None = None) -> int:
                               "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
+    parser.add_argument("--detach", action="store_true",
+                        help=("start the cycle in its own session and return at once, "
+                              "so a host's task time limit cannot stop it; follow it "
+                              "with cycle_status.py and read its report in the printed log"))
     parser.add_argument("--verbose", action="store_true",
                         help="show stage starts, live progress, and stage results")
     parser.add_argument("--progress-interval", type=float, default=60,
@@ -1754,9 +1920,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--progress-interval must be greater than zero")
 
     try:
-        validate_start(args.start_from, args.change_request, local_only=args.local_only)
+        validate_start(args.start_from, args.change_request, local_only=args.local_only,
+                       continue_work=args.continue_work)
         repo, profiles, routing_strategy = plan_with_strategy(args)
         config = resolve_config(args)
+        if args.continue_work:
+            check_continuation(args.cwd, config)
         if args.start_from in RESUMES:
             host = (config.get("code_cycle") or {}).get("code_host")
             if host not in (None, "github"):
@@ -1767,6 +1936,11 @@ def main(argv: list[str] | None = None) -> int:
     except CycleDriverError as error:
         parser.error(str(error))
 
+    if args.detach:
+        # Everything that can be refused was refused above, where a person is
+        # still reading; the detached run repeats those checks on its own.
+        return detach(list(sys.argv[1:] if argv is None else argv), args.database)
+
     change_bases = change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
@@ -1774,33 +1948,41 @@ def main(argv: list[str] | None = None) -> int:
                     else load_issue_review_mode(config))
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
-        report = run_cycle(
-            repo, args.task,
-            TaskSignals(difficulty=args.difficulty,
-                        verifiability=args.verifiability,
-                        security_sensitive=args.security_sensitive),
-            telemetry,
-            profiles=profiles,
-            mode=RoutingMode[args.mode.upper()],
-            routing_strategy=routing_strategy,
-            max_iterations=args.max_iterations,
-            cwd=args.cwd,
-            timeout=args.timeout,
-            verbose=args.verbose,
-            progress_interval=args.progress_interval,
-            local_only=args.local_only,
-            change_bases=change_bases,
-            verification_available=(
-                None if args.verification is None
-                else args.verification == "available"
-            ),
-            jev=jev,
-            start_from=args.start_from,
-            change_request_id=args.change_request,
-            issue_review=issue_review,
-        )
+        with interruptible():
+            report = run_cycle(
+                repo, args.task,
+                TaskSignals(difficulty=args.difficulty,
+                            verifiability=args.verifiability,
+                            security_sensitive=args.security_sensitive),
+                telemetry,
+                profiles=profiles,
+                mode=RoutingMode[args.mode.upper()],
+                routing_strategy=routing_strategy,
+                max_iterations=args.max_iterations,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                verbose=args.verbose,
+                progress_interval=args.progress_interval,
+                local_only=args.local_only,
+                change_bases=change_bases,
+                verification_available=(
+                    None if args.verification is None
+                    else args.verification == "available"
+                ),
+                jev=jev,
+                start_from=args.start_from,
+                change_request_id=args.change_request,
+                issue_review=issue_review,
+                continue_work=args.continue_work,
+            )
     except CycleDriverError as error:
         parser.error(str(error))
+    except CycleInterrupted as interruption:
+        # Before the recorder existed, or after it closed: nothing is running
+        # and there is no stage to record.
+        print(f"interrupted by {interruption.signal_name} before any stage ran",
+              file=sys.stderr)
+        return 1
 
     print(report.explain())
     print(f"recorded in {telemetry.path}")

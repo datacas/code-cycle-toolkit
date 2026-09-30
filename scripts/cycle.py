@@ -31,6 +31,7 @@ availability untouched, so the question stays visible.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -178,6 +179,21 @@ def routing_context(decision: RoutingDecision) -> str:
 
 class CycleError(ValueError):
     """The recorder was asked for something inconsistent."""
+
+
+class CycleInterrupted(BaseException):
+    """The process running the cycle was told to stop: SIGTERM, SIGHUP, SIGINT.
+
+    A `BaseException`, like `KeyboardInterrupt`, so that no `except Exception`
+    on the way up can read it as a stage failure and carry on. When it arrives
+    during a dispatch, `CycleRecorder.stage()` records that stage as
+    interrupted and attaches it here as `outcome` before letting it continue.
+    """
+
+    def __init__(self, signal_name: str) -> None:
+        super().__init__(signal_name)
+        self.signal_name = signal_name
+        self.outcome: StageOutcome | None = None
 
 
 @dataclass
@@ -420,11 +436,29 @@ class CycleRecorder:
 
             # Per attempt: a reroute runs under the fallback's target, and its
             # run line has to name that one.
-            result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
-                              self.registry,
-                              policy=self.policy, probes=self.probes,
-                              on_progress=self.on_progress,
-                              **dispatch_kwargs)
+            started = time.monotonic()
+            try:
+                result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
+                                  self.registry,
+                                  policy=self.policy, probes=self.probes,
+                                  on_progress=self.on_progress,
+                                  **dispatch_kwargs)
+            except CycleInterrupted as interruption:
+                # No half-done state, even now: the stage that was running is
+                # the row a later question about this run needs most.
+                result = DispatchResult(
+                    DispatchOutcome.INTERRUPTED, decision.target.executor, decision.target,
+                    detail=f"interrupted by {interruption.signal_name}",
+                    duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+                )
+                outcome.decision = decision
+                outcome.result = result
+                outcome.attempts.append((decision, result))
+                outcome.rows.append(self._record(role, decision, result, signals))
+                self.failed_attempts += 1
+                self.stages.append(outcome)
+                interruption.outcome = outcome
+                raise
             outcome.decision = decision
             outcome.result = result
             outcome.attempts.append((decision, result))

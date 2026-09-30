@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import cycle  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import stats  # noqa: E402
@@ -127,6 +129,20 @@ class StreamingNative(ex.NativeAdapter):
             model_resolved=target.model,
             artifacts={"stdout": self.body}, agent_output=self.body,
         )
+
+
+class Interrupter(Talker):
+    """An executor the host stops partway through one named stage."""
+
+    def __init__(self, name: str, during: str = "cc-implement-issue") -> None:
+        super().__init__(name)
+        self.during = during
+
+    def dispatch(self, target, task, **kw):
+        if self.during in task:
+            self.dispatched.append(task)
+            raise cycle.CycleInterrupted("SIGTERM")
+        return super().dispatch(target, task, **kw)
 
 
 class RunCycleTestCase(unittest.TestCase):
@@ -2106,3 +2122,145 @@ class CompleteDiffTests(RunCycleTestCase):
                                           "APPDATA": ""}):
             self.assertFalse(ex._paths_overlap(str(rc.evidence_root()),
                                                tempfile.gettempdir()))
+
+
+class InterruptionTests(RunCycleTestCase):
+    """A host that stops the cycle must still leave a record of where."""
+
+    def dispatch_rows(self, role: str) -> list[dict]:
+        return [row for row in self.rows() if row["role"] == role
+                and row["payload"].get("record_kind") == "dispatch"]
+
+    def test_an_interrupted_stage_is_recorded_as_interrupted(self) -> None:
+        report = self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.dispatch_rows("implement")])
+        self.assertEqual([], self.dispatch_rows("review"))
+        self.assertEqual("interrupted", report.stop_reason)
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertIn("interrupted by SIGTERM during implement", report.stopped_because)
+        self.assertIn("interrupted", report.explain())
+
+    def test_the_cycle_row_says_it_was_interrupted(self) -> None:
+        self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        closing = [row for row in self.rows()
+                   if row["payload"].get("record_kind") == "cycle"]
+        self.assertEqual(["interrupted"],
+                         [row["payload"]["stop_reason"] for row in closing])
+
+    def test_the_status_file_no_longer_says_the_stage_is_running(self) -> None:
+        self.run_cycle(Interrupter("codex"), Talker("claude"))
+
+        [path] = (self.store.path.parent / "status").glob("*.json")
+        status = json.loads(path.read_text(encoding="utf-8"))
+        self.assertTrue(status["finished"])
+        self.assertEqual(rc.UNRESOLVED_END, status["status"])
+        self.assertTrue(status["stage"]["finished"])
+        self.assertEqual("interrupted", status["stage"]["outcome"])
+
+    def test_an_interrupted_review_keeps_the_implementation_before_it(self) -> None:
+        report = self.run_cycle(Talker("codex"), Interrupter("claude", "cc-initial-review"))
+
+        self.assertEqual(["succeeded"],
+                         [row["outcome"] for row in self.dispatch_rows("implement")])
+        self.assertEqual(["interrupted"],
+                         [row["outcome"] for row in self.dispatch_rows("review")])
+        self.assertIn("during review", report.stopped_because)
+
+
+@unittest.skipUnless(hasattr(signal, "SIGTERM") and os.name != "nt",
+                     "needs POSIX signal delivery to the current process")
+class InterruptibleTests(unittest.TestCase):
+    def test_a_stop_request_becomes_an_interruption_and_the_handler_is_restored(self) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+
+        with self.assertRaises(cycle.CycleInterrupted) as caught:
+            with rc.interruptible():
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+
+        self.assertEqual("SIGTERM", caught.exception.signal_name)
+        self.assertIs(before, signal.getsignal(signal.SIGTERM))
+
+
+class DetachFlagTests(unittest.TestCase):
+    def test_the_detached_run_is_started_without_the_flag_or_its_abbreviations(self) -> None:
+        for argument in ("--detach", "--detac", "--det", "--de"):
+            self.assertTrue(rc._detach_flag(argument), argument)
+        for argument in ("--database", "--difficulty", "--d", "detach", "--detached"):
+            self.assertFalse(rc._detach_flag(argument), argument)
+
+
+class ContinueImplementationTests(RunCycleTestCase):
+    """An interrupted implementation continues from its work, not from zero."""
+
+    def implement_prompts(self, implementer) -> list[str]:
+        return [task for task in implementer.dispatched if "cc-implement-issue" in task]
+
+    def test_the_implementer_is_told_to_continue_the_partial_work(self) -> None:
+        implementer = Talker("codex")
+        self.run_cycle(implementer, Talker("claude"), continue_work=True)
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+
+    def test_a_new_implementation_is_not_told_to_continue(self) -> None:
+        implementer = Talker("codex")
+        self.run_cycle(implementer, Talker("claude"))
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertNotIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+
+    def test_a_continued_implementation_does_not_review_the_work_item_again(self) -> None:
+        implementer, reviewer = Talker("codex"), Talker("claude")
+        self.run_cycle(implementer, reviewer, continue_work=True, issue_review="auto")
+
+        dispatched = implementer.dispatched + reviewer.dispatched
+        self.assertFalse(any("cc-issue-review" in task for task in dispatched))
+        [closing] = [row for row in self.rows()
+                     if row["payload"].get("record_kind") == "cycle"]
+        self.assertTrue(closing["payload"]["continued"])
+        self.assertNotIn("issue_review", closing["payload"])
+
+    def test_continue_is_refused_with_a_resumed_change_request(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "--continue resumes an interrupted"):
+            rc.validate_start("review", "74", continue_work=True)
+
+
+class CheckContinuationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.checkout = Path(temporary.name)
+        git = ["git", "-C", str(self.checkout)]
+        subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+        subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.test",
+                        "commit", "-q", "--allow-empty", "-m", "seed"], check=True)
+        self.git = git
+
+    def check(self, config: dict | None = None) -> None:
+        rc.check_continuation(str(self.checkout), config or {})
+
+    def test_a_clean_default_branch_has_nothing_to_continue(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "nothing to continue.*clean on main"):
+            self.check()
+
+    def test_uncommitted_work_can_be_continued(self) -> None:
+        (self.checkout / "partial.txt").write_text("half done\n", encoding="utf-8")
+        self.check()
+
+    def test_a_branch_of_its_own_can_be_continued(self) -> None:
+        subprocess.run([*self.git, "checkout", "-q", "-b", "issue-7"], check=True)
+        self.check()
+
+    def test_the_declared_default_branch_is_the_one_that_needs_work(self) -> None:
+        subprocess.run([*self.git, "checkout", "-q", "-b", "trunk"], check=True)
+        config = {"code_cycle": {"repository": {"default_branch": "trunk"}}}
+        with self.assertRaisesRegex(rc.CycleDriverError, "clean on trunk"):
+            self.check(config)
+
+    def test_the_checkout_must_be_named(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "--continue needs --cwd"):
+            rc.check_continuation(None, {})
