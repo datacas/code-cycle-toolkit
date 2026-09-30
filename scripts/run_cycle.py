@@ -755,16 +755,22 @@ def validate_local_only_cwd(cwd: str | None) -> None:
 
 
 def validate_start(start_from: str, change_request_id: str | None,
-                   *, local_only: bool = False) -> None:
+                   *, local_only: bool = False, continue_work: bool = False) -> None:
     """Refuse a resume that cannot be honest, before anything is dispatched.
 
     A resumed cycle works on a change request somebody names: without one there
     is nothing to review, and guessing it from the work item would be a guess.
     A local-only run creates no change request, so it has nothing to resume.
+    `continue_work` resumes an interrupted implementation, which is the one
+    stage a change request cannot be resumed at.
     """
     if start_from not in CYCLE_STARTS:
         raise CycleDriverError(
             f"--from must be one of {', '.join(CYCLE_STARTS)}, not {start_from!r}")
+    if continue_work and start_from != "implement":
+        raise CycleDriverError(
+            f"--continue resumes an interrupted implementation; --from {start_from} "
+            "already resumes the change request without it")
     if start_from == "implement":
         if change_request_id is not None:
             raise CycleDriverError(
@@ -779,6 +785,52 @@ def validate_start(start_from: str, change_request_id: str | None,
     if local_only:
         raise CycleDriverError(
             f"--local-only stops after implementation; it cannot resume from {start_from}")
+
+
+#: What an implementation told to continue is told, in addition to its task.
+CONTINUE_IMPLEMENTATION = (
+    "A previous run of this implementation was interrupted before it finished. "
+    "Its partial work is in this checkout: the current branch, its commits, and "
+    "any uncommitted changes. Inspect them, and any open change request for this "
+    "work item, keep what is correct, and continue from there. Do not discard, "
+    "reset, or redo that work, and do not open a second change request when one "
+    "already exists."
+)
+
+
+def check_continuation(cwd: str | None, config: dict, *, run=subprocess.run) -> None:
+    """Refuse to continue an implementation when there is nothing to continue.
+
+    An interrupted implementation leaves its work in the checkout it was given:
+    uncommitted edits, or commits on a branch of its own. A clean checkout of
+    the default branch holds neither, and telling an agent to continue there
+    would send it looking for work that is not there. The checkout is named,
+    never assumed, because continuing in the wrong one would build on it.
+    """
+    if not cwd:
+        raise CycleDriverError("--continue needs --cwd: the checkout the interrupted run used")
+
+    def call(*arguments: str) -> str:
+        try:
+            done = run(["git", *arguments], capture_output=True, text=True, check=False,
+                       stdin=subprocess.DEVNULL, cwd=cwd)
+        except OSError as error:
+            raise CycleDriverError(f"--continue could not read {cwd}: {error}") from error
+        if done.returncode != 0:
+            raise CycleDriverError(
+                f"--continue could not read {cwd}: {readable(done.stderr or done.stdout, 200)}")
+        return done.stdout.strip()
+
+    branch = call("rev-parse", "--abbrev-ref", "HEAD")
+    changed = call("status", "--porcelain", "--untracked-files=all")
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    declared = repository.get("default_branch") if isinstance(repository, dict) else None
+    defaults = {declared} if isinstance(declared, str) and declared else {"main", "master"}
+    if not changed and (branch == "HEAD" or branch in defaults):
+        where = "a detached HEAD" if branch == "HEAD" else f"{branch}"
+        raise CycleDriverError(
+            f"--continue found nothing to continue: {cwd} is clean on {where}")
 
 
 def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
@@ -921,6 +973,7 @@ def run_cycle(
     start_from: str = "implement",
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
+    continue_work: bool = False,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -943,7 +996,8 @@ def run_cycle(
     Jev's suggestion beside the rules' choice; the rules still route every
     stage. `shadow` injects an already-built observer instead, for tests.
     """
-    validate_start(start_from, change_request_id, local_only=local_only)
+    validate_start(start_from, change_request_id, local_only=local_only,
+                   continue_work=continue_work)
     issue_review = IssueReviewMode(issue_review)
     if shadow is None and jev is not None and jev.enabled:
         shadow = JevShadow(jev)
@@ -1141,7 +1195,10 @@ def run_cycle(
     # Recorded on the closing row of every cycle that could have reviewed its
     # work item; a resumed cycle could not, and says nothing about it.
     issue_review_fields = {}
-    if start_from == "implement":
+    if continue_work:
+        # The interrupted run already passed, or skipped, the readiness gate.
+        issue_review_fields["continued"] = True
+    elif start_from == "implement":
         issue_review_fields["issue_review"] = issue_review_decision(
             issue_review, signals)
 
@@ -1150,11 +1207,12 @@ def run_cycle(
         reported = Reported()
         verdict = None
         if start_from == "implement":
-            if issue_review_fields["issue_review"] == "dispatched":
+            if issue_review_fields.get("issue_review") == "dispatched":
                 stopped = review_issue()
                 if stopped is not None:
                     return stopped
-            reported, stopped = advance("implement")
+            reported, stopped = advance(
+                "implement", CONTINUE_IMPLEMENTATION if continue_work else "")
             if stopped is not None:
                 return stopped
             if local_only:
@@ -1831,6 +1889,10 @@ def main(argv: list[str] | None = None) -> int:
                               "work; off keeps the original flow (default: "
                               f"code_cycle.issue_review.mode in {CONFIG_NAME}, "
                               "else auto). A resumed cycle never runs it"))
+    parser.add_argument("--continue", dest="continue_work", action="store_true",
+                        help=("continue an interrupted implementation from the partial "
+                              "work in --cwd instead of starting it again; skips the "
+                              "issue review"))
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
@@ -1858,9 +1920,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--progress-interval must be greater than zero")
 
     try:
-        validate_start(args.start_from, args.change_request, local_only=args.local_only)
+        validate_start(args.start_from, args.change_request, local_only=args.local_only,
+                       continue_work=args.continue_work)
         repo, profiles, routing_strategy = plan_with_strategy(args)
         config = resolve_config(args)
+        if args.continue_work:
+            check_continuation(args.cwd, config)
         if args.start_from in RESUMES:
             host = (config.get("code_cycle") or {}).get("code_host")
             if host not in (None, "github"):
@@ -1908,6 +1973,7 @@ def main(argv: list[str] | None = None) -> int:
                 start_from=args.start_from,
                 change_request_id=args.change_request,
                 issue_review=issue_review,
+                continue_work=args.continue_work,
             )
     except CycleDriverError as error:
         parser.error(str(error))

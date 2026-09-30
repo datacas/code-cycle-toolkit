@@ -55,7 +55,7 @@ An implementation `forecast` is a pre-edit claim made after implement routing, r
 
 Issue-review findings, uncertainties, evidence references, and proposed edits are printed for the operator and never stored: only their counts and closed tokens are. Rows from before schema 11 have no issue-review stage and read as they were written.
 
-A stage the host stopped before it finished is recorded with the outcome `interrupted`, and its cycle with the stop reason `interrupted` (schema 12); a run killed without a catchable signal still leaves no closing row and reads as unknown.
+A stage the host stopped before it finished is recorded with the outcome `interrupted`, and its cycle with the stop reason `interrupted` (schema 12); a run killed without a catchable signal still leaves no closing row and reads as unknown. A cycle that continued an interrupted implementation with `--continue` carries `continued` on its cycle row.
 
 The field-by-field schema, correlation keys, and schema versions 1–12 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 

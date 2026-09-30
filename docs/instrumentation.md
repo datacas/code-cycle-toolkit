@@ -622,7 +622,8 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
 | `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12 |
-| `cycle` | `issue_review` | the cycle started at `implement`: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
+| `cycle` | `issue_review` | the cycle started at `implement` and was not continued: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
+| `cycle` | `continued` | the cycle continued an interrupted implementation with `--continue`; always `true` when present (schema 12) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
 
 Forecast accuracy pairs those implement verdict fields with the observed change

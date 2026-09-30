@@ -2191,3 +2191,76 @@ class DetachFlagTests(unittest.TestCase):
             self.assertTrue(rc._detach_flag(argument), argument)
         for argument in ("--database", "--difficulty", "--d", "detach", "--detached"):
             self.assertFalse(rc._detach_flag(argument), argument)
+
+
+class ContinueImplementationTests(RunCycleTestCase):
+    """An interrupted implementation continues from its work, not from zero."""
+
+    def implement_prompts(self, implementer) -> list[str]:
+        return [task for task in implementer.dispatched if "cc-implement-issue" in task]
+
+    def test_the_implementer_is_told_to_continue_the_partial_work(self) -> None:
+        implementer = Talker("codex")
+        self.run_cycle(implementer, Talker("claude"), continue_work=True)
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+
+    def test_a_new_implementation_is_not_told_to_continue(self) -> None:
+        implementer = Talker("codex")
+        self.run_cycle(implementer, Talker("claude"))
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertNotIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+
+    def test_a_continued_implementation_does_not_review_the_work_item_again(self) -> None:
+        implementer, reviewer = Talker("codex"), Talker("claude")
+        self.run_cycle(implementer, reviewer, continue_work=True, issue_review="auto")
+
+        dispatched = implementer.dispatched + reviewer.dispatched
+        self.assertFalse(any("cc-issue-review" in task for task in dispatched))
+        [closing] = [row for row in self.rows()
+                     if row["payload"].get("record_kind") == "cycle"]
+        self.assertTrue(closing["payload"]["continued"])
+        self.assertNotIn("issue_review", closing["payload"])
+
+    def test_continue_is_refused_with_a_resumed_change_request(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "--continue resumes an interrupted"):
+            rc.validate_start("review", "74", continue_work=True)
+
+
+class CheckContinuationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.checkout = Path(temporary.name)
+        git = ["git", "-C", str(self.checkout)]
+        subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+        subprocess.run([*git, "-c", "user.name=t", "-c", "user.email=t@example.test",
+                        "commit", "-q", "--allow-empty", "-m", "seed"], check=True)
+        self.git = git
+
+    def check(self, config: dict | None = None) -> None:
+        rc.check_continuation(str(self.checkout), config or {})
+
+    def test_a_clean_default_branch_has_nothing_to_continue(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "nothing to continue.*clean on main"):
+            self.check()
+
+    def test_uncommitted_work_can_be_continued(self) -> None:
+        (self.checkout / "partial.txt").write_text("half done\n", encoding="utf-8")
+        self.check()
+
+    def test_a_branch_of_its_own_can_be_continued(self) -> None:
+        subprocess.run([*self.git, "checkout", "-q", "-b", "issue-7"], check=True)
+        self.check()
+
+    def test_the_declared_default_branch_is_the_one_that_needs_work(self) -> None:
+        subprocess.run([*self.git, "checkout", "-q", "-b", "trunk"], check=True)
+        config = {"code_cycle": {"repository": {"default_branch": "trunk"}}}
+        with self.assertRaisesRegex(rc.CycleDriverError, "clean on trunk"):
+            self.check(config)
+
+    def test_the_checkout_must_be_named(self) -> None:
+        with self.assertRaisesRegex(rc.CycleDriverError, "--continue needs --cwd"):
+            rc.check_continuation(None, {})

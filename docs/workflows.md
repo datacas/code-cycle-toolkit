@@ -232,6 +232,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--issue-review` | `issue_review.mode`, else `auto` | `auto` reviews the work item before implementing it, except declared trivial, non-sensitive work; `off` keeps the original flow. See [Issue review](review-cycle.md#issue-review-before-implementation) |
 | `--from` | `implement` | Stage to start at: `implement`, `review`, `resolve`, or `rereview`; anything but `implement` resumes `--pr` |
 | `--pr` | — | Existing change request a resumed cycle works on; required by `--from review\|resolve\|rereview` |
+| `--continue` | off | Continue an interrupted implementation from the partial work in `--cwd` instead of starting it again; skips the issue review |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
@@ -270,6 +271,14 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --detach
 Every check that can refuse the run happens before it detaches, so a mistake is still printed where you launched it. The detached run's report and any error go to the log; follow its progress with `cycle_status.py`. Stop it with `kill <pid>`: like any other stop request, that is recorded.
 
 **Interrupted runs:** SIGTERM, SIGHUP, or Ctrl-C during a stage stops the executor the driver started, records that stage with the outcome `interrupted`, closes the cycle with the stop reason `interrupted`, marks its status file finished, and leaves the checkout exactly as it was. Only a `SIGKILL` still ends a run without a record.
+
+An interrupted review or resolution resumes with `--from` as above. An interrupted implementation has no change request to resume yet, so continue it from its checkout instead:
+
+```bash
+python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --cwd /path/to/checkout --continue --detach
+```
+
+The driver refuses `--continue` without `--cwd`, with a resuming `--from`, or when the checkout is clean on its default branch (`repository.default_branch`, else `main` or `master`), because then there is nothing to continue. Otherwise the implementer is told a previous run was interrupted and to inspect the branch, its commits, uncommitted changes, and any open change request for the work item, keep what is correct, and continue without discarding it or opening a second change request. The issue review is not repeated, and the cycle row records `continued`.
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 
