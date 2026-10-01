@@ -56,7 +56,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter, _duration, status_directory
+from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -1920,6 +1920,7 @@ def detach(arguments: list[str], database: str | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdout()
     parser = argparse.ArgumentParser(
         prog="run_cycle",
         description="Run one work item through a recorded cycle.",

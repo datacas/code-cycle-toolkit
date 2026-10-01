@@ -23,6 +23,18 @@ from telemetry import default_database_path
 ACTIVITY_LIMIT = 500
 
 
+def _configure_stdout() -> None:
+    """Keep emoji progress icons printable when Windows defaults to CP1252."""
+    import sys
+
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="microseconds")
 
@@ -568,6 +580,9 @@ class CycleStatusWriter:
         import sys
 
         stream = self.stream or sys.stdout
+        if self.stream is None:
+            _configure_stdout()
+            stream = sys.stdout
         with self._lock:
             print(value, file=stream, flush=True)
 
@@ -615,6 +630,7 @@ def read_statuses(directory: str | Path) -> list[dict]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdout()
     parser = argparse.ArgumentParser(description="Show the status of code-cycle runs.")
     parser.add_argument("--follow", action="store_true", help="refresh until interrupted")
     parser.add_argument("--line", action="store_true",
