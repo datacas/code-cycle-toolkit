@@ -877,10 +877,14 @@ telemetry database. `cycle_status.py` reads those snapshots from any terminal;
 the snapshot is updated while a dispatch runs and retained after the cycle
 finishes. `cycle_status.py --line --since <timestamp>` prints only updated
 snapshots, each as one user-facing line, for a host monitoring facility to
-relay. `run_cycle.py --verbose` prints the same routing and activity fields to
-the launching terminal, with periodic updates controlled by
-`--progress-interval`. This output is opt-in; without `--verbose`, the normal
-terminal output is unchanged.
+relay. `run_cycle.py --verbose` prints the same routing, workspace, and activity
+fields to the launching terminal, with periodic updates controlled by
+`--progress-interval`: every two minutes through minute 15, then every five
+minutes. The workspace snapshot reports the dispatched worker's current
+directory, Git root, branch, and whether the checkout is a linked worktree,
+regular checkout, outside Git, or in a temporary path. Lines use role and
+result icons without depending on terminal color support. This output is opt-in; without
+`--verbose`, the normal terminal output is unchanged.
 
 **What the agent said about it is shown, and believed by nobody.** A stage that
 stops reports a reason in its own block, and that reason is printed beside the

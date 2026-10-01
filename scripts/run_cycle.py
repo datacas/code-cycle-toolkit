@@ -56,7 +56,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
-from cycle_status import CycleStatusWriter, _duration, status_directory
+from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -1028,7 +1028,7 @@ def run_cycle(
     jev: JevConfig | None = None,
     shadow: JevShadow | None = None,
     verbose: bool = False,
-    progress_interval: float = 60,
+    progress_interval: float = 120,
     start_from: str = "implement",
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
@@ -1086,9 +1086,11 @@ def run_cycle(
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,
         progress_interval=progress_interval, verbose=verbose,
+        workspace=cwd or Path.cwd(),
     )
     recorder.stage_started = status_writer.stage_started
     recorder.on_progress = status_writer.activity
+    recorder.on_workspace = status_writer.workspace_observed
     status_writer.start()
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
@@ -1919,6 +1921,7 @@ def detach(arguments: list[str], database: str | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdout()
     parser = argparse.ArgumentParser(
         prog="run_cycle",
         description="Run one work item through a recorded cycle.",
@@ -1969,8 +1972,8 @@ def main(argv: list[str] | None = None) -> int:
                               "with cycle_status.py and read its report in the printed log"))
     parser.add_argument("--verbose", action="store_true",
                         help="show stage starts, live progress, and stage results")
-    parser.add_argument("--progress-interval", type=float, default=60,
-                        help="seconds between live progress lines (default: 60)")
+    parser.add_argument("--progress-interval", type=float, default=120,
+                        help="short-run heartbeat cadence in seconds (default: 120; changes to 300 after 15 minutes)")
     parser.add_argument("--database", default=None,
                         help=f"telemetry database (default: {default_database_path()})")
     parser.add_argument("--config", default=None,

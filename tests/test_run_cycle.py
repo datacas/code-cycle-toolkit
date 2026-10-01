@@ -119,6 +119,9 @@ class StreamingNative(ex.NativeAdapter):
         return True, "scripted publication access"
 
     def dispatch(self, target, task, **kw):
+        workspace = kw.get("on_workspace")
+        if workspace:
+            workspace(kw.get("cwd") or str(Path.cwd()))
         callback = kw.get("on_progress")
         if callback:
             callback(text="The scripted executor is working")

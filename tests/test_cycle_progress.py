@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import cycle_status  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
@@ -54,11 +56,25 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("implement ·", rendered)
         self.assertIn("1 tools", rendered)
         self.assertIn("The scripted executor is working", rendered)
-        self.assertIn("implement done · succeeded · IMPLEMENTED", rendered)
-        self.assertIn("review done · succeeded · APPROVED", rendered)
-        self.assertLessEqual(rendered.count("implement ·"), 2)
+        self.assertIn("✅ 🛠️", rendered)
+        self.assertIn("implement done", rendered)
+        self.assertIn("succeeded · IMPLEMENTED", rendered)
+        self.assertIn("✅ 🔍", rendered)
+        self.assertIn("review done", rendered)
+        self.assertIn("succeeded · APPROVED", rendered)
+        # How many heartbeats a stage crosses depends on the runner's speed;
+        # what must hold everywhere is that a line is printed only when the
+        # progress it shows changed.
+        implement_lines = [
+            re.sub(r"\[\d{2}:\d{2}\] ", "", line)
+            for line in rendered.splitlines() if "implement ·" in line
+        ]
+        self.assertGreaterEqual(len(implement_lines), 2)
+        for previous, current in zip(implement_lines, implement_lines[1:]):
+            self.assertNotEqual(previous, current)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
+        expected_workspace = cycle_status._workspace_snapshot(Path.cwd())
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             report = self.run_cycle(progress_interval=0.01)
@@ -71,6 +87,7 @@ class CycleProgressTests(unittest.TestCase):
         self.assertTrue(status["finished"])
         self.assertTrue(status["stage"]["finished"])
         self.assertEqual("APPROVED", status["stage"]["status"])
+        self.assertEqual(expected_workspace, status["workspace"])
 
     def test_cli_passes_verbose_options_and_keeps_defaults_opt_in(self) -> None:
         report = rc.CycleReport(
@@ -87,6 +104,14 @@ class CycleProgressTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertTrue(run.call_args.kwargs["verbose"])
         self.assertEqual(12, run.call_args.kwargs["progress_interval"])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(rc, "run_cycle", return_value=report) as run:
+                rc.main([
+                    "--repo", "owner/api", "--task", "API-7", "--no-config",
+                    "--database", str(Path(self.temporary.name) / "default.sqlite"),
+                ])
+        self.assertEqual(120, run.call_args.kwargs["progress_interval"])
 
 
 if __name__ == "__main__":
