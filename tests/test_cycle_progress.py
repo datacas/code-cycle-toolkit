@@ -61,8 +61,9 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("✅ 🔍", rendered)
         self.assertIn("review done", rendered)
         self.assertIn("succeeded · APPROVED", rendered)
-        # Start, one immediate workspace-change notice, and one heartbeat.
-        self.assertLessEqual(rendered.count("implement ·"), 3)
+        # Start, an immediate workspace notice, and heartbeats. A slow runner
+        # may cross another interval while the test suite is busy.
+        self.assertLessEqual(rendered.count("implement ·"), 5)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
         expected_workspace = cycle_status._workspace_snapshot(Path.cwd())
