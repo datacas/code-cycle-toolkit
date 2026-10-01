@@ -423,33 +423,54 @@ change-request state handed to later stages.
 
 ## User-visible progress
 
-Keep the user informed while a cycle runs. At every stage start and end, and on
-periodic heartbeats while work is active, send one line in this format:
+Keep the user informed while a cycle runs. At every stage start and end, on
+heartbeats while work is active, when the active workspace changes, and as soon
+as the host reports an error, send one concise line:
 
 ```text
-[HH:MM] <stage> · <executor> <provider>/<model> <effort> · <elapsed> · <activity>
+<result icon?> <role icon> [HH:MM] <stage> · <executor> <provider>/<model> <effort> · <elapsed> · cwd <path> · repo <root> · branch <name|detached|unknown> · <workspace kind> · <activity>
 ```
 
-At completion, mark the stage as `done` and include its outcome or reported
-status. Keep `<activity>` to one short clause. Use the routed target for a
-dispatched stage and the current agent and host-reported model for in-agent
-work; use `unknown` only for details the host does not expose. The
-`progress_interval` invocation value sets the heartbeat cadence; default it to
-3 minutes. A different positive interval may be supplied by the caller.
+Choose a role icon consistently: `🧭` bootstrap/issue review, `🛠️`
+implementation, `🔍` review, `🩹` resolution, and `🔎` rereview. Use
+`🔔` when no role is known. Add a result icon before the role icon when a
+result is available: `✅` succeeded/approved, `⚠️` changes requested or
+needs refinement, `⛔` blocked/stopped, and `❌` failed/errored. A reported
+error gets `❌` immediately; do not wait for the stage completion line. Keep
+these emoji visible without relying on ANSI color. At completion, mark the stage
+as `done` and include its outcome or reported status.
+
+Use details from the actual dispatched worker/terminal or the active in-agent
+workspace, never from the coordinator's own checkout by assumption. Include the
+worker's current directory, Git root, checked-out branch (or `detached`), and
+workspace kind: linked worktree, regular checkout, outside Git, or temporary.
+The exact path makes locations such as `/tmp/...` visible. A workspace may be
+both temporary and a worktree; report both. Call a branch separate from the
+base only when the configured base is known and differs from the observed
+branch. Do not infer that a branch or worktree was created from its name. Use
+`unknown` for details the host cannot expose. Keep `<activity>` to one short
+clause.
+
+Measure cadence from the start of the overall task, not from each stage:
+heartbeat every 2 minutes through minute 15, emit at the 15-minute threshold,
+then every 5 minutes (20, 25, ...). Stage transitions, errors, and observed
+workspace changes are immediate and do not reset the schedule. The
+`progress_interval` invocation value sets the short-run cadence; default it to
+2 minutes, then use 5 minutes after 15 minutes.
 
 For a detached `run_cycle.py`, keep stage start and end lines immediate in the
 coordinator. Follow the status snapshots through the host's monitoring
 facility. Before each scheduled check, capture the current UTC time as an
 RFC 3339 timestamp with subsecond precision and save it as the cursor for the
-next check. Run `cycle_status.py --line --since <previous-cursor>`, then relay
-its lines verbatim. Capturing the next cursor before reading ensures updates
-written during or after the check are included on the next wake-up. Use
-status-change wake-ups when the host supports them, plus the periodic heartbeat.
-Do not keep a foreground or background task open just to wait for progress. If
-the host only supports timed wake-ups, progress from the status file may be
-delayed by one interval; the coordinator still reports each stage transition as
-it happens. When a `cycle done` line appears, stop polling and report its final
-status.
+next check. Run `cycle_status.py --line --since <previous-cursor>`; its lines
+include the executor-reported workspace snapshot and can be relayed verbatim.
+Capturing the next cursor before reading ensures updates written during or
+after the check are included on the next wake-up. Use status-change wake-ups
+when the host supports them, plus the adaptive heartbeat. Do not keep a
+foreground or background task open just to wait for progress. If the host only
+supports timed wake-ups, updates may be delayed by one interval; report each
+stage transition and any workspace change as soon as the snapshot exposes it.
+When a `cycle done` line appears, stop polling and report its final status.
 
 For in-agent work, including `single_agent` stages and Orca coordinator steps,
 emit the same start and end lines yourself. For each worker Task, emit the start

@@ -239,7 +239,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--timeout` | adapter default (3600 s) | Seconds one dispatch may take |
 | `--detach` | off | Start the cycle in its own session and return at once, printing its process ID, a log path, and a `cycle_status.py --line --since <timestamp>` command. Use it whenever an agent or another host that limits a task's time launches the cycle |
 | `--verbose` | off | Print stage starts, changed progress, and stage results as they happen; the final report is always printed |
-| `--progress-interval` | `60` seconds | Time between progress lines while a stage is running |
+| `--progress-interval` | `120` seconds | Progress cadence through the first 15 minutes; switches to `300` seconds after the 15-minute update |
 | `--database` | [default path](telemetry.md#where-it-lives) | Telemetry database |
 | `--config` / `--no-config` | `.code-cycle.yml` in `--cwd` | Use another file, or the built-in defaults on purpose |
 
@@ -282,11 +282,11 @@ The driver refuses `--continue` without `--cwd`, with a resuming `--from`, or wh
 
 **Orca targets** dispatch asynchronously, so a cycle routed to Orca stops after the dispatch instead of treating the missing output as a failure.
 
-The runtime always updates an atomic status file at `<telemetry database directory>/status/<cycle_id>.json`, including when `--verbose` is off. Read current and recently finished cycles with `python3 ~/.code-cycle/runtime/cycle_status.py`; add `--follow` to refresh every 60 seconds or pass `--progress-interval N` to change it. For host monitoring, add `--line` to print one concise line per cycle and `--since <timestamp>` to print only snapshots updated after an ISO 8601 timestamp with a timezone. `--status-dir` selects another status directory, and `--database` follows a custom telemetry database path. `python3 ~/.code-cycle/runtime/cycle_status.py --profiles` prints the effective routing profiles of the current repository instead, or of `--cwd <root>`. Status snapshots include the active role, routing target, elapsed time, tool count, and one short activity line.
+The runtime always updates an atomic status file at `<telemetry database directory>/status/<cycle_id>.json`, including when `--verbose` is off. Read current and recently finished cycles with `python3 ~/.code-cycle/runtime/cycle_status.py`; add `--follow` to refresh every 60 seconds or pass `--progress-interval N` to change it. For host monitoring, add `--line` to print one concise line per cycle and `--since <timestamp>` to print only snapshots updated after an ISO 8601 timestamp with a timezone. `--status-dir` selects another status directory, and `--database` follows a custom telemetry database path. `python3 ~/.code-cycle/runtime/cycle_status.py --profiles` prints the effective routing profiles of the current repository instead, or of `--cwd <root>`. Status snapshots include the active role, routing target, current directory, Git root, branch, workspace kind, elapsed time, tool count, and one short activity line. Progress lines use role/result icons, show the workspace path and branch, and run every 2 minutes through minute 15, then every 5 minutes.
 
 **Final report:** the default output prints the cycle status, then one row per stage with its round, profile, executor, target model and effort, fallback marker, dispatch outcome, reported status, and measured duration. Review and re-review rows include validated open-finding counts by severity when the stage supplied a complete finding list. A successful stage's warnings appear beneath its row. The first status line and the `stopped:` / `reason:` lines keep their existing wording.
 
-With `--verbose`, each `done` line also includes the review finding summary and any warnings. Periodic progress lines appear only when the displayed elapsed-time bucket, tool count, or activity changes. The runtime continues to write every telemetry row unchanged.
+With `--verbose`, each `done` line also includes the review finding summary and any warnings. Periodic progress lines appear when the displayed elapsed-time bucket, tool count, activity, or workspace snapshot changes. The runtime continues to write every telemetry row unchanged.
 
 ```text
 owner/api API-7: READY_FOR_MANUAL_MERGE

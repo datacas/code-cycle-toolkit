@@ -28,12 +28,20 @@ class CycleStatusTests(unittest.TestCase):
         })
 
         self.assertEqual(
-            f"[{local_time}] cycle done · READY_FOR_MANUAL_MERGE",
+            f"✅ 🔍 [{local_time}] cycle done · READY_FOR_MANUAL_MERGE · "
+            "cwd unknown · repo unknown · branch unknown · unknown",
             line,
         )
 
     def test_progress_line_has_the_fixed_fields_on_one_line(self) -> None:
         line = cycle_status.format_progress_line({
+            "workspace": {
+                "cwd": "/tmp/asgard-issue230",
+                "repo_root": "/srv/asgard",
+                "branch": "fix/230-audittable-recovery",
+                "kind": "linked worktree",
+                "temporary": True,
+            },
             "stage": {
                 "role": "implement",
                 "executor": "codex",
@@ -48,8 +56,10 @@ class CycleStatusTests(unittest.TestCase):
 
         self.assertRegex(
             line,
-            r"^\[\d{2}:\d{2}\] implement · codex openai/gpt-6-luna max · "
-            r"12m00s · running the test suite$",
+            r"^🛠️ \[\d{2}:\d{2}\] implement · codex openai/gpt-6-luna max · "
+            r"12m00s · cwd /tmp/asgard-issue230 · repo /srv/asgard · "
+            r"branch fix/230-audittable-recovery · temporary linked worktree · "
+            r"running the test suite$",
         )
         self.assertNotIn("\n", line)
 
@@ -66,9 +76,118 @@ class CycleStatusTests(unittest.TestCase):
                 "finished": True,
             },
         })
+        self.assertIn("✅ 🛠️", done)
         self.assertIn("implement done", done)
         self.assertIn("IMPLEMENTED: opening the pull request", done)
         self.assertNotIn("\n", done)
+
+    def test_result_icons_distinguish_review_changes_and_errors(self) -> None:
+        review = cycle_status.format_progress_line({
+            "updated_at": "2026-09-30T12:34:00Z",
+            "stage": {
+                "role": "review",
+                "status": "CHANGES_REQUESTED",
+                "outcome": "succeeded",
+                "finished": True,
+            },
+        })
+        failed = cycle_status.format_progress_line({
+            "updated_at": "2026-09-30T12:34:00Z",
+            "finished": True,
+            "status": "FAILED",
+            "stage": {"role": "implement", "finished": True},
+        })
+
+        self.assertIn("⚠️ 🔍", review)
+        self.assertIn("❌ 🛠️", failed)
+
+    def test_heartbeat_schedule_switches_at_fifteen_minutes(self) -> None:
+        cases = (
+            (0, 120),
+            (120, 120),
+            (14 * 60, 60),
+            (15 * 60 - 1, 1),
+            (15 * 60, 300),
+            (20 * 60 - 1, 1),
+            (20 * 60, 300),
+        )
+        for elapsed, expected in cases:
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(
+                    expected,
+                    cycle_status._next_heartbeat_delay(elapsed, 120),
+                )
+
+    def test_workspace_snapshot_identifies_git_location_and_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            root.mkdir()
+            subprocess.run(["git", "-C", str(root), "init"], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email",
+                            "test@example.com"], check=True, capture_output=True, text=True)
+            (root / "README.md").write_text("test\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "README.md"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "branch", "-M", "issue-137"],
+                           check=True, capture_output=True, text=True)
+
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "workspace-test", "owner/repo",
+                "ISSUE-137", workspace=root,
+            )
+            current = writer._status["workspace"]
+            self.assertEqual(str(root.resolve()), current["repo_root"])
+            self.assertEqual("issue-137", current["branch"])
+            self.assertEqual("regular checkout", current["kind"])
+            self.assertTrue(current["temporary"])
+            nested = root / "scripts"
+            nested.mkdir()
+            self.assertEqual(
+                "regular checkout", cycle_status._workspace_snapshot(nested)["kind"]
+            )
+
+            subprocess.run(["git", "-C", str(root), "switch", "-c", "feature"],
+                           check=True, capture_output=True, text=True)
+            self.assertTrue(writer._refresh_workspace(force=True))
+            self.assertEqual("feature", writer._status["workspace"]["branch"])
+            self.assertIn("branch feature", cycle_status.format_progress_line(writer._status))
+
+            outside = Path(temporary) / "outside-git"
+            outside.mkdir()
+            untracked = cycle_status._workspace_snapshot(outside)
+            self.assertEqual("outside Git", untracked["kind"])
+            self.assertEqual("unknown", untracked["branch"])
+
+    def test_workspace_snapshot_identifies_linked_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            root.mkdir()
+            subprocess.run(["git", "-C", str(root), "init"], check=True,
+                           capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email",
+                            "test@example.com"], check=True, capture_output=True, text=True)
+            (root / "README.md").write_text("test\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "README.md"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"],
+                           check=True, capture_output=True, text=True)
+            worktree = Path(temporary) / "linked-worktree"
+            subprocess.run(["git", "-C", str(root), "worktree", "add", "-b",
+                            "feature", str(worktree)], check=True,
+                           capture_output=True, text=True)
+
+            snapshot = cycle_status._workspace_snapshot(worktree)
+
+            self.assertEqual("linked worktree", snapshot["kind"])
+            self.assertEqual("feature", snapshot["branch"])
+            self.assertTrue(snapshot["temporary"])
 
     def test_line_mode_only_prints_statuses_newer_than_since(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,8 +273,24 @@ class CycleStatusTests(unittest.TestCase):
             self.assertEqual(3, len(progress))  # start plus the two changed heartbeats
             self.assertIn("1 tools", progress[1])
             self.assertIn("1 tools", progress[2])
-            self.assertEqual(['        └ "reading source"'],
-                             [line for line in lines if "└" in line])
+            self.assertIn("reading source", progress[-1])
+            self.assertFalse(any("└" in line for line in lines))
+
+    def test_finished_status_keeps_usage_summary(self) -> None:
+        rendered = cycle_status.format_status({
+            "cycle_id": "usage-test",
+            "finished": True,
+            "status": "APPROVED",
+            "stage": {
+                "role": "review",
+                "finished": True,
+                "status": "APPROVED",
+                "usage": "in 10k (25% cached) / out 1k",
+                "workspace": {},
+            },
+        })
+
+        self.assertIn("in 10k (25% cached) / out 1k", rendered)
 
     def test_status_is_written_atomically_and_reader_shows_start_and_finish(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

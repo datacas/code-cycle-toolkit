@@ -54,8 +54,12 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("implement ·", rendered)
         self.assertIn("1 tools", rendered)
         self.assertIn("The scripted executor is working", rendered)
-        self.assertIn("implement done · succeeded · IMPLEMENTED", rendered)
-        self.assertIn("review done · succeeded · APPROVED", rendered)
+        self.assertIn("✅ 🛠️", rendered)
+        self.assertIn("implement done", rendered)
+        self.assertIn("succeeded · IMPLEMENTED", rendered)
+        self.assertIn("✅ 🔍", rendered)
+        self.assertIn("review done", rendered)
+        self.assertIn("succeeded · APPROVED", rendered)
         self.assertLessEqual(rendered.count("implement ·"), 2)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
@@ -71,6 +75,10 @@ class CycleProgressTests(unittest.TestCase):
         self.assertTrue(status["finished"])
         self.assertTrue(status["stage"]["finished"])
         self.assertEqual("APPROVED", status["stage"]["status"])
+        self.assertEqual(str(Path.cwd().resolve()), status["workspace"]["cwd"])
+        self.assertEqual(str(ROOT), status["workspace"]["repo_root"])
+        self.assertEqual("regular checkout", status["workspace"]["kind"])
+        self.assertFalse(status["workspace"]["temporary"])
 
     def test_cli_passes_verbose_options_and_keeps_defaults_opt_in(self) -> None:
         report = rc.CycleReport(
@@ -87,6 +95,14 @@ class CycleProgressTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertTrue(run.call_args.kwargs["verbose"])
         self.assertEqual(12, run.call_args.kwargs["progress_interval"])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(rc, "run_cycle", return_value=report) as run:
+                rc.main([
+                    "--repo", "owner/api", "--task", "API-7", "--no-config",
+                    "--database", str(Path(self.temporary.name) / "default.sqlite"),
+                ])
+        self.assertEqual(120, run.call_args.kwargs["progress_interval"])
 
 
 if __name__ == "__main__":
