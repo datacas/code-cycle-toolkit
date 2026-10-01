@@ -5,6 +5,8 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -100,6 +102,24 @@ class CycleStatusTests(unittest.TestCase):
 
         self.assertIn("⚠️ 🔍", review)
         self.assertIn("❌ 🛠️", failed)
+        self.assertEqual("⛔", cycle_status._result_icon("HUMAN_INTERVENTION"))
+        self.assertEqual("⛔", cycle_status._result_icon("interrupted"))
+        self.assertEqual("✅", cycle_status._result_icon("RESOLVED"))
+
+        blocked_cycle = cycle_status.format_progress_line({
+            "finished": True,
+            "status": "HUMAN_INTERVENTION",
+            "stage": {"role": "implement"},
+        })
+        interrupted = cycle_status.format_progress_line({
+            "stage": {"role": "implement", "outcome": "interrupted", "finished": True},
+        })
+        resolved = cycle_status.format_progress_line({
+            "stage": {"role": "resolve", "status": "RESOLVED", "finished": True},
+        })
+        self.assertIn("⛔ 🛠️", blocked_cycle)
+        self.assertIn("⛔ 🛠️", interrupted)
+        self.assertIn("✅ 🩹", resolved)
 
     def test_heartbeat_schedule_switches_at_fifteen_minutes(self) -> None:
         cases = (
@@ -188,6 +208,100 @@ class CycleStatusTests(unittest.TestCase):
             self.assertEqual("linked worktree", snapshot["kind"])
             self.assertEqual("feature", snapshot["branch"])
             self.assertTrue(snapshot["temporary"])
+
+    def test_workspace_observation_replaces_unknown_stage_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "workspace-observed", "owner/repo",
+                "ISSUE-137", workspace=ROOT,
+            )
+            writer._status["stage"] = {
+                "role": "implement",
+                "executor": "codex",
+                "provider": "openai",
+                "model": "gpt-6-luna",
+                "effort": "high",
+                "elapsed_seconds": 0,
+                "finished": False,
+                "workspace": {
+                    "cwd": "unknown", "repo_root": None, "branch": "unknown",
+                    "kind": "unknown", "temporary": False,
+                },
+            }
+
+            self.assertTrue(writer.workspace_observed(ROOT / "scripts"))
+            expected = cycle_status._workspace_snapshot(ROOT / "scripts")
+            self.assertEqual(expected, writer._status["stage"]["workspace"])
+            self.assertEqual(expected, writer._status["workspace"])
+
+    def test_stale_workspace_refresh_cannot_overwrite_new_worker_location(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace_a = root / "worker-a"
+            workspace_b = root / "worker-b"
+            writer = cycle_status.CycleStatusWriter(
+                root / "telemetry.sqlite", "workspace-race", "owner/repo", "ISSUE-137",
+                workspace=root,
+            )
+            writer._status["stage"] = {
+                "role": "implement", "finished": False,
+                "workspace": {"cwd": "unknown"},
+            }
+            writer._stage_workspace_cwd = str(workspace_a)
+            snapshot_a = {"cwd": str(workspace_a), "branch": "stale"}
+            snapshot_b = {"cwd": str(workspace_b), "branch": "current"}
+            snapshot_started = threading.Event()
+            release_snapshot = threading.Event()
+
+            def fake_snapshot(path):
+                if str(path) == str(workspace_a):
+                    snapshot_started.set()
+                    if not release_snapshot.wait(timeout=3):
+                        raise TimeoutError("test did not release the stale snapshot")
+                    return snapshot_a
+                if str(path) == str(workspace_b):
+                    return snapshot_b
+                self.fail(f"unexpected workspace snapshot: {path}")
+
+            with patch.object(cycle_status, "_workspace_snapshot", side_effect=fake_snapshot):
+                stale_refresh = threading.Thread(
+                    target=lambda: writer._refresh_workspace(force=True),
+                )
+                stale_refresh.start()
+                self.assertTrue(snapshot_started.wait(timeout=2))
+
+                new_observation = threading.Thread(
+                    target=writer.workspace_observed, args=(workspace_b,),
+                )
+                new_observation.start()
+                deadline = time.monotonic() + 2
+                while (writer._stage_workspace_cwd != str(workspace_b)
+                       and time.monotonic() < deadline):
+                    time.sleep(0.005)
+                self.assertEqual(str(workspace_b), writer._stage_workspace_cwd)
+                release_snapshot.set()
+                stale_refresh.join(timeout=2)
+                new_observation.join(timeout=2)
+
+            self.assertFalse(stale_refresh.is_alive())
+            self.assertFalse(new_observation.is_alive())
+            self.assertEqual(snapshot_b, writer._status["stage"]["workspace"])
+            self.assertEqual(snapshot_b, writer._status["workspace"])
+
+    def test_temporary_detection_uses_roots_not_directory_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project_tmp = Path(temporary) / "project" / "tmp"
+            project_tmp.mkdir(parents=True)
+            with patch.object(cycle_status, "_is_within", return_value=False):
+                snapshot = cycle_status._workspace_snapshot(project_tmp)
+            self.assertFalse(snapshot["temporary"])
+
+        temporary_root = Path("/tmp").resolve()
+        candidate = temporary_root / "cycle-status-known-temp-root"
+        alternate_root = temporary_root.parent / "cycle-status-alternate-temp-root"
+        with patch.object(cycle_status.tempfile, "gettempdir", return_value=str(alternate_root)):
+            snapshot = cycle_status._workspace_snapshot(candidate)
+        self.assertTrue(snapshot["temporary"])
 
     def test_line_mode_only_prints_statuses_newer_than_since(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

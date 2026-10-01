@@ -880,10 +880,10 @@ snapshots, each as one user-facing line, for a host monitoring facility to
 relay. `run_cycle.py --verbose` prints the same routing, workspace, and activity
 fields to the launching terminal, with periodic updates controlled by
 `--progress-interval`: every two minutes through minute 15, then every five
-minutes. The workspace snapshot reports the runner's current directory, Git
-root, branch, and whether the checkout is a linked worktree, regular checkout,
-outside Git, or in a temporary path. Lines use role and result icons without
-depending on terminal color support. This output is opt-in; without
+minutes. The workspace snapshot reports the dispatched worker's current
+directory, Git root, branch, and whether the checkout is a linked worktree,
+regular checkout, outside Git, or in a temporary path. Lines use role and
+result icons without depending on terminal color support. This output is opt-in; without
 `--verbose`, the normal terminal output is unchanged.
 
 **What the agent said about it is shown, and believed by nobody.** A stage that

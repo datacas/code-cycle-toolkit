@@ -609,7 +609,7 @@ class NativeAdapter(Adapter):
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
-                 on_progress=None) -> DispatchResult:
+                 on_progress=None, on_workspace=None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -631,6 +631,9 @@ class NativeAdapter(Adapter):
             argv = (self.argv(target, task, cwd, writes, True)
                     if publishes else self.argv(target, task, cwd, writes))
         argv = self.readable(argv, read_dirs)
+        worker_cwd = cwd or os.getcwd()
+        if on_workspace is not None:
+            on_workspace(worker_cwd)
         try:
             if on_progress is not None and runner is _run:
                 completed = runner(
@@ -646,6 +649,9 @@ class NativeAdapter(Adapter):
             )
         except Exception as exc:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
+
+        if on_workspace is not None:
+            on_workspace(worker_cwd)
 
         friction = self.classify_failure(
             completed.returncode, completed.stderr or "", completed.stdout or ""
@@ -1189,12 +1195,13 @@ class ClaudeAdapter(NativeAdapter):
                  publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
-                 on_progress=None) -> DispatchResult:
+                 on_progress=None, on_workspace=None) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
             read_dirs=read_dirs, on_progress=on_progress,
+            on_workspace=on_workspace,
         )
 
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
@@ -1349,7 +1356,7 @@ class OrcaAdapter(Adapter):
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = 3600, runner=_run,
                  context: "OrcaDispatchContext | None" = None,
-                 writes: bool = False) -> DispatchResult:
+                 writes: bool = False, on_workspace=None) -> DispatchResult:
         """Run the work as a supervised Orca worker.
 
         Orca is the one backend that reports which model it actually launched,
@@ -1403,6 +1410,9 @@ class OrcaAdapter(Adapter):
         # prompt went into that Task when it was created; passing prose to
         # --task would silently create work nobody can find again.
         worktree = review_workspace.path if review_workspace is not None else cwd
+        worker_cwd = worktree or os.getcwd()
+        if on_workspace is not None:
+            on_workspace(worker_cwd)
         argv = [self.binary, "orchestration", "worker-start",
                 "--from", context.coordinator, "--run", context.run_id,
                 "--task", context.task_id, "--agent", agent,
@@ -1417,6 +1427,9 @@ class OrcaAdapter(Adapter):
                                   detail=f"no receipt within {timeout}s; the worker may still be alive")
         except Exception as exc:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
+
+        if on_workspace is not None:
+            on_workspace(worker_cwd)
 
         if not payload.get("ok") or completed.returncode != 0:
             # The CLI exits 0 only for `ready`; a failed or outcome_unknown
@@ -1569,6 +1582,7 @@ def dispatch(
     target = decision.target
     adapter = registry.get(target.executor)
     on_progress = kw.pop("on_progress", None)
+    on_workspace = kw.pop("on_workspace", None)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -1667,6 +1681,8 @@ def dispatch(
     kw.pop("workspace", None)
     if isinstance(adapter, NativeAdapter) and on_progress is not None:
         kw["on_progress"] = on_progress
+    if on_workspace is not None and isinstance(adapter, (NativeAdapter, OrcaAdapter)):
+        kw["on_workspace"] = on_workspace
     # Evidence the runtime wrote outside the workspace. Only a native CLI is
     # started here and can be granted a directory; Orca's worker runs where
     # Orca puts it, and its prompt already says what to do without the file.

@@ -319,6 +319,7 @@ class CycleRecorder:
         self.shadow = shadow
         self.stage_started = stage_started
         self.on_progress = on_progress
+        self.on_workspace: Callable[..., None] | None = None
 
     def stage(self, role: str, task: str, *, escalated: bool = False,
               **dispatch_kwargs) -> StageOutcome:
@@ -442,6 +443,7 @@ class CycleRecorder:
                                   self.registry,
                                   policy=self.policy, probes=self.probes,
                                   on_progress=self.on_progress,
+                                  on_workspace=self.on_workspace,
                                   **dispatch_kwargs)
             except CycleInterrupted as interruption:
                 # No half-done state, even now: the stage that was running is

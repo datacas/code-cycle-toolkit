@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import cycle_status  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
@@ -64,6 +65,7 @@ class CycleProgressTests(unittest.TestCase):
         self.assertLessEqual(rendered.count("implement ·"), 3)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
+        expected_workspace = cycle_status._workspace_snapshot(Path.cwd())
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             report = self.run_cycle(progress_interval=0.01)
@@ -76,10 +78,7 @@ class CycleProgressTests(unittest.TestCase):
         self.assertTrue(status["finished"])
         self.assertTrue(status["stage"]["finished"])
         self.assertEqual("APPROVED", status["stage"]["status"])
-        self.assertEqual(str(Path.cwd().resolve()), status["workspace"]["cwd"])
-        self.assertEqual(str(ROOT), status["workspace"]["repo_root"])
-        self.assertEqual("regular checkout", status["workspace"]["kind"])
-        self.assertFalse(status["workspace"]["temporary"])
+        self.assertEqual(expected_workspace, status["workspace"])
 
     def test_cli_passes_verbose_options_and_keeps_defaults_opt_in(self) -> None:
         report = rc.CycleReport(

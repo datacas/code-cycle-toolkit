@@ -1090,6 +1090,7 @@ def run_cycle(
     )
     recorder.stage_started = status_writer.stage_started
     recorder.on_progress = status_writer.activity
+    recorder.on_workspace = status_writer.workspace_observed
     status_writer.start()
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}

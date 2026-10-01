@@ -125,10 +125,10 @@ ROLE_ICONS = {
 
 _SUCCESS_RESULTS = {
     "APPROVED", "COMPLETED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
-    "SUCCEEDED", "SUCCESS",
+    "RESOLVED", "SUCCEEDED", "SUCCESS",
 }
 _WARNING_RESULTS = {"CHANGES_REQUESTED", "NEEDS_REFINEMENT", "PARTIALLY_RESOLVED"}
-_BLOCKED_RESULTS = {"BLOCKED", "STOPPED"}
+_BLOCKED_RESULTS = {"BLOCKED", "HUMAN_INTERVENTION", "INTERRUPTED", "STOPPED"}
 _FAILURE_RESULTS = {"CONTRACT_VIOLATION", "ERROR", "FAILED"}
 
 
@@ -203,19 +203,13 @@ def _workspace_snapshot(cwd: str | Path | None) -> dict[str, object]:
         kind = "unknown"
 
     temporary = False
-    try:
-        temporary = _is_within(path, Path(tempfile.gettempdir()).resolve())
-    except (OSError, RuntimeError):
-        pass
-    if repo_root:
+    for root in (Path(tempfile.gettempdir()), Path("/tmp"), Path("/private/tmp")):
         try:
-            relative = path.relative_to(Path(repo_root))
-            temporary = temporary or any(
-                part.lower() in {"tmp", ".tmp", "temp", ".temp", "temporary"}
-                for part in relative.parts
-            )
-        except ValueError:
-            pass
+            if _is_within(path, root.expanduser().resolve()):
+                temporary = True
+                break
+        except (OSError, RuntimeError):
+            continue
     return {
         "cwd": str(path),
         "repo_root": repo_root,
@@ -398,6 +392,8 @@ class CycleStatusWriter:
         self.verbose = verbose
         self.stream = stream
         self.workspace_cwd = str(workspace or Path.cwd())
+        self._stage_workspace_cwd: str | None = None
+        self._workspace_generation = 0
         self._workspace_refresh_lock = threading.Lock()
         self._last_workspace_check = time.monotonic()
         workspace_info = _workspace_snapshot(self.workspace_cwd)
@@ -433,8 +429,16 @@ class CycleStatusWriter:
         self._refresh_workspace(force=True)
         target = decision.target
         with self._lock:
+            self._workspace_generation += 1
+            self._stage_workspace_cwd = None
             self._stage_started = time.monotonic()
-            workspace = dict(self._status.get("workspace") or {})
+            workspace = {
+                "cwd": "unknown",
+                "repo_root": None,
+                "branch": "unknown",
+                "kind": "unknown",
+                "temporary": False,
+            }
             self._status["stage"] = {
                 "role": role,
                 "profile": decision.profile,
@@ -458,6 +462,24 @@ class CycleStatusWriter:
         if self.verbose:
             self._print(_stage_line(snapshot))
 
+    def workspace_observed(self, cwd: str | Path) -> bool:
+        """Record the directory selected by the active executor for its worker."""
+        path = str(cwd or Path.cwd())
+        with self._lock:
+            self._workspace_generation += 1
+            self.workspace_cwd = path
+            self._stage_workspace_cwd = path
+            self._last_workspace_check = 0
+        changed = self._refresh_workspace(force=True)
+        if changed:
+            with self._lock:
+                stage = self._status.get("stage")
+                snapshot = dict(stage) if isinstance(stage, dict) else None
+            self._write()
+            if self.verbose and snapshot is not None:
+                self._print(_stage_line(snapshot, progress=True))
+        return changed
+
     def activity(self, *, text: str | None = None, tool: bool = False) -> None:
         workspace_changed = self._refresh_workspace(force=False)
         with self._lock:
@@ -479,7 +501,6 @@ class CycleStatusWriter:
     def stage_finished(self, result, status: str | None, *,
                        findings: str | None = None,
                        warnings: list[str] | None = None) -> float | None:
-        self._refresh_workspace(force=True)
         with self._lock:
             stage = self._status.get("stage")
             if not isinstance(stage, dict):
@@ -489,6 +510,7 @@ class CycleStatusWriter:
             stage["outcome"] = result.outcome.value if result else "blocked"
             stage["status"] = status
             stage["finished"] = True
+            self._workspace_generation += 1
             usage = _usage_summary(result)
             if usage:
                 stage["usage"] = usage
@@ -521,6 +543,18 @@ class CycleStatusWriter:
         self._write()
 
     def _refresh_workspace(self, *, force: bool) -> bool:
+        with self._lock:
+            stage = self._status.get("stage")
+            if isinstance(stage, dict):
+                if stage.get("finished") or self._stage_workspace_cwd is None:
+                    return False
+                workspace_cwd = self._stage_workspace_cwd
+                generation = self._workspace_generation
+                stage_workspace = True
+            else:
+                workspace_cwd = self.workspace_cwd
+                generation = self._workspace_generation
+                stage_workspace = False
         now = time.monotonic()
         if not force and now - self._last_workspace_check < 5:
             return False
@@ -528,16 +562,25 @@ class CycleStatusWriter:
             now = time.monotonic()
             if not force and now - self._last_workspace_check < 5:
                 return False
-            snapshot = _workspace_snapshot(self.workspace_cwd)
+            snapshot = _workspace_snapshot(workspace_cwd)
             self._last_workspace_check = time.monotonic()
         with self._lock:
-            if snapshot == self._status.get("workspace"):
+            if generation != self._workspace_generation:
                 return False
-            self._status["workspace"] = snapshot
+            previous = self._status.get("workspace")
             stage = self._status.get("stage")
-            if isinstance(stage, dict):
+            if stage_workspace:
+                if (not isinstance(stage, dict) or stage.get("finished")
+                        or self._stage_workspace_cwd != workspace_cwd):
+                    return False
+            elif isinstance(stage, dict) or self.workspace_cwd != workspace_cwd:
+                return False
+            if isinstance(stage, dict) and not stage.get("finished"):
+                previous = stage.get("workspace")
+            self._status["workspace"] = snapshot
+            if isinstance(stage, dict) and not stage.get("finished"):
                 stage["workspace"] = dict(snapshot)
-        return True
+        return snapshot != previous
 
     def _refresh_elapsed(self, stage: dict) -> None:
         if self._stage_started is not None:

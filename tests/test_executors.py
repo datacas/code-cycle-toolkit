@@ -577,6 +577,22 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertFalse(result.model_matches_request)
         self.assertIn("requested gpt-6-luna", result.detail)
 
+    def test_native_dispatch_reports_its_effective_workspace(self) -> None:
+        observed = []
+        runner_cwds = []
+
+        def runner(argv, timeout=None, cwd=None):
+            runner_cwds.append(cwd)
+            return completed("done")
+
+        ex.CodexAdapter().dispatch(
+            TARGET, "work", cwd="/tmp/worker-checkout", runner=runner,
+            on_workspace=observed.append,
+        )
+
+        self.assertEqual(["/tmp/worker-checkout", "/tmp/worker-checkout"], observed)
+        self.assertEqual(["/tmp/worker-checkout"], runner_cwds)
+
 
 class WorkingDirectoryTests(unittest.TestCase):
     """A multi-repository dispatcher must not run in the coordinator's directory."""
@@ -708,6 +724,27 @@ class OrcaDispatchTests(unittest.TestCase):
         self.assertTrue(result.model_matches_request)
         self.assertIn("worker-start", seen["argv"])
         self.assertIn("gpt-6-luna", seen["argv"])
+
+    def test_it_reports_the_actual_review_workspace(self) -> None:
+        observed = []
+        seen = {}
+        context = orca_context(review_workspace=ex.OrcaReviewWorkspace(
+            path="/tmp/orca-review-worktree",
+            implementer_path="/repo/implementer",
+            isolation="disposable",
+        ))
+
+        def runner(argv, timeout=None, cwd=None):
+            seen["cwd"] = cwd
+            return self.receipt()
+
+        ex.OrcaAdapter().dispatch(
+            self.TARGET, "ignored-prompt", cwd="/repo/implementer",
+            context=context, runner=runner, on_workspace=observed.append,
+        )
+
+        self.assertEqual("/tmp/orca-review-worktree", seen["cwd"])
+        self.assertEqual([seen["cwd"], seen["cwd"]], observed)
 
     def test_it_refuses_to_invent_a_coordinator_or_a_run(self) -> None:
         """A dispatcher that quietly spawns terminals is one nobody can reason about."""
@@ -2036,6 +2073,21 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertEqual("read-only", argv[argv.index("-s") + 1])
         self.assertFalse({"--dangerously-bypass-approvals-and-sandbox", "--yolo",
                           "--full-auto"} & set(argv))
+
+    def test_isolated_claude_review_reports_the_disposable_clone(self) -> None:
+        observed = []
+        result = self.dispatch(
+            "claude", "none",
+            on_workspace=lambda path: observed.append((path, Path(path).exists())),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(2, len(observed))
+        self.assertTrue(all(exists for _, exists in observed))
+        self.assertTrue(Path(observed[0][0]).name.startswith("code-cycle-review-"))
+        self.assertNotEqual(str(self.repo), observed[0][0])
+        self.assertEqual(observed[0][0], observed[1][0])
+        self.assertFalse(Path(observed[0][0]).exists())
 
     def test_a_codex_stage_that_writes_is_a_contract_violation(self) -> None:
         """The sandbox flag confines the agent's own commands, not a process
