@@ -35,6 +35,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from executors import (
     Availability,
@@ -45,6 +46,7 @@ from executors import (
     WorkspacePolicy,
     dispatch,
 )
+from harness import build_harness_snapshot
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
     RoutingDecision,
@@ -244,6 +246,7 @@ class CycleRecorder:
         shadow: JevShadow | None = None,
         stage_started: Callable[[str, RoutingDecision], None] | None = None,
         on_progress: Callable[..., None] | None = None,
+        skills_by_role: dict[str, str] | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -263,6 +266,7 @@ class CycleRecorder:
         # between two stages with nothing recording that it had — and the
         # decisions on either side of the change become unexplainable.
         self.probes = probes
+        self.skills_by_role = dict(skills_by_role or {})
         # Already resolved by whoever loaded the repository's configuration.
         # The recorder does not go looking for a file: a component that reads
         # configuration on its own is one that can disagree with the caller
@@ -387,6 +391,8 @@ class CycleRecorder:
             else None
         )
         self.latest_change = change
+        parent_attempt_id = None
+        parent_executor = None
         for attempt in range(2):
             signals = self._pre_routing(role, change)
             if escalated:
@@ -438,12 +444,43 @@ class CycleRecorder:
             # Per attempt: a reroute runs under the fallback's target, and its
             # run line has to name that one.
             started = time.monotonic()
+            relationship = None
+            if parent_attempt_id is not None:
+                relationship = (
+                    "fallback" if parent_executor != decision.target.executor else "retry"
+                )
+            skill = self.skills_by_role.get(role)
+            harness_snapshot = build_harness_snapshot(
+                role=role, skill=skill, profile=decision.profile,
+                routing_strategy=getattr(decision.strategy, "value", self.routing_strategy.value),
+                readiness_policy=self.policy.value,
+                executor=decision.target.executor,
+                probe=(self.probes or {}).get(decision.target.executor),
+                profiles=self.profiles,
+            )
+            attempt_id = self.telemetry.create_dispatch_attempt(
+                self.repo_id, self.task_id, self.cycle_id, self.stage_seq, role,
+                executor=decision.target.executor,
+                provider=decision.target.provider,
+                model_requested=decision.target.model,
+                effort=decision.target.effort,
+                profile=decision.profile,
+                harness_snapshot=harness_snapshot,
+                parent_attempt_id=parent_attempt_id,
+                relationship=relationship,
+            )
+            if self.registry.get(decision.target.executor).completes_work:
+                self.telemetry.update_dispatch_attempt(
+                    attempt_id, {"lifecycle_state": "running"},
+                    update_id=f"update-{uuid.uuid4().hex}", source="runtime",
+                )
             try:
                 result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
                                   self.registry,
                                   policy=self.policy, probes=self.probes,
                                   on_progress=self.on_progress,
                                   on_workspace=self.on_workspace,
+                                  dispatch_attempt_id=attempt_id,
                                   **dispatch_kwargs)
             except CycleInterrupted as interruption:
                 # No half-done state, even now: the stage that was running is
@@ -452,19 +489,70 @@ class CycleRecorder:
                     DispatchOutcome.INTERRUPTED, decision.target.executor, decision.target,
                     detail=f"interrupted by {interruption.signal_name}",
                     duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+                    lifecycle_state="interrupted",
+                )
+                self.telemetry.update_dispatch_attempt(
+                    attempt_id,
+                    {"lifecycle_state": "interrupted", "outcome": "interrupted",
+                     "duration_ms": result.duration_ms,
+                     "finished_at": datetime.now(timezone.utc).isoformat(),
+                     "error_code": "interrupted"},
+                    update_id=f"update-{uuid.uuid4().hex}", source="runtime",
                 )
                 outcome.decision = decision
                 outcome.result = result
                 outcome.attempts.append((decision, result))
-                outcome.rows.append(self._record(role, decision, result, signals))
+                outcome.rows.append(self._record(
+                    role, decision, result, signals, attempt_id=attempt_id,
+                    parent_attempt_id=parent_attempt_id, relationship=relationship,
+                ))
                 self.failed_attempts += 1
                 self.stages.append(outcome)
                 interruption.outcome = outcome
                 raise
+            state = result.lifecycle_state or (
+                "launched" if result.asynchronous else
+                "completed" if result.outcome is DispatchOutcome.SUCCEEDED else
+                "interrupted" if result.outcome is DispatchOutcome.INTERRUPTED else "failed"
+            )
+            partial_result = {
+                "lifecycle_state": state,
+                "outcome": result.outcome.value,
+                "model_resolved": result.model_resolved,
+                "duration_ms": result.duration_ms,
+                "usage_observations": list(result.usage_observations),
+                "cost_measures": list(result.cost_measures),
+            }
+            if state in {"completed", "failed", "timed_out", "interrupted"}:
+                partial_result["finished_at"] = datetime.now(timezone.utc).isoformat()
+            external_dispatch_id = (result.artifacts or {}).get("dispatchId")
+            if external_dispatch_id is None:
+                external_dispatch_id = (result.artifacts or {}).get("dispatch_id")
+            if external_dispatch_id is not None:
+                partial_result["external_dispatch_id"] = external_dispatch_id
+            if state == "timed_out":
+                partial_result["error_code"] = "timeout"
+            elif state == "interrupted":
+                partial_result["error_code"] = "interrupted"
+            elif result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+                partial_result["error_code"] = "contract_violation"
+            elif result.outcome is not DispatchOutcome.SUCCEEDED:
+                partial_result["error_code"] = (
+                    result.missing_capability
+                    if result.missing_capability in {"operating_quota", "operating_availability"}
+                    else "dispatch_failed"
+                )
+            self.telemetry.update_dispatch_attempt(
+                attempt_id, partial_result,
+                update_id=f"update-{uuid.uuid4().hex}", source="runtime",
+            )
             outcome.decision = decision
             outcome.result = result
             outcome.attempts.append((decision, result))
-            outcome.rows.append(self._record(role, decision, result, signals))
+            outcome.rows.append(self._record(
+                role, decision, result, signals, attempt_id=attempt_id,
+                parent_attempt_id=parent_attempt_id, relationship=relationship,
+            ))
             if result.outcome is not DispatchOutcome.SUCCEEDED:
                 self.failed_attempts += 1
 
@@ -480,6 +568,8 @@ class CycleRecorder:
             # The evidence a probe could not have had. Recorded already, above,
             # so the abandoned attempt keeps its row.
             self.availability[result.executor] = learned
+            parent_attempt_id = attempt_id
+            parent_executor = decision.target.executor
 
         self.stages.append(outcome)
         self._observe_shadow(role, *first)
@@ -642,7 +732,10 @@ class CycleRecorder:
         return signals
 
     def _record(self, role: str, decision: RoutingDecision,
-                result: DispatchResult | None, signals: dict) -> int:
+                result: DispatchResult | None, signals: dict, *,
+                attempt_id: str | None = None,
+                parent_attempt_id: str | None = None,
+                relationship: str | None = None) -> int:
         if result is None:
             # A blocked routing decision never reached an executor, so there is
             # no dispatch to describe — but the decision still happened, and a
@@ -668,5 +761,8 @@ class CycleRecorder:
             started_from=self.started_from,
             cycle_id=self.cycle_id, stage_seq=self.stage_seq,
             record_kind="dispatch",
+            dispatch_attempt_id=attempt_id,
+            parent_attempt_id=parent_attempt_id,
+            dispatch_relationship=relationship,
             **signals,
         )

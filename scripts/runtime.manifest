@@ -12,6 +12,8 @@
 cycle.py
 run_cycle.py
 executors.py
+usage.py
+harness.py
 router.py
 telemetry.py
 cycle_status.py

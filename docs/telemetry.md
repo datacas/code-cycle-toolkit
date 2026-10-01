@@ -35,7 +35,7 @@ References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
 
 | Row | Written | Holds |
 |---|---|---|
-| `dispatch` | once per stage attempt, **before** its result is known | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and the pre-routing signals below |
+| `dispatch` | after each dispatch decision | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and references to an attempt, execution variant and harness snapshot when an attempt was created |
 | `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed; an `issue_review` verdict holds instead `READY`/`NEEDS_REFINEMENT`/`BLOCKED`, `readiness_result_valid`, and, when valid, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, and `readiness_uncertainties_material` |
 | `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion, and for a cycle that started at `implement`, `issue_review` (`off`, `skipped`, `dispatched`) |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
@@ -57,7 +57,45 @@ Issue-review findings, uncertainties, evidence references, and proposed edits ar
 
 A stage the host stopped before it finished is recorded with the outcome `interrupted`, and its cycle with the stop reason `interrupted` (schema 12); a run killed without a catchable signal still leaves no closing row and reads as unknown. A cycle that continued an interrupted implementation with `--continue` carries `continued` on its cycle row.
 
-The field-by-field schema, correlation keys, and schema versions 1–12 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+### Physical attempts, usage, and harness snapshots (schema 13)
+
+Each executor invocation has a `dispatch_attempt_id`, even when multiple
+invocations share one logical `(cycle_id, stage_seq)` because of a retry or
+fallback. `dispatch_attempts` records the work item, cycle, stage, parent
+attempt, execution variant, lifecycle state, outcome, safe error code,
+duration, and any Orca `dispatchId`. An Orca launch remains `launched` until a
+later partial update confirms a terminal state. Updates are idempotent by
+`update_id`; omitted fields leave the prior value intact. A contradictory
+terminal update creates a reconciliation conflict. A correction requires a
+closed correction reason and preserves the prior update.
+
+Token observations are stored by reported category and source, including cache
+and reasoning categories when the executor reports them. Missing categories
+have no observation; a reported zero remains a measured zero. Aggregation keeps
+categories separate so overlapping provider fields are never added into an
+invented total. Retries and fallbacks aggregate through their distinct attempt
+IDs without counting the same observation ID twice.
+
+Cost measures carry exactly one basis: `actual_billed`,
+`api_equivalent_estimated`, `subscription_consumption`, or `unknown`. Native
+CLI `costUSD` reports have `unknown` basis and keep the reported amount apart
+from an attributable billed amount. API-equivalent estimates require an explicit
+pricing snapshot ID and date; subscription consumption keeps its own unit.
+Totals are grouped by basis, component, and unit. An actual billed measure
+takes precedence over an API estimate with the same attribution key, and no
+combined monetary total across bases or currencies is produced.
+
+Each attempt references an execution variant (executor, provider, requested
+and resolved model when known, and effort) and a content-free harness snapshot.
+The snapshot records release and commit, CLI version, effective profile and
+routing policy, runtime manifest, relevant prompt templates, and the stage
+skill/configuration hashes. It contains no prompt or issue text, credentials,
+or local paths. Identical normalized components share a fingerprint.
+
+Historical stage rows remain queryable. They have no new attempt or usage rows;
+the new fields are unmeasured and must be read as unknown, never as zero.
+
+The field-by-field schema, correlation keys, and schema versions 1–13 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
 
 ## What is never recorded
 

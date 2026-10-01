@@ -44,6 +44,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from router import Availability, RoutingDecision, RoutingMode, Target
+from usage import normalize_executor_output
 
 SCHEMA_VERSION = 1
 
@@ -216,6 +217,12 @@ class DispatchResult:
     #: started work that finishes elsewhere: timing the launch would report a
     #: stage as fast because nobody watched it finish.
     duration_ms: int | None = None
+    #: Typed provider-reported categories. Raw stdout is never carried here.
+    usage_observations: tuple[dict, ...] = ()
+    #: Reported cost evidence; CLI amounts remain unpriced and use `unknown`.
+    cost_measures: tuple[dict, ...] = ()
+    #: The physical call's lifecycle is independent of usage availability.
+    lifecycle_state: str | None = None
 
     @property
     def learned_availability(self) -> Availability | None:
@@ -609,7 +616,8 @@ class NativeAdapter(Adapter):
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
-                 on_progress=None, on_workspace=None) -> DispatchResult:
+                 on_progress=None, on_workspace=None,
+                 dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -642,30 +650,45 @@ class NativeAdapter(Adapter):
                 )
             else:
                 completed = runner(argv, timeout=timeout, cwd=cwd)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as timeout_error:
+            partial_stdout = timeout_error.stdout or ""
+            if isinstance(partial_stdout, bytes):
+                partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+            usage, costs = normalize_executor_output(
+                self.name, partial_stdout, dispatch_attempt_id or "attempt-unlinked",
+            )
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
                 detail=f"no result within {timeout}s; the run may still be alive",
+                usage_observations=usage, cost_measures=costs,
+                lifecycle_state="timed_out",
             )
         except Exception as exc:
-            return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc),
+                                  lifecycle_state="failed")
 
         if on_workspace is not None:
             on_workspace(worker_cwd)
 
+        stdout = completed.stdout or ""
+        usage, costs = normalize_executor_output(
+            self.name, stdout, dispatch_attempt_id or "attempt-unlinked",
+        )
+        evidence = {"usage_observations": usage, "cost_measures": costs}
         friction = self.classify_failure(
             completed.returncode, completed.stderr or "", completed.stdout or ""
         )
         if friction is not None:
             capability, detail = friction
-            return self._blocked(target, capability, detail)
+            return replace(self._blocked(target, capability, detail), **evidence,
+                           lifecycle_state="failed")
         if completed.returncode != 0:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
                 detail=(completed.stderr or completed.stdout or "").strip()[:400],
                 artifacts={"argv": argv, "returncode": completed.returncode},
+                **evidence, lifecycle_state="failed",
             )
-        stdout = completed.stdout or ""
         resolved = self.read_resolved_model(stdout)
         # Two different jobs, and only one of them may be bounded. The tail in
         # `artifacts` is for a human reading afterwards, so it is cut to keep a
@@ -681,11 +704,13 @@ class NativeAdapter(Adapter):
                 model_resolved=resolved,
                 detail=(f"requested {target.model}, the executor reported running"
                         f" {resolved}"),
-                artifacts=artifacts, agent_output=spoken,
+                artifacts=artifacts, agent_output=spoken, **evidence,
+                lifecycle_state="completed",
             )
         return DispatchResult(
             DispatchOutcome.SUCCEEDED, self.name, target,
             model_resolved=resolved, artifacts=artifacts, agent_output=spoken,
+            **evidence, lifecycle_state="completed",
         )
 
     def classify_failure(self, returncode: int, stderr: str, stdout: str) -> tuple[str, str] | None:
@@ -1195,13 +1220,14 @@ class ClaudeAdapter(NativeAdapter):
                  publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
-                 on_progress=None, on_workspace=None) -> DispatchResult:
+                 on_progress=None, on_workspace=None,
+                 dispatch_attempt_id: str | None = None) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
             read_dirs=read_dirs, on_progress=on_progress,
-            on_workspace=on_workspace,
+            on_workspace=on_workspace, dispatch_attempt_id=dispatch_attempt_id,
         )
 
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
@@ -1583,6 +1609,7 @@ def dispatch(
     adapter = registry.get(target.executor)
     on_progress = kw.pop("on_progress", None)
     on_workspace = kw.pop("on_workspace", None)
+    dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -1681,6 +1708,8 @@ def dispatch(
     kw.pop("workspace", None)
     if isinstance(adapter, NativeAdapter) and on_progress is not None:
         kw["on_progress"] = on_progress
+    if isinstance(adapter, NativeAdapter) and dispatch_attempt_id is not None:
+        kw["dispatch_attempt_id"] = dispatch_attempt_id
     if on_workspace is not None and isinstance(adapter, (NativeAdapter, OrcaAdapter)):
         kw["on_workspace"] = on_workspace
     # Evidence the runtime wrote outside the workspace. Only a native CLI is

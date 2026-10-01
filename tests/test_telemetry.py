@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import executors as ex  # noqa: E402
+import harness  # noqa: E402
 import router  # noqa: E402
 import telemetry as tm  # noqa: E402
 
@@ -675,6 +676,183 @@ class SummaryTests(TelemetryTestCase):
         self.assertEqual(2, summary["stages"])
         self.assertEqual(1, summary["tasks"])
         self.assertIn("unknown", summary["first_pass_rate"])
+
+
+class DispatchAttemptTests(TelemetryTestCase):
+    def snapshot(self, profile="deep_coder"):
+        return harness.build_harness_snapshot(
+            role="implement", skill="cc-implement-issue", profile=profile,
+            routing_strategy="fixed", readiness_policy="attempt", executor="codex",
+            probe=None, profiles=None, root=ROOT,
+        )
+
+    def create_attempt(self, *, parent=None, relationship=None):
+        return self.store.create_dispatch_attempt(
+            "repo", "task-119", "cycle-test", 1, "implement",
+            executor="codex", provider="openai", model_requested="gpt-6-luna",
+            effort="max", profile="deep_coder", harness_snapshot=self.snapshot(),
+            parent_attempt_id=parent, relationship=relationship,
+        )
+
+    def test_schema_13_keeps_old_stage_rows_unmeasured(self) -> None:
+        self.store.record_stage("repo", "old-task", "implement", cycle_id="old-cycle", stage_seq=1)
+
+        self.assertEqual(13, self.store.rows("repo")[0]["schema_version"])
+        self.assertEqual([], self.store.dispatch_attempts("repo", cycle_id="old-cycle"))
+        self.assertEqual([], self.store.usage_totals("repo", cycle_id="old-cycle"))
+
+    def test_harness_fingerprint_is_stable_and_changes_with_material_profile(self) -> None:
+        first = self.snapshot()
+        same = self.snapshot()
+        changed = self.snapshot(profile="cheap_coder")
+
+        self.assertEqual(first["fingerprint"], same["fingerprint"])
+        self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
+
+    def test_attempts_correlate_retries_and_aggregate_reported_usage_once(self) -> None:
+        first = self.create_attempt()
+        second = self.create_attempt(parent=first, relationship="retry")
+        first_usage = [
+            {"observation_id": "usage-first-input", "source": "codex",
+             "source_event": "turn.completed", "event_ordinal": 0,
+             "source_model": "/var/private/model", "category": "input_total", "amount": 1200},
+            {"observation_id": "usage-first-cache", "source": "codex",
+             "source_event": "turn.completed", "event_ordinal": 0,
+             "category": "cached_input", "amount": 300},
+        ]
+        second_usage = [
+            {"observation_id": "usage-second-output", "source": "codex",
+             "source_event": "turn.completed", "event_ordinal": 0,
+             "category": "output_total", "amount": 50},
+        ]
+        self.store.update_dispatch_attempt(
+            first, {"lifecycle_state": "failed", "outcome": "failed",
+                    "usage_observations": first_usage},
+            update_id="update-first-failed",
+        )
+        completed = {
+            "lifecycle_state": "completed", "outcome": "succeeded",
+            "model_resolved": "gpt-6-luna", "duration_ms": 250,
+            "usage_observations": second_usage,
+            "cost_measures": [{
+                "measure_id": "cost-reported", "basis": "unknown",
+                "component": "reported_cli_cost", "source": "codex", "unit": "USD",
+                "amount": None, "reported_amount": "0.02",
+            }],
+        }
+
+        result = self.store.update_dispatch_attempt(
+            second, completed, update_id="update-final", source="runtime",
+        )
+        duplicate = self.store.update_dispatch_attempt(
+            second, completed, update_id="update-final", source="runtime",
+        )
+
+        self.assertEqual([], result["conflicts"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(
+            {"input_total": 1200, "cached_input": 300, "output_total": 50},
+            {row["category"]: row["amount"] for row in self.store.usage_totals("repo", cycle_id="cycle-test")},
+        )
+        attempt = self.store.attempt(second)
+        self.assertEqual("completed", attempt["lifecycle_state"])
+        self.assertEqual(first, attempt["parent_attempt_id"])
+        self.assertEqual("retry", attempt["relationship"])
+        self.assertEqual("gpt-6-luna", self.store.execution_variant(attempt["execution_variant_id"])["model_resolved"])
+        snapshot = self.store.harness_snapshot(attempt["harness_snapshot_id"])
+        self.assertEqual(snapshot["fingerprint"], self.snapshot()["fingerprint"])
+        self.assertNotIn("path", json.dumps(snapshot["components"]).lower())
+        cost = self.store.cost_totals("repo", cycle_id="cycle-test")[0]
+        self.assertEqual("unknown", cost["basis"])
+        self.assertIsNone(cost["amount"])
+        self.assertEqual("0.02", cost["reported_amount"])
+        self.assertNotIn("/var/private/model", json.dumps(self.store.dispatch_attempts("repo", cycle_id="cycle-test")))
+
+    def test_out_of_order_terminal_updates_conflict_and_corrections_keep_history(self) -> None:
+        attempt = self.create_attempt()
+        self.store.update_dispatch_attempt(
+            attempt, {"lifecycle_state": "running", "external_dispatch_id": "orca-job-119"},
+            update_id="update-launched", source="orca",
+        )
+        completed = {"lifecycle_state": "completed", "outcome": "succeeded"}
+        self.store.update_dispatch_attempt(attempt, completed, update_id="update-completed")
+        conflict = self.store.update_dispatch_attempt(
+            attempt, {"lifecycle_state": "failed", "outcome": "failed"},
+            update_id="update-late-failure",
+        )
+        self.assertIn("lifecycle_state", conflict["conflicts"])
+        self.assertEqual("completed", self.store.attempt(attempt)["lifecycle_state"])
+
+        self.store.update_dispatch_attempt(
+            attempt, {"lifecycle_state": "failed", "outcome": "failed"},
+            update_id="update-correction", correction_reason="operator_correction",
+            source="operator",
+        )
+
+        self.assertEqual("failed", self.store.attempt(attempt)["lifecycle_state"])
+        history = self.store.attempt_updates(attempt)
+        self.assertEqual(4, len(history))
+        self.assertEqual("operator_correction", history[-1]["correction_reason"])
+        self.assertEqual(attempt, self.store.attempt_by_external_dispatch_id("orca-job-119")["attempt_id"])
+
+    def test_actual_billed_cost_takes_precedence_over_estimate_for_same_component(self) -> None:
+        attempt = self.create_attempt()
+        self.store.update_dispatch_attempt(
+            attempt,
+            {"cost_measures": [
+                {"measure_id": "cost-api-estimate", "basis": "api_equivalent_estimated",
+                 "attribution_key": "provider-charge-1",
+                 "component": "provider_charge", "source": "provider", "unit": "USD",
+                 "amount": "0.004", "pricing_snapshot_id": "pricing-2026-q4",
+                 "pricing_date": "2026-10-01"},
+                {"measure_id": "cost-actual", "basis": "actual_billed",
+                 "attribution_key": "provider-charge-1",
+                 "component": "provider_charge", "source": "provider", "unit": "USD",
+                 "amount": "0.005"},
+            ]},
+            update_id="update-costs",
+        )
+
+        totals = self.store.cost_totals("repo", cycle_id="cycle-test")
+
+        self.assertEqual(1, len(totals))
+        self.assertEqual("actual_billed", totals[0]["basis"])
+        self.assertEqual("0.005", totals[0]["amount"])
+
+    def test_usage_correction_supersedes_without_losing_the_original_observation(self) -> None:
+        attempt = self.create_attempt()
+        original = {"observation_id": "usage-before-correction", "source": "codex",
+                    "source_event": "turn.completed", "event_ordinal": 0,
+                    "category": "input_total", "amount": 100}
+        self.store.update_dispatch_attempt(
+            attempt, {"usage_observations": [original]}, update_id="update-original-usage",
+        )
+        correction = {"observation_id": "usage-after-correction", "source": "codex",
+                      "source_event": "turn.completed", "event_ordinal": 0,
+                      "category": "input_total", "amount": 90,
+                      "supersedes_id": "usage-before-correction"}
+
+        first = self.store.update_dispatch_attempt(
+            attempt, {"usage_observations": [correction]}, update_id="update-corrected-usage",
+            correction_reason="parser_correction", source="codex",
+        )
+        replay = self.store.update_dispatch_attempt(
+            attempt, {"usage_observations": [correction]}, update_id="update-corrected-usage",
+            correction_reason="parser_correction", source="codex",
+        )
+
+        self.assertEqual([], first["conflicts"])
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(90, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"])
+        with closing(self.store._connect()) as connection:
+            rows = connection.execute(
+                "SELECT observation_id, superseded_by_id, correction_reason "
+                "FROM usage_observations ORDER BY observation_id",
+            ).fetchall()
+        self.assertEqual(2, len(rows))
+        by_id = {row["observation_id"]: row for row in rows}
+        self.assertEqual("usage-after-correction", by_id["usage-before-correction"]["superseded_by_id"])
+        self.assertEqual("parser_correction", by_id["usage-after-correction"]["correction_reason"])
 
 
 if __name__ == "__main__":
