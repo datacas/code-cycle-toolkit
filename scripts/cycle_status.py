@@ -454,10 +454,8 @@ class CycleStatusWriter:
                 "activity": None,
                 "finished": False,
             }
-            self._last_progress = (
-                _duration(0), 0, None, json.dumps(workspace, sort_keys=True),
-            )
             snapshot = dict(self._status["stage"])
+            self._mark_progress(snapshot)
         self._write()
         if self.verbose:
             self._print(_stage_line(snapshot))
@@ -475,6 +473,8 @@ class CycleStatusWriter:
             with self._lock:
                 stage = self._status.get("stage")
                 snapshot = dict(stage) if isinstance(stage, dict) else None
+                if snapshot is not None:
+                    self._mark_progress(snapshot)
             self._write()
             if self.verbose and snapshot is not None:
                 self._print(_stage_line(snapshot, progress=True))
@@ -494,6 +494,8 @@ class CycleStatusWriter:
                     stage["activity"] = clean
             self._refresh_elapsed(stage)
             snapshot = dict(stage)
+            if workspace_changed:
+                self._mark_progress(snapshot)
         self._write()
         if self.verbose and workspace_changed:
             self._print(_stage_line(snapshot, progress=True))
@@ -582,6 +584,19 @@ class CycleStatusWriter:
                 stage["workspace"] = dict(snapshot)
         return snapshot != previous
 
+    def _mark_progress(self, snapshot: dict) -> bool:
+        """Record the progress a line shows; False when it repeats the last one."""
+        progress = (
+            _duration(snapshot.get("elapsed_seconds", 0)),
+            int(snapshot.get("tool_count", 0)),
+            snapshot.get("activity"),
+            json.dumps(snapshot.get("workspace") or {}, sort_keys=True),
+        )
+        if progress == self._last_progress:
+            return False
+        self._last_progress = progress
+        return True
+
     def _refresh_elapsed(self, stage: dict) -> None:
         if self._stage_started is not None:
             stage["elapsed_seconds"] = round(time.monotonic() - self._stage_started, 3)
@@ -602,19 +617,7 @@ class CycleStatusWriter:
                     snapshot = dict(stage)
                 else:
                     snapshot = None
-                if snapshot is not None:
-                    progress = (
-                        _duration(snapshot.get("elapsed_seconds", 0)),
-                        int(snapshot.get("tool_count", 0)),
-                        snapshot.get("activity"),
-                        json.dumps(snapshot.get("workspace") or {}, sort_keys=True),
-                    )
-                    previous = self._last_progress
-                    changed = progress != previous
-                    if changed:
-                        self._last_progress = progress
-                else:
-                    changed = False
+                changed = snapshot is not None and self._mark_progress(snapshot)
             self._write()
             if self.verbose and snapshot is not None and changed:
                 self._print(_stage_line(snapshot, progress=True))

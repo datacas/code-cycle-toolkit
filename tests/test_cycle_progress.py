@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,9 +62,16 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("✅ 🔍", rendered)
         self.assertIn("review done", rendered)
         self.assertIn("succeeded · APPROVED", rendered)
-        # Start, an immediate workspace notice, and heartbeats. A slow runner
-        # may cross another interval while the test suite is busy.
-        self.assertLessEqual(rendered.count("implement ·"), 5)
+        # How many heartbeats a stage crosses depends on the runner's speed;
+        # what must hold everywhere is that a line is printed only when the
+        # progress it shows changed.
+        implement_lines = [
+            re.sub(r"\[\d{2}:\d{2}\] ", "", line)
+            for line in rendered.splitlines() if "implement ·" in line
+        ]
+        self.assertGreaterEqual(len(implement_lines), 2)
+        for previous, current in zip(implement_lines, implement_lines[1:]):
+            self.assertNotEqual(previous, current)
 
     def test_default_output_stays_silent_and_status_is_finished(self) -> None:
         expected_workspace = cycle_status._workspace_snapshot(Path.cwd())

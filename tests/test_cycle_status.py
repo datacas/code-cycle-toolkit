@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -233,6 +234,29 @@ class CycleStatusTests(unittest.TestCase):
             expected = cycle_status._workspace_snapshot(ROOT / "scripts")
             self.assertEqual(expected, writer._status["stage"]["workspace"])
             self.assertEqual(expected, writer._status["workspace"])
+
+    def test_heartbeat_does_not_repeat_a_workspace_notice(self) -> None:
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "workspace-notice", "owner/repo",
+                "ISSUE-137", workspace=ROOT, verbose=True, stream=output,
+            )
+            decision = SimpleNamespace(
+                profile="implementer", used_fallback=False,
+                target=SimpleNamespace(executor="codex", provider="openai",
+                                       model="gpt-6-luna", effort="high"),
+            )
+            writer.stage_started("implement", decision)
+            self.assertTrue(writer.workspace_observed(ROOT))
+            printed = output.getvalue().count("implement ·")
+
+            # The next heartbeat sees the same elapsed bucket, tools, activity,
+            # and workspace the notice already showed, so it stays silent.
+            with writer._lock:
+                stage = dict(writer._status["stage"])
+            self.assertFalse(writer._mark_progress(stage))
+            self.assertEqual(2, printed)
 
     def test_stale_workspace_refresh_cannot_overwrite_new_worker_location(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
