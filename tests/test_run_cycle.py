@@ -317,6 +317,52 @@ class RoutingStrategyTests(RunCycleTestCase):
         self.assertEqual(targets(empty_report), targets(populated_report))
 
 
+class WorktreeDirectoryTests(unittest.TestCase):
+    def test_default_worktree_directory_is_repository_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(root / ".worktree",
+                             rc.resolve_worktree_dir({}, root))
+
+    def test_configured_worktree_directory_overrides_the_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = {"code_cycle": {"worktree_dir": "build/workers"}}
+            self.assertEqual(root / "build" / "workers",
+                             rc.resolve_worktree_dir(config, root))
+
+    def test_configured_worktree_directory_cannot_escape_repository(self) -> None:
+        for value in ("../outside", "/tmp/outside", "C:\\outside", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(rc.CycleDriverError):
+                    rc.configured_worktree_dir(
+                        {"code_cycle": {"worktree_dir": value}}
+                    )
+
+    def test_resolved_worktree_directory_cannot_escape_through_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            outside = Path(temporary) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / "workers").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(rc.CycleDriverError):
+                rc.resolve_worktree_dir(
+                    {"code_cycle": {"worktree_dir": "workers"}}, root
+                )
+
+    def test_config_loader_accepts_the_worktree_directory_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text(
+                "code_cycle:\n  worktree_dir: .worker-checkouts\n",
+                encoding="utf-8",
+            )
+            config = rc.load_config(path)
+        self.assertEqual(Path(".worker-checkouts"),
+                         rc.configured_worktree_dir(config))
+
 class LocalOnlyPolicyTests(RunCycleTestCase):
     def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -381,6 +427,23 @@ class PromptContractTests(unittest.TestCase):
 
         self.assertIn("change request `4`", prompt)
         self.assertIn("owner/api (work item API-7)", prompt)
+
+    def test_worker_prompt_receives_the_resolved_worktree_base(self) -> None:
+        prompt = rc.compose(
+            "implement", "owner/api", "API-7",
+            worktree_dir="/repo/.worktree",
+        )
+
+        self.assertIn("`/repo/.worktree` as their base directory", prompt)
+        self.assertIn("isolated disposable review clones outside", prompt)
+
+    def test_review_prompt_does_not_apply_the_persistent_worktree_base(self) -> None:
+        prompt = rc.compose(
+            "review", "owner/api", "API-7", change_request_id="4",
+            worktree_dir="/repo/.worktree",
+        )
+
+        self.assertNotIn("/repo/.worktree", prompt)
 
 
 class AsynchronousStageTests(RunCycleTestCase):

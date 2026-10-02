@@ -1,6 +1,7 @@
 code_cycle:
   issue_provider: github
   code_host: github
+  worktree_dir: .worktree
   repository:
     selector: datacas/code-cycle-toolkit
     default_branch: main

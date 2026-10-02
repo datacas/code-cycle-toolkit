@@ -33,6 +33,7 @@ code_cycle:
   repository:
     selector: owner/repository      # required by run_cycle.py (unless --repo) and cc-stats
     default_branch: main            # base for scoped reads and diff signals
+  worktree_dir: .worktree           # persistent worker worktrees; relative to the repository root
 
   # ── Provider health cache ─────────────────────────────────
   verification:
@@ -83,6 +84,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `issue.selector` | string | — | `cc-provider-bootstrap` |
 | `repository.selector` | `owner/name` or `workspace/repo` | inferred from `origin` (skills); **required** by `cc-stats` and by `run_cycle.py` without `--repo` | bootstrap, `run_cycle.py`, `cc-stats` |
 | `repository.default_branch` | branch name | remote default (`origin/HEAD`) | bootstrap, `run_cycle.py` diff signals |
+| `worktree_dir` | non-empty relative path within the repository | `.worktree` | orchestrator skills and `run_cycle.py` stage prompts |
 | `verification.cache_ttl` | duration, e.g. `7d` | `7d` | `cc-provider-bootstrap` |
 | `verification.recheck_on_failure` | boolean | — | **not read**: a live provider failure always forces a recheck |
 | `profiles.<name>.primary` | target string | `DEFAULT_PROFILES` | `run_cycle.py`, `cc-orchestrator` |
@@ -106,6 +108,17 @@ A configuration file that exists but can't be read (bad YAML, PyYAML missing, wr
 `issue_provider` and `code_host` are independent, even when both are GitHub. Plane and Jira are never guessed from an identifier's shape. When either value stays ambiguous, the cycle stops with `BLOCKED` before creating a branch, commit, comment, or PR. See [Providers](provider-contract.md).
 
 `repository.default_branch` is also the base the runtime diffs against to record [pre-routing signals](telemetry.md#what-is-recorded). Without it, the remote's default branch is used.
+
+### Persistent worker worktrees
+
+`worktree_dir` names the repository-relative base directory for persistent
+worker worktrees created or requested by the toolkit. It defaults to
+`.worktree`; a stage prompt receives its resolved absolute path. The default
+directory is ignored by Git. If you override it, add the selected directory to
+the repository's `.gitignore` too. The setting does not relocate disposable
+review clones, which remain outside the repository. Orca-managed worktrees use
+Orca's managed location because its current CLI does not expose a caller-chosen
+base directory; see [Orca workflows](workflows.md#cc-orca-orchestrator).
 
 ### Provider health cache
 
