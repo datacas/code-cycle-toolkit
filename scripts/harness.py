@@ -63,28 +63,67 @@ def _skill_hash(root: Path, skill: str | None) -> str | None:
 def _safe_profile_hash(profiles, profile: str) -> str | None:
     if not isinstance(profiles, dict):
         return None
-    config = profiles.get(profile)
-    if not isinstance(config, dict):
+    configured = profiles.get(profile)
+    if isinstance(configured, dict):
+        primary = configured.get("primary")
+        fallback = configured.get("fallback")
+    else:
+        primary = getattr(configured, "primary", None)
+        fallback = getattr(configured, "fallback", None)
+    if primary is None:
         return None
-    safe = {}
-    vocabularies = {
-        "executor": {"codex", "claude", "orca"},
-        "provider": {"openai", "anthropic"},
-        "effort": {"low", "medium", "high", "max"},
-        "fallback": {"cheap_tool", "auxiliary_tool", "coordinator", "cheap_coder",
-                     "deep_coder", "reviewer", "senior_reviewer", "security"},
-    }
-    for key, vocabulary in vocabularies.items():
-        value = config.get(key)
-        if isinstance(value, str) and value in vocabulary:
-            safe[key] = value
-    model = config.get("model")
-    if (isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", model)
-            and not model.startswith(("sk-", "ghp_", "AKIA", "xox"))):
-        safe["model"] = model
-    if not safe:
+
+    def safe_target(target) -> dict | None:
+        if isinstance(target, str):
+            try:
+                where, effort = target.rsplit(" ", 1)
+                executor, rest = where.split(":", 1)
+                provider, model = rest.split("/", 1)
+            except ValueError:
+                return None
+        elif isinstance(target, dict):
+            executor = target.get("executor")
+            provider = target.get("provider")
+            model = target.get("model")
+            effort = target.get("effort")
+        else:
+            executor = getattr(target, "executor", None)
+            provider = getattr(target, "provider", None)
+            model = getattr(target, "model", None)
+            effort = getattr(target, "effort", None)
+
+        if not all(isinstance(value, str) for value in (executor, provider, model, effort)):
+            return None
+        executor, provider, model, effort = (
+            value.strip() for value in (executor, provider, model, effort)
+        )
+        if executor not in {"codex", "claude", "orca"}:
+            return None
+        if provider not in {"openai", "anthropic"}:
+            return None
+        if effort not in {"low", "medium", "high", "max"}:
+            return None
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", model)
+                or model.startswith(("sk-", "ghp_", "AKIA", "xox"))):
+            return None
+        return {
+            "executor": executor,
+            "provider": provider,
+            "model": model,
+            "effort": effort,
+        }
+
+    primary_fields = safe_target(primary)
+    if primary_fields is None:
         return None
-    encoded = json.dumps(safe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fallback_fields = safe_target(fallback) if fallback is not None else None
+    if fallback is not None and fallback_fields is None:
+        return None
+
+    effective_profile = {"primary": primary_fields, "fallback": fallback_fields}
+    encoded = json.dumps(
+        effective_profile, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
     return _sha256(encoded)
 
 

@@ -701,12 +701,42 @@ class DispatchAttemptTests(TelemetryTestCase):
         self.assertEqual([], self.store.dispatch_attempts("repo", cycle_id="old-cycle"))
         self.assertEqual([], self.store.usage_totals("repo", cycle_id="old-cycle"))
 
-    def test_harness_fingerprint_is_stable_and_changes_with_material_profile(self) -> None:
-        first = self.snapshot()
-        same = self.snapshot()
-        changed = self.snapshot(profile="cheap_coder")
+    def test_harness_fingerprint_is_stable_and_changes_with_effective_fallback(self) -> None:
+        base_profiles = router.load_profiles()
+        changed_profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "deep_coder": {"fallback": "claude:anthropic/claude-sonnet-5 medium"},
+        }}})
+        snapshot_args = {
+            "role": "implement", "skill": "cc-implement-issue",
+            "profile": "deep_coder", "routing_strategy": "fixed",
+            "readiness_policy": "attempt", "executor": "codex",
+            "probe": None, "root": ROOT,
+        }
 
+        first = harness.build_harness_snapshot(
+            profiles=base_profiles, **snapshot_args,
+        )
+        same = harness.build_harness_snapshot(
+            profiles=base_profiles, **snapshot_args,
+        )
+        changed = harness.build_harness_snapshot(
+            profiles=changed_profiles, **snapshot_args,
+        )
+
+        self.assertEqual(
+            str(base_profiles["deep_coder"].primary),
+            str(changed_profiles["deep_coder"].primary),
+        )
+        self.assertNotEqual(
+            str(base_profiles["deep_coder"].fallback),
+            str(changed_profiles["deep_coder"].fallback),
+        )
+        self.assertIsNotNone(first["components"]["profile_config_sha256"])
         self.assertEqual(first["fingerprint"], same["fingerprint"])
+        self.assertNotEqual(
+            first["components"]["profile_config_sha256"],
+            changed["components"]["profile_config_sha256"],
+        )
         self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
 
     def test_attempts_correlate_retries_and_aggregate_reported_usage_once(self) -> None:

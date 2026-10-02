@@ -14,6 +14,9 @@ _CATEGORIES = {
     "reasoning_output",
 }
 _MAX_TOKEN_COUNT = 9_223_372_036_854_775_807
+_MAX_COST_TEXT_LENGTH = 128
+_MAX_COST_EXPONENT = 128
+_MAX_COST_AMOUNT = Decimal("1000000000000000000")
 _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}\Z")
 
 
@@ -27,11 +30,18 @@ def _integer(value) -> int | None:
 def _decimal_text(value) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
+    if isinstance(value, str) and len(value) > _MAX_COST_TEXT_LENGTH:
+        return None
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if not parsed.is_finite() or parsed < 0:
+    if (
+        not parsed.is_finite()
+        or parsed < 0
+        or parsed > _MAX_COST_AMOUNT
+        or abs(parsed.as_tuple().exponent) > _MAX_COST_EXPONENT
+    ):
         return None
     return format(parsed, "f")
 

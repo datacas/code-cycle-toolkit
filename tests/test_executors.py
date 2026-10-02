@@ -2316,6 +2316,39 @@ class UsageNormalizationTests(unittest.TestCase):
                          [(row["category"], row["amount"]) for row in observations])
         self.assertEqual((), costs)
 
+    def test_out_of_range_reported_cost_is_omitted(self) -> None:
+        def normalize_cost(raw_cost: str, attempt_id: str):
+            stdout = json.dumps({"type": "result", "modelUsage": {
+                "claude-sonnet-5": {"inputTokens": 17, "costUSD": raw_cost},
+            }})
+            return ex.normalize_executor_output("claude", stdout, attempt_id)
+
+        usage_rows, cost_rows = normalize_cost(
+            "1000000000000000001", "attempt-cost-over-limit",
+        )
+        self.assertEqual([("input", 17)],
+                         [(row["category"], row["amount"]) for row in usage_rows])
+        self.assertEqual((), cost_rows)
+
+        _, cost_rows = normalize_cost(
+            "1000000000000000000", "attempt-cost-at-limit",
+        )
+        self.assertEqual("1000000000000000000", cost_rows[0]["reported_amount"])
+
+        _, cost_rows = normalize_cost(
+            "1e-1000000000", "attempt-cost-tiny-exponent",
+        )
+        self.assertEqual((), cost_rows)
+
+        _, cost_rows = normalize_cost(
+            "0." + "0" * 127 + "1", "attempt-cost-long-decimal",
+        )
+        self.assertEqual((), cost_rows)
+
+        _, cost_rows = normalize_cost("1e-128", "attempt-cost-exponent-at-limit")
+        self.assertEqual(130, len(cost_rows[0]["reported_amount"]))
+        self.assertTrue(cost_rows[0]["reported_amount"].endswith("1"))
+
 
 if __name__ == "__main__":
     unittest.main()
