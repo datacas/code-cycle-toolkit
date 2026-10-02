@@ -1610,6 +1610,7 @@ def dispatch(
     on_progress = kw.pop("on_progress", None)
     on_workspace = kw.pop("on_workspace", None)
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
+    on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -1708,8 +1709,6 @@ def dispatch(
     kw.pop("workspace", None)
     if isinstance(adapter, NativeAdapter) and on_progress is not None:
         kw["on_progress"] = on_progress
-    if isinstance(adapter, NativeAdapter) and dispatch_attempt_id is not None:
-        kw["dispatch_attempt_id"] = dispatch_attempt_id
     if on_workspace is not None and isinstance(adapter, (NativeAdapter, OrcaAdapter)):
         kw["on_workspace"] = on_workspace
     # Evidence the runtime wrote outside the workspace. Only a native CLI is
@@ -1722,16 +1721,31 @@ def dispatch(
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 
+    def invoke_adapter(
+        prompt: str, *, cwd: str | None = None, **overrides,
+    ) -> DispatchResult:
+        call_kw = dict(kw)
+        call_kw.update(overrides)
+        if cwd is not None:
+            call_kw["cwd"] = cwd
+        attempt_id = on_dispatch_attempt() if on_dispatch_attempt is not None else dispatch_attempt_id
+        if isinstance(adapter, NativeAdapter):
+            if attempt_id is not None:
+                call_kw["dispatch_attempt_id"] = attempt_id
+            elif on_dispatch_attempt is not None:
+                call_kw.pop("dispatch_attempt_id", None)
+        return adapter.dispatch(target, prompt, **call_kw)
+
     def run_stage() -> DispatchResult:
         if (workspace_policy is WorkspacePolicy.READ_ONLY
                 and target.executor == "claude" and not adapter.enforces_read_only):
             return _isolated_review_dispatch(
                 adapter, target, task, cwd=kw.get("cwd"),
-                dispatch_call=lambda prompt, isolated_cwd: adapter.dispatch(
-                    target, prompt, **{**kw, "cwd": isolated_cwd, "writes": False},
+                dispatch_call=lambda prompt, isolated_cwd: invoke_adapter(
+                    prompt, cwd=isolated_cwd, writes=False,
                 ),
             )
-        result = adapter.dispatch(target, task, **kw)
+        result = invoke_adapter(task)
         if not adapter.completes_work and result.outcome is DispatchOutcome.SUCCEEDED:
             result = replace(result, asynchronous=True)
         if workspace_policy is WorkspacePolicy.READ_ONLY and adapter.enforces_read_only:

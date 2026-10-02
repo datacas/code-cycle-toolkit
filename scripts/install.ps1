@@ -190,6 +190,51 @@ function Install-Runtime {
         Copy-Item -LiteralPath $Source -Destination $Target
     }
 
+    $ManifestTarget = Join-Path $Destination 'runtime.manifest'
+    Assert-NotReparsePoint -Path $ManifestTarget -What 'runtime manifest'
+    if (Get-Item -LiteralPath $ManifestTarget -Force -ErrorAction SilentlyContinue) {
+        if (-not $Force) {
+            throw "Already exists: $ManifestTarget (use -Force to replace it)"
+        }
+        Remove-Item -LiteralPath $ManifestTarget -Force
+    }
+    Copy-Item -LiteralPath $RuntimeManifest -Destination $ManifestTarget
+
+    $Version = ''
+    foreach ($MetadataFile in @(
+        (Join-Path $PackageRoot '.codex-plugin\plugin.json'),
+        (Join-Path $PackageRoot '.claude-plugin\plugin.json')
+    )) {
+        if (-not (Test-Path -LiteralPath $MetadataFile -PathType Leaf)) { continue }
+        try {
+            $Metadata = Get-Content -LiteralPath $MetadataFile -Raw | ConvertFrom-Json
+            if ($Metadata.version -match '^[A-Za-z0-9.+_-]{1,64}$') {
+                $Version = $Metadata.version
+                break
+            }
+        } catch {
+            continue
+        }
+    }
+    $Commit = ''
+    try {
+        $Commit = (& git -C $PackageRoot rev-parse --verify HEAD 2>$null | Out-String).Trim()
+    } catch {
+        $Commit = ''
+    }
+    if ($Commit -notmatch '^[0-9a-f]{40}$') { $Commit = '' }
+
+    $Identity = Join-Path $Destination 'toolkit.identity'
+    Assert-NotReparsePoint -Path $Identity -What 'toolkit identity'
+    if (Get-Item -LiteralPath $Identity -Force -ErrorAction SilentlyContinue) {
+        if (-not $Force) {
+            throw "Already exists: $Identity (use -Force to replace it)"
+        }
+        Remove-Item -LiteralPath $Identity -Force
+    }
+    $IdentityText = "version=$Version`ncommit=$Commit`n"
+    [IO.File]::WriteAllText($Identity, $IdentityText, [Text.UTF8Encoding]::new($false))
+
     Write-Host "Installed runtime -> $Destination"
     Write-Host "Runtime installed at $Destination. run_cycle.py and cc-stats use it as-is; add it to PYTHONPATH only to import its modules from other code."
 }

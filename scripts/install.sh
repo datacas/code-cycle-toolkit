@@ -199,7 +199,7 @@ refuse_symlink() {
 }
 
 install_runtime() {
-  local root destination module source
+  local root destination module source manifest_target identity version commit metadata_file
   [ -f "$RUNTIME_MANIFEST" ] || {
     printf 'Runtime manifest not found: %s\n' "$RUNTIME_MANIFEST" >&2
     return 1
@@ -233,6 +233,38 @@ install_runtime() {
     fi
     cp "$source" "$destination/$module"
   done < "$RUNTIME_MANIFEST"
+
+  manifest_target="$destination/runtime.manifest"
+  refuse_symlink "$manifest_target" 'runtime manifest' || return 1
+  if [ -e "$manifest_target" ] || [ -L "$manifest_target" ]; then
+    if [ "$FORCE" -ne 1 ]; then
+      printf 'Already exists: %s (use --force to replace it)\n' "$manifest_target" >&2
+      return 1
+    fi
+    rm -f "$manifest_target"
+  fi
+  cp "$RUNTIME_MANIFEST" "$manifest_target"
+
+  version=''
+  for metadata_file in "$PACKAGE_ROOT/.codex-plugin/plugin.json" \
+                       "$PACKAGE_ROOT/.claude-plugin/plugin.json"; do
+    [ -f "$metadata_file" ] || continue
+    version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9.+_-]\{1,64\}\)".*/\1/p' \
+      "$metadata_file" | head -n 1)"
+    if [ -n "$version" ]; then break; fi
+  done
+  commit="$(git -C "$PACKAGE_ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || commit=''
+  identity="$destination/toolkit.identity"
+  refuse_symlink "$identity" 'toolkit identity' || return 1
+  if [ -e "$identity" ] || [ -L "$identity" ]; then
+    if [ "$FORCE" -ne 1 ]; then
+      printf 'Already exists: %s (use --force to replace it)\n' "$identity" >&2
+      return 1
+    fi
+    rm -f "$identity"
+  fi
+  printf 'version=%s\ncommit=%s\n' "$version" "$commit" > "$identity"
 
   printf 'Installed runtime -> %s\n' "$destination"
   printf 'Runtime installed at %s. run_cycle.py and cc-stats use it as-is; add it to PYTHONPATH only to import its modules from other code.\n' "$destination"

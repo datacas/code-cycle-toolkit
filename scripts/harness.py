@@ -57,21 +57,59 @@ def _commit(root: Path) -> str | None:
     return value if len(value) == 40 and all(c in "0123456789abcdef" for c in value) else None
 
 
-def _skill_hash(root: Path, skill: str | None) -> str | None:
-    if not skill or "/" in skill or ".." in skill:
+def _skill_hash(
+    project_root: Path, skill: str | None, *, toolkit_root: Path | None = None,
+) -> str | None:
+    if not skill or "/" in skill or "\\" in skill or ".." in skill:
         return None
-    candidates = (
-        root / ".agents" / "skills" / skill / "SKILL.md",
-        root / ".codex" / "skills" / skill / "SKILL.md",
-        Path.home() / ".agents" / "skills" / skill / "SKILL.md",
-        Path.home() / ".codex" / "skills" / skill / "SKILL.md",
+    project_root = Path(project_root)
+    toolkit_root = Path(toolkit_root) if toolkit_root is not None else None
+    bases = []
+    for base in (project_root, toolkit_root, Path.home()):
+        if base is not None and base not in bases:
+            bases.append(base)
+    skill_roots = (
+        (".agents", "skills"),
+        (".codex", "skills"),
+        (".claude", "skills"),
+        (".opencode", "skills"),
+        (".config", "opencode", "skills"),
     )
-    for candidate in candidates:
-        digest = _file_hash(candidate)
-        if digest:
-            return digest
+    for base in bases:
+        for parts in skill_roots:
+            digest = _file_hash(base.joinpath(*parts, skill, "SKILL.md"))
+            if digest:
+                return digest
     return None
 
+
+def _runtime_layout(root: Path | None) -> tuple[Path, Path, bool]:
+    if root is not None:
+        return root, root / "scripts", False
+    module_path = Path(__file__).resolve()
+    if (module_path.parent.name == "runtime"
+            and module_path.parent.parent.name == ".code-cycle"):
+        return module_path.parents[2], module_path.parent, True
+    package_root = module_path.parents[1]
+    return package_root, package_root / "scripts", False
+
+
+def _installed_identity(runtime_dir: Path) -> tuple[str | None, str | None]:
+    try:
+        values = {}
+        for line in (runtime_dir / "toolkit.identity").read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+    except OSError:
+        return None, None
+    release = values.get("version")
+    commit = values.get("commit")
+    if not release or not re.fullmatch(r"[A-Za-z0-9.+_-]{1,64}", release):
+        release = None
+    if not commit or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        commit = None
+    return release, commit
 
 def _safe_profile_hash(profiles, profile: str) -> str | None:
     if not isinstance(profiles, dict):
@@ -152,13 +190,14 @@ def build_harness_snapshot(
     probe,
     profiles,
     root: Path | None = None,
+    project_root: Path | None = None,
 ) -> dict:
     """Return only safe labels and hashes; never return a path or source text."""
-    root = root or Path(__file__).resolve().parents[1]
-    manifest_hash = _file_hash(root / "scripts" / "runtime.manifest")
-    routing_hash = _file_hash(root / "scripts" / "router.py")
+    toolkit_root, runtime_dir, installed = _runtime_layout(root)
+    manifest_hash = _file_hash(runtime_dir / "runtime.manifest")
+    routing_hash = _file_hash(runtime_dir / "router.py")
     prompt_hashes = [
-        _file_hash(root / "scripts" / name)
+        _file_hash(runtime_dir / name)
         for name in ("run_cycle.py", "cycle.py", "review_contract.py")
     ]
     prompt_hashes = [value for value in prompt_hashes if value]
@@ -171,9 +210,13 @@ def build_harness_snapshot(
         executor_version = match.group(0) if match else None
     else:
         executor_version = None
+    if installed:
+        toolkit_release, toolkit_commit = _installed_identity(runtime_dir)
+    else:
+        toolkit_release, toolkit_commit = _version(toolkit_root), _commit(toolkit_root)
     components = {
-        "toolkit_release": _version(root),
-        "toolkit_commit": _commit(root),
+        "toolkit_release": toolkit_release,
+        "toolkit_commit": toolkit_commit,
         "runtime_manifest_sha256": manifest_hash,
         "routing_policy_sha256": routing_hash,
         "prompt_template_sha256": prompt_hash,
@@ -185,7 +228,9 @@ def build_harness_snapshot(
         "readiness_policy": readiness_policy,
         "role": role,
         "skill": skill,
-        "skill_sha256": _skill_hash(root, skill),
+        "skill_sha256": _skill_hash(
+            project_root or Path.cwd(), skill, toolkit_root=toolkit_root,
+        ),
     }
     encoded = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
     fingerprint = _sha256(encoded)

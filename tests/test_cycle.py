@@ -376,6 +376,8 @@ class RoleWorkspacePolicyTests(CycleTestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, outcome.result.outcome)
         self.assertEqual([], adapter.dispatched)
+        self.assertEqual([], outcome.attempts)
+        self.assertEqual([], self.store.dispatch_attempts("owner/repo"))
         self.assertEqual("publication_access", self.store.rows("owner/repo")[0]["missing_capability"])
 
     def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:

@@ -785,6 +785,66 @@ class DispatchAttemptTests(TelemetryTestCase):
         self.assertEqual("1.2.3", snapshot["components"]["executor_version"])
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", repr(snapshot))
 
+    def test_installed_harness_uses_runtime_identity_and_project_or_global_skill(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        project = base / "project"
+        home = base / "home"
+        project.mkdir()
+        home.mkdir()
+
+        cases = (
+            ("project", project, project / ".claude" / "skills" / "project-skill" / "SKILL.md"),
+            ("global", home, home / ".config" / "opencode" / "skills"
+             / "global-skill" / "SKILL.md"),
+        )
+        for label, install_root, skill_file in cases:
+            with self.subTest(scope=label):
+                runtime = install_root / ".code-cycle" / "runtime"
+                runtime.mkdir(parents=True)
+                (runtime / "toolkit.identity").write_text(
+                    "version=9.8.7\ncommit=" + "a" * 40 + "\n", encoding="utf-8",
+                )
+                expected = {}
+                for name, contents in {
+                    "runtime.manifest": "cycle.py\n",
+                    "router.py": "routing policy fixture\n",
+                    "run_cycle.py": "run prompt fixture\n",
+                    "cycle.py": "cycle prompt fixture\n",
+                    "review_contract.py": "review contract fixture\n",
+                }.items():
+                    path = runtime / name
+                    path.write_text(contents, encoding="utf-8")
+                    expected[name] = harness._file_hash(path)
+                skill_file.parent.mkdir(parents=True, exist_ok=True)
+                skill_file.write_text(f"{label} skill contents\n", encoding="utf-8")
+                skill = "project-skill" if label == "project" else "global-skill"
+
+                with (unittest.mock.patch.object(harness, "__file__", str(runtime / "harness.py")),
+                      unittest.mock.patch.object(Path, "home", return_value=home),
+                      unittest.mock.patch.object(
+                          harness.subprocess, "run",
+                          side_effect=AssertionError("installed identity must not use target git"),
+                      )):
+                    snapshot = harness.build_harness_snapshot(
+                        role="implement", skill=skill, profile="deep_coder",
+                        routing_strategy="fixed", readiness_policy="attempt",
+                        executor="codex", probe=None, profiles=None,
+                        project_root=project,
+                    )
+
+                components = snapshot["components"]
+                self.assertEqual("9.8.7", components["toolkit_release"])
+                self.assertEqual("a" * 40, components["toolkit_commit"])
+                self.assertEqual(expected["runtime.manifest"],
+                                 components["runtime_manifest_sha256"])
+                self.assertEqual(expected["router.py"], components["routing_policy_sha256"])
+                self.assertIsNotNone(components["prompt_template_sha256"])
+                self.assertEqual(harness._file_hash(skill_file), components["skill_sha256"])
+                self.assertNotIn(str(project), repr(snapshot))
+                self.assertNotIn(str(home), repr(snapshot))
+
     def test_cost_decimal_rejects_unbounded_length_and_exponent(self) -> None:
         with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
             self.store._decimal("1e-1000000000", "amount")
