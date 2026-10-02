@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 import sys
@@ -26,6 +27,20 @@ def completed(stdout="", returncode=0, stderr=""):
 
 
 TARGET = router.parse_target("codex:openai/gpt-6-luna high")
+
+
+class DispatchTimeoutDefaultsTests(unittest.TestCase):
+    def test_every_executor_defaults_to_six_hours_per_dispatch(self) -> None:
+        adapters = (
+            ex.NativeAdapter,
+            ex.CodexAdapter,
+            ex.ClaudeAdapter,
+            ex.OrcaAdapter,
+        )
+        for adapter in adapters:
+            with self.subTest(adapter=adapter.__name__):
+                default = inspect.signature(adapter.dispatch).parameters["timeout"].default
+                self.assertEqual(6 * 60 * 60, default)
 
 
 class FakeAdapter(ex.Adapter):
