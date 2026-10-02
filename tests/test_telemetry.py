@@ -739,6 +739,48 @@ class DispatchAttemptTests(TelemetryTestCase):
         )
         self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
 
+    def test_harness_fingerprint_supports_telemetry_model_identifiers(self) -> None:
+        snapshot_args = {
+            "role": "implement", "skill": "cc-implement-issue",
+            "profile": "deep_coder", "routing_strategy": "fixed",
+            "readiness_policy": "attempt", "executor": "codex",
+            "probe": None, "root": ROOT,
+        }
+        models = (
+            "vendor/model",
+            "vendor:model",
+            "vendor@region",
+            "vendor#revision",
+            "m" * 200,
+        )
+        profile_hashes = []
+
+        for model in models:
+            profiles = router.load_profiles({"code_cycle": {"profiles": {
+                "deep_coder": {
+                    "primary": f"codex:openai/{model} high",
+                },
+            }}})
+            snapshot = harness.build_harness_snapshot(
+                profiles=profiles, **snapshot_args,
+            )
+            profile_hash = snapshot["components"]["profile_config_sha256"]
+            self.assertIsNotNone(profile_hash)
+            self.assertNotIn(model, repr(snapshot))
+            profile_hashes.append(profile_hash)
+
+        self.assertEqual(len(models), len(set(profile_hashes)))
+
+    def test_harness_snapshot_normalizes_string_probe_versions(self) -> None:
+        snapshot = harness.build_harness_snapshot(
+            role="implement", skill="cc-implement-issue", profile="deep_coder",
+            routing_strategy="fixed", readiness_policy="attempt", executor="codex",
+            probe=unittest.mock.Mock(version="codex-cli 1.2.3"),
+            profiles=router.load_profiles(), root=ROOT,
+        )
+
+        self.assertEqual("1.2.3", snapshot["components"]["executor_version"])
+
     def test_cost_decimal_rejects_unbounded_length_and_exponent(self) -> None:
         with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
             self.store._decimal("1e-1000000000", "amount")

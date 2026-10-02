@@ -8,6 +8,19 @@ import re
 import subprocess
 from pathlib import Path
 
+try:
+    from .telemetry import (
+        CREDENTIAL_PREFIXES,
+        IDENTIFIER_PATTERN,
+        MAX_IDENTIFIER_LENGTH,
+    )
+except ImportError:
+    from telemetry import (
+        CREDENTIAL_PREFIXES,
+        IDENTIFIER_PATTERN,
+        MAX_IDENTIFIER_LENGTH,
+    )
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -103,13 +116,14 @@ def _safe_profile_hash(profiles, profile: str) -> str | None:
             return None
         if effort not in {"low", "medium", "high", "max"}:
             return None
-        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", model)
-                or model.startswith(("sk-", "ghp_", "AKIA", "xox"))):
+        if (len(model) > MAX_IDENTIFIER_LENGTH
+                or not IDENTIFIER_PATTERN.fullmatch(model)
+                or model.startswith(CREDENTIAL_PREFIXES)):
             return None
         return {
             "executor": executor,
             "provider": provider,
-            "model": model,
+            "model_sha256": _sha256(model.encode("utf-8")),
             "effort": effort,
         }
 
