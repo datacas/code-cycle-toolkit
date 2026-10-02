@@ -775,11 +775,14 @@ class DispatchAttemptTests(TelemetryTestCase):
         snapshot = harness.build_harness_snapshot(
             role="implement", skill="cc-implement-issue", profile="deep_coder",
             routing_strategy="fixed", readiness_policy="attempt", executor="codex",
-            probe=unittest.mock.Mock(version="codex-cli 1.2.3"),
+            probe=unittest.mock.Mock(
+                version="codex-cli 1.2.3-AKIAIOSFODNN7EXAMPLE",
+            ),
             profiles=router.load_profiles(), root=ROOT,
         )
 
         self.assertEqual("1.2.3", snapshot["components"]["executor_version"])
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", repr(snapshot))
 
     def test_cost_decimal_rejects_unbounded_length_and_exponent(self) -> None:
         with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):

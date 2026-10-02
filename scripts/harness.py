@@ -167,7 +167,7 @@ def build_harness_snapshot(
     if isinstance(raw_version, (tuple, list)) and raw_version:
         executor_version = ".".join(str(part) for part in raw_version)
     elif isinstance(raw_version, str):
-        match = re.search(r"\d+(?:\.\d+){0,5}(?:[-+][A-Za-z0-9.-]+)?", raw_version)
+        match = re.search(r"\d+(?:\.\d+){0,5}", raw_version)
         executor_version = match.group(0) if match else None
     else:
         executor_version = None
