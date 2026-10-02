@@ -182,6 +182,8 @@ def _workspace_snapshot(cwd: str | Path | None) -> dict[str, object]:
 def _workspace_fields(workspace: object) -> list[str]:
     if not isinstance(workspace, dict):
         workspace = {}
+    if workspace.get("pending"):
+        return ["workspace pending"]
     cwd = workspace.get("cwd") or "unknown"
     repo_root = workspace.get("repo_root") or "unknown"
     branch = workspace.get("branch") or "unknown"
@@ -393,10 +395,11 @@ class CycleStatusWriter:
             self._stage_workspace_cwd = None
             self._stage_started = time.monotonic()
             workspace = {
-                "cwd": "unknown",
+                "pending": True,
+                "cwd": None,
                 "repo_root": None,
-                "branch": "unknown",
-                "kind": "unknown",
+                "branch": None,
+                "kind": None,
                 "temporary": False,
             }
             self._status["stage"] = {
