@@ -351,7 +351,15 @@ def resolve_worktree_dir(config: dict, repo_root: str | Path) -> Path:
     """Resolve the configured base against the repository root without escaping it."""
     try:
         root = Path(repo_root).resolve()
-        resolved = (root / configured_worktree_dir(config)).resolve()
+        candidate = root / configured_worktree_dir(config)
+        probe = candidate
+        while probe != root:
+            if probe.is_symlink():
+                probe.resolve(strict=True)
+            if probe.exists():
+                break
+            probe = probe.parent
+        resolved = candidate.resolve()
     except (OSError, RuntimeError) as exc:
         raise CycleDriverError(
             "code_cycle.worktree_dir could not be resolved safely"
