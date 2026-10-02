@@ -47,6 +47,7 @@ from router import Availability, RoutingDecision, RoutingMode, Target
 from usage import normalize_executor_output
 
 SCHEMA_VERSION = 1
+DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 class ReadinessPolicy(str, Enum):
@@ -612,7 +613,7 @@ class NativeAdapter(Adapter):
         return argv
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
-                 timeout: int = 3600, runner=_run,
+                 timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run,
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
@@ -1216,7 +1217,7 @@ class ClaudeAdapter(NativeAdapter):
         return isinstance(cwd, str) and bool(cwd) and Path(cwd).is_dir()
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
-                 timeout: int = 3600, runner=_run, writes: bool = False,
+                 timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run, writes: bool = False,
                  publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
@@ -1380,7 +1381,7 @@ class OrcaAdapter(Adapter):
                 and context.review_workspace is not None)
 
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
-                 timeout: int = 3600, runner=_run,
+                 timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run,
                  context: "OrcaDispatchContext | None" = None,
                  writes: bool = False, on_workspace=None) -> DispatchResult:
         """Run the work as a supervised Orca worker.

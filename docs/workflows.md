@@ -236,7 +236,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
-| `--timeout` | adapter default (3600 s) | Seconds one dispatch may take |
+| `--timeout` | adapter default (21600 s / 6 h) | Maximum time for one dispatch. `--detach` only avoids the launching host's task limit; it does not change this per-dispatch timeout. |
 | `--detach` | off | Start the cycle in its own session and return at once, printing its process ID, a log path, and a `cycle_status.py --line --since <timestamp>` command. Use it whenever an agent or another host that limits a task's time launches the cycle |
 | `--verbose` | off | Print stage starts, changed progress, and stage results as they happen; the final report is always printed |
 | `--progress-interval` | `120` seconds | Progress cadence through the first 15 minutes; switches to `300` seconds after the 15-minute update |
