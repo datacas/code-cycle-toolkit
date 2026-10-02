@@ -853,7 +853,7 @@ class DispatchAttemptTests(TelemetryTestCase):
 
         self.assertEqual([], first["conflicts"])
         self.assertEqual([], repeated["conflicts"])
-        with self.store._connect() as connection:
+        with closing(self.store._connect()) as connection:
             usage_row = connection.execute(
                 "SELECT observed_at FROM usage_observations WHERE observation_id=?", ("usage-repeat",),
             ).fetchone()
@@ -874,7 +874,7 @@ class DispatchAttemptTests(TelemetryTestCase):
         self.assertEqual(["usage_observations", "cost_measures"], changed["conflicts"])
         self.assertEqual(17, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"])
         self.assertEqual("0.01", self.store.cost_totals("repo", cycle_id="cycle-test")[0]["reported_amount"])
-        with self.store._connect() as connection:
+        with closing(self.store._connect()) as connection:
             self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM dispatch_conflicts").fetchone()[0])
 
     def test_attempts_correlate_retries_and_aggregate_reported_usage_once(self) -> None:
