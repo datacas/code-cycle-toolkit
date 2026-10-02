@@ -43,7 +43,10 @@ def _decimal_text(value) -> str | None:
         or abs(parsed.as_tuple().exponent) > _MAX_COST_EXPONENT
     ):
         return None
-    return format(parsed, "f")
+    canonical = format(parsed, "f")
+    if len(canonical) > _MAX_COST_TEXT_LENGTH:
+        return None
+    return canonical
 
 
 def _observation_id(attempt_id: str, source: str, event: str, ordinal: int,

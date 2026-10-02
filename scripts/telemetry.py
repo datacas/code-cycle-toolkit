@@ -1128,7 +1128,10 @@ class Telemetry:
             or parsed > Decimal("1000000000000000000")
         ):
             raise TelemetryError(f"{field_name} is outside the supported non-negative range")
-        return format(parsed, "f")
+        canonical = format(parsed, "f")
+        if len(canonical) > _MAX_COST_TEXT_LENGTH:
+            raise TelemetryError(f"{field_name} is outside the supported non-negative range")
+        return canonical
 
     def _conflict(self, connection, attempt_id: str, field_name: str,
                   existing, incoming, observed_at: str, source: str) -> None:
@@ -1145,7 +1148,7 @@ class Telemetry:
 
     def _insert_usage_observation(self, connection, attempt_id: str, value: dict,
                                   observed_at: str, correction_reason: str | None,
-                                  source: str) -> None:
+                                  source: str) -> bool:
         allowed = {"observation_id", "source", "source_event", "event_ordinal", "source_model",
                    "category", "amount", "observed_at", "supersedes_id"}
         if not isinstance(value, dict) or set(value) - allowed:
@@ -1189,9 +1192,11 @@ class Telemetry:
             "FROM usage_observations WHERE observation_id=?", (observation_id,),
         ).fetchone()
         if prior is not None:
-            if tuple(prior) != normalized:
+            prior_values = tuple(prior)
+            if prior_values[:7] + prior_values[8:] != normalized[:7] + normalized[8:]:
                 self._conflict(connection, attempt_id, "usage_observation", tuple(prior), normalized, row_time, row_source)
-            return
+                return True
+            return False
         connection.execute(
             "INSERT INTO usage_observations (observation_id, attempt_id, source, source_event, event_ordinal, "
             "source_model, category, amount, observed_at, supersedes_id, correction_reason) "
@@ -1203,10 +1208,11 @@ class Telemetry:
                 "UPDATE usage_observations SET superseded_by_id=? WHERE observation_id=?",
                 (observation_id, supersedes),
             )
+        return False
 
     def _insert_cost_measure(self, connection, attempt_id: str, value: dict,
                              observed_at: str, correction_reason: str | None,
-                             source: str) -> None:
+                             source: str) -> bool:
         allowed = {"measure_id", "attribution_key", "basis", "component", "source", "unit", "amount",
                    "reported_amount", "pricing_snapshot_id", "pricing_date", "observed_at", "supersedes_id"}
         if not isinstance(value, dict) or set(value) - allowed:
@@ -1263,9 +1269,11 @@ class Telemetry:
             "FROM cost_measures WHERE measure_id=?", (measure_id,),
         ).fetchone()
         if prior is not None:
-            if tuple(prior) != normalized:
+            prior_values = tuple(prior)
+            if prior_values[:10] + prior_values[11:] != normalized[:10] + normalized[11:]:
                 self._conflict(connection, attempt_id, "cost_measure", tuple(prior), normalized, row_time, row_source)
-            return
+                return True
+            return False
         connection.execute(
             "INSERT INTO cost_measures (measure_id, attempt_id, attribution_key, basis, component, source, unit, amount, "
             "reported_amount, pricing_snapshot_id, pricing_date, observed_at, supersedes_id, correction_reason) "
@@ -1277,6 +1285,7 @@ class Telemetry:
                 "UPDATE cost_measures SET superseded_by_id=? WHERE measure_id=?",
                 (measure_id, supersedes),
             )
+        return False
 
     def update_dispatch_attempt(
         self, attempt_id: str, partial_result: dict, *, update_id: str, source: str = "runtime",
@@ -1426,13 +1435,17 @@ class Telemetry:
                 " WHERE attempt_id=?", (*columns.values(), attempt_id),
             )
             for observation in clean_usage:
-                self._insert_usage_observation(
+                observation_conflict = self._insert_usage_observation(
                     connection, attempt_id, observation, observed_at, correction_reason, source,
                 )
+                if observation_conflict and "usage_observations" not in conflicts:
+                    conflicts.append("usage_observations")
             for measure in clean_costs:
-                self._insert_cost_measure(
+                cost_conflict = self._insert_cost_measure(
                     connection, attempt_id, measure, observed_at, correction_reason, source,
                 )
+                if cost_conflict and "cost_measures" not in conflicts:
+                    conflicts.append("cost_measures")
             connection.commit()
         return {"duplicate": False, "conflicts": conflicts}
 

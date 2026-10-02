@@ -2345,9 +2345,10 @@ class UsageNormalizationTests(unittest.TestCase):
         )
         self.assertEqual((), cost_rows)
 
-        _, cost_rows = normalize_cost("1e-128", "attempt-cost-exponent-at-limit")
-        self.assertEqual(130, len(cost_rows[0]["reported_amount"]))
-        self.assertTrue(cost_rows[0]["reported_amount"].endswith("1"))
+        usage_rows, cost_rows = normalize_cost("1e-128", "attempt-cost-exponent-at-limit")
+        self.assertEqual([("input", 17)],
+                         [(row["category"], row["amount"]) for row in usage_rows])
+        self.assertEqual((), cost_rows)
 
 
 if __name__ == "__main__":

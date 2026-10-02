@@ -679,18 +679,19 @@ class SummaryTests(TelemetryTestCase):
 
 
 class DispatchAttemptTests(TelemetryTestCase):
-    def snapshot(self, profile="deep_coder"):
+    def snapshot(self, profile="deep_coder", executor="codex"):
         return harness.build_harness_snapshot(
             role="implement", skill="cc-implement-issue", profile=profile,
-            routing_strategy="fixed", readiness_policy="attempt", executor="codex",
+            routing_strategy="fixed", readiness_policy="attempt", executor=executor,
             probe=None, profiles=None, root=ROOT,
         )
 
-    def create_attempt(self, *, parent=None, relationship=None):
+    def create_attempt(self, *, parent=None, relationship=None, executor="codex",
+                       provider="openai", model_requested="gpt-6-luna", effort="max"):
         return self.store.create_dispatch_attempt(
             "repo", "task-119", "cycle-test", 1, "implement",
-            executor="codex", provider="openai", model_requested="gpt-6-luna",
-            effort="max", profile="deep_coder", harness_snapshot=self.snapshot(),
+            executor=executor, provider=provider, model_requested=model_requested,
+            effort=effort, profile="deep_coder", harness_snapshot=self.snapshot(executor=executor),
             parent_attempt_id=parent, relationship=relationship,
         )
 
@@ -789,6 +790,92 @@ class DispatchAttemptTests(TelemetryTestCase):
             self.store._decimal("1e-1000000000", "amount")
         with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
             self.store._decimal("0" * 129, "amount")
+        attempt = self.create_attempt()
+        with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
+            self.store.update_dispatch_attempt(
+                attempt,
+                {"cost_measures": [{
+                    "measure_id": "cost-expanded-decimal", "basis": "unknown",
+                    "component": "reported_cli_cost", "source": "codex", "unit": "USD",
+                    "amount": None, "reported_amount": "1e-128",
+                }]},
+                update_id="update-expanded-decimal",
+            )
+
+    def test_claude_small_exponent_cost_is_omitted_at_persistence_boundary(self) -> None:
+        attempt = self.create_attempt(
+            executor="claude", provider="anthropic", model_requested="claude-sonnet-5",
+            effort="high",
+        )
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        stdout = json.dumps({"type": "result", "modelUsage": {
+            "claude-sonnet-5": {"inputTokens": 17, "costUSD": "1e-128"},
+        }})
+        result = ex.ClaudeAdapter().dispatch(
+            target, "work",
+            runner=lambda *_args, **_kwargs: unittest.mock.Mock(
+                returncode=0, stdout=stdout, stderr="",
+            ),
+            dispatch_attempt_id=attempt,
+        )
+
+        self.assertEqual("completed", result.lifecycle_state)
+        self.assertEqual((), result.cost_measures)
+        self.assertEqual(1, len(result.usage_observations))
+        saved = self.store.update_dispatch_attempt(
+            attempt,
+            {"lifecycle_state": "completed", "outcome": "succeeded",
+             "usage_observations": list(result.usage_observations),
+             "cost_measures": list(result.cost_measures)},
+            update_id="update-small-exponent-cost",
+        )
+
+        self.assertEqual([], saved["conflicts"])
+        self.assertEqual(17, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"])
+        self.assertEqual([], self.store.cost_totals("repo", cycle_id="cycle-test"))
+
+    def test_repeated_observations_ignore_receipt_time_and_report_real_conflicts(self) -> None:
+        attempt = self.create_attempt()
+        usage = {"observation_id": "usage-repeat", "source": "codex",
+                 "source_event": "turn.completed", "event_ordinal": 0,
+                 "category": "input_total", "amount": 17}
+        cost = {"measure_id": "cost-repeat", "basis": "unknown",
+                "component": "reported_cli_cost", "source": "codex", "unit": "USD",
+                "amount": None, "reported_amount": "0.01"}
+        first = self.store.update_dispatch_attempt(
+            attempt, {"usage_observations": [usage], "cost_measures": [cost]},
+            update_id="update-repeat-first", observed_at="2026-10-02T00:00:01Z",
+        )
+        repeated = self.store.update_dispatch_attempt(
+            attempt, {"usage_observations": [usage], "cost_measures": [cost]},
+            update_id="update-repeat-again", observed_at="2026-10-02T00:00:02Z",
+        )
+
+        self.assertEqual([], first["conflicts"])
+        self.assertEqual([], repeated["conflicts"])
+        with self.store._connect() as connection:
+            usage_row = connection.execute(
+                "SELECT observed_at FROM usage_observations WHERE observation_id=?", ("usage-repeat",),
+            ).fetchone()
+            cost_row = connection.execute(
+                "SELECT observed_at FROM cost_measures WHERE measure_id=?", ("cost-repeat",),
+            ).fetchone()
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM dispatch_conflicts").fetchone()[0])
+        self.assertEqual("2026-10-02T00:00:01+00:00", usage_row["observed_at"])
+        self.assertEqual("2026-10-02T00:00:01+00:00", cost_row["observed_at"])
+
+        changed = self.store.update_dispatch_attempt(
+            attempt,
+            {"usage_observations": [{**usage, "amount": 18}],
+             "cost_measures": [{**cost, "reported_amount": "0.02"}]},
+            update_id="update-repeat-conflict", observed_at="2026-10-02T00:00:03Z",
+        )
+
+        self.assertEqual(["usage_observations", "cost_measures"], changed["conflicts"])
+        self.assertEqual(17, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"])
+        self.assertEqual("0.01", self.store.cost_totals("repo", cycle_id="cycle-test")[0]["reported_amount"])
+        with self.store._connect() as connection:
+            self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM dispatch_conflicts").fetchone()[0])
 
     def test_attempts_correlate_retries_and_aggregate_reported_usage_once(self) -> None:
         first = self.create_attempt()
