@@ -339,6 +339,7 @@ def configured_worktree_dir(config: dict) -> Path:
     path = Path(value)
     windows_path = PureWindowsPath(value)
     if (path.is_absolute() or windows_path.is_absolute() or windows_path.drive
+            or windows_path.root
             or ".." in path.parts or ".." in windows_path.parts
             or path == Path(".")):
         raise CycleDriverError(

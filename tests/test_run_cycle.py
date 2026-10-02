@@ -321,14 +321,14 @@ class WorktreeDirectoryTests(unittest.TestCase):
     def test_default_worktree_directory_is_repository_relative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.assertEqual(root / ".worktree",
+            self.assertEqual(root.resolve() / ".worktree",
                              rc.resolve_worktree_dir({}, root))
 
     def test_configured_worktree_directory_overrides_the_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = {"code_cycle": {"worktree_dir": "build/workers"}}
-            self.assertEqual(root / "build" / "workers",
+            self.assertEqual(root.resolve() / "build" / "workers",
                              rc.resolve_worktree_dir(config, root))
 
     def test_configured_worktree_directory_cannot_escape_repository(self) -> None:
