@@ -209,10 +209,11 @@ Use only the supervised flow: `run-create`, `task-create`, `worker-start`,
 
 Place every worker of the run in the same worktree, because they share one PR
 branch. Use `--worktree current` when the active worktree is the target
-repository; otherwise create the worker's persistent worktree explicitly once
-under the repository-relative `code_cycle.worktree_dir` from `.code-cycle.yml`
-(default `.worktree`), then keep every later Task there. Keep isolated
-disposable review workspaces outside this directory.
+repository. When the toolkit controls the path for a persistent worker
+worktree, create it once under the repository-relative
+`code_cycle.worktree_dir` from `.code-cycle.yml` (default `.worktree`), then
+keep every later Task there. Keep isolated disposable review workspaces
+outside this directory.
 
 The current Orca CLI creates `new-child` worktrees under Orca's managed
 location and does not document a caller-selected base directory. Do not treat

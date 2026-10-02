@@ -345,7 +345,10 @@ class WorktreeDirectoryTests(unittest.TestCase):
             outside = Path(temporary) / "outside"
             root.mkdir()
             outside.mkdir()
-            (root / "workers").symlink_to(outside, target_is_directory=True)
+            try:
+                (root / "workers").symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
 
             with self.assertRaises(rc.CycleDriverError):
                 rc.resolve_worktree_dir(
@@ -355,7 +358,10 @@ class WorktreeDirectoryTests(unittest.TestCase):
     def test_symlink_loop_is_reported_as_invalid_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "workers").symlink_to(root / "workers")
+            try:
+                (root / "workers").symlink_to(root / "workers")
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
 
             with self.assertRaisesRegex(
                 rc.CycleDriverError, "could not be resolved safely"
