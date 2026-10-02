@@ -739,6 +739,12 @@ class DispatchAttemptTests(TelemetryTestCase):
         )
         self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
 
+    def test_cost_decimal_rejects_unbounded_length_and_exponent(self) -> None:
+        with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
+            self.store._decimal("1e-1000000000", "amount")
+        with self.assertRaisesRegex(tm.TelemetryError, "outside the supported"):
+            self.store._decimal("0" * 129, "amount")
+
     def test_attempts_correlate_retries_and_aggregate_reported_usage_once(self) -> None:
         first = self.create_attempt()
         second = self.create_attempt(parent=first, relationship="retry")

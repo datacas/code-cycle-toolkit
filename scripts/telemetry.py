@@ -899,6 +899,11 @@ def routing_decision_fields(decision) -> dict:
     }
 
 
+# Keep direct telemetry writes aligned with scripts/usage.py cost limits.
+_MAX_COST_TEXT_LENGTH = 128
+_MAX_COST_EXPONENT = 128
+
+
 class Telemetry:
     """Append-only record of what each stage did."""
 
@@ -1108,12 +1113,20 @@ class Telemetry:
             return None
         if isinstance(value, bool):
             raise TelemetryError(f"{field_name} must be a non-negative decimal")
+        raw = str(value)
+        if len(raw) > _MAX_COST_TEXT_LENGTH:
+            raise TelemetryError(f"{field_name} is outside the supported non-negative range")
         try:
             from decimal import Decimal, InvalidOperation
-            parsed = Decimal(str(value))
+            parsed = Decimal(raw)
         except (InvalidOperation, ValueError, TypeError) as exc:
             raise TelemetryError(f"{field_name} must be a non-negative decimal") from exc
-        if not parsed.is_finite() or parsed < 0 or parsed > Decimal("1000000000000000000"):
+        if (
+            not parsed.is_finite()
+            or abs(parsed.as_tuple().exponent) > _MAX_COST_EXPONENT
+            or parsed < 0
+            or parsed > Decimal("1000000000000000000")
+        ):
             raise TelemetryError(f"{field_name} is outside the supported non-negative range")
         return format(parsed, "f")
 
