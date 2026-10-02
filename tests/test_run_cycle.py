@@ -352,6 +352,18 @@ class WorktreeDirectoryTests(unittest.TestCase):
                     {"code_cycle": {"worktree_dir": "workers"}}, root
                 )
 
+    def test_symlink_loop_is_reported_as_invalid_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "workers").symlink_to(root / "workers")
+
+            with self.assertRaisesRegex(
+                rc.CycleDriverError, "could not be resolved safely"
+            ):
+                rc.resolve_worktree_dir(
+                    {"code_cycle": {"worktree_dir": "workers"}}, root
+                )
+
     def test_config_loader_accepts_the_worktree_directory_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / ".code-cycle.yml"

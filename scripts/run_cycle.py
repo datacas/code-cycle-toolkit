@@ -349,8 +349,13 @@ def configured_worktree_dir(config: dict) -> Path:
 
 def resolve_worktree_dir(config: dict, repo_root: str | Path) -> Path:
     """Resolve the configured base against the repository root without escaping it."""
-    root = Path(repo_root).resolve()
-    resolved = (root / configured_worktree_dir(config)).resolve()
+    try:
+        root = Path(repo_root).resolve()
+        resolved = (root / configured_worktree_dir(config)).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise CycleDriverError(
+            "code_cycle.worktree_dir could not be resolved safely"
+        ) from exc
     try:
         relative = resolved.relative_to(root)
     except ValueError as exc:
