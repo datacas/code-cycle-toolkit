@@ -505,22 +505,35 @@ class CycleStatusTests(unittest.TestCase):
 
     def test_usage_summary_reads_codex_and_claude_final_events(self) -> None:
         class Result:
-            def __init__(self, stdout):
+            def __init__(self, stdout, executor):
                 self.artifacts = {"stdout": stdout}
+                self.executor = executor
 
         codex = Result(json.dumps({"type": "turn.completed", "usage": {
             "input_tokens": 3_100_000, "cached_input_tokens": 2_945_000,
             "output_tokens": 61_000,
-        }}))
+        }}), "codex")
         claude = Result(json.dumps({"type": "result", "modelUsage": {
             "claude-sonnet-5": {"inputTokens": 10, "cacheReadInputTokens": 90,
                                 "outputTokens": 2_000},
-        }}))
+        }}), "claude")
 
-        self.assertEqual("in 3.1M (95% cached) / out 61k",
+        self.assertEqual("in 3.1M / cached 2.9M / out 61k",
                          cycle_status._usage_summary(codex))
-        self.assertEqual("in 100 (90% cached) / out 2k",
+        self.assertEqual("in 10 / cache read 90 / out 2k",
                          cycle_status._usage_summary(claude))
+
+    def test_structured_usage_summary_never_invents_missing_categories(self) -> None:
+        result = SimpleNamespace(usage_observations=(
+            {"category": "input_total", "amount": 100},
+            {"category": "cached_input", "amount": 25},
+        ))
+        only_input = SimpleNamespace(usage_observations=(
+            {"category": "input_total", "amount": 17},
+        ))
+
+        self.assertEqual("in 100 / cached 25", cycle_status._usage_summary(result))
+        self.assertEqual("in 17", cycle_status._usage_summary(only_input))
 
 
 if __name__ == "__main__":

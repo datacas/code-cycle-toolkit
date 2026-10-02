@@ -114,6 +114,19 @@ class InstalledRuntimeTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("recorded 3 rows", result.stdout)
 
+    def test_installed_runtime_keeps_its_manifest_and_toolkit_identity(self) -> None:
+        self.assertEqual(MANIFEST.read_bytes(),
+                         (self.runtime / "runtime.manifest").read_bytes())
+        identity = dict(
+            line.split("=", 1)
+            for line in (self.runtime / "toolkit.identity").read_text(encoding="utf-8").splitlines()
+        )
+        expected_version = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"),
+        )["version"]
+        self.assertEqual(expected_version, identity["version"])
+        self.assertRegex(identity["commit"], r"^(?:[0-9a-f]{40})?$")
+
     def test_the_installed_stats_component_reads_scope_without_creating_a_database(self) -> None:
         (self.project / ".code-cycle.yml").write_text(
             "code_cycle:\n  repository:\n    selector: owner/repo\n",

@@ -2266,5 +2266,90 @@ class ReadOnlyVerificationTests(unittest.TestCase):
                     self.assertNotIn(name, code)
 
 
+class UsageNormalizationTests(unittest.TestCase):
+    def test_codex_dispatch_preserves_reported_cache_and_reasoning_categories(self) -> None:
+        stdout = json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 1200, "cached_input_tokens": 300,
+            "cache_write_input_tokens": 25, "output_tokens": 80,
+            "reasoning_output_tokens": 15,
+        }})
+        result = ex.CodexAdapter().dispatch(
+            TARGET, "work", runner=lambda *_args, **_kwargs: completed(stdout),
+            dispatch_attempt_id="attempt-physical-119",
+        )
+
+        self.assertEqual("completed", result.lifecycle_state)
+        self.assertEqual({"input_total", "cached_input", "cache_write_input",
+                          "output_total", "reasoning_output"},
+                         {row["category"] for row in result.usage_observations})
+        self.assertTrue(all(row["observation_id"].startswith("usage-")
+                            for row in result.usage_observations))
+        self.assertEqual((), result.cost_measures)
+
+    def test_claude_model_usage_is_partial_and_reported_cost_stays_unknown(self) -> None:
+        target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+        stdout = json.dumps({"type": "result", "modelUsage": {
+            "claude-sonnet-5": {
+                "inputTokens": 40, "cacheReadInputTokens": 60,
+                "cacheCreationInputTokens": 5, "outputTokens": 25,
+                "costUSD": "0.0032",
+            },
+        }})
+        result = ex.ClaudeAdapter().dispatch(
+            target, "work", runner=lambda *_args, **_kwargs: completed(stdout),
+            dispatch_attempt_id="attempt-physical-120",
+        )
+
+        self.assertEqual({"input", "cache_read_input", "cache_creation_input", "output"},
+                         {row["category"] for row in result.usage_observations})
+        self.assertEqual("unknown", result.cost_measures[0]["basis"])
+        self.assertIsNone(result.cost_measures[0]["amount"])
+        self.assertEqual("0.0032", result.cost_measures[0]["reported_amount"])
+
+    def test_missing_or_invalid_categories_are_not_filled_with_zero(self) -> None:
+        stdout = json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 17, "cached_input_tokens": "not-a-count",
+        }})
+        observations, costs = ex.normalize_executor_output("codex", stdout, "attempt-partial")
+
+        self.assertEqual([("input_total", 17)],
+                         [(row["category"], row["amount"]) for row in observations])
+        self.assertEqual((), costs)
+
+    def test_out_of_range_reported_cost_is_omitted(self) -> None:
+        def normalize_cost(raw_cost: str, attempt_id: str):
+            stdout = json.dumps({"type": "result", "modelUsage": {
+                "claude-sonnet-5": {"inputTokens": 17, "costUSD": raw_cost},
+            }})
+            return ex.normalize_executor_output("claude", stdout, attempt_id)
+
+        usage_rows, cost_rows = normalize_cost(
+            "1000000000000000001", "attempt-cost-over-limit",
+        )
+        self.assertEqual([("input", 17)],
+                         [(row["category"], row["amount"]) for row in usage_rows])
+        self.assertEqual((), cost_rows)
+
+        _, cost_rows = normalize_cost(
+            "1000000000000000000", "attempt-cost-at-limit",
+        )
+        self.assertEqual("1000000000000000000", cost_rows[0]["reported_amount"])
+
+        _, cost_rows = normalize_cost(
+            "1e-1000000000", "attempt-cost-tiny-exponent",
+        )
+        self.assertEqual((), cost_rows)
+
+        _, cost_rows = normalize_cost(
+            "0." + "0" * 127 + "1", "attempt-cost-long-decimal",
+        )
+        self.assertEqual((), cost_rows)
+
+        usage_rows, cost_rows = normalize_cost("1e-128", "attempt-cost-exponent-at-limit")
+        self.assertEqual([("input", 17)],
+                         [(row["category"], row["amount"]) for row in usage_rows])
+        self.assertEqual((), cost_rows)
+
+
 if __name__ == "__main__":
     unittest.main()

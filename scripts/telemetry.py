@@ -33,9 +33,11 @@ prose can hide one level down inside a container.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -69,7 +71,10 @@ from pathlib import Path
 #: older store has no such rows: its interrupted runs left none at all. A
 #: cycle that continued an interrupted implementation carries `continued` on
 #: its cycle row, payload-only.
-SCHEMA_VERSION = 12
+#: 13: additive attempt, execution-variant, harness-snapshot, usage, cost,
+#: update, and conflict tables. Existing stage rows are not rewritten; old
+#: attempts and usage remain unknown rather than being filled with zero.
+SCHEMA_VERSION = 13
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -142,6 +147,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "task_id": ("identifier", None),
     "model_requested": ("identifier", None),
     "model_resolved": ("identifier", None),
+    "dispatch_attempt_id": ("identifier", None),
+    "execution_variant_id": ("identifier", None),
+    "harness_snapshot_id": ("identifier", None),
     "model_resolution": ("token", frozenset({
         "matched", "mismatch_known", "mismatch_unrecognized", "unreported",
     })),
@@ -321,6 +329,33 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "matched", "mismatch_known", "mismatch_unrecognized", "unreported",
     })),
     "jev_duration_ms": ("count", None),
+    # per-dispatch usage accounting references (schema 13)
+    "parent_attempt_id": ("identifier", None),
+    "dispatch_relationship": ("token", frozenset({"retry", "fallback"})),
+    "attempt_lifecycle_state": ("token", frozenset({
+        "launched", "running", "completed", "failed", "timed_out", "interrupted",
+    })),
+    "attempt_error_code": ("token", frozenset({
+        "dispatch_failed", "executor_error", "timeout", "contract_violation",
+        "interrupted", "operating_quota", "operating_availability", "unknown",
+    })),
+    "external_dispatch_id": ("identifier", None),
+    "pricing_snapshot_id": ("identifier", None),
+    "attempt_source": ("token", frozenset({"runtime", "codex", "claude", "orca", "provider", "operator"})),
+    "usage_category": ("token", frozenset({
+        "input_total", "input", "cached_input", "cache_read_input",
+        "cache_write_input", "cache_creation_input", "output_total", "output",
+        "reasoning_output",
+    })),
+    "usage_source_event": ("token", frozenset({"turn.completed", "result.modelUsage"})),
+    "cost_basis": ("token", frozenset({
+        "actual_billed", "api_equivalent_estimated", "subscription_consumption", "unknown",
+    })),
+    "cost_source": ("token", frozenset({"codex", "claude", "orca", "provider", "operator"})),
+    "cost_component": ("token", frozenset({"reported_cli_cost", "provider_charge", "api_estimate", "subscription_usage"})),
+    "correction_reason": ("token", frozenset({
+        "provider_correction", "parser_correction", "operator_correction", "reconciliation",
+    })),
 }
 
 #: Inclusive bounds for counts that have them. A count outside its range is a
@@ -568,6 +603,117 @@ CREATE TABLE IF NOT EXISTS stages (
 );
 CREATE INDEX IF NOT EXISTS stages_repo_task ON stages (repo_id, task_id);
 CREATE INDEX IF NOT EXISTS stages_profile   ON stages (repo_id, profile, role);
+
+-- Additive schema 13: one row per physical executor invocation. Existing
+-- stage rows are left untouched and remain queryable as unmeasured history.
+CREATE TABLE IF NOT EXISTS execution_variants (
+    execution_variant_id TEXT PRIMARY KEY,
+    executor             TEXT NOT NULL,
+    provider             TEXT NOT NULL,
+    model_requested      TEXT NOT NULL,
+    model_resolved       TEXT,
+    effort               TEXT NOT NULL,
+    fingerprint          TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS harness_snapshots (
+    harness_snapshot_id TEXT PRIMARY KEY,
+    fingerprint         TEXT NOT NULL UNIQUE,
+    components_json     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dispatch_attempts (
+    attempt_id              TEXT PRIMARY KEY,
+    repo_id                 TEXT NOT NULL,
+    task_id                 TEXT NOT NULL,
+    cycle_id                TEXT NOT NULL,
+    stage_seq               INTEGER NOT NULL CHECK(stage_seq >= 1),
+    role                    TEXT NOT NULL,
+    executor                TEXT NOT NULL,
+    provider                TEXT NOT NULL,
+    model_requested         TEXT NOT NULL,
+    model_resolved          TEXT,
+    model_resolution        TEXT NOT NULL DEFAULT 'unreported',
+    effort                  TEXT NOT NULL,
+    profile                 TEXT NOT NULL,
+    execution_variant_id    TEXT NOT NULL REFERENCES execution_variants(execution_variant_id),
+    harness_snapshot_id     TEXT NOT NULL REFERENCES harness_snapshots(harness_snapshot_id),
+    parent_attempt_id       TEXT REFERENCES dispatch_attempts(attempt_id),
+    relationship            TEXT CHECK(relationship IN ('retry', 'fallback')),
+    lifecycle_state         TEXT NOT NULL CHECK(lifecycle_state IN
+                              ('launched', 'running', 'completed', 'failed', 'timed_out', 'interrupted')),
+    outcome                 TEXT CHECK(outcome IN
+                              ('succeeded', 'blocked', 'failed', 'contract_violation', 'interrupted')),
+    error_code              TEXT,
+    external_dispatch_id    TEXT,
+    started_at              TEXT NOT NULL,
+    finished_at             TEXT,
+    duration_ms             INTEGER CHECK(duration_ms IS NULL OR duration_ms >= 0),
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dispatch_attempts_cycle
+    ON dispatch_attempts (repo_id, cycle_id, stage_seq, attempt_id);
+CREATE INDEX IF NOT EXISTS dispatch_attempts_task
+    ON dispatch_attempts (repo_id, task_id, cycle_id);
+CREATE INDEX IF NOT EXISTS dispatch_attempts_external_id
+    ON dispatch_attempts (external_dispatch_id);
+CREATE TABLE IF NOT EXISTS dispatch_attempt_updates (
+    update_id             TEXT PRIMARY KEY,
+    attempt_id            TEXT NOT NULL REFERENCES dispatch_attempts(attempt_id),
+    source                TEXT NOT NULL,
+    observed_at           TEXT NOT NULL,
+    correction_reason     TEXT,
+    patch_hash            TEXT NOT NULL,
+    patch_json            TEXT NOT NULL,
+    correction_of_update  TEXT REFERENCES dispatch_attempt_updates(update_id)
+);
+CREATE INDEX IF NOT EXISTS attempt_updates_attempt
+    ON dispatch_attempt_updates (attempt_id, observed_at);
+CREATE TABLE IF NOT EXISTS dispatch_conflicts (
+    conflict_id       TEXT PRIMARY KEY,
+    attempt_id        TEXT NOT NULL REFERENCES dispatch_attempts(attempt_id),
+    field             TEXT NOT NULL,
+    existing_hash     TEXT NOT NULL,
+    incoming_hash     TEXT NOT NULL,
+    observed_at       TEXT NOT NULL,
+    source            TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_observations (
+    observation_id       TEXT PRIMARY KEY,
+    attempt_id           TEXT NOT NULL REFERENCES dispatch_attempts(attempt_id),
+    source               TEXT NOT NULL,
+    source_event         TEXT NOT NULL,
+    event_ordinal        INTEGER NOT NULL CHECK(event_ordinal >= 0),
+    source_model         TEXT,
+    category             TEXT NOT NULL,
+    amount               INTEGER NOT NULL CHECK(amount >= 0),
+    observed_at          TEXT NOT NULL,
+    supersedes_id        TEXT REFERENCES usage_observations(observation_id),
+    superseded_by_id     TEXT REFERENCES usage_observations(observation_id),
+    correction_reason    TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_attempt_active
+    ON usage_observations (attempt_id, superseded_by_id, category);
+CREATE TABLE IF NOT EXISTS cost_measures (
+    measure_id            TEXT PRIMARY KEY,
+    attempt_id            TEXT NOT NULL REFERENCES dispatch_attempts(attempt_id),
+    basis                 TEXT NOT NULL CHECK(basis IN
+                              ('actual_billed', 'api_equivalent_estimated',
+                               'subscription_consumption', 'unknown')),
+    attribution_key       TEXT NOT NULL,
+    component             TEXT NOT NULL,
+    source                TEXT NOT NULL,
+    unit                  TEXT,
+    amount                TEXT,
+    reported_amount       TEXT,
+    pricing_snapshot_id   TEXT,
+    pricing_date          TEXT,
+    observed_at           TEXT NOT NULL,
+    supersedes_id         TEXT REFERENCES cost_measures(measure_id),
+    superseded_by_id      TEXT REFERENCES cost_measures(measure_id),
+    correction_reason     TEXT
+);
+CREATE INDEX IF NOT EXISTS cost_attempt_active
+    ON cost_measures (attempt_id, superseded_by_id, basis, component);
 """
 
 
@@ -753,6 +899,11 @@ def routing_decision_fields(decision) -> dict:
     }
 
 
+# Keep direct telemetry writes aligned with scripts/usage.py cost limits.
+_MAX_COST_TEXT_LENGTH = 128
+_MAX_COST_EXPONENT = 128
+
+
 class Telemetry:
     """Append-only record of what each stage did."""
 
@@ -796,7 +947,681 @@ class Telemetry:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @staticmethod
+    def _timestamp(value=None) -> str:
+        if value is None:
+            return datetime.now(timezone.utc).isoformat()
+        if not isinstance(value, str):
+            raise TelemetryError("timestamps must be ISO-8601 strings with a timezone")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise TelemetryError("timestamps must be ISO-8601 strings with a timezone") from exc
+        if parsed.tzinfo is None:
+            raise TelemetryError("timestamps must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _fingerprint(value) -> str:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _safe_external_reference(self, key: str, value: str):
+        checked = self._checked(key, value)
+        if not isinstance(checked, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", checked):
+            raise TelemetryError(f"{key} must be a short opaque reference without path separators")
+        return checked
+
+    def _execution_variant(self, connection, *, executor, provider,
+                           model_requested, model_resolved, effort, repo_id):
+        executor = self._checked("executor", executor, repo_id=repo_id)
+        provider = self._checked("provider", provider, repo_id=repo_id)
+        model_requested = self._checked("model_requested", model_requested, repo_id=repo_id)
+        effort = self._checked("effort", effort, repo_id=repo_id)
+        if model_resolved is not None:
+            model_resolved, _resolution = self._model_observation(
+                repo_id, model_requested, model_resolved,
+            )
+        variant = {
+            "executor": executor, "provider": provider,
+            "model_requested": model_requested,
+            "model_resolved": model_resolved, "effort": effort,
+        }
+        fingerprint = self._fingerprint(variant)
+        variant_id = f"variant-{fingerprint}"
+        connection.execute(
+            "INSERT OR IGNORE INTO execution_variants "
+            "(execution_variant_id, executor, provider, model_requested, model_resolved, effort, fingerprint) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (variant_id, executor, provider, model_requested, model_resolved, effort, fingerprint),
+        )
+        return variant_id, variant
+
+    def _harness_snapshot(self, connection, snapshot):
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("components"), dict):
+            raise TelemetryError("a harness snapshot needs normalized components")
+        components = snapshot["components"]
+        allowed = {
+            "toolkit_release", "toolkit_commit", "runtime_manifest_sha256",
+            "routing_policy_sha256", "prompt_template_sha256", "executor",
+            "executor_version", "profile", "profile_config_sha256",
+            "routing_strategy", "readiness_policy", "role", "skill", "skill_sha256",
+        }
+        if set(components) != allowed:
+            raise TelemetryError("harness snapshot components do not match the safe field allowlist")
+        normalized = {}
+        for key, value in components.items():
+            if value is None:
+                normalized[key] = None
+            elif key.endswith("_sha256"):
+                if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+                    raise TelemetryError(f"{key} must be a SHA-256 digest")
+                normalized[key] = value
+            elif key == "toolkit_commit":
+                if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{40}", value):
+                    raise TelemetryError("toolkit_commit must be a full commit hash")
+                normalized[key] = value
+            elif key == "toolkit_release":
+                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", value):
+                    raise TelemetryError("toolkit_release must be a short version identifier")
+                normalized[key] = value
+            elif key == "executor_version":
+                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", value):
+                    raise TelemetryError("executor_version must be a short version identifier")
+                normalized[key] = value
+            else:
+                field_name = {
+                    "routing_strategy": "routing_strategy",
+                    "readiness_policy": "readiness_policy",
+                    "executor": "executor", "profile": "profile", "role": "role",
+                    "skill": "skill",
+                }[key]
+                normalized[key] = self._checked(field_name, value)
+        fingerprint = self._fingerprint(normalized)
+        supplied_fingerprint = snapshot.get("fingerprint")
+        snapshot_id = snapshot.get("harness_snapshot_id")
+        if supplied_fingerprint != fingerprint or snapshot_id != f"harness-{fingerprint}":
+            raise TelemetryError("harness snapshot fingerprint does not match its components")
+        encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "INSERT OR IGNORE INTO harness_snapshots "
+            "(harness_snapshot_id, fingerprint, components_json) VALUES (?, ?, ?)",
+            (snapshot_id, fingerprint, encoded),
+        )
+        return snapshot_id
+
+    def create_dispatch_attempt(
+        self, repo_id: str, task_id: str, cycle_id: str, stage_seq: int, role: str,
+        *, executor: str, provider: str, model_requested: str, effort: str,
+        profile: str, harness_snapshot: dict, parent_attempt_id: str | None = None,
+        relationship: str | None = None, attempt_id: str | None = None,
+        started_at: str | None = None,
+    ) -> str:
+        """Persist a physical attempt before invoking or launching its executor."""
+        for key, value in (("repo_id", repo_id), ("task_id", task_id),
+                           ("cycle_id", cycle_id), ("role", role),
+                           ("executor", executor), ("provider", provider),
+                           ("model_requested", model_requested), ("effort", effort),
+                           ("profile", profile)):
+            self._checked(key, value, repo_id=repo_id)
+        if isinstance(stage_seq, bool) or not isinstance(stage_seq, int) or stage_seq < 1:
+            raise TelemetryError("stage_seq must be a positive integer")
+        if relationship is not None:
+            relationship = self._checked("dispatch_relationship", relationship)
+        if parent_attempt_id is not None:
+            parent_attempt_id = self._checked("parent_attempt_id", parent_attempt_id)
+        if (relationship is None) != (parent_attempt_id is None):
+            raise TelemetryError("a retry or fallback relationship must name its parent attempt")
+        attempt_id = attempt_id or f"attempt-{uuid.uuid4().hex}"
+        attempt_id = self._safe_external_reference("dispatch_attempt_id", attempt_id)
+        started_at = self._timestamp(started_at)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            variant_id, _ = self._execution_variant(
+                connection, executor=executor, provider=provider,
+                model_requested=model_requested, model_resolved=None, effort=effort,
+                repo_id=repo_id,
+            )
+            harness_id = self._harness_snapshot(connection, harness_snapshot)
+            if parent_attempt_id is not None:
+                parent = connection.execute(
+                    "SELECT repo_id, task_id, cycle_id, stage_seq FROM dispatch_attempts WHERE attempt_id=?",
+                    (parent_attempt_id,),
+                ).fetchone()
+                if parent is None or (parent["repo_id"], parent["task_id"], parent["cycle_id"], parent["stage_seq"]) != (
+                    repo_id, task_id, cycle_id, stage_seq,
+                ):
+                    raise TelemetryError("a retry or fallback parent must be from the same logical stage")
+            connection.execute(
+                "INSERT INTO dispatch_attempts (attempt_id, repo_id, task_id, cycle_id, stage_seq, role, "
+                "executor, provider, model_requested, effort, profile, execution_variant_id, "
+                "harness_snapshot_id, parent_attempt_id, relationship, lifecycle_state, started_at, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'launched', ?, ?, ?)",
+                (attempt_id, repo_id, task_id, cycle_id, stage_seq, role, executor, provider,
+                 model_requested, effort, profile, variant_id, harness_id, parent_attempt_id,
+                 relationship, started_at, started_at, started_at),
+            )
+            connection.commit()
+        return attempt_id
+
+    @staticmethod
+    def _decimal(value, field_name: str, *, required: bool = False) -> str | None:
+        if value is None and not required:
+            return None
+        if isinstance(value, bool):
+            raise TelemetryError(f"{field_name} must be a non-negative decimal")
+        raw = str(value)
+        if len(raw) > _MAX_COST_TEXT_LENGTH:
+            raise TelemetryError(f"{field_name} is outside the supported non-negative range")
+        try:
+            from decimal import Decimal, InvalidOperation
+            parsed = Decimal(raw)
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise TelemetryError(f"{field_name} must be a non-negative decimal") from exc
+        if (
+            not parsed.is_finite()
+            or abs(parsed.as_tuple().exponent) > _MAX_COST_EXPONENT
+            or parsed < 0
+            or parsed > Decimal("1000000000000000000")
+        ):
+            raise TelemetryError(f"{field_name} is outside the supported non-negative range")
+        canonical = format(parsed, "f")
+        if len(canonical) > _MAX_COST_TEXT_LENGTH:
+            raise TelemetryError(f"{field_name} is outside the supported non-negative range")
+        return canonical
+
+    def _conflict(self, connection, attempt_id: str, field_name: str,
+                  existing, incoming, observed_at: str, source: str) -> None:
+        old_hash = self._fingerprint(existing)
+        new_hash = self._fingerprint(incoming)
+        identity = "\0".join((attempt_id, field_name, old_hash, new_hash, observed_at, source))
+        conflict_id = "conflict-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        connection.execute(
+            "INSERT OR IGNORE INTO dispatch_conflicts "
+            "(conflict_id, attempt_id, field, existing_hash, incoming_hash, observed_at, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (conflict_id, attempt_id, field_name, old_hash, new_hash, observed_at, source),
+        )
+
+    def _insert_usage_observation(self, connection, attempt_id: str, value: dict,
+                                  observed_at: str, correction_reason: str | None,
+                                  source: str) -> bool:
+        allowed = {"observation_id", "source", "source_event", "event_ordinal", "source_model",
+                   "category", "amount", "observed_at", "supersedes_id"}
+        if not isinstance(value, dict) or set(value) - allowed:
+            raise TelemetryError("usage observation contains an unrecognized field")
+        observation_id = self._safe_external_reference("dispatch_attempt_id", value.get("observation_id"))
+        row_source = self._checked("attempt_source", value.get("source", source))
+        event = self._checked("usage_source_event", value.get("source_event"))
+        category = self._checked("usage_category", value.get("category"))
+        ordinal = value.get("event_ordinal")
+        amount = value.get("amount")
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
+            raise TelemetryError("event_ordinal must be a non-negative integer")
+        if (isinstance(amount, bool) or not isinstance(amount, int)
+                or amount < 0 or amount > 9_223_372_036_854_775_807):
+            raise TelemetryError("usage amount must be a non-negative integer; missing is not zero")
+        model = value.get("source_model")
+        if model is not None:
+            attempt = connection.execute(
+                "SELECT repo_id, model_requested FROM dispatch_attempts WHERE attempt_id=?", (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise TelemetryError("usage observation refers to an unknown attempt")
+            model, _resolution = self._model_observation(
+                attempt["repo_id"], attempt["model_requested"], model,
+            )
+        row_time = self._timestamp(value.get("observed_at") or observed_at)
+        supersedes = value.get("supersedes_id")
+        if supersedes is not None:
+            if correction_reason is None:
+                raise TelemetryError("superseding usage needs an explicit correction_reason")
+            self._checked("correction_reason", correction_reason)
+        normalized = (attempt_id, row_source, event, ordinal, model, category, amount, row_time, supersedes)
+        prior = connection.execute(
+            "SELECT attempt_id, source, source_event, event_ordinal, source_model, category, amount, observed_at, supersedes_id "
+            "FROM usage_observations WHERE observation_id=?", (observation_id,),
+        ).fetchone()
+        if prior is not None:
+            prior_values = tuple(prior)
+            if prior_values[:7] + prior_values[8:] != normalized[:7] + normalized[8:]:
+                self._conflict(connection, attempt_id, "usage_observation", tuple(prior), normalized, row_time, row_source)
+                return True
+            return False
+        if supersedes is not None:
+            previous = connection.execute(
+                "SELECT attempt_id, superseded_by_id FROM usage_observations WHERE observation_id=?",
+                (supersedes,),
+            ).fetchone()
+            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
+                raise TelemetryError("superseded usage must be an active observation from the same attempt")
+        connection.execute(
+            "INSERT INTO usage_observations (observation_id, attempt_id, source, source_event, event_ordinal, "
+            "source_model, category, amount, observed_at, supersedes_id, correction_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (observation_id, *normalized, correction_reason),
+        )
+        if supersedes:
+            connection.execute(
+                "UPDATE usage_observations SET superseded_by_id=? WHERE observation_id=?",
+                (observation_id, supersedes),
+            )
+        return False
+
+    def _insert_cost_measure(self, connection, attempt_id: str, value: dict,
+                             observed_at: str, correction_reason: str | None,
+                             source: str) -> bool:
+        allowed = {"measure_id", "attribution_key", "basis", "component", "source", "unit", "amount",
+                   "reported_amount", "pricing_snapshot_id", "pricing_date", "observed_at", "supersedes_id"}
+        if not isinstance(value, dict) or set(value) - allowed:
+            raise TelemetryError("cost measure contains an unrecognized field")
+        measure_id = self._safe_external_reference("dispatch_attempt_id", value.get("measure_id"))
+        attribution_key = self._safe_external_reference(
+            "dispatch_attempt_id", value.get("attribution_key", measure_id),
+        )
+        basis = self._checked("cost_basis", value.get("basis"))
+        component = self._checked("cost_component", value.get("component"))
+        row_source = self._checked("cost_source", value.get("source", source))
+        unit = value.get("unit")
+        if unit is not None and unit not in {"USD", "EUR", "GBP", "tokens", "requests", "credits", "seconds"}:
+            raise TelemetryError("cost unit must be a supported currency or usage unit")
+        amount = self._decimal(value.get("amount"), "amount", required=basis != "unknown")
+        reported = self._decimal(value.get("reported_amount"), "reported_amount")
+        if basis == "unknown" and amount is not None:
+            raise TelemetryError("unknown basis cannot contain an attributable amount")
+        if basis == "actual_billed" and unit not in {"USD", "EUR", "GBP"}:
+            raise TelemetryError("actual billed measures need an attributable currency")
+        if basis == "api_equivalent_estimated" and unit != "USD":
+            raise TelemetryError("API-equivalent estimates must use USD")
+        if basis == "api_equivalent_estimated":
+            snapshot_id = self._safe_external_reference("pricing_snapshot_id", value.get("pricing_snapshot_id"))
+            try:
+                date_value = datetime.fromisoformat(value.get("pricing_date", "")).date().isoformat()
+            except (ValueError, TypeError) as exc:
+                raise TelemetryError("an API-equivalent estimate needs a pricing snapshot date") from exc
+        else:
+            snapshot_id = value.get("pricing_snapshot_id")
+            date_value = value.get("pricing_date")
+            if snapshot_id is not None or date_value is not None:
+                raise TelemetryError("pricing snapshots apply only to API-equivalent estimates")
+        if basis == "unknown" and reported is None and value.get("amount") is not None:
+            raise TelemetryError("unknown basis may retain a reported amount only in reported_amount")
+        if basis == "subscription_consumption" and unit not in {"tokens", "requests", "credits", "seconds"}:
+            raise TelemetryError("subscription consumption must retain its non-monetary usage unit")
+        row_time = self._timestamp(value.get("observed_at") or observed_at)
+        supersedes = value.get("supersedes_id")
+        if supersedes is not None:
+            if correction_reason is None:
+                raise TelemetryError("superseding cost needs an explicit correction_reason")
+            self._checked("correction_reason", correction_reason)
+        normalized = (attempt_id, attribution_key, basis, component, row_source, unit, amount, reported,
+                      snapshot_id, date_value, row_time, supersedes)
+        prior = connection.execute(
+            "SELECT attempt_id, attribution_key, basis, component, source, unit, amount, reported_amount, "
+            "pricing_snapshot_id, pricing_date, observed_at, supersedes_id "
+            "FROM cost_measures WHERE measure_id=?", (measure_id,),
+        ).fetchone()
+        if prior is not None:
+            prior_values = tuple(prior)
+            if prior_values[:10] + prior_values[11:] != normalized[:10] + normalized[11:]:
+                self._conflict(connection, attempt_id, "cost_measure", tuple(prior), normalized, row_time, row_source)
+                return True
+            return False
+        if supersedes is not None:
+            previous = connection.execute(
+                "SELECT attempt_id, superseded_by_id FROM cost_measures WHERE measure_id=?", (supersedes,),
+            ).fetchone()
+            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
+                raise TelemetryError("superseded cost must be active and belong to the same attempt")
+        connection.execute(
+            "INSERT INTO cost_measures (measure_id, attempt_id, attribution_key, basis, component, source, unit, amount, "
+            "reported_amount, pricing_snapshot_id, pricing_date, observed_at, supersedes_id, correction_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (measure_id, *normalized, correction_reason),
+        )
+        if supersedes:
+            connection.execute(
+                "UPDATE cost_measures SET superseded_by_id=? WHERE measure_id=?",
+                (measure_id, supersedes),
+            )
+        return False
+
+    def update_dispatch_attempt(
+        self, attempt_id: str, partial_result: dict, *, update_id: str, source: str = "runtime",
+        observed_at: str | None = None, correction_reason: str | None = None,
+    ) -> dict:
+        """Idempotently merge an async or synchronous partial result into one attempt."""
+        attempt_id = self._safe_external_reference("dispatch_attempt_id", attempt_id)
+        update_id = self._safe_external_reference("dispatch_attempt_id", update_id)
+        source = self._checked("attempt_source", source)
+        observed_at = self._timestamp(observed_at)
+        if correction_reason is not None:
+            correction_reason = self._checked("correction_reason", correction_reason)
+        if not isinstance(partial_result, dict):
+            raise TelemetryError("partial_result must be a mapping of typed fields")
+        allowed = {
+            "lifecycle_state", "outcome", "model_resolved", "duration_ms", "started_at",
+            "finished_at", "external_dispatch_id", "error_code", "usage_observations", "cost_measures",
+        }
+        unknown = set(partial_result) - allowed
+        if unknown:
+            raise TelemetryError(f"unrecognized attempt update fields: {', '.join(sorted(unknown))}")
+        clean = {}
+        attempt = self.attempt(attempt_id)
+        if attempt is None:
+            raise TelemetryError("unknown dispatch attempt")
+        for key in ("lifecycle_state", "outcome", "error_code", "external_dispatch_id"):
+            if key not in partial_result or partial_result[key] is None:
+                continue
+            value = partial_result[key]
+            if key == "lifecycle_state":
+                value = self._checked("attempt_lifecycle_state", value)
+            elif key == "outcome":
+                value = self._checked("outcome", value)
+            elif key == "error_code":
+                value = self._checked("attempt_error_code", value)
+            else:
+                value = self._safe_external_reference("external_dispatch_id", value)
+            clean[key] = value
+        if "model_resolved" in partial_result and partial_result["model_resolved"] is not None:
+            resolved, resolution = self._model_observation(
+                attempt["repo_id"], attempt["model_requested"], partial_result["model_resolved"],
+            )
+            clean["model_resolved"] = resolved
+            clean["model_resolution"] = resolution
+        for key in ("duration_ms",):
+            if key in partial_result and partial_result[key] is not None:
+                value = partial_result[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise TelemetryError(f"{key} must be a non-negative integer")
+                clean[key] = value
+        for key in ("started_at", "finished_at"):
+            if key in partial_result and partial_result[key] is not None:
+                clean[key] = self._timestamp(partial_result[key])
+        usage = partial_result.get("usage_observations", ())
+        costs = partial_result.get("cost_measures", ())
+        if not isinstance(usage, (list, tuple)) or len(usage) > 10000:
+            raise TelemetryError("usage_observations must be a bounded sequence")
+        if not isinstance(costs, (list, tuple)) or len(costs) > 1000:
+            raise TelemetryError("cost_measures must be a bounded sequence")
+        clean_usage = []
+        for observation in usage:
+            if not isinstance(observation, dict):
+                clean_usage.append(observation)
+                continue
+            observation = dict(observation)
+            if observation.get("source_model") is not None:
+                observation["source_model"], _resolution = self._model_observation(
+                    attempt["repo_id"], attempt["model_requested"], observation["source_model"],
+                )
+            clean_usage.append(observation)
+        clean_costs = list(costs)
+        clean["usage_observations"] = clean_usage
+        clean["cost_measures"] = clean_costs
+        patch_json = json.dumps(clean, sort_keys=True, separators=(",", ":"), default=str)
+        patch_hash = self._fingerprint({
+            "fields": clean, "source": source, "correction_reason": correction_reason,
+        })
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior_update = connection.execute(
+                "SELECT attempt_id, patch_hash FROM dispatch_attempt_updates WHERE update_id=?",
+                (update_id,),
+            ).fetchone()
+            if prior_update is not None:
+                if prior_update["attempt_id"] == attempt_id and prior_update["patch_hash"] == patch_hash:
+                    connection.commit()
+                    return {"duplicate": True, "conflicts": []}
+                self._conflict(connection, attempt_id, "update_id", prior_update["patch_hash"], patch_hash,
+                               observed_at, source)
+                connection.commit()
+                return {"duplicate": False, "conflicts": ["update_id"]}
+            latest_update = connection.execute(
+                "SELECT update_id FROM dispatch_attempt_updates WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone() if correction_reason else None
+            connection.execute(
+                "INSERT INTO dispatch_attempt_updates "
+                "(update_id, attempt_id, source, observed_at, correction_reason, patch_hash, patch_json, correction_of_update) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (update_id, attempt_id, source, observed_at, correction_reason, patch_hash, patch_json,
+                 latest_update["update_id"] if latest_update else None),
+            )
+            row = connection.execute("SELECT * FROM dispatch_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            columns = {}
+            conflicts = []
+            state_rank = {"launched": 0, "running": 1, "completed": 2, "failed": 2,
+                          "timed_out": 2, "interrupted": 2}
+            for key, value in clean.items():
+                if key in {"usage_observations", "cost_measures", "model_resolution"}:
+                    continue
+                current = row[key]
+                if key == "lifecycle_state":
+                    allowed_transition = state_rank[value] >= state_rank[current]
+                    if not allowed_transition and correction_reason is None:
+                        self._conflict(connection, attempt_id, key, current, value, observed_at, source)
+                        conflicts.append(key)
+                        continue
+                    if current in {"completed", "failed", "timed_out", "interrupted"} and value != current and correction_reason is None:
+                        self._conflict(connection, attempt_id, key, current, value, observed_at, source)
+                        conflicts.append(key)
+                        continue
+                elif current is not None and current != value and correction_reason is None:
+                    self._conflict(connection, attempt_id, key, current, value, observed_at, source)
+                    conflicts.append(key)
+                    continue
+                columns[key] = value
+            if "model_resolution" in clean:
+                current_resolution = row["model_resolution"]
+                resolution = clean["model_resolution"]
+                if current_resolution not in {"unreported", resolution} and correction_reason is None:
+                    self._conflict(connection, attempt_id, "model_resolution", current_resolution,
+                                   resolution, observed_at, source)
+                    conflicts.append("model_resolution")
+                    columns.pop("model_resolved", None)
+                else:
+                    columns["model_resolution"] = resolution
+            if columns.get("model_resolved"):
+                variant_id, _ = self._execution_variant(
+                    connection, executor=row["executor"], provider=row["provider"],
+                    model_requested=row["model_requested"], model_resolved=columns["model_resolved"],
+                    effort=row["effort"], repo_id=row["repo_id"],
+                )
+                columns["execution_variant_id"] = variant_id
+            columns["updated_at"] = observed_at
+            connection.execute(
+                "UPDATE dispatch_attempts SET " + ", ".join(f"{key}=?" for key in columns) +
+                " WHERE attempt_id=?", (*columns.values(), attempt_id),
+            )
+            for observation in clean_usage:
+                observation_conflict = self._insert_usage_observation(
+                    connection, attempt_id, observation, observed_at, correction_reason, source,
+                )
+                if observation_conflict and "usage_observations" not in conflicts:
+                    conflicts.append("usage_observations")
+            for measure in clean_costs:
+                cost_conflict = self._insert_cost_measure(
+                    connection, attempt_id, measure, observed_at, correction_reason, source,
+                )
+                if cost_conflict and "cost_measures" not in conflicts:
+                    conflicts.append("cost_measures")
+            connection.commit()
+        return {"duplicate": False, "conflicts": conflicts}
+
+    def attempt(self, attempt_id: str) -> dict | None:
+        attempt_id = self._checked("dispatch_attempt_id", attempt_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT * FROM dispatch_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            return dict(row) if row else None
+
+    def execution_variant(self, variant_id: str) -> dict | None:
+        variant_id = self._checked("execution_variant_id", variant_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM execution_variants WHERE execution_variant_id=?", (variant_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def harness_snapshot(self, snapshot_id: str) -> dict | None:
+        snapshot_id = self._checked("harness_snapshot_id", snapshot_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM harness_snapshots WHERE harness_snapshot_id=?", (snapshot_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["components"] = json.loads(result.pop("components_json"))
+            return result
+
+    def attempt_by_external_dispatch_id(self, dispatch_id: str) -> dict | None:
+        dispatch_id = self._safe_external_reference("external_dispatch_id", dispatch_id)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM dispatch_attempts WHERE external_dispatch_id=? "
+                "ORDER BY created_at DESC LIMIT 1", (dispatch_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def dispatch_attempts(self, repo_id: str, *, task_id: str | None = None,
+                          cycle_id: str | None = None, stage_seq: int | None = None) -> list[dict]:
+        repo_id = self._checked("repo_id", repo_id)
+        clauses, params = ["repo_id=?"], [repo_id]
+        for key, value in (("task_id", task_id), ("cycle_id", cycle_id), ("stage_seq", stage_seq)):
+            if value is not None:
+                self._checked(key, value)
+                clauses.append(f"{key}=?")
+                params.append(value)
+        with closing(self._connect()) as connection:
+            rows = [dict(row) for row in connection.execute(
+                "SELECT * FROM dispatch_attempts WHERE " + " AND ".join(clauses) +
+                " ORDER BY cycle_id, stage_seq, started_at, attempt_id", params,
+            )]
+            variants, snapshots, usage, costs = {}, {}, {}, {}
+            for start in range(0, len(rows), 400):
+                chunk = rows[start:start + 400]
+                attempt_ids = [row["attempt_id"] for row in chunk]
+                variant_ids = sorted({row["execution_variant_id"] for row in chunk})
+                snapshot_ids = sorted({row["harness_snapshot_id"] for row in chunk})
+                attempt_marks = ",".join("?" for _ in attempt_ids)
+                variant_marks = ",".join("?" for _ in variant_ids)
+                snapshot_marks = ",".join("?" for _ in snapshot_ids)
+                for value in connection.execute(
+                    f"SELECT * FROM execution_variants WHERE execution_variant_id IN ({variant_marks})",
+                    variant_ids,
+                ):
+                    variants[value["execution_variant_id"]] = dict(value)
+                for value in connection.execute(
+                    f"SELECT * FROM harness_snapshots WHERE harness_snapshot_id IN ({snapshot_marks})",
+                    snapshot_ids,
+                ):
+                    item = dict(value)
+                    item["components"] = json.loads(item.pop("components_json"))
+                    snapshots[item["harness_snapshot_id"]] = item
+                for value in connection.execute(
+                    f"SELECT * FROM usage_observations WHERE attempt_id IN ({attempt_marks}) "
+                    "AND superseded_by_id IS NULL ORDER BY observed_at, observation_id",
+                    attempt_ids,
+                ):
+                    usage.setdefault(value["attempt_id"], []).append(dict(value))
+                for value in connection.execute(
+                    f"SELECT * FROM cost_measures WHERE attempt_id IN ({attempt_marks}) "
+                    "AND superseded_by_id IS NULL ORDER BY observed_at, measure_id",
+                    attempt_ids,
+                ):
+                    costs.setdefault(value["attempt_id"], []).append(dict(value))
+            for row in rows:
+                row["execution_variant"] = variants.get(row["execution_variant_id"])
+                row["harness_snapshot"] = snapshots.get(row["harness_snapshot_id"])
+                row["usage_observations"] = usage.get(row["attempt_id"], [])
+                row["cost_measures"] = costs.get(row["attempt_id"], [])
+            return rows
+
+    def usage_totals(self, repo_id: str, *, task_id: str | None = None,
+                     cycle_id: str | None = None, stage_seq: int | None = None) -> list[dict]:
+        """Aggregate active observations by category; never combine overlapping categories."""
+        clauses, params = ["a.repo_id=?", "u.superseded_by_id IS NULL"], [self._checked("repo_id", repo_id)]
+        for key, value in (("task_id", task_id), ("cycle_id", cycle_id), ("stage_seq", stage_seq)):
+            if value is not None:
+                self._checked(key, value)
+                clauses.append(f"a.{key}=?")
+                params.append(value)
+        query = (
+            "SELECT a.task_id, a.cycle_id, a.stage_seq, u.category, u.amount FROM usage_observations u "
+            "JOIN dispatch_attempts a ON a.attempt_id=u.attempt_id WHERE " + " AND ".join(clauses) +
+            " ORDER BY a.task_id, a.cycle_id, a.stage_seq, u.category"
+        )
+        with closing(self._connect()) as connection:
+            grouped = {}
+            for row in connection.execute(query, params):
+                key = (row["task_id"], row["cycle_id"], row["stage_seq"], row["category"])
+                item = grouped.setdefault(key, {
+                    "task_id": key[0], "cycle_id": key[1], "stage_seq": key[2],
+                    "category": key[3], "observations": 0, "amount": 0,
+                })
+                item["observations"] += 1
+                item["amount"] += row["amount"]
+            return list(grouped.values())
+
+    def cost_totals(self, repo_id: str, *, task_id: str | None = None,
+                    cycle_id: str | None = None, stage_seq: int | None = None) -> list[dict]:
+        """Aggregate costs separately by basis and component, retaining unknown reports."""
+        clauses, params = ["a.repo_id=?", "c.superseded_by_id IS NULL"], [self._checked("repo_id", repo_id)]
+        for key, value in (("task_id", task_id), ("cycle_id", cycle_id), ("stage_seq", stage_seq)):
+            if value is not None:
+                self._checked(key, value)
+                clauses.append(f"a.{key}=?")
+                params.append(value)
+        query = (
+            "SELECT a.task_id, a.cycle_id, a.stage_seq, c.attempt_id, c.attribution_key, c.basis, c.component, c.unit, "
+            "c.amount, c.reported_amount FROM cost_measures c "
+            "JOIN dispatch_attempts a ON a.attempt_id=c.attempt_id WHERE " +
+            " AND ".join(clauses) +
+            " ORDER BY a.task_id, a.cycle_id, a.stage_seq, c.basis, c.component"
+        )
+        with closing(self._connect()) as connection:
+            from decimal import Decimal
+            rows = list(connection.execute(query, params))
+            actual = {
+                (row["attempt_id"], row["attribution_key"])
+                for row in rows if row["basis"] == "actual_billed"
+            }
+            grouped = {}
+            for row in rows:
+                if (row["basis"] == "api_equivalent_estimated"
+                        and (row["attempt_id"], row["attribution_key"]) in actual):
+                    continue
+                key = tuple(row[name] for name in (
+                    "task_id", "cycle_id", "stage_seq", "basis", "component", "unit",
+                ))
+                item = grouped.setdefault(key, {
+                    "task_id": key[0], "cycle_id": key[1], "stage_seq": key[2],
+                    "basis": key[3], "component": key[4], "unit": key[5],
+                    "measures": 0, "amount": None, "reported_amount": None,
+                })
+                item["measures"] += 1
+                if row["amount"] is not None:
+                    current = Decimal(item["amount"] or "0")
+                    item["amount"] = format(current + Decimal(row["amount"]), "f")
+                if row["reported_amount"] is not None:
+                    current = Decimal(item["reported_amount"] or "0")
+                    item["reported_amount"] = format(current + Decimal(row["reported_amount"]), "f")
+            return list(grouped.values())
+
+    def attempt_updates(self, attempt_id: str) -> list[dict]:
+        attempt_id = self._checked("dispatch_attempt_id", attempt_id)
+        with closing(self._connect()) as connection:
+            result = []
+            for row in connection.execute(
+                "SELECT * FROM dispatch_attempt_updates WHERE attempt_id=? ORDER BY rowid", (attempt_id,),
+            ):
+                item = dict(row)
+                item["patch"] = json.loads(item.pop("patch_json"))
+                result.append(item)
+            return result
 
     def record_stage(self, repo_id: str, task_id: str, role: str, **fields) -> int:
         """Append one stage execution.
@@ -866,6 +1691,27 @@ class Telemetry:
         disagree with what actually happened.
         """
         target = decision.target
+        attempt_id = extra.get("dispatch_attempt_id")
+        if attempt_id is not None:
+            attempt = self.attempt(attempt_id)
+            if attempt is not None:
+                extra.setdefault("execution_variant_id", attempt["execution_variant_id"])
+                extra.setdefault("harness_snapshot_id", attempt["harness_snapshot_id"])
+        observations = getattr(result, "usage_observations", ()) or ()
+        totals = {}
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            category = observation.get("category")
+            if category not in {"input_total", "output_total"}:
+                continue
+            amount = observation.get("amount")
+            if isinstance(amount, int) and not isinstance(amount, bool):
+                totals[category] = totals.get(category, 0) + amount
+        if "input_total" in totals:
+            extra.setdefault("tokens_in", totals["input_total"])
+        if "output_total" in totals:
+            extra.setdefault("tokens_out", totals["output_total"])
         return self.record_stage(
             repo_id, task_id, role,
             profile=decision.profile,
@@ -1026,6 +1872,7 @@ class Telemetry:
                     if merged.get(key) is not None}
 
         closing_rows = [row for row in rows if row["payload"].get("record_kind") == "cycle"]
+        attempts = self.dispatch_attempts(repo_id, task_id=rows[0]["task_id"], cycle_id=cycle_id)
         return {
             "cycle_id": cycle_id,
             "task_id": rows[0]["task_id"],
@@ -1034,9 +1881,13 @@ class Telemetry:
             "dispatches": [
                 {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
                  "profile": row["profile"], "outcome": row["outcome"],
-                 "used_fallback": bool(row["used_fallback"])}
+                 "used_fallback": bool(row["used_fallback"]),
+                 "dispatch_attempt_id": row["payload"].get("dispatch_attempt_id"),
+                 "execution_variant_id": row["payload"].get("execution_variant_id"),
+                 "harness_snapshot_id": row["payload"].get("harness_snapshot_id")}
                 for row in rows if row["payload"].get("record_kind") == "dispatch"
             ],
+            "attempts": attempts,
             "verdicts": [
                 {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
                  **fields(row, OUTCOME_FIELDS["verdict"])}

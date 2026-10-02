@@ -1082,6 +1082,7 @@ def run_cycle(
         ),
         verification_available=verification_available,
         shadow=shadow,
+        skills_by_role=SKILL_FOR_ROLE,
     )
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,

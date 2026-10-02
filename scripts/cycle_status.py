@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from usage import normalize_executor_output, usage_summary
 from typing import TextIO
 
 from telemetry import default_database_path
@@ -53,63 +54,22 @@ def _duration(seconds: float) -> str:
     return f"{remainder}s"
 
 
-def _compact_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value // 1_000}k"
-    return str(value)
-
-
 def _usage_summary(result) -> str | None:
+    structured = getattr(result, "usage_observations", ())
+    summary = usage_summary(structured)
+    if summary:
+        return summary
     artifacts = getattr(result, "artifacts", None)
     if not isinstance(artifacts, dict):
         return None
     stdout = artifacts.get("stdout")
     if not isinstance(stdout, str):
         return None
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "turn.completed":
-            usage = event.get("usage")
-            if isinstance(usage, dict):
-                total = usage.get("input_tokens")
-                cached = usage.get("cached_input_tokens", 0)
-                output = usage.get("output_tokens")
-                if all(isinstance(value, int) for value in (total, cached, output)):
-                    percent = round(cached / total * 100) if total else 0
-                    return (f"in {_compact_tokens(total)} ({percent}% cached) / "
-                            f"out {_compact_tokens(output)}")
-        if event.get("type") == "result":
-            model_usage = event.get("modelUsage")
-            if isinstance(model_usage, dict) and model_usage:
-                total = cached = output = 0
-                valid = True
-                for values in model_usage.values():
-                    if not isinstance(values, dict):
-                        valid = False
-                        break
-                    normal = values.get("inputTokens", 0)
-                    cache_read = values.get("cacheReadInputTokens", 0)
-                    cache_create = values.get("cacheCreationInputTokens", 0)
-                    out = values.get("outputTokens", 0)
-                    if not all(isinstance(value, int)
-                               for value in (normal, cache_read, cache_create, out)):
-                        valid = False
-                        break
-                    total += normal + cache_read + cache_create
-                    cached += cache_read + cache_create
-                    output += out
-                if valid:
-                    percent = round(cached / total * 100) if total else 0
-                    return (f"in {_compact_tokens(total)} ({percent}% cached) / "
-                            f"out {_compact_tokens(output)}")
-    return None
+    executor = getattr(result, "executor", None)
+    if executor not in {"codex", "claude"}:
+        return None
+    observations, _costs = normalize_executor_output(executor, stdout, "status-only")
+    return usage_summary(observations)
 
 
 ROLE_ICONS = {

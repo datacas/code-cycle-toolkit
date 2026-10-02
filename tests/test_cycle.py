@@ -376,6 +376,8 @@ class RoleWorkspacePolicyTests(CycleTestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, outcome.result.outcome)
         self.assertEqual([], adapter.dispatched)
+        self.assertEqual([], outcome.attempts)
+        self.assertEqual([], self.store.dispatch_attempts("owner/repo"))
         self.assertEqual("publication_access", self.store.rows("owner/repo")[0]["missing_capability"])
 
     def test_auxiliary_roles_have_explicit_least_privilege_contracts(self) -> None:
@@ -430,6 +432,41 @@ class RoleWorkspacePolicyTests(CycleTestCase):
         self.assertTrue(outcome.succeeded)
 
 
+class AsyncAttemptTests(CycleTestCase):
+    def test_launch_receipt_keeps_attempt_launched_and_persists_dispatch_id(self) -> None:
+        class ReceiptAdapter(ScriptedAdapter):
+            completes_work = False
+
+            def dispatch(self, target, task, **kw):
+                attempts = self.store.dispatch_attempts(
+                    "owner/repo", cycle_id=self.cycle_id,
+                )
+                self.attempt_id_seen = attempts[0]["attempt_id"]
+                self.lifecycle_seen = attempts[0]["lifecycle_state"]
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                    model_resolved=target.model,
+                    artifacts={"dispatchId": "orca-dispatch-119"},
+                    asynchronous=True,
+                    readiness_policy=ex.ReadinessPolicy.ATTEMPT,
+                    dispatched_from=self._availability,
+                )
+
+        adapter = ReceiptAdapter("codex")
+        adapter.store = self.store
+        recorder = self.recorder([adapter])
+        adapter.cycle_id = recorder.cycle_id
+
+        outcome = recorder.stage("implement", "launch async work")
+
+        attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual("launched", adapter.lifecycle_seen)
+        self.assertEqual("launched", attempts[0]["lifecycle_state"])
+        self.assertEqual("orca-dispatch-119", attempts[0]["external_dispatch_id"])
+        self.assertEqual(attempts[0]["attempt_id"], adapter.attempt_id_seen)
+
+
 class RerouteRecordingTests(CycleTestCase):
     """A fallback whose first attempt left no trace makes fallbacks look free."""
 
@@ -450,6 +487,17 @@ class RerouteRecordingTests(CycleTestCase):
         self.assertEqual(["codex", "claude"], [row["executor"] for row in rows])
         self.assertEqual(["blocked", "succeeded"], [row["outcome"] for row in rows])
         self.assertTrue(outcome.rerouted)
+        attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
+        self.assertEqual(2, len(attempts))
+        self.assertNotEqual(attempts[0]["attempt_id"], attempts[1]["attempt_id"])
+        self.assertEqual(attempts[0]["attempt_id"], attempts[1]["parent_attempt_id"])
+        self.assertEqual("fallback", attempts[1]["relationship"])
+        self.assertEqual("failed", attempts[0]["lifecycle_state"])
+        self.assertEqual("completed", attempts[1]["lifecycle_state"])
+        self.assertEqual(
+            [attempt["attempt_id"] for attempt in attempts],
+            [row["payload"]["dispatch_attempt_id"] for row in rows],
+        )
 
     def test_the_abandoned_attempt_keeps_the_capability_that_stopped_it(self) -> None:
         self.quota_then_fallback()[2].stage("implement", "work")

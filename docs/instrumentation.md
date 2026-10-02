@@ -451,7 +451,7 @@ should be looking at.
 
 ## Telemetry
 
-`scripts/telemetry.py` records one row per stage in a SQLite database outside
+`scripts/telemetry.py` records one stage row per dispatch decision in a SQLite database outside
 every repository, holding references, statuses and counts — no diffs and no
 prose. It never enters Git.
 
@@ -598,9 +598,13 @@ Three payload keys tie a run together, listed in `telemetry.CORRELATION_FIELDS`:
 | Field | Meaning |
 |---|---|
 | `cycle_id` | minted once per `CycleRecorder`, so two runs of one work item stay apart; validated before anything is dispatched |
-| `stage_seq` | the number of the `stage()` call; a rerouted attempt shares its stage's number, and a verdict carries the number of the latest dispatch of its role |
+| `stage_seq` | the number of the `stage()` call; physical retries and fallbacks share it, and a verdict carries the number of the latest dispatch of its role |
 | `record_kind` | `dispatch`, `verdict` or `cycle` |
 | `started_from` | the stage the cycle began at: `implement`, or `review`/`resolve`/`rereview` for a run that resumed an existing change request (`run_cycle.py --from`); on every row of the cycle, and a row without it reads as `implement` |
+| `dispatch_attempt_id` | a unique ID for one physical executor invocation; absent when routing was blocked before an attempt existed (schema 13) |
+| `execution_variant_id` | a reference to executor, provider, requested/resolved model, and effort (schema 13) |
+| `harness_snapshot_id` | a stable reference to safe release, CLI, profile, routing, prompt, skill, and configuration fingerprints (schema 13) |
+| `parent_attempt_id`, `dispatch_relationship` | retry/fallback lineage between physical attempts of one logical stage (schema 13) |
 
 Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 
@@ -688,6 +692,31 @@ Each dispatch row that reached an executor carries `duration_ms`, the executor
 call's wall time from a monotonic clock. An attempt refused before an executor
 ran has none, and neither does a dispatch that only started work finishing
 elsewhere: its launch time is not the stage's duration.
+
+Schema 13 adds `execution_variants`, `harness_snapshots`, `dispatch_attempts`,
+`dispatch_attempt_updates`, `usage_observations`, `cost_measures`, and
+`dispatch_conflicts`. Attempts are inserted before an executor is invoked and
+start in `launched`; synchronous calls move to `running` and then a terminal
+state, while Orca launch receipts remain `launched` until a later update. Each
+partial update has a caller-provided idempotency key. Replays of the same
+update are no-ops, omitted fields are preserved, and out-of-order or
+contradictory terminal updates create conflict records. Corrections require a
+closed reason and preserve their earlier update history.
+
+Usage rows retain source categories, including cache and reasoning fields when
+reported. There is no row for a missing field, and explicit zero remains a
+measured zero. Aggregates group by category and never combine potentially
+overlapping provider categories. Costs have one basis per measure:
+`actual_billed`, `api_equivalent_estimated`, `subscription_consumption`, or
+`unknown`. CLI-reported dollar values remain reported amounts with unknown
+basis until a versioned pricing snapshot supports an estimate. Cost queries
+group by basis, component, and unit, prefer an actual billed measure over an
+estimate with the same attribution key, and do not combine bases or currencies.
+
+Existing stage rows are not rewritten by schema 13. Their new attempt, usage,
+cost, and harness fields are unmeasured and unknown rather than zero. The
+`Telemetry.dispatch_attempts`, `usage_totals`, and `cost_totals` queries expose
+the new history; `cycle_outcome()` includes attempts alongside logical stages.
 
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
