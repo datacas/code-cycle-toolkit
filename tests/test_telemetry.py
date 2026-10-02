@@ -1023,5 +1023,116 @@ class DispatchAttemptTests(TelemetryTestCase):
         self.assertEqual("parser_correction", by_id["usage-after-correction"]["correction_reason"])
 
 
+    def test_repeated_corrected_observations_with_fresh_update_ids_are_idempotent(self) -> None:
+        attempt = self.create_attempt()
+        original_usage = {
+            "observation_id": "usage-correction-original", "source": "codex",
+            "source_event": "turn.completed", "event_ordinal": 0,
+            "category": "input_total", "amount": 100,
+        }
+        original_cost = {
+            "measure_id": "cost-correction-original", "basis": "unknown",
+            "component": "reported_cli_cost", "source": "codex", "unit": "USD",
+            "amount": None, "reported_amount": "0.10",
+        }
+        self.store.update_dispatch_attempt(
+            attempt,
+            {"usage_observations": [original_usage], "cost_measures": [original_cost]},
+            update_id="update-original-observations",
+        )
+        corrected_usage = {
+            "observation_id": "usage-correction-fixed", "source": "codex",
+            "source_event": "turn.completed", "event_ordinal": 0,
+            "category": "input_total", "amount": 90,
+            "supersedes_id": "usage-correction-original",
+        }
+        corrected_cost = {
+            "measure_id": "cost-correction-fixed", "basis": "unknown",
+            "component": "reported_cli_cost", "source": "codex", "unit": "USD",
+            "amount": None, "reported_amount": "0.09",
+            "supersedes_id": "cost-correction-original",
+        }
+        first = self.store.update_dispatch_attempt(
+            attempt,
+            {"usage_observations": [corrected_usage], "cost_measures": [corrected_cost]},
+            update_id="update-correction-first",
+            correction_reason="parser_correction", source="codex",
+        )
+        usage_repeat = self.store.update_dispatch_attempt(
+            attempt,
+            {"duration_ms": 42, "usage_observations": [corrected_usage]},
+            update_id="update-correction-usage-repeat",
+            correction_reason="parser_correction", source="codex",
+        )
+        cost_repeat = self.store.update_dispatch_attempt(
+            attempt,
+            {"external_dispatch_id": "worker-correction-119",
+             "cost_measures": [corrected_cost]},
+            update_id="update-correction-cost-repeat",
+            correction_reason="parser_correction", source="codex",
+        )
+
+        self.assertEqual([], first["conflicts"])
+        self.assertEqual([], usage_repeat["conflicts"])
+        self.assertFalse(usage_repeat["duplicate"])
+        self.assertEqual([], cost_repeat["conflicts"])
+        self.assertFalse(cost_repeat["duplicate"])
+        self.assertEqual(42, self.store.attempt(attempt)["duration_ms"])
+        self.assertEqual(
+            "worker-correction-119", self.store.attempt(attempt)["external_dispatch_id"],
+        )
+        self.assertEqual(
+            90, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"],
+        )
+        cost_totals = self.store.cost_totals("repo", cycle_id="cycle-test")
+        self.assertEqual("0.09", cost_totals[0]["reported_amount"])
+
+        changed_usage = self.store.update_dispatch_attempt(
+            attempt,
+            {"usage_observations": [{**corrected_usage, "amount": 91}]},
+            update_id="update-correction-usage-conflict",
+            correction_reason="parser_correction", source="codex",
+        )
+        changed_cost = self.store.update_dispatch_attempt(
+            attempt,
+            {"cost_measures": [{**corrected_cost, "reported_amount": "0.10"}]},
+            update_id="update-correction-cost-conflict",
+            correction_reason="parser_correction", source="codex",
+        )
+        self.assertEqual(["usage_observations"], changed_usage["conflicts"])
+        self.assertEqual(["cost_measures"], changed_cost["conflicts"])
+        self.assertEqual(
+            90, self.store.usage_totals("repo", cycle_id="cycle-test")[0]["amount"],
+        )
+        self.assertEqual(
+            "0.09", self.store.cost_totals("repo", cycle_id="cycle-test")[0]["reported_amount"],
+        )
+        with closing(self.store._connect()) as connection:
+            self.assertEqual(
+                2, connection.execute("SELECT COUNT(*) FROM dispatch_conflicts").fetchone()[0],
+            )
+
+        with self.assertRaisesRegex(tm.TelemetryError, "active observation"):
+            self.store.update_dispatch_attempt(
+                attempt,
+                {"usage_observations": [{
+                    **corrected_usage, "observation_id": "usage-second-successor",
+                    "amount": 90,
+                }]},
+                update_id="update-correction-usage-second-successor",
+                correction_reason="parser_correction", source="codex",
+            )
+        with self.assertRaisesRegex(tm.TelemetryError, "active and belong"):
+            self.store.update_dispatch_attempt(
+                attempt,
+                {"cost_measures": [{
+                    **corrected_cost, "measure_id": "cost-second-successor",
+                    "reported_amount": "0.09",
+                }]},
+                update_id="update-correction-cost-second-successor",
+                correction_reason="parser_correction", source="codex",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

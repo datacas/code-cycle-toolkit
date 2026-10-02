@@ -1180,12 +1180,6 @@ class Telemetry:
             if correction_reason is None:
                 raise TelemetryError("superseding usage needs an explicit correction_reason")
             self._checked("correction_reason", correction_reason)
-            previous = connection.execute(
-                "SELECT attempt_id, superseded_by_id FROM usage_observations WHERE observation_id=?",
-                (supersedes,),
-            ).fetchone()
-            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
-                raise TelemetryError("superseded usage must be an active observation from the same attempt")
         normalized = (attempt_id, row_source, event, ordinal, model, category, amount, row_time, supersedes)
         prior = connection.execute(
             "SELECT attempt_id, source, source_event, event_ordinal, source_model, category, amount, observed_at, supersedes_id "
@@ -1197,6 +1191,13 @@ class Telemetry:
                 self._conflict(connection, attempt_id, "usage_observation", tuple(prior), normalized, row_time, row_source)
                 return True
             return False
+        if supersedes is not None:
+            previous = connection.execute(
+                "SELECT attempt_id, superseded_by_id FROM usage_observations WHERE observation_id=?",
+                (supersedes,),
+            ).fetchone()
+            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
+                raise TelemetryError("superseded usage must be an active observation from the same attempt")
         connection.execute(
             "INSERT INTO usage_observations (observation_id, attempt_id, source, source_event, event_ordinal, "
             "source_model, category, amount, observed_at, supersedes_id, correction_reason) "
@@ -1256,11 +1257,6 @@ class Telemetry:
             if correction_reason is None:
                 raise TelemetryError("superseding cost needs an explicit correction_reason")
             self._checked("correction_reason", correction_reason)
-            previous = connection.execute(
-                "SELECT attempt_id, superseded_by_id FROM cost_measures WHERE measure_id=?", (supersedes,),
-            ).fetchone()
-            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
-                raise TelemetryError("superseded cost must be active and belong to the same attempt")
         normalized = (attempt_id, attribution_key, basis, component, row_source, unit, amount, reported,
                       snapshot_id, date_value, row_time, supersedes)
         prior = connection.execute(
@@ -1274,6 +1270,12 @@ class Telemetry:
                 self._conflict(connection, attempt_id, "cost_measure", tuple(prior), normalized, row_time, row_source)
                 return True
             return False
+        if supersedes is not None:
+            previous = connection.execute(
+                "SELECT attempt_id, superseded_by_id FROM cost_measures WHERE measure_id=?", (supersedes,),
+            ).fetchone()
+            if previous is None or previous["attempt_id"] != attempt_id or previous["superseded_by_id"]:
+                raise TelemetryError("superseded cost must be active and belong to the same attempt")
         connection.execute(
             "INSERT INTO cost_measures (measure_id, attempt_id, attribution_key, basis, component, source, unit, amount, "
             "reported_amount, pricing_snapshot_id, pricing_date, observed_at, supersedes_id, correction_reason) "
