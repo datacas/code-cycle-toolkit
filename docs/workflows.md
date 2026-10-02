@@ -185,6 +185,13 @@ The full discovery, handoff, and failure rules are in the [adapter contract](../
 
 **What it does:** runs `cc-provider-bootstrap`, creates an Orca Run, then one Task per stage ([issue review →] implement → initial review → resolve ↔ rereview). It starts or reuses workers, waits for `worker_done`, reads each `ORCHESTRATION_RESULT`, and branches only on its functional status. All workers share one worktree and one PR branch, except the issue-review worker, which runs in its own isolated review workspace (the run stops `BLOCKED` when Orca cannot provide one; it never falls back to the shared worktree) and must finish, unchanged, with a confirmed `READY` before the implementer starts. It applies the same [issue review gate](review-cycle.md#issue-review-before-implementation) as `cc-orchestrator`. The coordinator itself never edits code, reviews, or judges a finding.
 
+Persistent worktrees created by Orca use Orca's managed location. The current
+CLI documents `new-child` and named worktree creation, but no caller-selected
+base directory ([worker and worktree commands](https://github.com/stablyai/orca/blob/main/docs/site/content/docs/cli/orchestration.mdx),
+[CLI reference](https://github.com/stablyai/orca/blob/main/docs/site/content/docs/cli/reference.mdx)).
+`code_cycle.worktree_dir` applies to persistent worktrees created or requested
+through paths the toolkit controls; disposable review clones stay outside it.
+
 **Inputs:**
 
 | Input | Default | Meaning |
@@ -235,6 +242,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--continue` | off | Continue an interrupted implementation from the partial work in `--cwd` instead of starting it again; skips the issue review |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
+| `code_cycle.worktree_dir` | `.worktree` | Repository-relative base for persistent worker worktrees; review clones remain temporary and outside it |
 | `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
 | `--timeout` | adapter default (21600 s / 6 h) | Maximum time for one dispatch. `--detach` only avoids the launching host's task limit; it does not change this per-dispatch timeout. |
 | `--detach` | off | Start the cycle in its own session and return at once, printing its process ID, a log path, and a `cycle_status.py --line --since <timestamp>` command. Use it whenever an agent or another host that limits a task's time launches the cycle |

@@ -187,6 +187,16 @@ All stages that touch the same pull request must use the same branch or an
 explicitly coordinated worktree. Never let parallel workers edit the same
 branch concurrently.
 
+### Persistent worker worktree location
+
+When a stage needs to create or request a persistent worker worktree, read
+`code_cycle.worktree_dir` from `.code-cycle.yml`, defaulting to `.worktree`,
+and resolve it relative to the repository root. Put the worktree below that
+base using a task-specific name. The default is ignored by Git; when a
+repository overrides it, ensure that directory is ignored as well. This
+setting covers persistent worker worktrees only. Keep isolated disposable
+review clones outside the repository.
+
 ## Execution modes
 
 Resolve `orchestration_mode` from an explicit invocation value, then

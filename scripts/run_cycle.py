@@ -53,7 +53,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
 from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
@@ -104,9 +104,11 @@ from telemetry import (
 
 #: The repository's own declaration of how it wants to be run.
 CONFIG_NAME = ".code-cycle.yml"
+DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
-DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review"})
+DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
+                         "worktree_dir"})
 
 #: The keys under `code_cycle` that belong to a skill or another module. They
 #: are legitimate here and deliberately not interpreted: recognising a key is
@@ -311,6 +313,7 @@ def load_config(path: Path) -> dict:
         load_routing_strategy(config)
         load_jev_config(config)
         load_issue_review_mode(config)
+        configured_worktree_dir(config)
     except (RouterError, JevConfigError, IssueReviewConfigError) as error:
         raise CycleDriverError(str(error)) from error
     return config
@@ -322,6 +325,57 @@ def repository_of(config: dict) -> str | None:
     repository = section.get("repository") if isinstance(section, dict) else None
     selector = repository.get("selector") if isinstance(repository, dict) else None
     return selector if isinstance(selector, str) and selector else None
+
+
+def configured_worktree_dir(config: dict) -> Path:
+    """Return the validated repository-relative base for persistent worktrees."""
+    section = config.get("code_cycle")
+    value = (section.get("worktree_dir", DEFAULT_WORKTREE_DIR)
+             if isinstance(section, dict) else DEFAULT_WORKTREE_DIR)
+    if not isinstance(value, str) or not value.strip():
+        raise CycleDriverError(
+            "code_cycle.worktree_dir must be a non-empty relative path"
+        )
+    path = Path(value)
+    windows_path = PureWindowsPath(value)
+    if (path.is_absolute() or windows_path.is_absolute() or windows_path.drive
+            or windows_path.root
+            or ".." in path.parts or ".." in windows_path.parts
+            or path == Path(".")):
+        raise CycleDriverError(
+            "code_cycle.worktree_dir must stay inside the repository"
+        )
+    return path
+
+
+def resolve_worktree_dir(config: dict, repo_root: str | Path) -> Path:
+    """Resolve the configured base against the repository root without escaping it."""
+    try:
+        root = Path(repo_root).resolve()
+        candidate = root / configured_worktree_dir(config)
+        probe = candidate
+        while probe != root:
+            if probe.is_symlink():
+                probe.resolve(strict=True)
+            if probe.exists():
+                break
+            probe = probe.parent
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise CycleDriverError(
+            "code_cycle.worktree_dir could not be resolved safely"
+        ) from exc
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise CycleDriverError(
+            "code_cycle.worktree_dir must resolve inside the repository"
+        ) from exc
+    if not relative.parts:
+        raise CycleDriverError(
+            "code_cycle.worktree_dir must not be the repository root"
+        )
+    return resolved
 
 
 def change_bases_of(config: dict) -> tuple[str, ...]:
@@ -626,7 +680,8 @@ def _stage_warnings(outcome: StageOutcome) -> list[str]:
 
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             *, change_request_id: str | None = None,
-            local_only: bool = False, evidence: str = "") -> str:
+            local_only: bool = False, evidence: str = "",
+            worktree_dir: str | Path | None = None) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -638,6 +693,13 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
+    if role in {"implement", "resolve"} and worktree_dir is not None:
+        parts.append(
+            f"Persistent worker worktrees for this repository must use "
+            f"`{worktree_dir}` as their base directory, with a task-specific "
+            "child name. This setting applies to persistent worker worktrees; "
+            "keep isolated disposable review clones outside this directory."
+        )
     if evidence:
         parts.append(evidence)
     if local_only:
@@ -1033,6 +1095,7 @@ def run_cycle(
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
     continue_work: bool = False,
+    worktree_dir: str | Path | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1121,7 +1184,8 @@ def run_cycle(
             outcome = recorder.stage(
                 role, compose(role, repo_id, task_id, instruction,
                               change_request_id=change_request_id,
-                              local_only=local_only, evidence=evidence),
+                              local_only=local_only, evidence=evidence,
+                              worktree_dir=worktree_dir),
                 escalated=escalated, **stage_kwargs)
             if artifact is not None:
                 tampered = artifact.changed()
@@ -2008,6 +2072,13 @@ def main(argv: list[str] | None = None) -> int:
         return detach(list(sys.argv[1:] if argv is None else argv), args.database)
 
     change_bases = change_bases_of(config)
+    repository_root = _git_line(
+        args.cwd or str(Path.cwd()), ["rev-parse", "--show-toplevel"], 10,
+    )
+    worktree_dir = (
+        resolve_worktree_dir(config, repository_root)
+        if repository_root else None
+    )
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
     issue_review = (IssueReviewMode(args.issue_review) if args.issue_review
@@ -2040,6 +2111,7 @@ def main(argv: list[str] | None = None) -> int:
                 change_request_id=args.change_request,
                 issue_review=issue_review,
                 continue_work=args.continue_work,
+                worktree_dir=worktree_dir,
             )
     except CycleDriverError as error:
         parser.error(str(error))
