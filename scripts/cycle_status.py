@@ -262,9 +262,15 @@ def _stage_line(stage: dict, *, progress: bool = False) -> str:
     if stage.get("profile"):
         parts.append(stage["profile"])
     executor = stage.get("executor", "unknown")
-    model = stage.get("model", "unknown")
-    effort = stage.get("effort", "unknown")
-    provider = stage.get("provider")
+    model = stage.get(
+        "delegated_model" if stage.get("delegated") else "model", "unknown",
+    )
+    effort = stage.get(
+        "delegated_effort" if stage.get("delegated") else "effort", "unknown",
+    )
+    provider = stage.get(
+        "delegated_provider" if stage.get("delegated") else "provider",
+    )
     target = f"{provider}/{model}" if provider else model
     parts.append(f"{executor} {target} {effort}")
     if stage.get("fallback"):
@@ -377,10 +383,19 @@ def format_progress_line(status: dict) -> str:
     icon_role = stage.get("parent_stage") if stage.get("delegated") else role
     state = _stage_state(stage)
     executor = field(stage.get("executor"), "unknown")
-    provider = field(stage.get("provider"), "")
-    model = field(stage.get("model"), "unknown")
+    provider = field(
+        stage.get("delegated_provider" if stage.get("delegated") else "provider"),
+        "unknown" if stage.get("delegated") else "",
+    )
+    model = field(
+        stage.get("delegated_model" if stage.get("delegated") else "model"),
+        "unknown",
+    )
     target = f"{provider}/{model}" if provider else model
-    effort = field(stage.get("effort"), "unknown")
+    effort = field(
+        stage.get("delegated_effort" if stage.get("delegated") else "effort"),
+        "unknown",
+    )
     result = stage.get("status") or stage.get("outcome") if stage.get("finished") else None
     parts = [f"{_progress_icons(icon_role, result)} [{timestamp}] {_stage_name(stage)} · {state}"]
     parts.append(f"{executor} {target} {effort}")
@@ -456,7 +471,7 @@ class CycleStatusWriter:
         self._stage_started: float | None = None
         self._cycle_started: float | None = None
         self._last_progress: tuple[object, ...] | None = None
-        self._delegated_stages: dict[str, str] = {}
+        self._delegated_stages: dict[str, dict[str, str]] = {}
         self._base_stage_context: tuple[str | None, str | None, bool] = (None, None, False)
         self._status = {
             "cycle_id": cycle_id,
@@ -554,6 +569,9 @@ class CycleStatusWriter:
     def activity(self, *, text: str | None = None, tool: bool = False,
                  delegation_id: str | None = None,
                  delegated_stage: str | None = None,
+                 delegated_provider: str | None = None,
+                 delegated_model: str | None = None,
+                 delegated_effort: str | None = None,
                  delegation_finished: bool = False) -> None:
         workspace_changed = self._refresh_workspace(force=False)
         with self._lock:
@@ -563,17 +581,37 @@ class CycleStatusWriter:
             delegation_changed = False
             if delegation_id and delegated_stage:
                 clean_stage = _clean_activity(delegated_stage)[:80]
-                if clean_stage and self._delegated_stages.get(delegation_id) != clean_stage:
-                    self._delegated_stages[delegation_id] = clean_stage
+                existing = self._delegated_stages.get(delegation_id)
+                child = dict(existing or {
+                    "stage": clean_stage,
+                    "provider": "unknown",
+                    "model": "unknown",
+                    "effort": "unknown",
+                })
+                if clean_stage and (clean_stage != "unknown" or child["stage"] == "unknown"):
+                    child["stage"] = clean_stage
+                for name, value in (
+                    ("provider", delegated_provider),
+                    ("model", delegated_model),
+                    ("effort", delegated_effort),
+                ):
+                    if isinstance(value, str) and value.strip():
+                        child[name] = _clean_activity(value)[:80]
+                if clean_stage and existing != child:
+                    self._delegated_stages[delegation_id] = child
                     delegation_changed = True
             if delegation_id and delegation_finished:
                 delegation_changed = self._delegated_stages.pop(
                     delegation_id, None,
                 ) is not None or delegation_changed
             if self._delegated_stages:
+                child = list(self._delegated_stages.values())[-1]
                 stage["parent_stage"] = stage["role"]
-                stage["substage"] = list(self._delegated_stages.values())[-1]
+                stage["substage"] = child["stage"]
                 stage["delegated"] = True
+                stage["delegated_provider"] = child["provider"]
+                stage["delegated_model"] = child["model"]
+                stage["delegated_effort"] = child["effort"]
             else:
                 parent_stage, substage, delegated = self._base_stage_context
                 if parent_stage:
@@ -586,6 +624,9 @@ class CycleStatusWriter:
                 else:
                     stage.pop("substage", None)
                     stage.pop("delegated", None)
+                stage.pop("delegated_provider", None)
+                stage.pop("delegated_model", None)
+                stage.pop("delegated_effort", None)
             if tool:
                 stage["tool_count"] += 1
             if text:

@@ -589,17 +589,19 @@ class NativeAdapter(Adapter):
                     delegated_children = {}
                     self._codex_delegated_children = delegated_children
 
-                agents = item.get("receiver_agents")
-                label = None
-                if isinstance(agents, list):
-                    for agent in agents:
-                        if not isinstance(agent, dict):
-                            continue
-                        label = agent.get("agent_role") or agent.get("agent_nickname")
-                        if isinstance(label, str) and label.strip():
-                            break
-                if not isinstance(label, str) or not label.strip():
-                    label = "delegated agent"
+                label = self._codex_delegated_label(item)
+                model = item.get("model")
+                provider = item.get("provider")
+                effort = item.get("reasoning_effort", item.get("reasoningEffort"))
+                child_metadata = {
+                    "delegated_provider": provider if isinstance(provider, str) else None,
+                    "delegated_model": model if isinstance(model, str) else None,
+                    "delegated_effort": effort if isinstance(effort, str) else None,
+                }
+                child_metadata = {
+                    key: value for key, value in child_metadata.items()
+                    if isinstance(value, str) and value.strip()
+                }
 
                 # A completed spawn call can still have live child threads.
                 # Track those by their thread IDs and finish them only when a
@@ -637,7 +639,8 @@ class NativeAdapter(Adapter):
                         callback(
                             text=f"delegated agent {thread_id} active",
                             delegation_id=child_id,
-                            delegated_stage=f"agent {thread_id}",
+                            delegated_stage=label,
+                            **child_metadata,
                         )
 
                 if event_type in {"item.started", "item.updated"}:
@@ -649,10 +652,11 @@ class NativeAdapter(Adapter):
                             tool=event_type == "item.started",
                             delegation_id=call_id,
                             delegated_stage=label,
+                            **child_metadata,
                         )
                 elif event_type == "item.completed":
                     callback(
-                        text="delegated stage finished",
+                        text="delegated call completed" if not child_threads else None,
                         delegation_id=call_id,
                         delegation_finished=True,
                     )
@@ -713,6 +717,39 @@ class NativeAdapter(Adapter):
             delta = payload.get("delta")
             if isinstance(delta, dict) and isinstance(delta.get("text"), str):
                 callback(text=delta["text"])
+
+    @staticmethod
+    def _codex_delegated_label(item: dict) -> str:
+        agents = item.get("receiver_agents")
+        if isinstance(agents, list):
+            for agent in agents:
+                if not isinstance(agent, dict):
+                    continue
+                label = agent.get("agent_role") or agent.get("agent_nickname")
+                if isinstance(label, str) and label.strip():
+                    return label.strip()
+
+        for key in ("agent_role", "agent_type", "subagent_type", "agent_nickname"):
+            label = item.get(key)
+            if isinstance(label, str) and label.strip():
+                return label.strip()
+
+        prompt = item.get("prompt")
+        if isinstance(prompt, str):
+            normalized = prompt.lower().replace("_", "-")
+            known_passes = (
+                ("security", r"\b(?:cc[- ]?)?security(?:[- ]review)?\b"),
+                ("code review", r"\bcode[- ]review\b"),
+                ("issue review", r"\bissue[- ]review\b"),
+                ("rereview", r"\brereview\b"),
+                ("resolve comments", r"\bresolve[- ]comments\b"),
+                ("implement issue", r"\bimplement[- ]issue\b"),
+                ("verification", r"\bcc[- ]verify\b|\bverification\b"),
+            )
+            for label, pattern in known_passes:
+                if re.search(pattern, normalized):
+                    return label
+        return "unknown"
 
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
         """`argv`, able to read `read_dirs` as well as its own directory.

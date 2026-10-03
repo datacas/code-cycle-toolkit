@@ -496,15 +496,21 @@ class CycleStatusTests(unittest.TestCase):
                 tool=True,
                 delegation_id="agent-1",
                 delegated_stage="security",
+                delegated_model="gpt-6-sol",
+                delegated_effort="high",
             )
             active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
             self.assertEqual("resolve", active["parent_stage"])
             self.assertEqual("security", active["substage"])
             self.assertTrue(active["delegated"])
-            self.assertIn("resolve › security (delegated)", cycle_status.format_progress_line(
-                {"stage": active},
-            ))
-            self.assertIn("resolve › security (delegated)", output.getvalue())
+            line = cycle_status.format_progress_line({"stage": active})
+            self.assertIn("resolve › security (delegated)", line)
+            self.assertIn("unknown/gpt-6-sol high", line)
+            self.assertNotIn("openai/gpt-6-luna", line)
+            delegated_line = output.getvalue().splitlines()[-1]
+            self.assertIn("resolve › security (delegated)", delegated_line)
+            self.assertIn("unknown/gpt-6-sol high", delegated_line)
+            self.assertNotIn("openai/gpt-6-luna", delegated_line)
 
             writer.activity(
                 text="delegated stage finished",
@@ -515,6 +521,9 @@ class CycleStatusTests(unittest.TestCase):
             self.assertNotIn("parent_stage", finished)
             self.assertNotIn("substage", finished)
             self.assertNotIn("delegated", finished)
+            self.assertNotIn("delegated_model", finished)
+            self.assertNotIn("delegated_provider", finished)
+            self.assertNotIn("delegated_effort", finished)
             self.assertIn("resolve · running", cycle_status.format_progress_line(
                 {"stage": finished},
             ))

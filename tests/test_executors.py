@@ -1644,7 +1644,7 @@ class AgentOutputTests(unittest.TestCase):
             "delegated_stage": "security",
         }, codex_events)
         self.assertIn({
-            "text": "delegated stage finished",
+            "text": "delegated call completed",
             "delegation_id": "collab-1",
             "delegation_finished": True,
         }, codex_events)
@@ -1686,6 +1686,9 @@ class AgentOutputTests(unittest.TestCase):
                     "id": "collab-spawn",
                     "type": "collab_tool_call",
                     "tool": "spawn_agent",
+                    "prompt": "Run the security review",
+                    "model": "gpt-6-sol",
+                    "reasoning_effort": "high",
                     "receiver_thread_ids": [],
                     "agents_states": {},
                 },
@@ -1696,6 +1699,9 @@ class AgentOutputTests(unittest.TestCase):
                     "id": "collab-spawn",
                     "type": "collab_tool_call",
                     "tool": "spawn_agent",
+                    "prompt": "Run the security review",
+                    "model": "gpt-6-sol",
+                    "reasoning_effort": "high",
                     "receiver_thread_ids": ["thread-child"],
                     "agents_states": {
                         "thread-child": {"status": "running", "message": None},
@@ -1705,12 +1711,14 @@ class AgentOutputTests(unittest.TestCase):
 
             active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
             self.assertEqual("resolve", active["parent_stage"])
-            self.assertEqual("agent thread-child", active["substage"])
+            self.assertEqual("security", active["substage"])
             self.assertTrue(active["delegated"])
-            self.assertIn(
-                "resolve › agent thread-child (delegated)",
-                cycle_status.format_progress_line({"stage": active}),
-            )
+            line = cycle_status.format_progress_line({"stage": active})
+            self.assertIn("resolve › security (delegated)", line)
+            self.assertIn("unknown/gpt-6-sol high", line)
+            self.assertNotIn("openai/gpt-6-luna", line)
+            self.assertIn("delegated agent thread-child active", line)
+            self.assertNotIn("delegated stage finished", line)
 
             codex._stream_activity(json.dumps({
                 "type": "item.completed",
@@ -1749,6 +1757,9 @@ class AgentOutputTests(unittest.TestCase):
                         "id": "collab-spawn",
                         "type": "collab_tool_call",
                         "tool": "spawn_agent",
+                        "prompt": "Run the security review",
+                        "model": "gpt-6-sol",
+                        "reasoning_effort": "high",
                         "receiver_thread_ids": [],
                         "agents_states": {},
                     },
@@ -1759,6 +1770,9 @@ class AgentOutputTests(unittest.TestCase):
                         "id": "collab-spawn",
                         "type": "collab_tool_call",
                         "tool": "spawn_agent",
+                        "prompt": "Run the security review",
+                        "model": "gpt-6-sol",
+                        "reasoning_effort": "high",
                         "receiver_thread_ids": ["thread-child"],
                         "agents_states": {
                             "thread-child": {"status": "running", "message": None},
@@ -1787,7 +1801,10 @@ class AgentOutputTests(unittest.TestCase):
             self.assertEqual("failed", result.lifecycle_state)
             self.assertEqual(7, result.artifacts["returncode"])
             active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
-            self.assertEqual("agent thread-child", active["substage"])
+            self.assertEqual("security", active["substage"])
+            line = cycle_status.format_progress_line({"stage": active})
+            self.assertIn("unknown/gpt-6-sol high", line)
+            self.assertNotIn("delegated stage finished", line)
 
     def test_native_runner_streams_stdout_to_its_callback(self) -> None:
         output = []
