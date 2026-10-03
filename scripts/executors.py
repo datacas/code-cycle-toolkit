@@ -584,29 +584,77 @@ class NativeAdapter(Adapter):
                 call_id = item.get("id")
                 if not isinstance(call_id, str) or not call_id:
                     return
-                if event_type == "item.completed":
+                delegated_children = getattr(self, "_codex_delegated_children", None)
+                if not isinstance(delegated_children, dict):
+                    delegated_children = {}
+                    self._codex_delegated_children = delegated_children
+
+                agents = item.get("receiver_agents")
+                label = None
+                if isinstance(agents, list):
+                    for agent in agents:
+                        if not isinstance(agent, dict):
+                            continue
+                        label = agent.get("agent_role") or agent.get("agent_nickname")
+                        if isinstance(label, str) and label.strip():
+                            break
+                if not isinstance(label, str) or not label.strip():
+                    label = "delegated agent"
+
+                # A completed spawn call can still have live child threads.
+                # Track those by their thread IDs and finish them only when a
+                # later collaboration event reports a terminal agent status.
+                states = item.get("agents_states")
+                states = states if isinstance(states, dict) else {}
+                receiver_ids = item.get("receiver_thread_ids")
+                receiver_ids = {
+                    thread_id for thread_id in receiver_ids
+                    if isinstance(thread_id, str) and thread_id
+                } if isinstance(receiver_ids, list) else set()
+                child_threads = receiver_ids | {
+                    thread_id for thread_id in states
+                    if isinstance(thread_id, str) and thread_id
+                }
+                for thread_id in child_threads:
+                    state = states.get(thread_id)
+                    state_value = state.get("status") if isinstance(state, dict) else state
+                    status = str(state_value or "").lower()
+                    if status in {
+                        "interrupted", "completed", "errored", "shutdown", "notfound",
+                    }:
+                        child_id = delegated_children.pop(thread_id, None)
+                        if child_id:
+                            callback(
+                                text="delegated stage finished",
+                                delegation_id=child_id,
+                                delegation_finished=True,
+                            )
+                    elif status in {"pendinginit", "running"} or thread_id in receiver_ids:
+                        child_id = delegated_children.get(thread_id)
+                        if not child_id:
+                            child_id = f"codex-child:{thread_id}"
+                            delegated_children[thread_id] = child_id
+                        callback(
+                            text=f"delegated agent {thread_id} active",
+                            delegation_id=child_id,
+                            delegated_stage=f"agent {thread_id}",
+                        )
+
+                if event_type in {"item.started", "item.updated"}:
+                    # Early spawn events may not include the child thread ID.
+                    # Keep a short-lived call entry until the child is reported.
+                    if not child_threads:
+                        callback(
+                            text=f"delegated {label} started",
+                            tool=event_type == "item.started",
+                            delegation_id=call_id,
+                            delegated_stage=label,
+                        )
+                elif event_type == "item.completed":
                     callback(
                         text="delegated stage finished",
                         delegation_id=call_id,
                         delegation_finished=True,
-                    )
-                elif event_type in {"item.started", "item.updated"}:
-                    agents = item.get("receiver_agents")
-                    label = None
-                    if isinstance(agents, list):
-                        for agent in agents:
-                            if not isinstance(agent, dict):
-                                continue
-                            label = agent.get("agent_role") or agent.get("agent_nickname")
-                            if isinstance(label, str) and label.strip():
-                                break
-                    if not isinstance(label, str) or not label.strip():
-                        label = "delegated agent"
-                    callback(
-                        text=f"delegated {label} started",
-                        tool=event_type == "item.started",
-                        delegation_id=call_id,
-                        delegated_stage=label,
                     )
             elif event_type == "item.started" and item_type in {
                 "command_execution", "mcp_tool_call", "web_search",

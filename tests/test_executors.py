@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import executors as ex  # noqa: E402
+import cycle_status  # noqa: E402
 import router  # noqa: E402
 
 
@@ -1664,6 +1666,128 @@ class AgentOutputTests(unittest.TestCase):
             [event["delegation_id"] for event in claude_events
              if event.get("delegation_finished")],
         )
+
+    def test_codex_spawn_status_tracks_child_after_call_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "codex-child-test", "owner/repo", "ISSUE-7",
+            )
+            target = SimpleNamespace(
+                executor="codex", provider="openai", model="gpt-6-luna", effort="high",
+            )
+            decision = SimpleNamespace(target=target, profile="cheap_coder", used_fallback=False)
+            writer.stage_started("resolve", decision)
+
+            codex = ex.CodexAdapter()
+            callback = writer.activity
+            codex._stream_activity(json.dumps({
+                "type": "item.started",
+                "item": {
+                    "id": "collab-spawn",
+                    "type": "collab_tool_call",
+                    "tool": "spawn_agent",
+                    "receiver_thread_ids": [],
+                    "agents_states": {},
+                },
+            }), callback)
+            codex._stream_activity(json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "id": "collab-spawn",
+                    "type": "collab_tool_call",
+                    "tool": "spawn_agent",
+                    "receiver_thread_ids": ["thread-child"],
+                    "agents_states": {
+                        "thread-child": {"status": "running", "message": None},
+                    },
+                },
+            }), callback)
+
+            active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertEqual("resolve", active["parent_stage"])
+            self.assertEqual("agent thread-child", active["substage"])
+            self.assertTrue(active["delegated"])
+            self.assertIn(
+                "resolve › agent thread-child (delegated)",
+                cycle_status.format_progress_line({"stage": active}),
+            )
+
+            codex._stream_activity(json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "id": "collab-wait",
+                    "type": "collab_tool_call",
+                    "tool": "wait",
+                    "receiver_thread_ids": ["thread-child"],
+                    "agents_states": {
+                        "thread-child": {"status": "completed", "message": None},
+                    },
+                },
+            }), callback)
+
+            finished = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertNotIn("parent_stage", finished)
+            self.assertNotIn("substage", finished)
+            self.assertNotIn("delegated", finished)
+
+    def test_codex_json_child_events_cross_process_boundary_and_keep_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer = cycle_status.CycleStatusWriter(
+                root / "telemetry.sqlite", "codex-process-test", "owner/repo", "ISSUE-7",
+            )
+            target = SimpleNamespace(
+                executor="codex", provider="openai", model="gpt-6-luna", effort="high",
+            )
+            decision = SimpleNamespace(target=target, profile="cheap_coder", used_fallback=False)
+            writer.stage_started("resolve", decision)
+
+            events = [
+                {
+                    "type": "item.started",
+                    "item": {
+                        "id": "collab-spawn",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "receiver_thread_ids": [],
+                        "agents_states": {},
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "collab-spawn",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "receiver_thread_ids": ["thread-child"],
+                        "agents_states": {
+                            "thread-child": {"status": "running", "message": None},
+                        },
+                    },
+                },
+            ]
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import json, sys\n"
+                f"events = {events!r}\n"
+                "for event in events:\n"
+                "    print(json.dumps(event), flush=True)\n"
+                "sys.exit(7)\n",
+                encoding="utf-8",
+            )
+
+            adapter = ex.CodexAdapter()
+            with patch.object(adapter, "argv", return_value=[sys.executable, str(fake_codex)]):
+                result = adapter.dispatch(
+                    TARGET, "exercise delegated JSON output", cwd=temporary,
+                    runner=ex._run, on_progress=writer.activity,
+                )
+
+            self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+            self.assertEqual("failed", result.lifecycle_state)
+            self.assertEqual(7, result.artifacts["returncode"])
+            active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertEqual("agent thread-child", active["substage"])
 
     def test_native_runner_streams_stdout_to_its_callback(self) -> None:
         output = []
