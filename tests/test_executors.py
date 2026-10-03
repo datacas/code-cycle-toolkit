@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import executors as ex  # noqa: E402
+import cycle_status  # noqa: E402
 import router  # noqa: E402
 
 
@@ -1589,24 +1591,220 @@ class AgentOutputTests(unittest.TestCase):
     def test_native_json_events_update_activity_and_tool_count(self) -> None:
         codex_events = []
         claude_events = []
-        ex.CodexAdapter()._stream_activity(json.dumps({
+        codex = ex.CodexAdapter()
+        codex._stream_activity(json.dumps({
             "type": "item.started", "item": {"type": "command_execution"},
         }), lambda **event: codex_events.append(event))
-        ex.CodexAdapter()._stream_activity(json.dumps({
+        codex._stream_activity(json.dumps({
             "type": "item.updated",
             "item": {"type": "agent_message", "text": "Codex is working"},
         }), lambda **event: codex_events.append(event))
-        ex.ClaudeAdapter()._stream_activity(json.dumps({
+        codex._stream_activity(json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "collab-1",
+                "type": "collab_tool_call",
+                "tool": "spawnAgent",
+                "receiver_agents": [
+                    {"thread_id": "agent-1", "agent_role": "security"},
+                ],
+            },
+        }), lambda **event: codex_events.append(event))
+        codex._stream_activity(json.dumps({
+            "type": "item.completed",
+            "item": {"id": "collab-1", "type": "collab_tool_call"},
+        }), lambda **event: codex_events.append(event))
+
+        claude = ex.ClaudeAdapter()
+        claude._stream_activity(json.dumps({
             "type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_use", "id": "bash-1", "name": "Bash"},
+                {"type": "tool_use", "id": "task-1", "name": "Agent",
+                 "input": {"subagent_type": "security"}},
                 {"type": "text", "text": "Claude is working"},
+            ]},
+        }), lambda **event: claude_events.append(event))
+        claude._stream_activity(json.dumps({
+            "type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "bash-1", "content": "read"},
+            ]},
+        }), lambda **event: claude_events.append(event))
+        claude._stream_activity(json.dumps({
+            "type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "task-1", "content": "done"},
             ]},
         }), lambda **event: claude_events.append(event))
 
         self.assertIn({"text": "command execution started", "tool": True}, codex_events)
         self.assertIn({"text": "Codex is working"}, codex_events)
+        self.assertIn({
+            "text": "delegated security started",
+            "tool": True,
+            "delegation_id": "collab-1",
+            "delegated_stage": "security",
+        }, codex_events)
+        self.assertIn({
+            "text": "delegated call completed",
+            "delegation_id": "collab-1",
+            "delegation_finished": True,
+        }, codex_events)
         self.assertIn({"text": "Using Bash", "tool": True}, claude_events)
         self.assertIn({"text": "Claude is working"}, claude_events)
+        self.assertIn({
+            "text": "delegated security started",
+            "tool": True,
+            "delegation_id": "task-1",
+            "delegated_stage": "security",
+        }, claude_events)
+        self.assertIn({
+            "text": "delegated stage finished",
+            "delegation_id": "task-1",
+            "delegation_finished": True,
+        }, claude_events)
+        self.assertEqual(
+            ["task-1"],
+            [event["delegation_id"] for event in claude_events
+             if event.get("delegation_finished")],
+        )
+
+    def test_codex_spawn_status_tracks_child_after_call_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "codex-child-test", "owner/repo", "ISSUE-7",
+            )
+            target = SimpleNamespace(
+                executor="codex", provider="openai", model="gpt-6-luna", effort="high",
+            )
+            decision = SimpleNamespace(target=target, profile="cheap_coder", used_fallback=False)
+            writer.stage_started("resolve", decision)
+
+            codex = ex.CodexAdapter()
+            callback = writer.activity
+            codex._stream_activity(json.dumps({
+                "type": "item.started",
+                "item": {
+                    "id": "collab-spawn",
+                    "type": "collab_tool_call",
+                    "tool": "spawn_agent",
+                    "prompt": "Run the security review",
+                    "model": "gpt-6-sol",
+                    "reasoning_effort": "high",
+                    "receiver_thread_ids": [],
+                    "agents_states": {},
+                },
+            }), callback)
+            codex._stream_activity(json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "id": "collab-spawn",
+                    "type": "collab_tool_call",
+                    "tool": "spawn_agent",
+                    "prompt": "Run the security review",
+                    "model": "gpt-6-sol",
+                    "reasoning_effort": "high",
+                    "receiver_thread_ids": ["thread-child"],
+                    "agents_states": {
+                        "thread-child": {"status": "running", "message": None},
+                    },
+                },
+            }), callback)
+
+            active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertEqual("resolve", active["parent_stage"])
+            self.assertEqual("security", active["substage"])
+            self.assertTrue(active["delegated"])
+            line = cycle_status.format_progress_line({"stage": active})
+            self.assertIn("resolve › security (delegated)", line)
+            self.assertIn("unknown/gpt-6-sol high", line)
+            self.assertNotIn("openai/gpt-6-luna", line)
+            self.assertIn("delegated agent thread-child active", line)
+            self.assertNotIn("delegated stage finished", line)
+
+            codex._stream_activity(json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "id": "collab-wait",
+                    "type": "collab_tool_call",
+                    "tool": "wait",
+                    "receiver_thread_ids": ["thread-child"],
+                    "agents_states": {
+                        "thread-child": {"status": "completed", "message": None},
+                    },
+                },
+            }), callback)
+
+            finished = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertNotIn("parent_stage", finished)
+            self.assertNotIn("substage", finished)
+            self.assertNotIn("delegated", finished)
+
+    def test_codex_json_child_events_cross_process_boundary_and_keep_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer = cycle_status.CycleStatusWriter(
+                root / "telemetry.sqlite", "codex-process-test", "owner/repo", "ISSUE-7",
+            )
+            target = SimpleNamespace(
+                executor="codex", provider="openai", model="gpt-6-luna", effort="high",
+            )
+            decision = SimpleNamespace(target=target, profile="cheap_coder", used_fallback=False)
+            writer.stage_started("resolve", decision)
+
+            events = [
+                {
+                    "type": "item.started",
+                    "item": {
+                        "id": "collab-spawn",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "prompt": "Run the security review",
+                        "model": "gpt-6-sol",
+                        "reasoning_effort": "high",
+                        "receiver_thread_ids": [],
+                        "agents_states": {},
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "collab-spawn",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "prompt": "Run the security review",
+                        "model": "gpt-6-sol",
+                        "reasoning_effort": "high",
+                        "receiver_thread_ids": ["thread-child"],
+                        "agents_states": {
+                            "thread-child": {"status": "running", "message": None},
+                        },
+                    },
+                },
+            ]
+            fake_codex = root / "fake_codex.py"
+            fake_codex.write_text(
+                "import json, sys\n"
+                f"events = {events!r}\n"
+                "for event in events:\n"
+                "    print(json.dumps(event), flush=True)\n"
+                "sys.exit(7)\n",
+                encoding="utf-8",
+            )
+
+            adapter = ex.CodexAdapter()
+            with patch.object(adapter, "argv", return_value=[sys.executable, str(fake_codex)]):
+                result = adapter.dispatch(
+                    TARGET, "exercise delegated JSON output", cwd=temporary,
+                    runner=ex._run, on_progress=writer.activity,
+                )
+
+            self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+            self.assertEqual("failed", result.lifecycle_state)
+            self.assertEqual(7, result.artifacts["returncode"])
+            active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertEqual("security", active["substage"])
+            line = cycle_status.format_progress_line({"stage": active})
+            self.assertIn("unknown/gpt-6-sol high", line)
+            self.assertNotIn("delegated stage finished", line)
 
     def test_native_runner_streams_stdout_to_its_callback(self) -> None:
         output = []

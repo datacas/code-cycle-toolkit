@@ -404,6 +404,16 @@ class DriverTests(RunCycleTestCase):
                                             recommended=None)]))])
 
         explained = report.explain()
+        status_files = list((self.store.path.parent / "status").glob("*.json"))
+        self.assertEqual(1, len(status_files))
+        status = json.loads(status_files[0].read_text(encoding="utf-8"))
+        self.assertEqual("needs_refinement", status["stop_reason"])
+        self.assertEqual(2, status["decision_count"])
+        self.assertEqual("Q-002", status["question"]["id"])
+        self.assertEqual("SECRET-PROSE what should the criterion observe?",
+                         status["question"]["prompt"])
+        self.assertEqual(["The exit status", "The printed report"],
+                         status["question"]["options"])
         self.assertIn("  decisions: 2 needed\n  question 1/2 Q-002: SECRET-PROSE", explained)
         self.assertIn("    options: The exit status | The printed report | free text\n"
                       "  details: not saved", explained)

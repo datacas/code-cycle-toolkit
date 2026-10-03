@@ -57,10 +57,10 @@ class CycleProgressTests(unittest.TestCase):
         self.assertIn("1 tools", rendered)
         self.assertIn("The scripted executor is working", rendered)
         self.assertIn("✅ 🛠️", rendered)
-        self.assertIn("implement done", rendered)
+        self.assertIn("implement · done", rendered)
         self.assertIn("succeeded · IMPLEMENTED", rendered)
         self.assertIn("✅ 🔍", rendered)
-        self.assertIn("review done", rendered)
+        self.assertIn("review · done", rendered)
         self.assertIn("succeeded · APPROVED", rendered)
         # How many heartbeats a stage crosses depends on the runner's speed;
         # what must hold everywhere is that a line is printed only when the
@@ -111,7 +111,7 @@ class CycleProgressTests(unittest.TestCase):
                     "--repo", "owner/api", "--task", "API-7", "--no-config",
                     "--database", str(Path(self.temporary.name) / "default.sqlite"),
                 ])
-        self.assertEqual(120, run.call_args.kwargs["progress_interval"])
+        self.assertEqual(60, run.call_args.kwargs["progress_interval"])
 
 
 if __name__ == "__main__":

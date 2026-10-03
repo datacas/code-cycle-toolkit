@@ -102,8 +102,8 @@ class ValidatePackageTests(unittest.TestCase):
         package = self.copy_package()
         path = package / "skills" / "cc-orca-orchestrator" / "SKILL.md"
         text = path.read_text(encoding="utf-8")
-        self.assertIn("heartbeat every 2 minutes through minute 15", text)
-        path.write_text(text.replace("2 minutes", "3 minutes", 1), encoding="utf-8")
+        self.assertIn("heartbeat every 1 minute through minute 5", text)
+        path.write_text(text.replace("1 minute", "2 minutes", 1), encoding="utf-8")
 
         errors = VALIDATOR.validate_package(package)
 
