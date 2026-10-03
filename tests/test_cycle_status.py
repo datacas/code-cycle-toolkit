@@ -471,6 +471,54 @@ class CycleStatusTests(unittest.TestCase):
             self.assertIn("reading source", progress[-1])
             self.assertFalse(any("└" in line for line in lines))
 
+    def test_delegated_activity_updates_and_clears_the_stage_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = io.StringIO()
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "delegated-test", "owner/repo", "ISSUE-7",
+                verbose=True, stream=output,
+            )
+
+            class Target:
+                executor = "codex"
+                provider = "openai"
+                model = "gpt-6-luna"
+                effort = "high"
+
+            class Decision:
+                target = Target()
+                profile = "cheap_coder"
+                used_fallback = False
+
+            writer.stage_started("resolve", Decision())
+            writer.activity(
+                text="delegated security started",
+                tool=True,
+                delegation_id="agent-1",
+                delegated_stage="security",
+            )
+            active = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertEqual("resolve", active["parent_stage"])
+            self.assertEqual("security", active["substage"])
+            self.assertTrue(active["delegated"])
+            self.assertIn("resolve › security (delegated)", cycle_status.format_progress_line(
+                {"stage": active},
+            ))
+            self.assertIn("resolve › security (delegated)", output.getvalue())
+
+            writer.activity(
+                text="delegated stage finished",
+                delegation_id="agent-1",
+                delegation_finished=True,
+            )
+            finished = json.loads(writer.path.read_text(encoding="utf-8"))["stage"]
+            self.assertNotIn("parent_stage", finished)
+            self.assertNotIn("substage", finished)
+            self.assertNotIn("delegated", finished)
+            self.assertIn("resolve · running", cycle_status.format_progress_line(
+                {"stage": finished},
+            ))
+
     def test_finished_status_keeps_usage_summary(self) -> None:
         rendered = cycle_status.format_status({
             "cycle_id": "usage-test",

@@ -1589,24 +1589,81 @@ class AgentOutputTests(unittest.TestCase):
     def test_native_json_events_update_activity_and_tool_count(self) -> None:
         codex_events = []
         claude_events = []
-        ex.CodexAdapter()._stream_activity(json.dumps({
+        codex = ex.CodexAdapter()
+        codex._stream_activity(json.dumps({
             "type": "item.started", "item": {"type": "command_execution"},
         }), lambda **event: codex_events.append(event))
-        ex.CodexAdapter()._stream_activity(json.dumps({
+        codex._stream_activity(json.dumps({
             "type": "item.updated",
             "item": {"type": "agent_message", "text": "Codex is working"},
         }), lambda **event: codex_events.append(event))
-        ex.ClaudeAdapter()._stream_activity(json.dumps({
+        codex._stream_activity(json.dumps({
+            "type": "item.started",
+            "item": {
+                "id": "collab-1",
+                "type": "collab_tool_call",
+                "tool": "spawnAgent",
+                "receiver_agents": [
+                    {"thread_id": "agent-1", "agent_role": "security"},
+                ],
+            },
+        }), lambda **event: codex_events.append(event))
+        codex._stream_activity(json.dumps({
+            "type": "item.completed",
+            "item": {"id": "collab-1", "type": "collab_tool_call"},
+        }), lambda **event: codex_events.append(event))
+
+        claude = ex.ClaudeAdapter()
+        claude._stream_activity(json.dumps({
             "type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash"},
+                {"type": "tool_use", "id": "bash-1", "name": "Bash"},
+                {"type": "tool_use", "id": "task-1", "name": "Agent",
+                 "input": {"subagent_type": "security"}},
                 {"type": "text", "text": "Claude is working"},
+            ]},
+        }), lambda **event: claude_events.append(event))
+        claude._stream_activity(json.dumps({
+            "type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "bash-1", "content": "read"},
+            ]},
+        }), lambda **event: claude_events.append(event))
+        claude._stream_activity(json.dumps({
+            "type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "task-1", "content": "done"},
             ]},
         }), lambda **event: claude_events.append(event))
 
         self.assertIn({"text": "command execution started", "tool": True}, codex_events)
         self.assertIn({"text": "Codex is working"}, codex_events)
+        self.assertIn({
+            "text": "delegated security started",
+            "tool": True,
+            "delegation_id": "collab-1",
+            "delegated_stage": "security",
+        }, codex_events)
+        self.assertIn({
+            "text": "delegated stage finished",
+            "delegation_id": "collab-1",
+            "delegation_finished": True,
+        }, codex_events)
         self.assertIn({"text": "Using Bash", "tool": True}, claude_events)
         self.assertIn({"text": "Claude is working"}, claude_events)
+        self.assertIn({
+            "text": "delegated security started",
+            "tool": True,
+            "delegation_id": "task-1",
+            "delegated_stage": "security",
+        }, claude_events)
+        self.assertIn({
+            "text": "delegated stage finished",
+            "delegation_id": "task-1",
+            "delegation_finished": True,
+        }, claude_events)
+        self.assertEqual(
+            ["task-1"],
+            [event["delegation_id"] for event in claude_events
+             if event.get("delegation_finished")],
+        )
 
     def test_native_runner_streams_stdout_to_its_callback(self) -> None:
         output = []

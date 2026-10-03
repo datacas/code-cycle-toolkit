@@ -456,6 +456,8 @@ class CycleStatusWriter:
         self._stage_started: float | None = None
         self._cycle_started: float | None = None
         self._last_progress: tuple[object, ...] | None = None
+        self._delegated_stages: dict[str, str] = {}
+        self._base_stage_context: tuple[str | None, str | None, bool] = (None, None, False)
         self._status = {
             "cycle_id": cycle_id,
             "repo": repo,
@@ -488,6 +490,8 @@ class CycleStatusWriter:
             self._workspace_generation += 1
             self._stage_workspace_cwd = None
             self._stage_started = time.monotonic()
+            self._delegated_stages.clear()
+            self._base_stage_context = (parent_stage, substage, bool(delegated))
             workspace = {
                 "pending": True,
                 "cwd": None,
@@ -547,12 +551,41 @@ class CycleStatusWriter:
                 self._print(_stage_line(snapshot, progress=True))
         return changed
 
-    def activity(self, *, text: str | None = None, tool: bool = False) -> None:
+    def activity(self, *, text: str | None = None, tool: bool = False,
+                 delegation_id: str | None = None,
+                 delegated_stage: str | None = None,
+                 delegation_finished: bool = False) -> None:
         workspace_changed = self._refresh_workspace(force=False)
         with self._lock:
             stage = self._status.get("stage")
             if not isinstance(stage, dict) or stage.get("finished"):
                 return
+            delegation_changed = False
+            if delegation_id and delegated_stage:
+                clean_stage = _clean_activity(delegated_stage)[:80]
+                if clean_stage and self._delegated_stages.get(delegation_id) != clean_stage:
+                    self._delegated_stages[delegation_id] = clean_stage
+                    delegation_changed = True
+            if delegation_id and delegation_finished:
+                delegation_changed = self._delegated_stages.pop(
+                    delegation_id, None,
+                ) is not None or delegation_changed
+            if self._delegated_stages:
+                stage["parent_stage"] = stage["role"]
+                stage["substage"] = list(self._delegated_stages.values())[-1]
+                stage["delegated"] = True
+            else:
+                parent_stage, substage, delegated = self._base_stage_context
+                if parent_stage:
+                    stage["parent_stage"] = parent_stage
+                else:
+                    stage.pop("parent_stage", None)
+                if substage:
+                    stage["substage"] = substage
+                    stage["delegated"] = delegated
+                else:
+                    stage.pop("substage", None)
+                    stage.pop("delegated", None)
             if tool:
                 stage["tool_count"] += 1
             if text:
@@ -561,10 +594,10 @@ class CycleStatusWriter:
                     stage["activity"] = clean
             self._refresh_elapsed(stage)
             snapshot = dict(stage)
-            if workspace_changed:
+            if workspace_changed or delegation_changed:
                 self._mark_progress(snapshot)
         self._write()
-        if self.verbose and workspace_changed:
+        if self.verbose and (workspace_changed or delegation_changed):
             self._print(_stage_line(snapshot, progress=True))
 
     def stage_finished(self, result, status: str | None, *,
@@ -681,6 +714,9 @@ class CycleStatusWriter:
             _duration(snapshot.get("elapsed_seconds", 0)),
             int(snapshot.get("tool_count", 0)),
             snapshot.get("activity"),
+            snapshot.get("parent_stage"),
+            snapshot.get("substage"),
+            snapshot.get("delegated"),
             json.dumps(snapshot.get("workspace") or {}, sort_keys=True),
         )
         if progress == self._last_progress:

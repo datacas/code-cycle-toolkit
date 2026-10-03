@@ -558,7 +558,7 @@ class NativeAdapter(Adapter):
         return None
 
     def _stream_activity(self, line: str, callback) -> None:
-        """Extract a short user-facing update from a native JSON event."""
+        """Extract activity and child-stage events from native JSON output."""
         try:
             payload = json.loads(line)
         except (TypeError, ValueError):
@@ -567,6 +567,10 @@ class NativeAdapter(Adapter):
             return
 
         event_type = payload.get("type")
+        delegated_tool_ids = getattr(self, "_delegated_tool_ids", None)
+        if not isinstance(delegated_tool_ids, set):
+            delegated_tool_ids = set()
+            self._delegated_tool_ids = delegated_tool_ids
         if self.name == "codex":
             item = payload.get("item")
             if not isinstance(item, dict):
@@ -576,8 +580,36 @@ class NativeAdapter(Adapter):
                 text = item.get("text")
                 if isinstance(text, str) and text.strip():
                     callback(text=text)
+            elif item_type == "collab_tool_call":
+                call_id = item.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    return
+                if event_type == "item.completed":
+                    callback(
+                        text="delegated stage finished",
+                        delegation_id=call_id,
+                        delegation_finished=True,
+                    )
+                elif event_type in {"item.started", "item.updated"}:
+                    agents = item.get("receiver_agents")
+                    label = None
+                    if isinstance(agents, list):
+                        for agent in agents:
+                            if not isinstance(agent, dict):
+                                continue
+                            label = agent.get("agent_role") or agent.get("agent_nickname")
+                            if isinstance(label, str) and label.strip():
+                                break
+                    if not isinstance(label, str) or not label.strip():
+                        label = "delegated agent"
+                    callback(
+                        text=f"delegated {label} started",
+                        tool=event_type == "item.started",
+                        delegation_id=call_id,
+                        delegated_stage=label,
+                    )
             elif event_type == "item.started" and item_type in {
-                "command_execution", "mcp_tool_call", "collab_tool_call", "web_search",
+                "command_execution", "mcp_tool_call", "web_search",
             }:
                 callback(text=f"{item_type.replace('_', ' ')} started", tool=True)
             return
@@ -592,8 +624,41 @@ class NativeAdapter(Adapter):
                     callback(text=block["text"])
                 elif block.get("type") == "tool_use":
                     name = block.get("name")
-                    callback(text=f"Using {name}" if isinstance(name, str) else "Using tool",
-                             tool=True)
+                    tool_input = block.get("input")
+                    if name in {"Task", "Agent"} and isinstance(tool_input, dict):
+                        call_id = block.get("id")
+                        label = tool_input.get("name") or tool_input.get("subagent_type")
+                        if not isinstance(label, str) or not label.strip():
+                            label = "delegated agent"
+                        if isinstance(call_id, str) and call_id:
+                            delegated_tool_ids.add(call_id)
+                            callback(
+                                text=f"delegated {label} started",
+                                tool=True,
+                                delegation_id=call_id,
+                                delegated_stage=label,
+                            )
+                        else:
+                            callback(text=f"Using {name}", tool=True)
+                    else:
+                        callback(
+                            text=f"Using {name}" if isinstance(name, str) else "Using tool",
+                            tool=True,
+                        )
+            return
+
+        if event_type == "user" and isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                call_id = block.get("tool_use_id")
+                if isinstance(call_id, str) and call_id in delegated_tool_ids:
+                    delegated_tool_ids.remove(call_id)
+                    callback(
+                        text="delegated stage finished",
+                        delegation_id=call_id,
+                        delegation_finished=True,
+                    )
             return
 
         if event_type == "content_block_delta":
