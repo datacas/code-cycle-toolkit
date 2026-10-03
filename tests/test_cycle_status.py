@@ -31,7 +31,7 @@ class CycleStatusTests(unittest.TestCase):
         })
 
         self.assertEqual(
-            f"✅ 🔍 [{local_time}] cycle done · done · initial-review · "
+            f"✅ 🔍 [{local_time}] cycle done · done · READY_FOR_MANUAL_MERGE · initial-review · "
             "unknown unknown unknown · total unknown · "
             "cwd unknown · repo unknown · branch unknown · unknown",
             line,
@@ -155,7 +155,7 @@ class CycleStatusTests(unittest.TestCase):
             "decision_count": 2,
             "question": {
                 "id": "Q-001",
-                "prompt": "Which scope should apply?",
+                "prompt": "Which scope should apply? " + "x" * 490,
                 "options": ["Current issue", "Expand scope"],
                 "recommended": "Current issue",
             },
@@ -190,7 +190,10 @@ class CycleStatusTests(unittest.TestCase):
         self.assertIn("readiness_unconfirmed", line)
         self.assertIn("requires decision (1/2)", line)
         self.assertIn("Which scope should apply?", line)
+        self.assertIn("x" * 174, line)
+        self.assertNotIn("x" * 175, line)
         self.assertIn("Current issue | Expand scope", line)
+        self.assertIn("recommended: Current issue", line)
         self.assertNotIn("\n", line)
 
     def test_workspace_snapshot_identifies_git_location_and_changes(self) -> None:

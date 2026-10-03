@@ -296,10 +296,10 @@ def format_progress_line(status: dict) -> str:
     except (AttributeError, TypeError, ValueError):
         timestamp = datetime.now().astimezone().strftime("%H:%M")
 
-    def field(value, fallback: str) -> str:
+    def field(value, fallback: str, limit: int = ACTIVITY_LIMIT) -> str:
         if value is None:
             return fallback
-        return _clean_activity(str(value)) or fallback
+        return _clean_activity(str(value))[:limit] or fallback
 
     stage = status.get("stage")
     finished = bool(status.get("finished"))
@@ -321,7 +321,7 @@ def format_progress_line(status: dict) -> str:
         final_stage = stage if isinstance(stage, dict) else None
         state_source = {**(final_stage or {}), "finished": True, "status": outcome}
         state = _stage_state(state_source)
-        parts = [f"{_progress_icons(role, outcome)} [{timestamp}] cycle done", state]
+        parts = [f"{_progress_icons(role, outcome)} [{timestamp}] cycle done", state, outcome]
         if final_stage is not None:
             parts.append(_stage_name(final_stage))
             executor = field(final_stage.get("executor"), "unknown")
@@ -349,16 +349,18 @@ def format_progress_line(status: dict) -> str:
             parts.append(f"requires decision (1/{count})")
         if isinstance(question, dict):
             question_id = field(question.get("id"), "")
-            prompt = field(question.get("prompt"), "question pending")
+            prompt = field(question.get("prompt"), "question pending", limit=200)
             options = question.get("options")
             question_label = f"{question_id}: {prompt}" if question_id else prompt
             if options:
                 question_label += " · options: " + " | ".join(
-                    field(option, "unknown") for option in options
+                    field(option, "unknown", limit=100) for option in options
                 )
             if question.get("recommended"):
-                question_label += f" · recommended: {field(question['recommended'], 'unknown')}"
-            parts.append(field(question_label, "question pending"))
+                question_label += (
+                    f" · recommended: {field(question['recommended'], 'unknown', limit=100)}"
+                )
+            parts.append(question_label)
         return " · ".join(parts)
 
     if not isinstance(stage, dict):
