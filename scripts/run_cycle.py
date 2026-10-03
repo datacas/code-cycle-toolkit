@@ -1090,7 +1090,7 @@ def run_cycle(
     jev: JevConfig | None = None,
     shadow: JevShadow | None = None,
     verbose: bool = False,
-    progress_interval: float = 120,
+    progress_interval: float = 60,
     start_from: str = "implement",
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
@@ -1152,7 +1152,11 @@ def run_cycle(
         progress_interval=progress_interval, verbose=verbose,
         workspace=cwd or Path.cwd(),
     )
-    recorder.stage_started = status_writer.stage_started
+    def progress_stage_started(role, decision) -> None:
+        iteration = recorder.iteration if role in {"review", "resolve", "rereview"} else None
+        status_writer.stage_started(role, decision, iteration=iteration)
+
+    recorder.stage_started = progress_stage_started
     recorder.on_progress = status_writer.activity
     recorder.on_workspace = status_writer.workspace_observed
     status_writer.start()
@@ -1222,7 +1226,12 @@ def run_cycle(
         if reported is not None:
             report.reason = reported.reason
         recorder.close(status, stop_reason=stop_reason, **issue_review_fields)
-        status_writer.finish(status)
+        status_writer.finish(
+            status,
+            stop_reason=stop_reason,
+            reason=because,
+            readiness=report.readiness,
+        )
         return report
 
     def unfinished(outcome: StageOutcome, reported: Reported,
@@ -2037,8 +2046,8 @@ def main(argv: list[str] | None = None) -> int:
                               "with cycle_status.py and read its report in the printed log"))
     parser.add_argument("--verbose", action="store_true",
                         help="show stage starts, live progress, and stage results")
-    parser.add_argument("--progress-interval", type=float, default=120,
-                        help="short-run heartbeat cadence in seconds (default: 120; changes to 300 after 15 minutes)")
+    parser.add_argument("--progress-interval", type=float, default=60,
+                        help="initial heartbeat seconds (default: 60; later intervals adapt)")
     parser.add_argument("--database", default=None,
                         help=f"telemetry database (default: {default_database_path()})")
     parser.add_argument("--config", default=None,

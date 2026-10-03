@@ -31,13 +31,15 @@ class CycleStatusTests(unittest.TestCase):
         })
 
         self.assertEqual(
-            f"✅ 🔍 [{local_time}] cycle done · READY_FOR_MANUAL_MERGE · "
+            f"✅ 🔍 [{local_time}] cycle done · done · initial-review · "
+            "unknown unknown unknown · total unknown · "
             "cwd unknown · repo unknown · branch unknown · unknown",
             line,
         )
 
     def test_progress_line_has_the_fixed_fields_on_one_line(self) -> None:
         line = cycle_status.format_progress_line({
+            "total_elapsed_seconds": 3600,
             "workspace": {
                 "cwd": "/tmp/asgard-issue230",
                 "repo_root": "/srv/asgard",
@@ -59,8 +61,8 @@ class CycleStatusTests(unittest.TestCase):
 
         self.assertRegex(
             line,
-            r"^🛠️ \[\d{2}:\d{2}\] implement · codex openai/gpt-6-luna max · "
-            r"12m00s · cwd /tmp/asgard-issue230 · repo /srv/asgard · "
+            r"^🛠️ \[\d{2}:\d{2}\] implement · running · codex openai/gpt-6-luna max · "
+            r"total 1h00m · stage 12m00s · cwd /tmp/asgard-issue230 · repo /srv/asgard · "
             r"branch fix/230-audittable-recovery · temporary linked worktree · "
             r"running the test suite$",
         )
@@ -80,7 +82,7 @@ class CycleStatusTests(unittest.TestCase):
             },
         })
         self.assertIn("✅ 🛠️", done)
-        self.assertIn("implement done", done)
+        self.assertIn("implement · done", done)
         self.assertIn("IMPLEMENTED: opening the pull request", done)
         self.assertNotIn("\n", done)
 
@@ -122,10 +124,14 @@ class CycleStatusTests(unittest.TestCase):
         self.assertIn("⛔ 🛠️", interrupted)
         self.assertIn("✅ 🩹", resolved)
 
-    def test_heartbeat_schedule_switches_at_fifteen_minutes(self) -> None:
+    def test_heartbeat_schedule_uses_one_two_and_five_minute_bands(self) -> None:
         cases = (
-            (0, 120),
-            (120, 120),
+            (0, 60),
+            (60, 60),
+            (4 * 60, 60),
+            (5 * 60 - 1, 1),
+            (5 * 60, 120),
+            (6 * 60, 60),
             (14 * 60, 60),
             (15 * 60 - 1, 1),
             (15 * 60, 300),
@@ -136,8 +142,56 @@ class CycleStatusTests(unittest.TestCase):
             with self.subTest(elapsed=elapsed):
                 self.assertEqual(
                     expected,
-                    cycle_status._next_heartbeat_delay(elapsed, 120),
+                    cycle_status._next_heartbeat_delay(elapsed, 60),
                 )
+        self.assertEqual(30, cycle_status._next_heartbeat_delay(0, 30))
+
+    def test_finished_stop_line_includes_reason_and_first_pending_question(self) -> None:
+        line = cycle_status.format_progress_line({
+            "finished": True,
+            "status": "HUMAN_INTERVENTION",
+            "stop_reason": "readiness_unconfirmed",
+            "reason": "The issue needs a scope decision.",
+            "decision_count": 2,
+            "question": {
+                "id": "Q-001",
+                "prompt": "Which scope should apply?",
+                "options": ["Current issue", "Expand scope"],
+                "recommended": "Current issue",
+            },
+            "total_elapsed_seconds": 4320,
+            "stage": {
+                "role": "issue-review",
+                "parent_stage": "resolve",
+                "substage": "security",
+                "delegated": True,
+                "iteration": 2,
+                "executor": "codex",
+                "provider": "openai",
+                "model": "gpt-6-luna",
+                "effort": "high",
+                "duration_seconds": 480,
+                "finished": True,
+                "status": "BLOCKED",
+                "workspace": {
+                    "cwd": "/work/task",
+                    "repo_root": "/repo",
+                    "branch": "issue-140",
+                    "kind": "linked worktree",
+                },
+            },
+        })
+        self.assertIn("⛔ 🩹", line)
+        self.assertIn("resolve › security (delegated)", line)
+        self.assertIn("blocked", line)
+        self.assertIn("total 1h12m", line)
+        self.assertIn("stage 8m00s", line)
+        self.assertIn("round 2", line)
+        self.assertIn("readiness_unconfirmed", line)
+        self.assertIn("requires decision (1/2)", line)
+        self.assertIn("Which scope should apply?", line)
+        self.assertIn("Current issue | Expand scope", line)
+        self.assertNotIn("\n", line)
 
     def test_workspace_snapshot_identifies_git_location_and_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -429,6 +483,54 @@ class CycleStatusTests(unittest.TestCase):
         })
 
         self.assertIn("in 10k (25% cached) / out 1k", rendered)
+
+    def test_writer_persists_stop_reason_and_first_readiness_question(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = cycle_status.CycleStatusWriter(
+                Path(temporary) / "telemetry.sqlite", "blocked-test", "owner/repo", "ISSUE-7",
+            )
+            readiness = SimpleNamespace(
+                valid=True,
+                decisions=2,
+                questions=[{
+                    "id": "Q-001",
+                    "prompt": "Which scope should apply?",
+                    "options": ["Current issue", "Expand scope"],
+                    "recommended": "Current issue",
+                }],
+            )
+            writer.finish(
+                "HUMAN_INTERVENTION",
+                stop_reason="readiness_unconfirmed",
+                reason="The issue needs a scope decision.",
+                readiness=readiness,
+            )
+
+            saved = json.loads(writer.path.read_text(encoding="utf-8"))
+            line = cycle_status.format_progress_line(saved)
+            self.assertEqual("readiness_unconfirmed", saved["stop_reason"])
+            self.assertEqual(2, saved["decision_count"])
+            self.assertEqual("Q-001", saved["question"]["id"])
+            self.assertIn("requires decision (1/2)", line)
+            self.assertIn("Which scope should apply?", line)
+            self.assertIn("Current issue | Expand scope", line)
+
+    def test_follow_suppresses_unchanged_status_lines(self) -> None:
+        status = {
+            "cycle_id": "unchanged-test",
+            "started_at": "2026-10-03T10:00:00+00:00",
+            "updated_at": "2026-10-03T10:00:00+00:00",
+            "total_elapsed_seconds": 60,
+            "finished": False,
+            "stage": {"role": "implement", "executor": "codex", "model": "gpt-6-luna"},
+        }
+        output = io.StringIO()
+        with patch.object(cycle_status, "read_statuses", side_effect=[[status], [status]]), \
+                patch.object(cycle_status.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+                contextlib.redirect_stdout(output):
+            result = cycle_status.main(["--follow", "--line", "--status-dir", "."])
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(output.getvalue().splitlines()))
 
     def test_status_is_written_atomically_and_reader_shows_start_and_finish(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
