@@ -1,0 +1,220 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--reporter=line,json",
+      "--output=out/repeated_r1/artifacts",
+      "--retries=1",
+      "--grep",
+      "@RETRY-REPEAT-001"
+    ],
+    "configFile": "/work/project/playwright.config.ts",
+    "rootDir": "/work/project/tests/behavioral",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/out/repeated_r1/artifacts",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/behavioral",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [
+    {
+      "title": "retry.spec.ts",
+      "file": "retry.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "R-REPEATED",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "RETRY-REPEAT-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 128,
+                  "error": {
+                    "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m",
+                    "stack": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n    at /work/project/tests/behavioral/retry.spec.ts:8:38",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/retry.spec.ts",
+                      "column": 38,
+                      "line": 8
+                    },
+                    "snippet": "   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/retry.spec.ts",
+                        "column": 38,
+                        "line": 8
+                      },
+                      "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n\n   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |\n    at /work/project/tests/behavioral/retry.spec.ts:8:38"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:35:43.637Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/retry.spec.ts",
+                    "column": 38,
+                    "line": 8
+                  }
+                },
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 190,
+                  "error": {
+                    "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m",
+                    "stack": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m\n    at /work/project/tests/behavioral/retry.spec.ts:8:38",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/retry.spec.ts",
+                      "column": 38,
+                      "line": 8
+                    },
+                    "snippet": "   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/retry.spec.ts",
+                        "column": 38,
+                        "line": 8
+                      },
+                      "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m\n\n   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |\n    at /work/project/tests/behavioral/retry.spec.ts:8:38"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:35:44.113Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/repeated_r1/artifacts/retry-R-REPEATED-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/retry.spec.ts",
+                    "column": 38,
+                    "line": 8
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "1d4db9983fd58b264f38-eee0bd3d5102fe26d657",
+          "file": "retry.spec.ts",
+          "line": 6,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-05T09:35:43.275Z",
+    "duration": 1173.806,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}
