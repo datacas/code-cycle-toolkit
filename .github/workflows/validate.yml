@@ -27,16 +27,23 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Make the Python shared library findable
-        # The self-hosted runner's tool-cache Python is built shared; child
-        # processes started by the tests need its lib/ on the loader path.
+        # The self-hosted runner uses its system python3: the tool-cache
+        # Python is built shared and its child processes cannot find
+        # libpython once the tests clear the environment. A virtual
+        # environment keeps pip installs off the system interpreter.
         shell: bash
         run: |
-          echo "LD_LIBRARY_PATH=$pythonLocation/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Show the interpreter and environment
+        shell: bash
+        run: |
+          python3 --version
+          command -v python3
+          ldd "$(command -v python3)" | grep -i libpython || echo "statically linked or no libpython needed"
+          echo "HOME=$HOME USER=$(id -un) TMPDIR=${TMPDIR:-unset}"
+          ls -ld "$HOME" || true
 
       - name: Install the configuration parser
         # PyYAML is the runtime's one optional dependency, needed only to read a
