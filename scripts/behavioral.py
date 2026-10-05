@@ -566,6 +566,10 @@ def evaluate(
         outcome["status"] = "error"
         outcome["reason"] = "run_level_error"
         return outcome
+    if counts["other"]:
+        outcome["status"] = "error"
+        outcome["reason"] = "unrecognized_test_outcome"
+        return outcome
     if counts["flaky"]:
         outcome["status"] = "flaky"
         return outcome

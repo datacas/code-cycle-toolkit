@@ -699,6 +699,27 @@ class NormalizeTests(unittest.TestCase):
             self.assertEqual(result["status"], "pass")
             self.assertTrue((base / "evidence" / result["runId"] / "run.json").is_file())
 
+    def test_a_ci_run_with_an_unrecognized_test_outcome_cannot_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            report = load("grep_look")
+            test = next(spec for _, _, spec in bv.iter_specs(report) if spec.get("tests"))["tests"][0]
+            test["status"] = "interrupted"
+            (base / "raw.json").write_text(json.dumps(report), encoding="utf-8")
+            (base / "list.json").write_text(
+                json.dumps(keep_ids(load("list"), ["AUTH-LOGIN-001"])), encoding="utf-8")
+
+            result = bv.normalize(base / "raw.json", base / "list.json", 0, base / "evidence",
+                                  selection_value="behavioral")
+            saved = json.loads((base / "evidence" / result["runId"] / "run.json").read_text(
+                encoding="utf-8"))
+
+            self.assertEqual((result["status"], result["reason"]),
+                             ("error", "unrecognized_test_outcome"))
+            self.assertEqual((saved["status"], saved["counts"]["passed"],
+                              saved["counts"]["other"], saved["results"][0]["status"]),
+                             ("error", 0, 1, "error"))
+
     def test_a_multi_id_ci_selection_rejects_an_id_missing_from_the_listing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
