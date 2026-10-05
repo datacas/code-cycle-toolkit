@@ -19,15 +19,31 @@ env:
 jobs:
   validate:
     name: Skills, manifests, and Bash installer
-    runs-on: ubuntu-latest
+    # Self-hosted runner: never run pull requests from forks on it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+        # The self-hosted runner uses its system python3: the tool-cache
+        # Python is built shared and its child processes cannot find
+        # libpython once the tests clear the environment. A virtual
+        # environment keeps pip installs off the system interpreter.
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Show the interpreter and environment
+        shell: bash
+        run: |
+          python3 --version
+          command -v python3
+          ldd "$(command -v python3)" | grep -i libpython || echo "statically linked or no libpython needed"
+          echo "HOME=$HOME USER=$(id -un) TMPDIR=${TMPDIR:-unset}"
+          ls -ld "$HOME" || true
 
       - name: Install the configuration parser
         # PyYAML is the runtime's one optional dependency, needed only to read a
@@ -68,9 +84,10 @@ jobs:
           sh -n scripts/get.sh
 
       - name: Lint Bash installer
+        # System tools are preinstalled on the self-hosted runner; the workflow
+        # only runs them and needs no root.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y shellcheck
+          command -v shellcheck >/dev/null || { echo "shellcheck is not installed on the runner" >&2; exit 1; }
           shellcheck scripts/install.sh scripts/get.sh
 
       - name: Install through the one-command installer
