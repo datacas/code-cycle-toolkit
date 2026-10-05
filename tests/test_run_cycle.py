@@ -453,7 +453,22 @@ class PromptContractTests(unittest.TestCase):
         )
 
         self.assertIn("`/repo/.worktree` as their base directory", prompt)
+        self.assertIn("one task-specific linked worktree by default", prompt)
+        self.assertIn("workspace=current", prompt)
+        self.assertIn("stop with an actionable BLOCKED result", prompt)
         self.assertIn("isolated disposable review clones outside", prompt)
+
+    def test_current_workspace_prompt_uses_the_invoking_checkout(self) -> None:
+        for role in ("implement", "resolve"):
+            with self.subTest(role=role):
+                prompt = rc.compose(
+                    role, "owner/api", "API-7",
+                    worktree_dir="/repo/.worktree", workspace="current",
+                )
+
+                self.assertIn("explicitly opts into the invoking checkout", prompt)
+                self.assertIn("supplied --cwd directly", prompt)
+                self.assertNotIn("task-specific linked worktree by default", prompt)
 
     def test_review_prompt_does_not_apply_the_persistent_worktree_base(self) -> None:
         prompt = rc.compose(
@@ -1363,6 +1378,7 @@ class ExplicitCalibrationTests(unittest.TestCase):
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc.main(["--repo", "owner/api", "--task", "API-7",
+                             "--workspace", "current",
                              "--config", str(config),
                              "--database", str(Path(temporary) / "t.sqlite"),
                              *extra])
@@ -1502,23 +1518,414 @@ class ResumeTests(RunCycleTestCase):
             calls.append((repo, change_request, cwd))
             raise rc.CycleDriverError("pull request 74 is CLOSED, not open")
 
-        original, rc.check_change_request = rc.check_change_request, refuse
-        try:
-            with tempfile.TemporaryDirectory() as temporary:
-                database = Path(temporary) / "telemetry.sqlite"
-                stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "telemetry.sqlite"
+            stderr = io.StringIO()
+            with (mock.patch.object(rc, "check_change_request", side_effect=refuse),
+                  mock.patch.object(
+                      rc, "select_workspace",
+                      return_value=(temporary, Path(temporary) / ".worktree"),
+                  )):
                 with contextlib.redirect_stderr(stderr):
                     with self.assertRaises(SystemExit) as raised:
                         rc.main(["--repo", "owner/api", "--task", "API-7",
                                  "--from", "resolve", "--pr", "74", "--no-config",
                                  "--cwd", temporary, "--database", str(database)])
-                self.assertFalse(database.exists())
-        finally:
-            rc.check_change_request = original
+            self.assertFalse(database.exists())
 
         self.assertEqual(2, raised.exception.code)
         self.assertEqual([("owner/api", "74", temporary)], calls)
         self.assertIn("CLOSED, not open", stderr.getvalue())
+
+
+class WorkspaceSelectionTests(unittest.TestCase):
+    def git(self, cwd: str | Path, *arguments: str) -> str:
+        result = subprocess.run(
+            ["git", *arguments], cwd=cwd, capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            raise AssertionError(result.stderr or result.stdout)
+        return result.stdout.strip()
+
+    def assert_same_path(self, expected: str | Path, actual: str | Path) -> None:
+        canonical_expected = os.path.normcase(str(Path(expected).resolve()))
+        canonical_actual = os.path.normcase(str(Path(actual).resolve()))
+        self.assertTrue(
+            canonical_expected == canonical_actual,
+            f"paths do not identify the same location: {expected!s} != {actual!s}",
+        )
+
+    def repository(self, root: Path) -> dict:
+        root.mkdir(parents=True)
+        self.git(root, "init", "--initial-branch=main")
+        self.git(root, "config", "user.name", "Test")
+        self.git(root, "config", "user.email", "test@example.invalid")
+        (root / ".gitignore").write_text(".worktree/\n", encoding="utf-8")
+        (root / "README.md").write_text("base\n", encoding="utf-8")
+        self.git(root, "add", ".gitignore", "README.md")
+        self.git(root, "commit", "-m", "initial")
+        return {"code_cycle": {"repository": {"default_branch": "main"}}}
+
+    def test_branch_reuse_requires_a_delimited_work_item_identifier(self) -> None:
+        self.assertTrue(rc.branch_identifies_work_item(
+            "issue-151-worktree-default", "151"
+        ))
+        self.assertFalse(rc.branch_identifies_work_item("issue-1510", "151"))
+        self.assertFalse(rc.branch_identifies_work_item("x151y", "151"))
+
+    def test_default_creates_and_then_reuses_the_task_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            selected, base = rc.select_workspace(
+                "151", "owner/api", config, cwd=str(root),
+            )
+            self.assert_same_path(root / ".worktree", base)
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assertTrue((Path(selected) / ".git").is_file())
+            self.assertEqual("task-151", self.git(selected, "branch", "--show-current"))
+            self.assertEqual("main", self.git(root, "branch", "--show-current"))
+
+            selected_again, _ = rc.select_workspace(
+                "151", "owner/api", config, cwd=str(root),
+            )
+            self.assert_same_path(selected, selected_again)
+
+    def test_matching_active_task_worktree_uses_repository_base_in_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            task_worktree = root / ".worktree" / "issue-151-worktree-default"
+            self.git(
+                root, "worktree", "add", "-b", "issue-151-worktree-default",
+                str(task_worktree), "main",
+            )
+
+            selected, base = rc.select_workspace(
+                "151", "owner/api", config, cwd=str(task_worktree),
+            )
+
+            self.assert_same_path(task_worktree, selected)
+            self.assert_same_path(root / ".worktree", base)
+            prompt = rc.compose(
+                "resolve", "owner/api", "151", change_request_id="153",
+                worktree_dir=base,
+            )
+            self.assertIn(f"`{base}` as their base directory", prompt)
+            self.assertNotIn(
+                f"`{task_worktree / '.worktree'}` as their base directory",
+                prompt,
+            )
+            self.assertFalse((root / ".worktree" / "task-151").exists())
+
+    def test_substring_worktree_is_not_reused_for_another_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            wrong = root / ".worktree" / "issue-1510"
+            self.git(root, "worktree", "add", "-b", "issue-1510", str(wrong), "main")
+
+            selected, _ = rc.select_workspace(
+                "151", "owner/api", config, cwd=str(root),
+            )
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assertNotEqual(
+                os.path.normcase(str(Path(wrong).resolve())),
+                os.path.normcase(str(Path(selected).resolve())),
+            )
+
+    def test_resume_creates_a_task_worktree_on_the_pull_request_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            self.git(root, "branch", "release/prompt", "main")
+
+            with mock.patch.object(rc, "_pull_request_branch",
+                                   return_value="release/prompt"):
+                selected, _ = rc.select_workspace(
+                    "151", "owner/api", config, cwd=str(root),
+                    change_request_id="153",
+                )
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assertEqual("release/prompt",
+                             self.git(selected, "branch", "--show-current"))
+
+    def test_resume_reuses_the_linked_worktree_for_its_pull_request_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            target = root / ".worktree" / "pr-151"
+            target.parent.mkdir()
+            self.git(root, "worktree", "add", "-b", "release/prompt", str(target), "main")
+
+            with mock.patch.object(rc, "_pull_request_branch",
+                                   return_value="release/prompt"):
+                selected, _ = rc.select_workspace(
+                    "151", "owner/api", config, cwd=str(root),
+                    change_request_id="153",
+                )
+            self.assert_same_path(target, selected)
+            self.assertEqual("release/prompt",
+                             self.git(selected, "branch", "--show-current"))
+
+    def test_current_checkout_is_an_explicit_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            selected, base = rc.select_workspace(
+                "151", "owner/api", {}, workspace="current", cwd=str(root),
+            )
+            self.assert_same_path(root, selected)
+            self.assertIsNone(base)
+            self.assertFalse((root / ".worktree").exists())
+
+    def test_herdr_creates_from_a_linked_invoker_without_focusing_the_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            source = root / ".worktree" / "worker-parent"
+            source.parent.mkdir()
+            self.git(root, "worktree", "add", "-b", "helper", str(source), "main")
+            herdr_commands = []
+
+            def run(command, *, cwd, **kwargs):
+                if command[:3] == ["herdr", "worktree", "create"]:
+                    herdr_commands.append(command)
+                    branch = command[command.index("--branch") + 1]
+                    target = command[command.index("--path") + 1]
+                    base = command[command.index("--base") + 1]
+                    result = subprocess.run(
+                        ["git", "worktree", "add", "-b", branch, target, base],
+                        cwd=cwd, capture_output=True, text=True, check=False,
+                    )
+                    return result
+                return subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True, check=False,
+                )
+
+            with mock.patch.dict(os.environ, {"HERDR_ENV": "1"}):
+                selected, _ = rc.select_workspace(
+                    "151", "owner/api", config, cwd=str(source), run=run,
+                )
+
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assertEqual(1, len(herdr_commands))
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "create", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--branch", "task-151", "--path"], command[5:8])
+            self.assert_same_path(selected, command[8])
+            self.assertEqual(["--no-focus", "--base", "refs/heads/main"], command[9:])
+            self.assertTrue((Path(selected) / ".git").is_file())
+
+    def test_herdr_failure_blocks_without_a_git_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            source = root / ".worktree" / "worker-parent"
+            source.parent.mkdir()
+            self.git(root, "worktree", "add", "-b", "helper", str(source), "main")
+            commands = []
+
+            def run(command, *, cwd, **kwargs):
+                commands.append(command)
+                if command[:3] == ["herdr", "worktree", "create"]:
+                    return subprocess.CompletedProcess(
+                        command, 1, "", "Herdr cannot open this repository",
+                    )
+                return subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True, check=False,
+                )
+
+            with mock.patch.dict(os.environ, {"HERDR_ENV": "1"}):
+                with self.assertRaises(rc.CycleDriverError) as refused:
+                    rc.select_workspace(
+                        "151", "owner/api", config, cwd=str(source), run=run,
+                    )
+
+            self.assertIn("BLOCKED", str(refused.exception))
+            self.assertIn("Herdr cannot open this repository", str(refused.exception))
+            self.assertIn("--workspace current", str(refused.exception))
+            self.assertFalse((root / ".worktree" / "task-151").exists())
+            self.assertFalse(any(
+                command[:3] == ["git", "worktree", "add"] for command in commands
+            ))
+
+    def test_herdr_opens_a_reused_worktree_without_focusing_the_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            target = root / ".worktree" / "issue-151-worker"
+            target.parent.mkdir()
+            self.git(
+                root, "worktree", "add", "-b", "issue-151-worker",
+                str(target), "main",
+            )
+            herdr_commands = []
+
+            def run(command, *, cwd, **kwargs):
+                if command[:3] == ["herdr", "worktree", "open"]:
+                    herdr_commands.append(command)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True, check=False,
+                )
+
+            with mock.patch.dict(os.environ, {"HERDR_ENV": "1"}):
+                selected, _ = rc.select_workspace(
+                    "151", "owner/api", config, cwd=str(root), run=run,
+                )
+
+            self.assert_same_path(target, selected)
+            self.assertEqual(1, len(herdr_commands))
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "open", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--path"], command[5:6])
+            self.assert_same_path(target, command[6])
+            self.assertEqual(["--no-focus"], command[7:])
+
+    def test_herdr_uses_parent_repository_for_open_from_linked_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            source = root / ".worktree" / "worker-parent"
+            target = root / ".worktree" / "issue-151-worker"
+            source.parent.mkdir()
+            self.git(root, "worktree", "add", "-b", "helper", str(source), "main")
+            self.git(
+                root, "worktree", "add", "-b", "issue-151-worker",
+                str(target), "main",
+            )
+            herdr_commands = []
+
+            def run(command, *, cwd, **kwargs):
+                if command[:3] == ["herdr", "worktree", "open"]:
+                    herdr_commands.append(command)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.run(
+                    command, cwd=cwd, capture_output=True, text=True, check=False,
+                )
+
+            with mock.patch.dict(os.environ, {"HERDR_ENV": "1"}):
+                selected, _ = rc.select_workspace(
+                    "151", "owner/api", config, cwd=str(source), run=run,
+                )
+
+            self.assert_same_path(target, selected)
+            self.assertEqual(1, len(herdr_commands))
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "open", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--path"], command[5:6])
+            self.assert_same_path(target, command[6])
+            self.assertEqual(["--no-focus"], command[7:])
+
+    def test_unavailable_selection_is_blocked_with_the_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "not-a-repository"
+            root.mkdir()
+            with self.assertRaises(rc.CycleDriverError) as refused:
+                rc.select_workspace("151", "owner/api", {}, cwd=str(root))
+            self.assertIn("BLOCKED", str(refused.exception))
+            self.assertIn("--workspace current", str(refused.exception))
+            self.assertFalse((root / ".worktree").exists())
+
+    def test_cli_dispatches_from_the_selected_workspace(self) -> None:
+        for mode in ("task", "current"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "repo"
+                config = self.repository(root)
+                database = Path(temporary) / "cycle.sqlite"
+                dispatched = {}
+                report = mock.Mock(status=rc.APPROVED_END)
+                report.explain.return_value = "ready"
+
+                def run_cycle(*_args, **kwargs):
+                    dispatched.update(kwargs)
+                    return report
+
+                command = [
+                    "--repo", "owner/api", "--task", "151",
+                    "--cwd", str(root), "--database", str(database),
+                ]
+                if mode == "current":
+                    command.extend(["--workspace", "current"])
+
+                with (mock.patch.object(
+                            rc, "plan_with_strategy",
+                            return_value=("owner/api", {}, None)),
+                      mock.patch.object(rc, "resolve_config", return_value=config),
+                      mock.patch.object(rc, "load_jev_config", return_value=None),
+                      mock.patch.object(rc, "run_cycle", side_effect=run_cycle),
+                      mock.patch.object(rc, "save_decisions")):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        status = rc.main(command)
+
+                self.assertEqual(0, status)
+                expected = (root if mode == "current"
+                            else root / ".worktree" / "task-151")
+                self.assert_same_path(expected, dispatched["cwd"])
+                self.assertEqual(mode, dispatched["workspace"])
+                expected_worktree_dir = (root / ".worktree" if mode == "task" else None)
+                if expected_worktree_dir is None:
+                    self.assertIsNone(dispatched["worktree_dir"])
+                else:
+                    self.assert_same_path(expected_worktree_dir, dispatched["worktree_dir"])
+                self.assertEqual("main", self.git(root, "branch", "--show-current"))
+
+    def test_cli_reports_blocked_selection_without_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "not-a-repository"
+            root.mkdir()
+            database = Path(temporary) / "cycle.sqlite"
+            stderr = io.StringIO()
+            with (mock.patch.object(
+                        rc, "plan_with_strategy",
+                        return_value=("owner/api", {}, None)),
+                  mock.patch.object(rc, "resolve_config", return_value={}),
+                  mock.patch.object(rc, "load_jev_config", return_value=None),
+                  mock.patch.object(rc, "run_cycle") as dispatched):
+                with contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        rc.main([
+                            "--repo", "owner/api", "--task", "151",
+                            "--cwd", str(root), "--database", str(database),
+                        ])
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("BLOCKED", stderr.getvalue())
+            self.assertIn("--workspace current", stderr.getvalue())
+            self.assertFalse(dispatched.called)
+            self.assertFalse(database.exists())
+
+    def test_local_only_requires_current_before_selecting_a_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            config = self.repository(root)
+            linked = root / ".worktree" / "unrelated"
+            linked.parent.mkdir(parents=True)
+            self.git(root, "worktree", "add", "-b", "unrelated", str(linked))
+            database = Path(temporary) / "cycle.sqlite"
+            stderr = io.StringIO()
+            with (mock.patch.object(
+                        rc, "plan_with_strategy",
+                        return_value=("owner/api", {}, None)),
+                  mock.patch.object(rc, "resolve_config", return_value=config),
+                  mock.patch.object(rc, "run_cycle") as dispatched):
+                with contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        rc.main([
+                            "--repo", "owner/api", "--task", "151",
+                            "--cwd", str(linked), "--local-only",
+                            "--database", str(database),
+                        ])
+
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("--local-only requires --workspace current", stderr.getvalue())
+            self.assertFalse((root / ".worktree" / "task-151").exists())
+            self.assertFalse(database.exists())
+            self.assertFalse(dispatched.called)
 
 
 class ChangeRequestCheckTests(unittest.TestCase):

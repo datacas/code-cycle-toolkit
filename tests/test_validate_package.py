@@ -39,6 +39,31 @@ class ValidatePackageTests(unittest.TestCase):
     def test_current_package_is_valid(self) -> None:
         self.assertEqual([], VALIDATOR.validate_package(ROOT))
 
+    def test_implementation_workspace_default_and_opt_out_are_documented(self) -> None:
+        implementer = (ROOT / "skills" / "cc-implement-issue" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        orchestrator = (ROOT / "skills" / "cc-orchestrator" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        orca = (ROOT / "skills" / "cc-orca-orchestrator" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        documentation = (ROOT / "docs" / "configuration.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (implementer, orchestrator, orca, documentation):
+            self.assertIn("linked worktree", text)
+            self.assertIn("workspace=current", text)
+        for text in (implementer, orchestrator, orca):
+            self.assertIn("delimited token", text)
+            self.assertIn("existing change request links this work item", text)
+        self.assertIn("exact, delimited work-item identifier", documentation)
+        self.assertIn("herdr worktree create", implementer)
+        self.assertIn("herdr worktree open", implementer)
+        self.assertIn("--no-focus", implementer)
+
     def test_rejects_shared_section_drift(self) -> None:
         package = self.copy_package()
         path = package / "skills" / "cc-code-review" / "SKILL.md"

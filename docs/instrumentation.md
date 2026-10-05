@@ -871,8 +871,8 @@ because that is the hole the recorder closes and a driver is the easiest place
 to reopen it.
 
 The `--local-only` mode is the safe rehearsal path: it requires an explicit
-linked Git worktree via `--cwd`, runs only the implementation stage, records a
-`HUMAN_INTERVENTION` stop because no change request exists to review, carries a
+linked Git worktree via `--cwd` and `--workspace current`, runs only the
+implementation stage, records a `HUMAN_INTERVENTION` stop because no change request exists to review, carries a
 no-publish policy in the implementation prompt, and marks each telemetry row
 with `local_only`. That policy is auditable but is not an OS-level network
 sandbox; use isolated credentials and remote access controls when remote writes

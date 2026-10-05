@@ -662,6 +662,7 @@ class ConfigurationTests(unittest.TestCase):
                 with mock.patch.object(rc, "run_cycle", return_value=report) as run, \
                         contextlib.redirect_stdout(io.StringIO()):
                     rc.main(["--repo", "owner/api", "--task", "API-7", "--no-config",
+                             "--workspace", "current",
                              "--database", str(Path(temporary.name) / "t.sqlite"), *argv])
                 self.assertIs(expected, run.call_args.kwargs["issue_review"])
 
@@ -680,6 +681,7 @@ class ConfigurationTests(unittest.TestCase):
         with mock.patch.object(rc, "run_cycle", return_value=report), \
                 contextlib.redirect_stdout(output):
             rc.main(["--repo", "owner/api", "--task", "API-7", "--no-config",
+                     "--workspace", "current",
                      "--database", str(database)])
 
         printed = output.getvalue()

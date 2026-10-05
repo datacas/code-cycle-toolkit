@@ -97,6 +97,7 @@ class CycleProgressTests(unittest.TestCase):
         with patch.object(rc, "run_cycle", return_value=report) as run:
             result = rc.main([
                 "--repo", "owner/api", "--task", "API-7", "--no-config",
+                "--workspace", "current",
                 "--database", str(Path(self.temporary.name) / "cli.sqlite"),
                 "--verbose", "--progress-interval", "12",
             ])
@@ -109,6 +110,7 @@ class CycleProgressTests(unittest.TestCase):
             with patch.object(rc, "run_cycle", return_value=report) as run:
                 rc.main([
                     "--repo", "owner/api", "--task", "API-7", "--no-config",
+                    "--workspace", "current",
                     "--database", str(Path(self.temporary.name) / "default.sqlite"),
                 ])
         self.assertEqual(60, run.call_args.kwargs["progress_interval"])
