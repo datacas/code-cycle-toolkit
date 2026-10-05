@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import io
 import json
+import os
 import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -98,6 +101,13 @@ class RegistryTests(unittest.TestCase):
     def test_a_clean_listing_has_no_problems(self) -> None:
         self.assertEqual(bv.registry_problems(bv.listed_tests(load("list"))), [])
 
+    def test_the_same_test_identity_in_multiple_projects_is_valid(self) -> None:
+        listed = bv.listed_tests(keep_ids(load("list"), ["AUTH-LOGIN-001"]))
+        repeated = [dataclasses.replace(test, key=f"{test.key.split('::')[0]}::{project}", project=project)
+                    for test in listed for project in ("chromium", "firefox")]
+
+        self.assertEqual(bv.registry_problems(repeated), [])
+
     def test_unidentified_duplicate_and_ambiguous_tests_are_reported(self) -> None:
         report = copy.deepcopy(load("list"))
         file_suite = report["suites"][0]
@@ -120,6 +130,19 @@ class PassRuleTests(unittest.TestCase):
         self.assertEqual(outcome["counts"]["selected"], 1)
         self.assertEqual(outcome["counts"]["executed"], 1)
         self.assertEqual(outcome["results"][0]["executionMode"], "deterministic")
+
+    def test_a_test_fail_assertion_is_not_counted_as_a_pass(self) -> None:
+        report = load("grep_look")
+        spec = next(spec for _, _, spec in bv.iter_specs(report) if spec.get("tests"))
+        test = spec["tests"][0]
+        test["expectedStatus"] = "failed"
+        test["status"] = "expected"
+        test["results"][-1]["status"] = "failed"
+
+        outcome = bv.evaluate(report, expected_for("AUTH-LOGIN-001"), 0)
+
+        self.assertEqual(outcome["status"], "fail")
+        self.assertEqual((outcome["counts"]["passed"], outcome["counts"]["failed"]), (0, 1))
 
     def test_a_missing_report_is_an_error_whatever_the_exit_code(self) -> None:
         outcome = bv.evaluate(None, expected_for("AUTH-LOGIN-001"), 0)
@@ -449,6 +472,16 @@ class RunTests(unittest.TestCase):
 
         self.assertEqual((result["status"], result["reason"]), ("error", "list_failed"))
 
+    def test_an_invalid_identity_registry_stops_before_playwright_runs(self) -> None:
+        listing = keep_ids(load("list"), ["AUTH-LOGIN-001"])
+        next(bv.iter_specs(listing))[2]["tags"] = ["behavioral"]
+        result, calls = self.run_with(load("grep_look"), listing, ids=["AUTH-LOGIN-001"])
+
+        self.assertEqual((result["status"], result["reason"]), ("error", "invalid_test_registry"))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--list", calls[0]["argv"])
+        self.assertEqual(result["registryProblems"][0]["kind"], "unidentified")
+
     def test_a_run_that_times_out_is_an_error(self) -> None:
         listing = keep_ids(load("list"), ["AUTH-LOGIN-001"])
 
@@ -537,6 +570,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["error-context"]["sha256"],
                          bv.sha256_file(run_dir / evidence["error-context"]["path"]))
 
+    @unittest.skipIf(os.name != "posix", "POSIX file modes are not available")
+    def test_evidence_modes_are_private_independent_of_umask(self) -> None:
+        previous_umask = os.umask(0)
+        try:
+            _, run_dir = self.persist()
+        finally:
+            os.umask(previous_umask)
+
+        directories = [run_dir, run_dir / "raw", run_dir / "artifacts",
+                       run_dir / "artifacts" / "RETRY-REPEAT-001",
+                       run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0",
+                       run_dir / "failures", run_dir / "failures" / "RETRY-REPEAT-001"]
+        files = [run_dir / "raw" / "playwright.json", run_dir / "run.json", run_dir / "summary.md",
+                 run_dir / "failures" / "RETRY-REPEAT-001" / "bundle.json",
+                 run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "error-context.md",
+                 run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "test-failed-1.png"]
+
+        self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in directories))
+        self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files))
+
     def test_a_listed_artifact_that_does_not_exist_is_recorded_as_missing(self) -> None:
         run, _ = self.persist()
 
@@ -601,6 +654,19 @@ class NormalizeTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "pass")
             self.assertTrue((base / "evidence" / result["runId"] / "run.json").is_file())
+
+    def test_a_ci_run_with_an_invalid_identity_registry_cannot_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            listing = keep_ids(load("list"), ["AUTH-LOGIN-001"])
+            next(bv.iter_specs(listing))[2]["tags"] = ["behavioral"]
+            (base / "raw.json").write_text(json.dumps(load("grep_look")), encoding="utf-8")
+            (base / "list.json").write_text(json.dumps(listing), encoding="utf-8")
+
+            result = bv.normalize(base / "raw.json", base / "list.json", 0, base / "evidence")
+
+            self.assertEqual((result["status"], result["reason"]), ("error", "invalid_test_registry"))
+            self.assertEqual(result["registryProblems"][0]["kind"], "unidentified")
 
     def test_the_command_line_exits_with_the_status_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -430,12 +430,20 @@ def _failure_of(test: ListedTest, results: list[dict[str, Any]], root: Path | No
 
 
 def _status_of(test_entry: dict[str, Any]) -> str:
+    status = str(test_entry.get("status"))
+    if status == "expected":
+        # Playwright also reports `expected` when a test.fail() assertion failed.
+        if test_entry.get("expectedStatus") == "failed":
+            return "fail"
+        results = [r for r in test_entry.get("results") or [] if isinstance(r, dict)]
+        if test_entry.get("expectedStatus") != "passed" or not results:
+            return "error"
+        return "pass" if results[-1].get("status") == "passed" else "error"
     return {
-        "expected": "pass",
         "unexpected": "fail",
         "flaky": "flaky",
         "skipped": "skipped",
-    }.get(str(test_entry.get("status")), "error")
+    }.get(status, "error")
 
 
 def _executed(test_entry: dict[str, Any]) -> bool:
@@ -633,6 +641,26 @@ def _safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")[:80] or "test"
 
 
+def _private_mkdir(path: Path) -> None:
+    """Create a private evidence directory regardless of the caller's umask."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """Write a private evidence file regardless of the caller's umask."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            handle.write(data)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _materialize_evidence(run_dir: Path, output_dir: Path | None,
                           results: list[dict[str, Any]]) -> None:
     """Move referenced artifacts under `artifacts/<test>/attempt-N/`.
@@ -662,9 +690,12 @@ def _materialize_evidence(run_dir: Path, output_dir: Path | None,
                 entry["status"] = "missing"
             else:
                 dest_dir = run_dir / "artifacts" / _safe_name(result["identity"]) / f"attempt-{item['attempt']}"
-                dest_dir.mkdir(parents=True, exist_ok=True)
+                _private_mkdir(run_dir / "artifacts")
+                _private_mkdir(dest_dir.parent)
+                _private_mkdir(dest_dir)
                 dest = dest_dir / path.name
                 shutil.copy2(path, dest)
+                dest.chmod(0o600)
                 entry.update({"status": "collected", "path": dest.relative_to(run_dir).as_posix(),
                               "bytes": dest.stat().st_size, "sha256": sha256_file(dest)})
             kept.append(entry)
@@ -718,11 +749,12 @@ def render_summary(run: dict[str, Any]) -> str:
 def write_run(run_dir: Path, run: dict[str, Any], raw: bytes | None,
               output_dir: Path | None) -> dict[str, Any]:
     """Persist one run. `raw/playwright.json` is written first and hashed."""
-    run_dir.mkdir(parents=True, exist_ok=True)
+    _private_mkdir(run_dir)
     source = {"kind": "playwright-json", "path": None, "sha256": None, "retained": False}
     if raw is not None:
-        (run_dir / "raw").mkdir(exist_ok=True)
-        (run_dir / "raw" / "playwright.json").write_bytes(raw)
+        raw_dir = run_dir / "raw"
+        _private_mkdir(raw_dir)
+        _write_private(raw_dir / "playwright.json", raw)
         source.update({"path": "raw/playwright.json", "sha256": sha256_bytes(raw), "retained": True})
     run["source"] = source
     _materialize_evidence(run_dir, output_dir, run["results"])
@@ -731,13 +763,14 @@ def write_run(run_dir: Path, run: dict[str, Any], raw: bytes | None,
         if not failure:
             continue
         bundle_dir = run_dir / "failures" / _safe_name(result["identity"])
-        bundle_dir.mkdir(parents=True, exist_ok=True)
+        _private_mkdir(run_dir / "failures")
+        _private_mkdir(bundle_dir)
         bundle = {"schema": SCHEMA_VERSION, "runId": run["runId"], "result": result}
-        (bundle_dir / "bundle.json").write_text(
-            json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (run_dir / "run.json").write_text(
-        json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (run_dir / "summary.md").write_text(render_summary(run), encoding="utf-8")
+        _write_private(bundle_dir / "bundle.json",
+                       (json.dumps(bundle, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    _write_private(run_dir / "run.json",
+                   (json.dumps(run, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    _write_private(run_dir / "summary.md", render_summary(run).encode("utf-8"))
     run["runJsonSha256"] = sha256_file(run_dir / "run.json")
     return run
 
@@ -888,16 +921,23 @@ def run_behavioral(
     if parsed is None or parsed < min_version:
         return finish("blocked", f"playwright_below_{'.'.join(map(str, min_version))}")
 
+    _private_mkdir(run_dir)
     env_extra = {"BASE_URL": base_url} if base_url else None
+    _private_mkdir(run_dir / ".list")
     expected, list_path = list_selection(project, grep, run_dir / ".list", runner=runner,
                                          command=command, env_extra=env_extra)
     shutil.rmtree(run_dir / ".list", ignore_errors=True)
     if expected is None:
         return finish("error", "list_failed")
+    problems = registry_problems(expected)
+    if problems:
+        run["registryProblems"] = problems
+        return finish("error", "invalid_test_registry")
 
     output_dir = run_dir / ".playwright-output"
     report_path = run_dir / "raw" / "playwright.json"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    _private_mkdir(report_path.parent)
+    _private_mkdir(output_dir)
     argv = [*command, "test", "--reporter=line,json", f"--retries={retries}",
             "--trace=retain-on-first-failure", f"--output={output_dir}", "--forbid-only",
             "--grep", grep]
@@ -925,6 +965,10 @@ def normalize(raw_path: Path, list_path: Path, exit_code: int, evidence_dir: Pat
     listing = load_report(list_path)
     expected = listed_tests(listing, project) if listing else []
     outcome = evaluate(report, expected, exit_code, selection_kind=selection_kind, root=project)
+    problems = registry_problems(expected)
+    if problems:
+        outcome.update({"status": "error", "reason": "invalid_test_registry",
+                        "errors": [], "counts": _empty_counts(len(expected)), "results": []})
     commit, dirty = git_state(project) if project else (None, None)
     run: dict[str, Any] = {
         "schema": SCHEMA_VERSION, "runId": run_id, "tool": "playwright", "toolVersion": tool_version,
@@ -935,6 +979,8 @@ def normalize(raw_path: Path, list_path: Path, exit_code: int, evidence_dir: Pat
         "reason": outcome["reason"], "errors": outcome["errors"], "counts": outcome["counts"],
         "results": outcome["results"],
     }
+    if problems:
+        run["registryProblems"] = problems
     return write_run(evidence_dir / run_id, run, raw, output_dir)
 
 
