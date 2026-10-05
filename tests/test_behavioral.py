@@ -440,7 +440,8 @@ class RunTests(unittest.TestCase):
         self.assertIsInstance(execution["argv"], list)
         self.assertEqual(execution["cwd"], self.project)
         self.assertEqual(execution["env"]["BASE_URL"], "http://127.0.0.1:4173")
-        self.assertTrue(execution["env"]["PLAYWRIGHT_JSON_OUTPUT_NAME"].endswith("raw/playwright.json"))
+        self.assertEqual(Path(execution["env"]["PLAYWRIGHT_JSON_OUTPUT_NAME"]).parts[-2:],
+                         ("raw", "playwright.json"))
         self.assertFalse(any(a.startswith("--project") or a.startswith("-c") for a in execution["argv"]))
 
     def test_the_project_configuration_is_not_modified(self) -> None:
