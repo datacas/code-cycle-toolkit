@@ -84,9 +84,10 @@ jobs:
           sh -n scripts/get.sh
 
       - name: Lint Bash installer
+        # System tools are preinstalled on the self-hosted runner; the workflow
+        # only runs them and needs no root.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y shellcheck
+          command -v shellcheck >/dev/null || { echo "shellcheck is not installed on the runner" >&2; exit 1; }
           shellcheck scripts/install.sh scripts/get.sh
 
       - name: Install through the one-command installer
