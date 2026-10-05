@@ -1378,6 +1378,7 @@ class ExplicitCalibrationTests(unittest.TestCase):
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc.main(["--repo", "owner/api", "--task", "API-7",
+                             "--workspace", "current",
                              "--config", str(config),
                              "--database", str(Path(temporary) / "t.sqlite"),
                              *extra])
