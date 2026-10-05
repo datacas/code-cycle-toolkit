@@ -19,7 +19,9 @@ env:
 jobs:
   validate:
     name: Skills, manifests, and Bash installer
-    runs-on: ubuntu-latest
+    # Self-hosted runner: never run pull requests from forks on it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
