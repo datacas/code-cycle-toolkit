@@ -245,7 +245,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `code_cycle.worktree_dir` | `.worktree` | Repository-relative base for persistent worker worktrees; review clones remain temporary and outside it |
-| `--local-only` | off | Rehearsal: implement only, no publishing, needs a linked worktree in `--cwd` |
+| `--local-only` | off | Rehearsal: implement only, no publishing; requires `--workspace current` and a linked worktree in `--cwd` |
 | `--timeout` | adapter default (21600 s / 6 h) | Maximum time for one dispatch. `--detach` only avoids the launching host's task limit; it does not change this per-dispatch timeout. |
 | `--detach` | off | Start the cycle in its own session and return at once, printing its process ID, a log path, and a `cycle_status.py --line --since <timestamp>` command. Use it whenever an agent or another host that limits a task's time launches the cycle |
 | `--verbose` | off | Print stage starts, changed progress, and stage results as they happen; the final report is always printed |
@@ -255,7 +255,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 
 **Requires:** the runtime and an authenticated Codex and/or Claude CLI. For publishing stages, it also needs `gh` authenticated with push access, Codex CLI 0.138.0 or later, and a working tree on a named branch. Before any publishing dispatch, a readiness check verifies this and records `missing_capability=publication_access` when it fails.
 
-**Local-only rehearsal:** `--cwd /path/to/linked-worktree --local-only` refuses the live repository. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
+**Local-only rehearsal:** `--cwd /path/to/linked-worktree --workspace current --local-only` refuses the live repository. The explicit `current` policy is required so workspace selection cannot create another task worktree. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
 
 Implementation workflows use a task-specific linked Git worktree by default.
 The implementation, resolution, and any later code-mutating stage for one

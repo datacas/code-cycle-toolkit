@@ -46,13 +46,20 @@ class ValidatePackageTests(unittest.TestCase):
         orchestrator = (ROOT / "skills" / "cc-orchestrator" / "SKILL.md").read_text(
             encoding="utf-8"
         )
+        orca = (ROOT / "skills" / "cc-orca-orchestrator" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         documentation = (ROOT / "docs" / "configuration.md").read_text(
             encoding="utf-8"
         )
 
-        for text in (implementer, orchestrator, documentation):
+        for text in (implementer, orchestrator, orca, documentation):
             self.assertIn("linked worktree", text)
             self.assertIn("workspace=current", text)
+        for text in (implementer, orchestrator, orca):
+            self.assertIn("delimited token", text)
+            self.assertIn("existing change request links this work item", text)
+        self.assertIn("exact, delimited work-item identifier", documentation)
         self.assertIn("herdr worktree create", implementer)
         self.assertIn("herdr worktree open", implementer)
         self.assertIn("--no-focus", implementer)

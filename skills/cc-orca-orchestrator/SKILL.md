@@ -218,7 +218,7 @@ outside this directory.
 
 The default implementation workspace is a task-specific linked worktree. Reuse
 an active linked worktree only when its branch contains this work item's
-identifier or its existing change request identifies this work item; otherwise
+identifier as a delimited token or its existing change request links this work item; otherwise
 create a separate task worktree before implementation, without nesting. Keep
 implementation, resolution, and later
 code-mutating stages on that same worktree and PR branch. An explicit

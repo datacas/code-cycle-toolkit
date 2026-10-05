@@ -196,8 +196,8 @@ created. Never merge a pull request or close unrelated issues.
 
 Use a task-specific linked Git worktree by default. Before the first edit,
 inspect the active checkout and linked worktrees. Reuse the active linked
-worktree only when its branch contains this work item's identifier or its
-existing change request identifies this work item; otherwise select or create a
+worktree only when its branch contains this work item's identifier as a
+delimited token or its existing change request links this work item; otherwise select or create a
 separate task-specific worktree and continue there without nesting one inside
 another. Use the repository's
 `code_cycle.worktree_dir` as the persistent worktree base, defaulting to

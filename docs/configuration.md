@@ -122,7 +122,7 @@ base directory; see [Orca workflows](workflows.md#cc-orca-orchestrator).
 Implementation workflows use a task-specific linked worktree by default.
 `workspace=current` is a per-invocation opt-out for the current checkout; it is
 not persisted in repository configuration. An active linked worktree is reused
-only when its branch or existing change request identifies the same work item.
+only when its branch contains the exact, delimited work-item identifier or its existing change request links the same work item.
 
 ### Provider health cache
 
@@ -223,7 +223,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `run_cycle.py`
 
-`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--cwd` · `--local-only` · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--cwd` · `--workspace task|current` (default task) · `--local-only` (requires `--workspace current`) · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
 
 ### `stats.py` (used by `cc-stats`)
 

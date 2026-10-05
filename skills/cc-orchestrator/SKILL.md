@@ -504,7 +504,7 @@ line immediately before dispatch and the end line as soon as its result arrives.
 Use a task-specific linked Git worktree by default. Before dispatching
 implementation, inspect the active checkout and linked worktrees. Reuse an
 active linked worktree only when its branch contains this work item's
-identifier or its existing change request identifies this work item; otherwise
+identifier as a delimited token or its existing change request links this work item; otherwise
 create or select a separate task-specific worktree without nesting. Use
 `code_cycle.worktree_dir` as the persistent
 worktree base, defaulting to `.worktree`. Keep implementation, resolution, and

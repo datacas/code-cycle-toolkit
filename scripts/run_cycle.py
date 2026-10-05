@@ -681,7 +681,8 @@ def _stage_warnings(outcome: StageOutcome) -> list[str]:
 def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             *, change_request_id: str | None = None,
             local_only: bool = False, evidence: str = "",
-            worktree_dir: str | Path | None = None) -> str:
+            worktree_dir: str | Path | None = None,
+            workspace: str = "task") -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -693,7 +694,13 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
-    if role in {"implement", "resolve"} and worktree_dir is not None:
+    if role in {"implement", "resolve"} and workspace == "current":
+        parts.append(
+            "This run explicitly opts into the invoking checkout. Use the "
+            "supplied --cwd directly for implementation and resolution; do not "
+            "select or create another task worktree for this run."
+        )
+    elif role in {"implement", "resolve"} and worktree_dir is not None:
         parts.append(
             f"Persistent worker worktrees for this repository must use "
             f"`{worktree_dir}` as their base directory, with a task-specific "
@@ -808,6 +815,286 @@ def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
         return None
     value = completed.stdout.strip()
     return value if completed.returncode == 0 and value else None
+
+WORKSPACE_MODES = ("task", "current")
+
+
+def branch_identifies_work_item(branch: str, work_item_id: str) -> bool:
+    """Match a work-item identifier as a complete, delimited branch token."""
+    identifier = str(work_item_id).strip()
+    if not identifier:
+        return False
+    return re.search(
+        rf"(?<![A-Za-z0-9]){re.escape(identifier)}(?![A-Za-z0-9])",
+        str(branch), flags=re.IGNORECASE,
+    ) is not None
+
+
+def _selection_result(command: list[str], cwd: Path, run=subprocess.run):
+    try:
+        return run(command, cwd=str(cwd), capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CycleDriverError(
+            f"BLOCKED: worktree selection could not run {command[0]}: {error}. "
+            "To opt into the invoking checkout, rerun with --workspace current."
+        ) from error
+
+
+def _selection_text(command: list[str], cwd: Path, action: str, run=subprocess.run) -> str:
+    result = _selection_result(command, cwd, run)
+    if result.returncode != 0:
+        detail = readable(result.stderr or result.stdout, 200)
+        raise CycleDriverError(
+            f"BLOCKED: worktree selection could not {action}: {detail}. "
+            "To opt into the invoking checkout, rerun with --workspace current."
+        )
+    return result.stdout.strip()
+
+
+def _worktree_records(repository_root: Path, run=subprocess.run) -> list[dict[str, str]]:
+    output = _selection_text(
+        ["git", "worktree", "list", "--porcelain"], repository_root,
+        "list linked worktrees", run,
+    )
+    records = []
+    for block in re.split(r"\n\s*\n", output.strip()):
+        values = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            values[key] = value
+        raw_path = values.get("worktree")
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = repository_root / path
+        branch = values.get("branch", "")
+        if branch.startswith("refs/heads/"):
+            branch = branch.removeprefix("refs/heads/")
+        records.append({"path": str(path.resolve()), "branch": branch})
+    return records
+
+
+def _is_linked_worktree(path: Path) -> bool:
+    marker = path / ".git"
+    if not marker.is_file():
+        return False
+    try:
+        return marker.read_text(encoding="utf-8", errors="strict").startswith("gitdir:")
+    except OSError:
+        return False
+
+
+def _main_repository_root(repository_root: Path, run=subprocess.run) -> Path:
+    common = _selection_text(
+        ["git", "rev-parse", "--git-common-dir"], repository_root,
+        "locate the main repository worktree", run,
+    )
+    common_path = Path(common)
+    if not common_path.is_absolute():
+        common_path = repository_root / common_path
+    common_path = common_path.resolve()
+    if common_path.name == ".git":
+        return common_path.parent
+    return repository_root
+
+
+def _default_base_ref(repository_root: Path, config: dict, run=subprocess.run) -> str:
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    configured = repository.get("default_branch") if isinstance(repository, dict) else None
+    candidates = []
+    if isinstance(configured, str) and configured.strip():
+        candidates.extend((f"refs/remotes/origin/{configured}",
+                           f"refs/heads/{configured}"))
+    else:
+        symbolic = _selection_result(
+            ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            repository_root, run,
+        )
+        if symbolic.returncode == 0 and symbolic.stdout.strip():
+            candidates.append(symbolic.stdout.strip())
+        candidates.extend((
+            "refs/remotes/origin/main", "refs/heads/main",
+            "refs/remotes/origin/master", "refs/heads/master",
+        ))
+    for ref in candidates:
+        probe = _selection_result(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            repository_root, run,
+        )
+        if probe.returncode == 0 and probe.stdout.strip():
+            return ref
+    raise CycleDriverError(
+        "BLOCKED: cannot identify the repository's default branch for a new "
+        "task worktree. Configure code_cycle.repository.default_branch or "
+        "rerun with --workspace current to opt into the invoking checkout."
+    )
+
+
+def _pull_request_branch(repo_id: str, change_request_id: str, work_item_id: str,
+                         repository_root: Path, run=subprocess.run) -> str:
+    reference = change_request_id.lstrip("#")
+    raw = _selection_text(
+        ["gh", "pr", "view", reference, "--repo", repo_id, "--json",
+         "state,headRefName,closingIssuesReferences"],
+        repository_root, f"read pull request {change_request_id}", run,
+    )
+    try:
+        pull = json.loads(raw)
+    except ValueError as error:
+        raise CycleDriverError(
+            f"BLOCKED: pull request {change_request_id} returned invalid workspace metadata. "
+            "Rerun with --cwd set to its linked worktree or use --workspace current."
+        ) from error
+    state = str(pull.get("state") or "").upper()
+    if state != "OPEN":
+        raise CycleDriverError(
+            f"BLOCKED: pull request {change_request_id} is {state or 'unknown'}, not open. "
+            "Use its active worktree or explicitly opt in with --workspace current."
+        )
+    branch = pull.get("headRefName")
+    if not isinstance(branch, str) or not branch:
+        raise CycleDriverError(
+            f"BLOCKED: pull request {change_request_id} names no head branch. "
+            "Rerun with --cwd set to its linked worktree or use --workspace current."
+        )
+    task = str(work_item_id).strip().lstrip("#")
+    linked_issues = pull.get("closingIssuesReferences") or []
+    linked = any(str(item.get("number")) == task for item in linked_issues
+                 if isinstance(item, dict))
+    if not linked and not branch_identifies_work_item(branch, task):
+        raise CycleDriverError(
+            f"BLOCKED: pull request {change_request_id} does not identify work item "
+            f"{work_item_id}; provide its task worktree with --cwd or explicitly "
+            "opt in with --workspace current."
+        )
+    return branch
+
+
+def select_workspace(work_item_id: str, repo_id: str, config: dict, *,
+                     workspace: str = "task", cwd: str | None = None,
+                     change_request_id: str | None = None,
+                     continue_work: bool = False, run=subprocess.run) -> tuple[str, Path | None]:
+    """Select one task worktree before any cycle stage can mutate the checkout."""
+    current = Path(cwd or Path.cwd()).expanduser().resolve()
+    if not current.is_dir():
+        raise CycleDriverError(f"BLOCKED: workspace does not exist: {current}")
+    if workspace not in WORKSPACE_MODES:
+        raise CycleDriverError(f"unknown workspace mode: {workspace}")
+    if workspace == "current":
+        return str(current), None
+    root_text = _selection_text(
+        ["git", "rev-parse", "--show-toplevel"], current,
+        "locate the Git repository", run,
+    )
+    repository_root = Path(root_text).resolve()
+    main_root = _main_repository_root(repository_root, run)
+    herdr_active = os.environ.get("HERDR_ENV") == "1"
+    requested_branch = (
+        _pull_request_branch(repo_id, change_request_id, work_item_id, repository_root, run)
+        if change_request_id else None
+    )
+    records = _worktree_records(main_root, run)
+    matches = [
+        Path(item["path"]) for item in records
+        if item["branch"] and _is_linked_worktree(Path(item["path"]))
+        and ((item["branch"] == requested_branch) if requested_branch
+             else branch_identifies_work_item(item["branch"], work_item_id))
+    ]
+    if len(matches) > 1:
+        names = ", ".join(str(path) for path in matches)
+        raise CycleDriverError(
+            f"BLOCKED: more than one linked worktree matches work item {work_item_id}: "
+            f"{names}. Pass --cwd for the intended worktree or --workspace current."
+        )
+    if matches:
+        selected = matches[0]
+        if herdr_active and selected != repository_root:
+            _selection_text(
+                ["herdr", "worktree", "open", "--cwd", str(main_root),
+                 "--path", str(selected), "--no-focus"],
+                main_root, f"open linked worktree {selected} in Herdr", run,
+            )
+        prompt_root = repository_root if selected == repository_root else main_root
+        return str(selected), resolve_worktree_dir(config, prompt_root)
+    if continue_work:
+        raise CycleDriverError(
+            "BLOCKED: no active linked worktree matches the interrupted task. "
+            "Provide its path with --cwd, or explicitly opt into the invoking "
+            "checkout with --workspace current."
+        )
+
+    worktree_dir = resolve_worktree_dir(config, main_root)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(work_item_id).strip()).strip(".-")
+    if not slug:
+        raise CycleDriverError(f"BLOCKED: work item {work_item_id!r} has no safe worktree name")
+    branch = f"task-{slug}"
+    target = (worktree_dir / branch).resolve()
+    try:
+        target.relative_to(worktree_dir.resolve())
+    except ValueError as error:
+        raise CycleDriverError("BLOCKED: task worktree path escapes its configured base") from error
+    if target.exists():
+        raise CycleDriverError(
+            f"BLOCKED: task worktree path already exists but is not an active matching "
+            f"worktree: {target}. Inspect it, or opt into the current checkout with "
+            "--workspace current."
+        )
+    try:
+        worktree_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise CycleDriverError(
+            f"BLOCKED: cannot create worktree base {worktree_dir}: {error}. "
+            "Use --workspace current to opt into the invoking checkout."
+        ) from error
+    branches = set(_selection_text(
+        ["git", "branch", "--format=%(refname:short)"], main_root,
+        "inspect local branches", run,
+    ).splitlines())
+    base_ref = None
+    create_branch = False
+    if requested_branch:
+        branch = requested_branch
+        if branch not in branches:
+            number = (change_request_id or "").lstrip("#")
+            if not re.fullmatch(r"[1-9][0-9]*", number):
+                raise CycleDriverError(
+                    f"BLOCKED: cannot fetch pull request branch {branch} without a numeric "
+                    "GitHub change-request ID. Provide its linked worktree with --cwd."
+                )
+            fetched_ref = f"refs/code-cycle/pulls/{number}/head"
+            _selection_text(
+                ["git", "fetch", "origin",
+                 f"+refs/pull/{number}/head:{fetched_ref}"],
+                main_root, f"fetch pull request {number}'s head", run,
+            )
+            base_ref = fetched_ref
+            create_branch = True
+    elif branch not in branches:
+        base_ref = _default_base_ref(main_root, config, run)
+        create_branch = True
+
+    if herdr_active:
+        command = [
+            "herdr", "worktree", "create", "--cwd", str(main_root),
+            "--branch", branch, "--path", str(target), "--no-focus",
+        ]
+        if base_ref:
+            command.extend(["--base", base_ref])
+    else:
+        command = ["git", "worktree", "add"]
+        if create_branch:
+            command.extend(["-b", branch])
+        command.extend([str(target), base_ref or branch])
+    _selection_text(command, main_root, f"create linked worktree {target}", run)
+    if not _is_linked_worktree(target):
+        raise CycleDriverError(
+            f"BLOCKED: worktree manager did not create a linked worktree at {target}. "
+            "Use --workspace current only if you explicitly accept editing the invoking checkout."
+        )
+    return str(target), worktree_dir
 
 
 def evidence_root() -> Path:
@@ -1103,6 +1390,7 @@ def run_cycle(
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
     continue_work: bool = False,
     worktree_dir: str | Path | None = None,
+    workspace: str = "task",
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1196,7 +1484,8 @@ def run_cycle(
                 role, compose(role, repo_id, task_id, instruction,
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence,
-                              worktree_dir=worktree_dir),
+                              worktree_dir=worktree_dir,
+                              workspace=workspace),
                 escalated=escalated, **stage_kwargs)
             if artifact is not None:
                 tampered = artifact.changed()
@@ -2042,8 +2331,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
+    parser.add_argument("--workspace", choices=WORKSPACE_MODES, default="task",
+                        help="workspace policy: task worktree by default, or current checkout")
     parser.add_argument("--local-only", action="store_true",
-                        help=("run only in the explicit --cwd linked worktree; "
+                        help=("run only in the explicit --cwd linked worktree "
+                              "with --workspace current; "
                               "stop after implementation without publishing"))
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds one dispatch may take")
@@ -2070,14 +2362,38 @@ def main(argv: list[str] | None = None) -> int:
                        continue_work=args.continue_work)
         repo, profiles, routing_strategy = plan_with_strategy(args)
         config = resolve_config(args)
-        if args.continue_work:
-            check_continuation(args.cwd, config)
+        if args.local_only:
+            validate_local_only_cwd(args.cwd)
+            if args.workspace != "current":
+                raise CycleDriverError(
+                    "--local-only requires --workspace current to use the "
+                    "explicitly supplied linked worktree"
+                )
+        if args.continue_work and not args.cwd:
+            raise CycleDriverError(
+                "--continue needs --cwd: the checkout the interrupted run used"
+            )
         if args.start_from in RESUMES:
             host = (config.get("code_cycle") or {}).get("code_host")
             if host not in (None, "github"):
                 raise CycleDriverError(
                     f"resuming reads the pull request through GitHub; code_host "
                     f"{host} is not supported")
+        selected_cwd, worktree_dir = select_workspace(
+            args.task, repo, config, workspace=args.workspace, cwd=args.cwd,
+            change_request_id=(args.change_request if args.start_from in RESUMES else None),
+            continue_work=args.continue_work,
+        )
+        if (args.local_only or args.continue_work) and (
+                not args.cwd or Path(args.cwd).resolve() != Path(selected_cwd).resolve()):
+            raise CycleDriverError(
+                "BLOCKED: the explicitly supplied --cwd does not identify the selected "
+                "task worktree. Pass its path with --cwd or use --workspace current."
+            )
+        args.cwd = selected_cwd
+        if args.continue_work:
+            check_continuation(args.cwd, config)
+        if args.start_from in RESUMES:
             check_change_request(repo, args.change_request, args.cwd)
     except CycleDriverError as error:
         parser.error(str(error))
@@ -2088,13 +2404,6 @@ def main(argv: list[str] | None = None) -> int:
         return detach(list(sys.argv[1:] if argv is None else argv), args.database)
 
     change_bases = change_bases_of(config)
-    repository_root = _git_line(
-        args.cwd or str(Path.cwd()), ["rev-parse", "--show-toplevel"], 10,
-    )
-    worktree_dir = (
-        resolve_worktree_dir(config, repository_root)
-        if repository_root else None
-    )
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
     issue_review = (IssueReviewMode(args.issue_review) if args.issue_review
@@ -2128,6 +2437,7 @@ def main(argv: list[str] | None = None) -> int:
                 issue_review=issue_review,
                 continue_work=args.continue_work,
                 worktree_dir=worktree_dir,
+                workspace=args.workspace,
             )
     except CycleDriverError as error:
         parser.error(str(error))
