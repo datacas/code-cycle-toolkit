@@ -91,6 +91,7 @@ Implements one work item and takes it to a tested pull request.
 ```text
 Use cc-implement-issue for issue 123 and open a pull request.
 Use cc-implement-issue for work item ENG-123 with issue_provider=plane code_host=bitbucket repository=workspace/repo.
+Use cc-implement-issue for issue 123 with workspace=current and open a pull request.
 ```
 
 ### `cc-initial-review`

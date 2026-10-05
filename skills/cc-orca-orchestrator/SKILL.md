@@ -173,6 +173,7 @@ Parse the invocation, for example:
 | `merge` | `manual` | Fixed. Automatic merge is not implemented. |
 | `paired_review` | `false` | Dispatch two reviewers over one commit for calibration. See *Paired review*. |
 | `campaign` | none | Campaign identifier, required when `paired_review=true`. |
+| `workspace` | task worktree | `task` (default) or `current`; `workspace=current` opts this run into the invoking checkout. |
 
 `repo` and the provider fields exist because a work-item identifier alone is
 ambiguous whenever the environment holds more than one repository or service.
@@ -214,6 +215,16 @@ worktree, create it once under the repository-relative
 `code_cycle.worktree_dir` from `.code-cycle.yml` (default `.worktree`), then
 keep every later Task there. Keep isolated disposable review workspaces
 outside this directory.
+
+The default implementation workspace is a task-specific linked worktree. Reuse
+an active linked worktree only when its branch contains this work item's
+identifier as a delimited token or its existing change request links this work item; otherwise
+create a separate task worktree before implementation, without nesting. Keep
+implementation, resolution, and later
+code-mutating stages on that same worktree and PR branch. An explicit
+`workspace=current` invocation opts into the current checkout. If Orca cannot
+select a task worktree and no current-checkout opt-out was requested, stop as
+`BLOCKED` with the limitation; never silently use the coordinator checkout.
 
 The current Orca CLI creates `new-child` worktrees under Orca's managed
 location and does not document a caller-selected base directory. Do not treat

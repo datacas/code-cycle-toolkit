@@ -359,12 +359,12 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertNotIn("detached:", refused.stdout)
 
     def test_an_interrupted_implementation_continues_from_its_checkout(self) -> None:
-        refused = self.run_cycle("--continue")
+        refused = self.run_cycle("--continue", "--workspace", "current")
         self.assertEqual(2, refused.returncode)
         self.assertIn("nothing to continue", refused.stderr)
 
         (self.project / "partial.txt").write_text("half done\n", encoding="utf-8")
-        continued = self.run_cycle("--continue")
+        continued = self.run_cycle("--continue", "--workspace", "current")
 
         self.assertEqual(0, continued.returncode, continued.stderr)
         closing = [json.loads(row["payload"]) for row in self.all_rows()
