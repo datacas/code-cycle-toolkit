@@ -1017,8 +1017,9 @@ def select_workspace(work_item_id: str, repo_id: str, config: dict, *,
                  "--path", str(selected), "--no-focus"],
                 main_root, f"open linked worktree {selected} in Herdr", run,
             )
-        prompt_root = repository_root if selected == repository_root else main_root
-        return str(selected), resolve_worktree_dir(config, prompt_root)
+        # Resolve the configured base from the main root even when reusing a
+        # linked checkout, so worker worktrees are not nested inside it.
+        return str(selected), resolve_worktree_dir(config, main_root)
     if continue_work:
         raise CycleDriverError(
             "BLOCKED: no active linked worktree matches the interrupted task. "

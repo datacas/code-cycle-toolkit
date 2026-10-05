@@ -1591,7 +1591,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
             )
             self.assert_same_path(selected, selected_again)
 
-    def test_matching_active_task_worktree_uses_its_worker_base(self) -> None:
+    def test_matching_active_task_worktree_uses_repository_base_in_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
             config = self.repository(root)
@@ -1606,7 +1606,16 @@ class WorkspaceSelectionTests(unittest.TestCase):
             )
 
             self.assert_same_path(task_worktree, selected)
-            self.assert_same_path(task_worktree / ".worktree", base)
+            self.assert_same_path(root / ".worktree", base)
+            prompt = rc.compose(
+                "resolve", "owner/api", "151", change_request_id="153",
+                worktree_dir=base,
+            )
+            self.assertIn(f"`{base}` as their base directory", prompt)
+            self.assertNotIn(
+                f"`{task_worktree / '.worktree'}` as their base directory",
+                prompt,
+            )
             self.assertFalse((root / ".worktree" / "task-151").exists())
 
     def test_substring_worktree_is_not_reused_for_another_item(self) -> None:
