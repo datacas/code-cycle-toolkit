@@ -287,7 +287,7 @@ heartbeats while work is active, when the active workspace changes, and as soon
 as the host reports an error, send one concise line:
 
 ```text
-<result icon?> <role icon> [HH:MM] <stage> · <executor> <provider>/<model> <effort> · <elapsed> · cwd <path> · repo <root> · branch <name|detached|unknown> · <workspace kind> · <activity>
+<result icon?> <role icon> [HH:MM] <parent › delegated substage?> · <state> · <executor> <provider>/<model> <effort> · total <elapsed> · stage <elapsed> · round <n?> · cwd <path> · repo <root> · branch <name|detached|unknown> · <workspace kind> · <activity>
 ```
 
 Choose a role icon consistently: `🧭` bootstrap/issue review, `🛠️`
@@ -297,7 +297,13 @@ result is available: `✅` succeeded/approved, `⚠️` changes requested or
 needs refinement, `⛔` blocked/stopped, and `❌` failed/errored. A reported
 error gets `❌` immediately; do not wait for the stage completion line. Keep
 these emoji visible without relying on ANSI color. At completion, mark the stage
-as `done` and include its outcome or reported status.
+as `done` and include its outcome or reported status. Use `running` while a
+stage executes, `waiting` before the first stage, `blocked` when a decision or
+external action is needed, and `failed` for an error. When a delegated sub-pass
+runs, name both its parent and sub-stage (for example, `resolve › security
+(delegated)`). Show the current review/resolve round when one applies. Keep the
+overall elapsed time measured from task start across stage transitions, and
+show the current stage elapsed time separately.
 
 Use details from the actual dispatched worker/terminal or the active in-agent
 workspace, never from the coordinator's own checkout by assumption. Include the
@@ -311,11 +317,11 @@ branch. Do not infer that a branch or worktree was created from its name. Use
 clause.
 
 Measure cadence from the start of the overall task, not from each stage:
-heartbeat every 2 minutes through minute 15, emit at the 15-minute threshold,
-then every 5 minutes (20, 25, ...). Stage transitions, errors, and observed
-workspace changes are immediate and do not reset the schedule. The
-`progress_interval` invocation value sets the short-run cadence; default it to
-2 minutes, then use 5 minutes after 15 minutes.
+heartbeat every 1 minute through minute 5, every 2 minutes through minute 15,
+then every 5 minutes (20, 25, ...). The `progress_interval` invocation value
+sets the first 5-minute segment; default it to 1 minute. Stage transitions,
+errors, and observed workspace changes are immediate and do not reset the
+schedule.
 
 For a detached `run_cycle.py`, keep stage start and end lines immediate in the
 coordinator. Follow the status snapshots through the host's monitoring
@@ -324,12 +330,18 @@ RFC 3339 timestamp with subsecond precision and save it as the cursor for the
 next check. Run `cycle_status.py --line --since <previous-cursor>`; its lines
 include the executor-reported workspace snapshot and can be relayed verbatim.
 Capturing the next cursor before reading ensures updates written during or
-after the check are included on the next wake-up. Use status-change wake-ups
-when the host supports them, plus the adaptive heartbeat. Do not keep a
-foreground or background task open just to wait for progress. If the host only
-supports timed wake-ups, updates may be delayed by one interval; report each
-stage transition and any workspace change as soon as the snapshot exposes it.
-When a `cycle done` line appears, stop polling and report its final status.
+after the check are included on the next wake-up. Prefer a host-side
+status-change notification to wake the coordinator when available. Otherwise,
+use the adaptive polling schedule; unchanged status lines are suppressed, and
+the extra model turns caused by polling are expected. Lack of host notifications
+must never stop the cycle. Do not keep a foreground or background task open just
+to wait for progress. If the host only supports timed wake-ups, updates may be
+delayed by one interval; report each stage transition and any workspace change
+as soon as the snapshot exposes it. A final `BLOCKED`, `HUMAN_INTERVENTION`, or
+`NEEDS_REFINEMENT` line includes the stop reason and the first pending question
+with its options; ask that question immediately, one at a time, instead of
+ending at `cycle done`. When any other `cycle done` line appears, stop polling
+and report its final status.
 
 For in-agent work, including `single_agent` stages and Orca coordinator steps,
 emit the same start and end lines yourself. For each worker Task, emit the start
