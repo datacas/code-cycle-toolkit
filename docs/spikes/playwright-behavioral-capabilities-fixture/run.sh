@@ -8,5 +8,7 @@ name=$1; shift
 out_dir="out/$name"
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
-PLAYWRIGHT_JSON_OUTPUT_NAME="$out_dir/playwright.json" rtk proxy npx playwright test --reporter=line,json --output="$out_dir/artifacts" "$@" > "$out_dir/stdout.txt" 2>&1
-echo "$name exit=$? json=$([ -f "$out_dir/playwright.json" ] && echo yes || echo no)" | tee -a out/exitcodes.txt
+PLAYWRIGHT_JSON_OUTPUT_NAME="$out_dir/playwright.json" npx playwright test --reporter=line,json --output="$out_dir/artifacts" "$@" > "$out_dir/stdout.txt" 2>&1
+test_status=$?
+echo "$name exit=$test_status json=$([ -f "$out_dir/playwright.json" ] && echo yes || echo no)" | tee -a out/exitcodes.txt
+exit "$test_status"
