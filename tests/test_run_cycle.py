@@ -1547,6 +1547,14 @@ class WorkspaceSelectionTests(unittest.TestCase):
             raise AssertionError(result.stderr or result.stdout)
         return result.stdout.strip()
 
+    def assert_same_path(self, expected: str | Path, actual: str | Path) -> None:
+        canonical_expected = os.path.normcase(str(Path(expected).resolve()))
+        canonical_actual = os.path.normcase(str(Path(actual).resolve()))
+        self.assertTrue(
+            canonical_expected == canonical_actual,
+            f"paths do not identify the same location: {expected!s} != {actual!s}",
+        )
+
     def repository(self, root: Path) -> dict:
         root.mkdir(parents=True)
         self.git(root, "init", "--initial-branch=main")
@@ -1572,8 +1580,8 @@ class WorkspaceSelectionTests(unittest.TestCase):
             selected, base = rc.select_workspace(
                 "151", "owner/api", config, cwd=str(root),
             )
-            self.assertEqual(root / ".worktree", base)
-            self.assertEqual(root / ".worktree" / "task-151", Path(selected))
+            self.assert_same_path(root / ".worktree", base)
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
             self.assertTrue((Path(selected) / ".git").is_file())
             self.assertEqual("task-151", self.git(selected, "branch", "--show-current"))
             self.assertEqual("main", self.git(root, "branch", "--show-current"))
@@ -1581,7 +1589,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
             selected_again, _ = rc.select_workspace(
                 "151", "owner/api", config, cwd=str(root),
             )
-            self.assertEqual(selected, selected_again)
+            self.assert_same_path(selected, selected_again)
 
     def test_matching_active_task_worktree_uses_its_worker_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1597,8 +1605,8 @@ class WorkspaceSelectionTests(unittest.TestCase):
                 "151", "owner/api", config, cwd=str(task_worktree),
             )
 
-            self.assertEqual(task_worktree, Path(selected))
-            self.assertEqual(task_worktree / ".worktree", base)
+            self.assert_same_path(task_worktree, selected)
+            self.assert_same_path(task_worktree / ".worktree", base)
             self.assertFalse((root / ".worktree" / "task-151").exists())
 
     def test_substring_worktree_is_not_reused_for_another_item(self) -> None:
@@ -1611,8 +1619,11 @@ class WorkspaceSelectionTests(unittest.TestCase):
             selected, _ = rc.select_workspace(
                 "151", "owner/api", config, cwd=str(root),
             )
-            self.assertEqual(root / ".worktree" / "task-151", Path(selected))
-            self.assertNotEqual(wrong, Path(selected))
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assertNotEqual(
+                os.path.normcase(str(Path(wrong).resolve())),
+                os.path.normcase(str(Path(selected).resolve())),
+            )
 
     def test_resume_creates_a_task_worktree_on_the_pull_request_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1626,7 +1637,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
                     "151", "owner/api", config, cwd=str(root),
                     change_request_id="153",
                 )
-            self.assertEqual(root / ".worktree" / "task-151", Path(selected))
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
             self.assertEqual("release/prompt",
                              self.git(selected, "branch", "--show-current"))
 
@@ -1644,7 +1655,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
                     "151", "owner/api", config, cwd=str(root),
                     change_request_id="153",
                 )
-            self.assertEqual(target, Path(selected))
+            self.assert_same_path(target, selected)
             self.assertEqual("release/prompt",
                              self.git(selected, "branch", "--show-current"))
 
@@ -1655,7 +1666,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
             selected, base = rc.select_workspace(
                 "151", "owner/api", {}, workspace="current", cwd=str(root),
             )
-            self.assertEqual(root, Path(selected))
+            self.assert_same_path(root, selected)
             self.assertIsNone(base)
             self.assertFalse((root / ".worktree").exists())
 
@@ -1688,16 +1699,14 @@ class WorkspaceSelectionTests(unittest.TestCase):
                     "151", "owner/api", config, cwd=str(source), run=run,
                 )
 
-            self.assertEqual(root / ".worktree" / "task-151", Path(selected))
+            self.assert_same_path(root / ".worktree" / "task-151", selected)
             self.assertEqual(1, len(herdr_commands))
-            self.assertEqual(
-                [
-                    "herdr", "worktree", "create", "--cwd", str(root),
-                    "--branch", "task-151", "--path", str(Path(selected)),
-                    "--no-focus", "--base", "refs/heads/main",
-                ],
-                herdr_commands[0],
-            )
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "create", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--branch", "task-151", "--path"], command[5:8])
+            self.assert_same_path(selected, command[8])
+            self.assertEqual(["--no-focus", "--base", "refs/heads/main"], command[9:])
             self.assertTrue((Path(selected) / ".git").is_file())
 
     def test_herdr_failure_blocks_without_a_git_fallback(self) -> None:
@@ -1758,14 +1767,14 @@ class WorkspaceSelectionTests(unittest.TestCase):
                     "151", "owner/api", config, cwd=str(root), run=run,
                 )
 
-            self.assertEqual(target, Path(selected))
-            self.assertEqual(
-                [[
-                    "herdr", "worktree", "open", "--cwd", str(root),
-                    "--path", str(target), "--no-focus",
-                ]],
-                herdr_commands,
-            )
+            self.assert_same_path(target, selected)
+            self.assertEqual(1, len(herdr_commands))
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "open", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--path"], command[5:6])
+            self.assert_same_path(target, command[6])
+            self.assertEqual(["--no-focus"], command[7:])
 
     def test_herdr_uses_parent_repository_for_open_from_linked_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1794,14 +1803,14 @@ class WorkspaceSelectionTests(unittest.TestCase):
                     "151", "owner/api", config, cwd=str(source), run=run,
                 )
 
-            self.assertEqual(target, Path(selected))
-            self.assertEqual(
-                [[
-                    "herdr", "worktree", "open", "--cwd", str(root),
-                    "--path", str(target), "--no-focus",
-                ]],
-                herdr_commands,
-            )
+            self.assert_same_path(target, selected)
+            self.assertEqual(1, len(herdr_commands))
+            command = herdr_commands[0]
+            self.assertEqual(["herdr", "worktree", "open", "--cwd"], command[:4])
+            self.assert_same_path(root, command[4])
+            self.assertEqual(["--path"], command[5:6])
+            self.assert_same_path(target, command[6])
+            self.assertEqual(["--no-focus"], command[7:])
 
     def test_unavailable_selection_is_blocked_with_the_opt_out(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1847,10 +1856,13 @@ class WorkspaceSelectionTests(unittest.TestCase):
                 self.assertEqual(0, status)
                 expected = (root if mode == "current"
                             else root / ".worktree" / "task-151")
-                self.assertEqual(str(expected), dispatched["cwd"])
+                self.assert_same_path(expected, dispatched["cwd"])
                 self.assertEqual(mode, dispatched["workspace"])
                 expected_worktree_dir = (root / ".worktree" if mode == "task" else None)
-                self.assertEqual(expected_worktree_dir, dispatched["worktree_dir"])
+                if expected_worktree_dir is None:
+                    self.assertIsNone(dispatched["worktree_dir"])
+                else:
+                    self.assert_same_path(expected_worktree_dir, dispatched["worktree_dir"])
                 self.assertEqual("main", self.git(root, "branch", "--show-current"))
 
     def test_cli_reports_blocked_selection_without_dispatch(self) -> None:
