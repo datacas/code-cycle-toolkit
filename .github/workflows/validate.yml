@@ -31,6 +31,13 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Make the Python shared library findable
+        # The self-hosted runner's tool-cache Python is built shared; child
+        # processes started by the tests need its lib/ on the loader path.
+        shell: bash
+        run: |
+          echo "LD_LIBRARY_PATH=$pythonLocation/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
       - name: Install the configuration parser
         # PyYAML is the runtime's one optional dependency, needed only to read a
         # repository's `.code-cycle.yml`. Installed here so the configuration
