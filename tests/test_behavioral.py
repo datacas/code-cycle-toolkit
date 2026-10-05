@@ -425,6 +425,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(stored["toolVersion"], "1.63.0")
         self.assertTrue(stored["configHash"])
 
+    def test_a_multi_id_run_rejects_an_id_missing_from_the_listing(self) -> None:
+        result, calls = self.run_with(
+            load("grep_look"), keep_ids(load("list"), ["AUTH-LOGIN-001"]),
+            ids=["AUTH-LOGIN-001", "CART-ADD-002"])
+
+        self.assertEqual((result["status"], result["reason"]),
+                         ("error", "requested_ids_not_listed"))
+        self.assertEqual(result["missingIds"], ["CART-ADD-002"])
+        self.assertEqual(len(calls), 1, "the Playwright test run must not start")
+
     def test_playwright_is_invoked_with_the_required_controls_and_no_shell(self) -> None:
         _, calls = self.run_with(load("grep_look"), keep_ids(load("list"), ["AUTH-LOGIN-001"]),
                                  ids=["AUTH-LOGIN-001"], base_url="http://127.0.0.1:4173")
@@ -566,7 +576,7 @@ class EvidenceTests(unittest.TestCase):
 
         evidence = {e["kind"]: e for e in run["results"][0]["evidence"] if e["attempt"] == 0}
         self.assertEqual(evidence["error-context"]["path"],
-                         "artifacts/RETRY-REPEAT-001/attempt-0/error-context.md")
+                         "artifacts/RETRY-REPEAT-001/attempt-0/001-error-context.md")
         self.assertTrue((run_dir / evidence["screenshot"]["path"]).is_file())
         self.assertEqual(evidence["error-context"]["sha256"],
                          bv.sha256_file(run_dir / evidence["error-context"]["path"]))
@@ -585,11 +595,44 @@ class EvidenceTests(unittest.TestCase):
                        run_dir / "failures", run_dir / "failures" / "RETRY-REPEAT-001"]
         files = [run_dir / "raw" / "playwright.json", run_dir / "run.json", run_dir / "summary.md",
                  run_dir / "failures" / "RETRY-REPEAT-001" / "bundle.json",
-                 run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "error-context.md",
-                 run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "test-failed-1.png"]
+                  run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "001-error-context.md",
+                  run_dir / "artifacts" / "RETRY-REPEAT-001" / "attempt-0" / "002-test-failed-1.png"]
 
         self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in directories))
         self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files))
+
+    def test_same_named_attachments_are_collected_without_overwriting(self) -> None:
+        report = self.report_with_artifacts()
+        result = spec_named(report, "R-REPEATED")["tests"][0]["results"][0]
+        first = self.output / "first" / "same.png"
+        second = self.output / "second" / "same.png"
+        first.parent.mkdir()
+        second.parent.mkdir()
+        first.write_bytes(b"first image")
+        second.write_bytes(b"second image")
+        result["attachments"].extend([
+            {"name": "first", "contentType": "image/png", "path": str(first)},
+            {"name": "second", "contentType": "image/png", "path": str(second)},
+        ])
+        outcome = bv.evaluate(report, expected_for("RETRY-REPEAT-001"), 1, root=PROJECT)
+        run = {"schema": 1, "runId": "bv-collision", "status": outcome["status"],
+               "reason": None, "commit": None, "dirty": None, "toolVersion": "1.63.0",
+               "selection": {"kind": "ids", "value": "RETRY-REPEAT-001"},
+               "errors": [], "counts": outcome["counts"], "results": outcome["results"]}
+        run_dir = self.base / "collision-run"
+        bv.write_run(run_dir, run, json.dumps(report).encode("utf-8"), self.output)
+
+        evidence = [item for item in run["results"][0]["evidence"]
+                    if item.get("status") == "collected" and item.get("path", "").endswith("same.png")]
+        self.assertEqual(len(evidence), 2)
+        first_item, second_item = evidence
+        first_path = run_dir / first_item["path"]
+        second_path = run_dir / second_item["path"]
+        self.assertNotEqual(first_item["path"], second_item["path"])
+        self.assertEqual(first_path.read_bytes(), b"first image")
+        self.assertEqual(second_path.read_bytes(), b"second image")
+        self.assertEqual(first_item["sha256"], bv.sha256_file(first_path))
+        self.assertEqual(second_item["sha256"], bv.sha256_file(second_path))
 
     def test_a_listed_artifact_that_does_not_exist_is_recorded_as_missing(self) -> None:
         run, _ = self.persist()
@@ -655,6 +698,21 @@ class NormalizeTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "pass")
             self.assertTrue((base / "evidence" / result["runId"] / "run.json").is_file())
+
+    def test_a_multi_id_ci_selection_rejects_an_id_missing_from_the_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "raw.json").write_text(json.dumps(load("grep_look")), encoding="utf-8")
+            (base / "list.json").write_text(
+                json.dumps(keep_ids(load("list"), ["AUTH-LOGIN-001"])), encoding="utf-8")
+
+            result = bv.normalize(
+                base / "raw.json", base / "list.json", 0, base / "evidence",
+                selection_kind="ids", selection_value="AUTH-LOGIN-001,CART-ADD-002")
+
+            self.assertEqual((result["status"], result["reason"]),
+                             ("error", "requested_ids_not_listed"))
+            self.assertEqual(result["missingIds"], ["CART-ADD-002"])
 
     def test_a_ci_run_with_an_invalid_identity_registry_cannot_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

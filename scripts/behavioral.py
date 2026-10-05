@@ -669,9 +669,11 @@ def _materialize_evidence(run_dir: Path, output_dir: Path | None,
     any path it likes; a path outside the output directory is recorded and left
     alone, so a test cannot make the evidence directory a copy of the host.
     """
+    attachment_index = 0
     for result in results:
         kept: list[dict[str, Any]] = []
         for item in result.get("evidence") or []:
+            attachment_index += 1
             source = item.pop("source", None)
             entry = {k: v for k, v in item.items()}
             path = Path(source) if source else None
@@ -693,7 +695,7 @@ def _materialize_evidence(run_dir: Path, output_dir: Path | None,
                 _private_mkdir(run_dir / "artifacts")
                 _private_mkdir(dest_dir.parent)
                 _private_mkdir(dest_dir)
-                dest = dest_dir / path.name
+                dest = dest_dir / f"{attachment_index:03d}-{path.name}"
                 shutil.copy2(path, dest)
                 dest.chmod(0o600)
                 entry.update({"status": "collected", "path": dest.relative_to(run_dir).as_posix(),
@@ -773,6 +775,16 @@ def write_run(run_dir: Path, run: dict[str, Any], raw: bytes | None,
     _write_private(run_dir / "summary.md", render_summary(run).encode("utf-8"))
     run["runJsonSha256"] = sha256_file(run_dir / "run.json")
     return run
+
+
+def missing_requested_ids(expected: list[dict[str, Any]], selection_kind: str,
+                          selection_value: str | None) -> list[str]:
+    """Return requested IDs absent from Playwright's authoritative test listing."""
+    if selection_kind != "ids" or not selection_value:
+        return []
+    requested = {part.strip() for part in selection_value.split(",") if part.strip()}
+    listed = {item.identity for item in expected if item.identity}
+    return sorted(requested - listed)
 
 
 # ---------------------------------------------------------------- process running
@@ -933,6 +945,10 @@ def run_behavioral(
     if problems:
         run["registryProblems"] = problems
         return finish("error", "invalid_test_registry")
+    missing_ids = missing_requested_ids(expected, selection["kind"], selection["value"])
+    if missing_ids:
+        run["missingIds"] = missing_ids
+        return finish("error", "requested_ids_not_listed")
 
     output_dir = run_dir / ".playwright-output"
     report_path = run_dir / "raw" / "playwright.json"
@@ -969,6 +985,10 @@ def normalize(raw_path: Path, list_path: Path, exit_code: int, evidence_dir: Pat
     if problems:
         outcome.update({"status": "error", "reason": "invalid_test_registry",
                         "errors": [], "counts": _empty_counts(len(expected)), "results": []})
+    missing_ids = [] if problems else missing_requested_ids(
+        expected, selection_kind, selection_value)
+    if missing_ids:
+        outcome.update({"status": "error", "reason": "requested_ids_not_listed"})
     commit, dirty = git_state(project) if project else (None, None)
     run: dict[str, Any] = {
         "schema": SCHEMA_VERSION, "runId": run_id, "tool": "playwright", "toolVersion": tool_version,
@@ -981,6 +1001,8 @@ def normalize(raw_path: Path, list_path: Path, exit_code: int, evidence_dir: Pat
     }
     if problems:
         run["registryProblems"] = problems
+    if missing_ids:
+        run["missingIds"] = missing_ids
     return write_run(evidence_dir / run_id, run, raw, output_dir)
 
 
