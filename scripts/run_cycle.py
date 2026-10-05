@@ -697,8 +697,15 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts.append(
             f"Persistent worker worktrees for this repository must use "
             f"`{worktree_dir}` as their base directory, with a task-specific "
-            "child name. This setting applies to persistent worker worktrees; "
-            "keep isolated disposable review clones outside this directory."
+            "child name. Use one task-specific linked worktree by default and "
+            "keep implementation and resolution on that same worktree and PR "
+            "branch. Reuse an active linked worktree only when it belongs to "
+            "this work item; do not nest worktrees. If worktree selection is "
+            "unavailable, stop with an actionable BLOCKED result instead of "
+            "editing the invoking checkout. `workspace=current` is the "
+            "explicit per-run opt-out. This setting applies to persistent "
+            "worker worktrees; keep isolated disposable review clones outside "
+            "this directory."
         )
     if evidence:
         parts.append(evidence)

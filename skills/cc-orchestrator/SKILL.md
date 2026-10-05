@@ -165,6 +165,7 @@ Accept:
 | `issue_review` | `code_cycle.issue_review.mode`, else `auto` | `auto` or `off`; see *Issue review before implementation*. |
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `merge` | `manual` | Fixed; automatic merge is not supported. |
+| `workspace` | task worktree | `task` (default) or `current`; `workspace=current` opts this run into the invoking checkout. |
 
 Reject an iteration limit below `1`. Treat an unknown or unavailable
 repository as `BLOCKED` before starting implementation.
@@ -497,6 +498,32 @@ and report its final status.
 For in-agent work, including `single_agent` stages and Orca coordinator steps,
 emit the same start and end lines yourself. For each worker Task, emit the start
 line immediately before dispatch and the end line as soon as its result arrives.
+
+## Implementation workspace
+
+Use a task-specific linked Git worktree by default. Before dispatching
+implementation, inspect the active checkout and linked worktrees. Reuse an
+active linked worktree only when its branch contains this work item's
+identifier or its existing change request identifies this work item; otherwise
+create or select a separate task-specific worktree without nesting. Use
+`code_cycle.worktree_dir` as the persistent
+worktree base, defaulting to `.worktree`. Keep implementation, resolution, and
+all other code-mutating stages for this change request on the same worktree and
+PR branch. Start the runtime with `--cwd <selected-worktree-path>` so its
+mutating stages run there. Reviews retain their existing isolated-workspace
+rules.
+
+When running inside Herdr, create with `herdr worktree create --cwd
+<repository> --branch <task-branch> --path
+<worktree-dir>/<task-name> --no-focus`. If that path already exists in Git,
+use `herdr worktree open --cwd <repository> --path
+<worktree-dir>/<task-name> --no-focus`. Use the current repository as `--cwd`
+and the resolved configured worktree base in `--path`.
+
+If the host cannot create or select a worktree, stop as `BLOCKED` and explain
+the limitation; do not continue in the current checkout. Do not start a
+mutating stage until it is running in the selected worktree. The explicit
+invocation option `workspace=current` opts this run into the current checkout.
 
 ## Workflow
 

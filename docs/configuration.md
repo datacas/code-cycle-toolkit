@@ -119,6 +119,10 @@ the repository's `.gitignore` too. The setting does not relocate disposable
 review clones, which remain outside the repository. Orca-managed worktrees use
 Orca's managed location because its current CLI does not expose a caller-chosen
 base directory; see [Orca workflows](workflows.md#cc-orca-orchestrator).
+Implementation workflows use a task-specific linked worktree by default.
+`workspace=current` is a per-invocation opt-out for the current checkout; it is
+not persisted in repository configuration. An active linked worktree is reused
+only when its branch or existing change request identifies the same work item.
 
 ### Provider health cache
 

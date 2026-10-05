@@ -192,6 +192,31 @@ The default outcome is an opened pull request. If the user explicitly asks for
 local-only work, stop after the requested local checks and report that no PR was
 created. Never merge a pull request or close unrelated issues.
 
+## Implementation workspace
+
+Use a task-specific linked Git worktree by default. Before the first edit,
+inspect the active checkout and linked worktrees. Reuse the active linked
+worktree only when its branch contains this work item's identifier or its
+existing change request identifies this work item; otherwise select or create a
+separate task-specific worktree and continue there without nesting one inside
+another. Use the repository's
+`code_cycle.worktree_dir` as the persistent worktree base, defaulting to
+`.worktree`.
+
+When running inside Herdr, use its worktree commands rather than `git worktree
+add`. Create with `herdr worktree create --cwd <repository> --branch
+<task-branch> --path <worktree-dir>/<task-name> --no-focus`. If that worktree
+already exists in Git, use `herdr worktree open --cwd <repository> --path
+<worktree-dir>/<task-name> --no-focus`. Use the repository root for `--cwd`
+and the resolved `code_cycle.worktree_dir` for `--path`.
+
+If no supported host or tool can select the worktree, stop as `BLOCKED` with
+the limitation and the explicit opt-out syntax. Never edit the active checkout
+as a fallback. Do not start editing until the implementation session is
+running in the selected worktree. A caller may explicitly request
+`workspace=current` to use the current checkout; treat that as authorization
+for this run only.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` and resolve the provider pair, repository, and

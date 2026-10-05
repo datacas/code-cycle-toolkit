@@ -453,6 +453,9 @@ class PromptContractTests(unittest.TestCase):
         )
 
         self.assertIn("`/repo/.worktree` as their base directory", prompt)
+        self.assertIn("one task-specific linked worktree by default", prompt)
+        self.assertIn("workspace=current", prompt)
+        self.assertIn("stop with an actionable BLOCKED result", prompt)
         self.assertIn("isolated disposable review clones outside", prompt)
 
     def test_review_prompt_does_not_apply_the_persistent_worktree_base(self) -> None:
