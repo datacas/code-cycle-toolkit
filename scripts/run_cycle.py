@@ -435,11 +435,19 @@ class Reported:
                 return reference
         return None
 
-    @property
-    def telemetry_pull_request_id(self) -> str | None:
-        """Return only the numeric suffix of a recognized PR reference."""
+    def telemetry_pull_request_id(self, code_host: str | None = None) -> str | None:
+        """Return a numeric suffix only when the reference identifies GitHub."""
         reference = self.change_request_id
         if not reference:
+            return None
+        if code_host not in (None, "github"):
+            return None
+        url_host = re.match(r"^https?://([^/]+)/", reference, re.IGNORECASE)
+        if url_host and url_host.group(1).lower() not in {"github.com", "www.github.com"}:
+            return None
+        if not url_host and code_host is None:
+            # A bare number or owner/repo#number has no host identity. Keep it
+            # out of GitHub reconciliation until the code host is known.
             return None
         if reference.isdecimal() and int(reference) > 0:
             return reference
@@ -1379,6 +1387,29 @@ def _status_of(payload: dict) -> str | None:
     return status
 
 
+def _work_item_scope(
+    config: dict, repo_id: str, repository_override: str | None = None
+) -> tuple[str | None, str | None]:
+    """Resolve the provider identity that should be stored with each cycle."""
+    code_cycle = config.get("code_cycle")
+    if not isinstance(code_cycle, dict):
+        return None, None
+    provider = code_cycle.get("issue_provider")
+    if provider not in {"github", "plane", "jira"}:
+        return None, None
+
+    issue = code_cycle.get("issue")
+    issue = issue if isinstance(issue, dict) else {}
+    repository = repository_override or issue.get("repository") or issue.get("project")
+    if repository is None and provider == "github":
+        # GitHub issues usually live beside the code being changed. A CLI
+        # override handles a work item owned by another repository.
+        repository = repo_id
+    if not repository:
+        return None, None
+    return provider, repository
+
+
 def run_cycle(
     repo_id: str,
     task_id: str,
@@ -1407,6 +1438,9 @@ def run_cycle(
     continue_work: bool = False,
     worktree_dir: str | Path | None = None,
     workspace: str = "task",
+    work_item_provider: str | None = None,
+    work_item_repository: str | None = None,
+    code_host: str | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1455,6 +1489,8 @@ def run_cycle(
             if change_bases else None
         ),
         verification_available=verification_available,
+        work_item_provider=work_item_provider,
+        work_item_repository=work_item_repository,
         shadow=shadow,
         skills_by_role=SKILL_FOR_ROLE,
     )
@@ -1614,7 +1650,8 @@ def run_cycle(
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
             pull_request_id = (
-                reported.telemetry_pull_request_id if role == "implement" else None
+                reported.telemetry_pull_request_id(code_host)
+                if role == "implement" else None
             )
             recorder.record_verdict(role, reported.status,
                                     **findings,
@@ -2321,6 +2358,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=("repository identifier, owner/name; defaults to "
                               f"code_cycle.repository.selector in {CONFIG_NAME}"))
     parser.add_argument("--task", required=True, help="work item identifier")
+    parser.add_argument(
+        "--work-item-repository", default=None,
+        help="provider repository or project when it differs from the configured default",
+    )
     # Labelled before routing, never after: choosing a model from a judgement
     # and then measuring by model measures the routing rather than the models.
     parser.add_argument("--difficulty", type=int, choices=(1, 2, 3), default=2)
@@ -2429,6 +2470,10 @@ def main(argv: list[str] | None = None) -> int:
     jev = load_jev_config(config)
     issue_review = (IssueReviewMode(args.issue_review) if args.issue_review
                     else load_issue_review_mode(config))
+    work_item_provider, work_item_repository = _work_item_scope(
+        config, repo, args.work_item_repository
+    )
+    code_host = (config.get("code_cycle") or {}).get("code_host")
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
         with interruptible():
@@ -2459,6 +2504,9 @@ def main(argv: list[str] | None = None) -> int:
                 continue_work=args.continue_work,
                 worktree_dir=worktree_dir,
                 workspace=args.workspace,
+                work_item_provider=work_item_provider,
+                work_item_repository=work_item_repository,
+                code_host=code_host,
             )
     except CycleDriverError as error:
         parser.error(str(error))

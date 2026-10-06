@@ -726,7 +726,9 @@ outcome, source, and observation/recording timestamps. Failed queries record a
 safe failure category and timestamp in the separate failure table without
 changing the disposition. Repeated unchanged or stale snapshots do not add
 disposition events. Existing stage and cycle rows are not rewritten, and a work
-item without a disposition remains unknown.
+item without a disposition remains unknown. Each cycle row also retains
+its work-item provider and repository/project when configured, so later cycles
+of the same work item share an identity before the next provider query.
 Each provider, repository, work-item, cycle, and pull-request value passes the
 opaque-reference check; outcome and source values are closed vocabularies.
 PR merge and revert associations are stored per PR, and a revert can revoke a

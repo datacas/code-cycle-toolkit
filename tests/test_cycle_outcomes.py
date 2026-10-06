@@ -242,6 +242,47 @@ class SeparationTests(CycleTestCase):
         self.assertFalse(self.store.cycle_outcome("owner/repo", second.cycle_id)["closed"])
 
 
+    def test_cycle_rows_preserve_the_work_item_identity(self) -> None:
+        recorder = self.recorder(
+            [ScriptedAdapter("codex"), ScriptedAdapter("claude")],
+            work_item_provider="github", work_item_repository="owner/repo",
+        )
+        recorder.stage("implement", "work")
+        recorder.record_verdict("implement", "IMPLEMENTED")
+        recorder.close("READY_FOR_MANUAL_MERGE")
+
+        rows = self.store.rows("owner/repo")
+        cycle_rows = [row for row in rows
+                      if row["payload"].get("cycle_id") == recorder.cycle_id]
+        self.assertGreaterEqual(len(cycle_rows), 3)
+        self.assertTrue(all(
+            row["payload"].get("work_item_provider") == "github"
+            and row["payload"].get("work_item_repository") == "owner/repo"
+            for row in cycle_rows
+        ))
+
+    def test_work_item_scope_uses_configured_project_and_external_override(self) -> None:
+        self.assertEqual(
+            ("github", "owner/repo"),
+            rc._work_item_scope({"code_cycle": {"issue_provider": "github"}}, "owner/repo"),
+        )
+        self.assertEqual(
+            ("github", "external/work-items"),
+            rc._work_item_scope(
+                {"code_cycle": {"issue_provider": "github"}},
+                "owner/repo",
+                "external/work-items",
+            ),
+        )
+        self.assertEqual(
+            ("jira", "ENG"),
+            rc._work_item_scope(
+                {"code_cycle": {"issue_provider": "jira", "issue": {"project": "ENG"}}},
+                "owner/repo",
+            ),
+        )
+
+
 class AllowlistTests(CycleTestCase):
     def test_outcome_fields_accept_only_their_types(self) -> None:
         for field, value in (("first_review_status", "LGTM"), ("final_approved", "yes"),
@@ -346,6 +387,32 @@ class DriverTests(RunCycleTestCase):
         verdict = [row for row in self.rows()
                    if row["role"] == "implement" and row["payload"].get("record_kind") == "verdict"][0]
         self.assertEqual("44", verdict["payload"]["pull_request_id"])
+
+    def test_a_bitbucket_pr_is_not_recorded_for_github_work_item_reconciliation(self) -> None:
+        references = (
+            ("https://bitbucket.org/owner/api/pull-requests/44", None),
+            ("44", "bitbucket"),
+            ("44", None),
+            ("44", "github"),
+        )
+        expected_ids = (None, None, None, "44")
+        for (reference, code_host), expected_id in zip(references, expected_ids):
+            implementer = Talker(
+                "codex", block("IMPLEMENTED", change_request_id=reference)
+            )
+
+            self.run_cycle(
+                implementer, Talker("claude"), work_item_provider="github",
+                work_item_repository="owner/issues", code_host=code_host,
+            )
+
+        verdicts = [row for row in self.rows()
+                    if row["role"] == "implement" and row["payload"].get("record_kind") == "verdict"]
+        self.assertEqual(4, len(verdicts))
+        self.assertEqual(
+            expected_ids,
+            tuple(verdict["payload"].get("pull_request_id") for verdict in verdicts),
+        )
 
     def test_the_checks_of_the_final_head_reach_the_verdict(self) -> None:
         """#77: whether a stage's head was green is recorded beside its claim."""

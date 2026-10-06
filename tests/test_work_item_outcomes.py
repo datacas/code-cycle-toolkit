@@ -32,6 +32,20 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.store.record_stage("owner/repo", task_id, "implement",
                                 record_kind="dispatch", cycle_id=cycle_id)
 
+    def add_scoped_cycle(
+        self, repo_id: str, task_id: str, cycle_id: str,
+        work_item_repository: str, pull_request_id: str,
+    ) -> None:
+        identity = {
+            "work_item_provider": "github",
+            "work_item_repository": work_item_repository,
+        }
+        self.store.record_stage(repo_id, task_id, "implement",
+                                record_kind="dispatch", cycle_id=cycle_id, **identity)
+        self.store.record_stage(repo_id, task_id, "implement",
+                                record_kind="verdict", cycle_id=cycle_id,
+                                pull_request_id=pull_request_id, **identity)
+
     def test_schema_fourteen_records_transitions_and_deduplicates_snapshots(self) -> None:
         first = self.store.record_work_item_disposition(
             repo_id="owner/repo", provider="github", repository="owner/repo",
@@ -335,6 +349,79 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.assertEqual((1, 0), (updated, failed))
         self.assertEqual(["44"], latest["pull_request_ids"])
         self.assertEqual(["44"], latest["resolving_pr_ids"])
+
+    def test_reconcile_scopes_cycles_and_toolkit_prs_to_the_selected_work_item_repository(self) -> None:
+        self.store.record_stage("owner/code", "120", "implement",
+                                record_kind="dispatch", cycle_id="legacy-cycle-120")
+        self.add_scoped_cycle("owner/code", "120", "cycle-a", "owner/issues-a", "44")
+        self.add_scoped_cycle("owner/code", "120", "cycle-b", "owner/issues-b", "45")
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 120, "state": "OPEN", "stateReason": None,
+                "updatedAt": "2026-10-06T10:00:00Z",
+                "closedByPullRequestsReferences": [],
+            }), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 44, "mergedAt": None, "updatedAt": "2026-10-06T10:00:00Z",
+            }), ""),
+        ])
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/code", repository="owner/issues-a", runner=runner
+        )
+
+        self.assertEqual((1, 0), (updated, failed))
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual("owner/issues-a", commands[0][5])
+        self.assertEqual(["gh", "pr", "view", "44", "--repo", "owner/code",
+                          "--json", "number,mergedAt,updatedAt"], commands[1])
+        event = self.store.latest_work_item_disposition(
+            "owner/code", "github", "owner/issues-a", "120"
+        )
+        self.assertEqual(["cycle-a"], event["cycle_ids"])
+        self.assertEqual(["owner/code#44"], event["pull_request_ids"])
+
+    def test_reconcile_uses_repository_from_provider_linked_pr_reference(self) -> None:
+        self.add_scoped_cycle("owner/code", "120", "cycle-120", "owner/issues", "44")
+
+        def runner(command, **_kwargs):
+            if command[1] == "issue":
+                self.assertEqual("owner/issues", command[5])
+                snapshot = {
+                    "number": 120, "state": "CLOSED", "stateReason": "COMPLETED",
+                    "updatedAt": "2026-10-06T10:00:00Z",
+                    "closedAt": "2026-10-06T10:00:00Z",
+                    "closedByPullRequestsReferences": [{
+                        "number": 46,
+                        "repository": {"name": "linked-prs", "owner": {"login": "owner"}},
+                    }],
+                }
+            else:
+                if command[3] == "44":
+                    self.assertEqual("owner/code", command[5])
+                    snapshot = {"number": 44, "mergedAt": None,
+                                "updatedAt": "2026-10-05T10:00:00Z"}
+                else:
+                    self.assertEqual("46", command[3])
+                    self.assertEqual("owner/linked-prs", command[5])
+                    snapshot = {
+                        "number": 46, "mergedAt": "2026-10-05T10:00:00Z",
+                        "updatedAt": "2026-10-05T10:00:00Z",
+                    }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot), stderr="")
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/code", repository="owner/issues", runner=runner
+        )
+
+        event = self.store.latest_work_item_disposition(
+            "owner/code", "github", "owner/issues", "120"
+        )
+        self.assertEqual((1, 0), (updated, failed))
+        self.assertEqual("resolved", event["outcome"])
+        self.assertEqual(["owner/code#44", "owner/linked-prs#46"], event["pull_request_ids"])
+        self.assertEqual(["owner/linked-prs#46"], event["merged_pr_ids"])
+        self.assertEqual(["owner/code#44", "owner/linked-prs#46"], event["resolving_pr_ids"])
 
     def test_cli_records_explicit_observations_and_reconciles_through_provider_runner(self) -> None:
         self.add_cycle("123", "cycle-123")

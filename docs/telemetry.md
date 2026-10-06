@@ -109,6 +109,11 @@ disposition and associations, and snapshots older than the latest observed
 transition, are ignored.
 Implementation verdicts keep only a numeric PR identifier from the reported
 change-request reference, so reconciliation can include toolkit-created PRs.
+The event qualifies that identifier with the cycled code repository when it
+differs from the work-item repository. PR links returned by GitHub retain their
+own repository too; event references use `owner/repo#number` when a PR is in a
+different repository from the work item. Older unqualified event references
+are interpreted in the work-item repository.
 
 Outcomes are `resolved`, `closed_unresolved`, `pr_merged`, `reopened`,
 `reverted`, and `unknown`. GitHub's `COMPLETED` close reason maps to resolved;
@@ -123,6 +128,15 @@ tracked per PR without changing that resolving snapshot. A `reverted` event
 must identify a previously merged resolving PR; an unrelated PR cannot revoke
 the resolution. A later-linked PR remains non-resolving unless a person
 explicitly associates it with `--resolving-pr-id`.
+
+Cycle rows retain the configured issue provider and repository/project
+with the task ID. GitHub defaults to the repository being cycled; Plane and
+Jira use `code_cycle.issue.project`. Pass `--work-item-repository` when a
+work item belongs to a different repository or project.
+Reconciliation selects identity-bearing cycles for the requested provider and
+repository. A legacy cycle without stored identity is attached only when no
+known cycle puts that task ID in a different scope; if the known cycles span
+multiple scopes, the legacy cycle stays unassociated rather than being guessed.
 
 Run reconciliation on demand; there is no background polling. The current
 standalone query adapter uses the authenticated `gh` CLI and visits work items

@@ -120,9 +120,11 @@ Do not include them in telemetry stage, dispatch, role, or profile counts.
 Cycle outcomes count each correlated cycle once by its final status. A cycle
 with no closing record in the period is unknown, never finished or failed.
 Work-item outcomes count unique provider/repository/item identities once even
-when several cycles belong to the same item. The latest observed transition
-sets its current disposition; an item without an outcome observation is
-unknown. `pr_merged` is separate from `resolved`: a merged PR, review verdict,
+when several cycles belong to the same item. New cycle rows retain the configured
+provider and repository/project with the task ID; legacy cycles without that
+identity stay unknown until they can be associated. The latest observed
+transition sets the current disposition; an item without an outcome observation
+is unknown. `pr_merged` is separate from `resolved`: a merged PR, review verdict,
 green check, or ready-for-merge state does not imply that its work item is
 resolved. Provider-query failures do not replace the last recorded outcome.
 Test outcomes are counted per cycle and grouped by evidence level:

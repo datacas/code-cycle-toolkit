@@ -59,7 +59,10 @@ from router import (
     rule_selector,
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
-from telemetry import CYCLE_STARTS, Telemetry, routing_decision_fields, validate_reference
+from telemetry import (
+    CYCLE_STARTS, Telemetry, TelemetryError, WORK_ITEM_PROVIDERS,
+    routing_decision_fields, validate_reference,
+)
 
 SCHEMA_VERSION = 1
 
@@ -243,6 +246,8 @@ class CycleRecorder:
         change_observer: Callable[[], ChangeSignals | None] | None = None,
         verification_available: bool | None = None,
         cycle_id: str | None = None,
+        work_item_provider: str | None = None,
+        work_item_repository: str | None = None,
         shadow: JevShadow | None = None,
         stage_started: Callable[[str, RoutingDecision], None] | None = None,
         on_progress: Callable[..., None] | None = None,
@@ -256,6 +261,24 @@ class CycleRecorder:
             "cycle_id", cycle_id or f"cycle-{uuid.uuid4().hex}")
         self.repo_id = repo_id
         self.task_id = task_id
+        if (work_item_provider is None) != (work_item_repository is None):
+            raise CycleError("work item provider and repository must be supplied together")
+        if work_item_provider is not None:
+            if work_item_provider not in WORK_ITEM_PROVIDERS:
+                raise CycleError("unknown work item provider")
+            if not work_item_repository:
+                raise CycleError("work item repository must be a short opaque reference")
+            try:
+                work_item_repository = Telemetry._work_item_reference(
+                    work_item_repository, "work_item_repository"
+                )
+            except TelemetryError as error:
+                raise CycleError(str(error)) from error
+        self.work_item_identity_fields = (
+            {"work_item_provider": work_item_provider,
+             "work_item_repository": work_item_repository}
+            if work_item_provider is not None else {}
+        )
         self.signals = signals
         self.availability = dict(availability)
         self.registry = registry or Registry()
@@ -641,6 +664,7 @@ class CycleRecorder:
             local_only=self.local_only,
             started_from=self.started_from,
             cycle_id=self.cycle_id, record_kind="verdict",
+            **self.work_item_identity_fields,
             **source, **fields,
         )
         # Tracked only after the row was accepted, so a refused verdict cannot
@@ -674,6 +698,7 @@ class CycleRecorder:
             local_only=self.local_only,
             started_from=self.started_from,
             cycle_id=self.cycle_id, record_kind="cycle",
+            **self.work_item_identity_fields,
             **{**self.observed_outcome(), **fields},
         )
 
@@ -767,6 +792,7 @@ class CycleRecorder:
                 local_only=self.local_only,
                 started_from=self.started_from,
                 **signals,
+                **self.work_item_identity_fields,
             )
         return self.telemetry.record_dispatch(
             self.repo_id, self.task_id, role, decision, result,
@@ -779,4 +805,5 @@ class CycleRecorder:
             parent_attempt_id=parent_attempt_id,
             dispatch_relationship=relationship,
             **signals,
+            **self.work_item_identity_fields,
         )

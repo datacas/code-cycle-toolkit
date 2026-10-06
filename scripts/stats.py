@@ -304,14 +304,28 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
 
 def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
     """Count one latest disposition per provider work item, never per cycle."""
-    task_cycles: dict[str, set[str]] = defaultdict(set)
-    cycle_tasks: dict[str, set[str]] = defaultdict(set)
+    cycle_tasks: dict[tuple[str, str], set[str]] = defaultdict(set)
+    cycle_identity_candidates: dict[
+        tuple[str, str], set[tuple[str, str, str, str]]
+    ] = defaultdict(set)
+    task_cycles: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for row in rows:
-        cycle_id = row["payload"].get("cycle_id")
-        if cycle_id:
-            task_id = str(row["task_id"])
-            task_cycles[task_id].add(str(cycle_id))
-            cycle_tasks[str(cycle_id)].add(task_id)
+        payload = row.get("payload") or {}
+        cycle_id = payload.get("cycle_id")
+        if not cycle_id:
+            continue
+        repo_id = str(row.get("repo_id", ""))
+        cycle_key = (repo_id, str(cycle_id))
+        task_id = str(row["task_id"])
+        cycle_tasks[cycle_key].add(task_id)
+        task_cycles[task_id].add(cycle_key)
+
+        provider = payload.get("work_item_provider")
+        repository = payload.get("work_item_repository")
+        if provider and repository:
+            cycle_identity_candidates[cycle_key].add(
+                (repo_id, str(provider), str(repository), task_id)
+            )
 
     if not task_cycles:
         return {
@@ -337,38 +351,51 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
         if prior_ordering is None or ordering > prior_ordering:
             latest[identity] = event
 
-    events_by_task_identity: dict[str, dict[tuple[str, str, str, str], dict]] = defaultdict(dict)
+    cycle_identity: dict[tuple[str, str], tuple[str, str, str, str]] = {
+        cycle_key: next(iter(identities))
+        for cycle_key, identities in cycle_identity_candidates.items()
+        if len(identities) == 1
+    }
+    unique_items: dict[tuple[str, str, str, str] | tuple[str, str, str], dict] = {}
+    for identity in set(cycle_identity.values()):
+        unique_items[identity] = latest.get(
+            identity, {"outcome": "unknown", "source": None}
+        )
+
+    # Older stage rows predate the per-cycle identity fields. An event that
+    # names one of those cycles can still identify it; an unmatched legacy
+    # cycle stays unknown instead of being guessed from its bare task ID.
+    legacy_event_candidates: dict[
+        tuple[str, str], set[tuple[str, str, str, str]]
+    ] = defaultdict(set)
     for identity, event in latest.items():
-        work_item_id = identity[3]
-        cycle_ids = {str(cycle_id) for cycle_id in event.get("cycle_ids", [])}
-        linked_tasks = {
-            task_id
-            for cycle_id in cycle_ids
-            for task_id in cycle_tasks.get(cycle_id, set())
-            if task_id == work_item_id
+        cycle_ids = event.get("cycle_ids", [])
+        if not isinstance(cycle_ids, (list, tuple)):
+            continue
+        for cycle_id in cycle_ids:
+            cycle_key = (identity[0], str(cycle_id))
+            if cycle_key in cycle_identity or identity[3] not in cycle_tasks.get(cycle_key, set()):
+                continue
+            legacy_event_candidates[cycle_key].add(identity)
+
+    associated_legacy_cycles = set()
+    for cycle_key, identities in legacy_event_candidates.items():
+        if len(identities) == 1:
+            identity = next(iter(identities))
+            unique_items[identity] = latest[identity]
+            associated_legacy_cycles.add(cycle_key)
+
+    unobserved_legacy_items = {
+        (cycle_key[0], task_id)
+        for cycle_key, task_ids in cycle_tasks.items()
+        if cycle_key not in cycle_identity and cycle_key not in associated_legacy_cycles
+        for task_id in task_ids
+    }
+    for repo_id, task_id in unobserved_legacy_items:
+        unique_items[("unobserved", repo_id, task_id)] = {
+            "outcome": "unknown",
+            "source": None,
         }
-        if not cycle_ids:
-            linked_tasks = {work_item_id} & task_cycles.keys()
-        for task_id in linked_tasks:
-            events_by_task_identity[task_id][identity] = event
-
-    unique_items: dict[tuple[str, str, str, str] | tuple[str, str], dict] = {}
-    for task_id, cycle_ids in task_cycles.items():
-        candidates = events_by_task_identity.get(task_id, {})
-        unique_items.update(candidates)
-
-        linked_cycle_ids: set[str] = set()
-        for event in candidates.values():
-            event_cycle_ids = {str(cycle_id) for cycle_id in event.get("cycle_ids", [])}
-            # Preserve the legacy task-level association when an event has no
-            # cycle IDs; otherwise track exactly which cycles have an outcome.
-            linked_cycle_ids.update(event_cycle_ids or cycle_ids)
-
-        # A task ID can now have an observed repository identity and leftover
-        # cycles with no identity/outcome event. Keep that remaining group as
-        # one unknown item, regardless of how many cycles it contains.
-        if cycle_ids - linked_cycle_ids:
-            unique_items[("unobserved", task_id)] = {"outcome": "unknown", "source": None}
 
     outcomes = Counter(item.get("outcome", "unknown") for item in unique_items.values())
     sources = Counter(item["source"] for item in unique_items.values()
@@ -379,10 +406,18 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
         repository = str(item.get("repository", ""))
         for metric, field in (("linked", "pull_request_ids"), ("merged", "merged_pr_ids"),
                               ("resolving", "resolving_pr_ids"), ("reverted", "reverted_pr_ids")):
-            pull_requests[metric].update(
-                (provider, repository, str(pull_request_id))
-                for pull_request_id in item.get(field, [])
-            )
+            for pull_request_id in item.get(field, []):
+                reference = str(pull_request_id)
+                if "#" in reference:
+                    pr_repository, pr_number = reference.rsplit("#", 1)
+                    # A qualified reference identifies the PR independently
+                    # of the provider used to observe its linked work item.
+                    pull_requests[metric].add((pr_repository, pr_number))
+                else:
+                    # Older ledger references carry only a PR number, so their
+                    # work-item repository remains the only known scope.
+                    pr_repository, pr_number = repository, reference
+                    pull_requests[metric].add((provider, pr_repository, pr_number))
     return {
         "items": len(unique_items),
         "recorded": sum(1 for item in unique_items.values()

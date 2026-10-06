@@ -281,6 +281,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "repeated_findings": ("count", None),
     # cycle correlation (schema 3)
     "cycle_id": ("identifier", None),
+    "work_item_provider": ("token", frozenset({"github", "plane", "jira"})),
+    "work_item_repository": ("identifier", None),
     # numeric pull-request reference emitted by an implementation verdict
     "pull_request_id": ("identifier", None),
     "stage_seq": ("count", None),

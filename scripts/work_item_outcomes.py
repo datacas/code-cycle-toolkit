@@ -127,14 +127,64 @@ def map_jira_resolution(
     return outcome
 
 
-def _pull_request_ids(snapshot: dict) -> list[str]:
+def _pull_request_repository(reference: dict) -> str | None:
+    repository = reference.get("repository")
+    if not isinstance(repository, dict):
+        return None
+    name_with_owner = repository.get("nameWithOwner")
+    if isinstance(name_with_owner, str) and name_with_owner:
+        return Telemetry._work_item_reference(name_with_owner, "pull_request_repository")
+    owner = repository.get("owner")
+    owner_login = owner.get("login") if isinstance(owner, dict) else None
+    name = repository.get("name")
+    if isinstance(owner_login, str) and owner_login and isinstance(name, str) and name:
+        return Telemetry._work_item_reference(
+            f"{owner_login}/{name}", "pull_request_repository"
+        )
+    return None
+
+
+def _qualified_pull_request_id(
+    repository: str, pull_request_id: str, default_repository: str | None
+) -> str:
+    repository = Telemetry._work_item_reference(repository, "pull_request_repository")
+    pull_request_id = Telemetry._work_item_reference(pull_request_id, "pull_request_id")
+    if default_repository is not None:
+        default_repository = Telemetry._work_item_reference(default_repository, "repository")
+        if repository == default_repository:
+            return pull_request_id
+    return f"{repository}#{pull_request_id}"
+
+
+def _parse_pull_request_id(
+    reference: str, default_repository: str
+) -> tuple[str, str]:
+    reference = Telemetry._work_item_reference(str(reference), "pull_request_id")
+    if "#" in reference:
+        repository, pull_request_id = reference.rsplit("#", 1)
+        repository = Telemetry._work_item_reference(repository, "pull_request_repository")
+        pull_request_id = Telemetry._work_item_reference(pull_request_id, "pull_request_id")
+        return repository, pull_request_id
+    return default_repository, reference
+
+
+def _pull_request_ids(snapshot: dict, default_repository: str | None = None) -> list[str]:
     references = snapshot.get("closedByPullRequestsReferences") or []
     if not isinstance(references, list):
         return []
     result = []
     for reference in references:
         if isinstance(reference, dict) and reference.get("number") is not None:
-            result.append(str(reference["number"]))
+            pull_request_id = str(reference["number"])
+            repository = _pull_request_repository(reference) or default_repository
+            if repository is None:
+                result.append(Telemetry._work_item_reference(
+                    pull_request_id, "pull_request_id"
+                ))
+            else:
+                result.append(_qualified_pull_request_id(
+                    repository, pull_request_id, default_repository
+                ))
     return list(dict.fromkeys(result))
 
 
@@ -152,13 +202,18 @@ def _latest_timestamp(values) -> str | None:
     return max(parsed).isoformat() if parsed else None
 
 
-def map_github_issue(snapshot: dict, previous: str | dict | None = None) -> dict:
+def map_github_issue(
+    snapshot: dict,
+    previous: str | dict | None = None,
+    *,
+    repository: str | None = None,
+) -> dict:
     """Normalize the fields returned by `gh issue view --json`."""
     if not isinstance(snapshot, dict):
         raise TelemetryError("GitHub returned an invalid issue snapshot")
     outcome = map_github_state(snapshot.get("state"), snapshot.get("stateReason"), previous,
                                closed_at=snapshot.get("closedAt"))
-    pull_requests = _pull_request_ids(snapshot)
+    pull_requests = _pull_request_ids(snapshot, repository)
     return {
         "outcome": outcome,
         "observed_at": snapshot.get("updatedAt") or snapshot.get("closedAt"),
@@ -168,20 +223,52 @@ def map_github_issue(snapshot: dict, previous: str | dict | None = None) -> dict
     }
 
 
-def _cycle_tasks(telemetry: Telemetry, repo_id: str) -> dict[str, list[str]]:
+def _cycle_tasks(
+    telemetry: Telemetry, repo_id: str, *, provider: str, repository: str
+) -> dict[str, list[str]]:
     tasks: dict[str, set[str]] = {}
+    legacy_cycles: dict[str, set[str]] = {}
+    scopes_by_task: dict[str, set[tuple[str, str]]] = {}
     for row in telemetry.rows(repo_id):
-        cycle_id = row["payload"].get("cycle_id")
-        if cycle_id:
-            tasks.setdefault(row["task_id"], set()).add(str(cycle_id))
+        payload = row["payload"]
+        cycle_id = payload.get("cycle_id")
+        if not cycle_id:
+            continue
+        task_id = str(row["task_id"])
+        cycle_id = str(cycle_id)
+        work_item_provider = payload.get("work_item_provider")
+        work_item_repository = payload.get("work_item_repository")
+        if work_item_provider is None and work_item_repository is None:
+            legacy_cycles.setdefault(task_id, set()).add(cycle_id)
+            continue
+        if not work_item_provider or not work_item_repository:
+            # An incomplete identity cannot safely be assigned to a provider scope.
+            continue
+        scope = (str(work_item_provider), str(work_item_repository))
+        scopes_by_task.setdefault(task_id, set()).add(scope)
+        if scope == (provider, repository):
+            tasks.setdefault(task_id, set()).add(cycle_id)
+
+    # Legacy rows can follow the selected scope when no identity-bearing cycle
+    # contradicts it. If the same task ID has been used in multiple scopes,
+    # leave those legacy cycles unassociated instead of guessing.
+    for task_id, cycle_ids in legacy_cycles.items():
+        known_scopes = scopes_by_task.get(task_id, set())
+        if not known_scopes or known_scopes == {(provider, repository)}:
+            tasks.setdefault(task_id, set()).update(cycle_ids)
     return {task_id: sorted(cycle_ids) for task_id, cycle_ids in tasks.items()}
 
 
-def _cycle_pull_requests(telemetry: Telemetry, repo_id: str) -> dict[str, list[str]]:
-    """Read numeric PR references captured on implementation verdicts."""
+def _cycle_pull_requests(
+    telemetry: Telemetry, repo_id: str, cycle_ids: set[str]
+) -> dict[str, list[str]]:
+    """Read PR references from implementation verdicts in selected cycles."""
     pull_requests: dict[str, set[str]] = {}
     for row in telemetry.rows(repo_id):
         if row.get("role") != "implement":
+            continue
+        cycle_id = row["payload"].get("cycle_id")
+        if not cycle_id or str(cycle_id) not in cycle_ids:
             continue
         pull_request_id = row["payload"].get("pull_request_id")
         if pull_request_id:
@@ -194,8 +281,17 @@ def reconcile_github(
     runner=subprocess.run,
 ) -> tuple[int, int]:
     """Query each cycled issue with gh; a failed query leaves its state untouched."""
-    tasks = _cycle_tasks(telemetry, repo_id)
-    cycle_pull_requests = _cycle_pull_requests(telemetry, repo_id)
+    repo_id = Telemetry._work_item_reference(repo_id, "repo_id")
+    repository = Telemetry._work_item_reference(repository, "repository")
+    tasks = _cycle_tasks(
+        telemetry, repo_id, provider="github", repository=repository
+    )
+    selected_cycle_ids = {
+        cycle_id for cycle_ids in tasks.values() for cycle_id in cycle_ids
+    }
+    cycle_pull_requests = _cycle_pull_requests(
+        telemetry, repo_id, selected_cycle_ids
+    )
     updated = failed = 0
     for work_item_id, cycle_ids in sorted(tasks.items()):
         previous = telemetry.latest_work_item_disposition(
@@ -230,7 +326,7 @@ def reconcile_github(
             continue
         try:
             snapshot = json.loads(result.stdout)
-            normalized = map_github_issue(snapshot, previous)
+            normalized = map_github_issue(snapshot, previous, repository=repository)
             item_id = str(snapshot.get("number"))
             if item_id != work_item_id:
                 raise TelemetryError("GitHub returned a different issue number")
@@ -242,25 +338,31 @@ def reconcile_github(
             continue
         pull_request_ids = list(dict.fromkeys(
             (previous or {}).get("pull_request_ids", [])
-            + cycle_pull_requests.get(work_item_id, [])
+            + [
+                _qualified_pull_request_id(repo_id, pull_request_id, repository)
+                for pull_request_id in cycle_pull_requests.get(work_item_id, [])
+            ]
             + normalized["pull_request_ids"]
         ))
         merged_pr_ids = set((previous or {}).get("merged_pr_ids", []))
         observed_timestamps = [normalized["observed_at"]]
         query_failed = False
-        for pull_request_id in pull_request_ids:
+        for pull_request_reference in pull_request_ids:
+            pull_request_repository, pull_request_id = _parse_pull_request_id(
+                pull_request_reference, repository
+            )
             command = [
-                "gh", "pr", "view", pull_request_id, "--repo", repository,
+                "gh", "pr", "view", pull_request_id, "--repo", pull_request_repository,
                 "--json", "number,mergedAt,updatedAt",
             ]
             try:
                 pr_result = runner(command, check=False, capture_output=True, text=True)
             except OSError:
-                record_failure("provider_unavailable", pull_request_id)
+                record_failure("provider_unavailable", pull_request_reference)
                 query_failed = True
                 break
             if pr_result.returncode:
-                record_failure("pull_request_query_failed", pull_request_id)
+                record_failure("pull_request_query_failed", pull_request_reference)
                 query_failed = True
                 break
             try:
@@ -271,10 +373,12 @@ def reconcile_github(
                     raise TelemetryError("GitHub returned a different pull request number")
                 merged_at = pr_snapshot.get("mergedAt")
                 if merged_at:
-                    merged_pr_ids.add(pull_request_id)
+                    merged_pr_ids.add(_qualified_pull_request_id(
+                        pull_request_repository, pull_request_id, repository
+                    ))
                     observed_timestamps.append(merged_at)
             except (TypeError, json.JSONDecodeError, TelemetryError):
-                record_failure("pull_request_query_failed", pull_request_id)
+                record_failure("pull_request_query_failed", pull_request_reference)
                 query_failed = True
                 break
         if query_failed:
