@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import json
-import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -322,7 +323,7 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.assertEqual(["44"], latest["pull_request_ids"])
         self.assertEqual(["44"], latest["resolving_pr_ids"])
 
-    def test_real_cli_records_explicit_observations_and_queries_through_gh(self) -> None:
+    def test_cli_records_explicit_observations_and_reconciles_through_provider_runner(self) -> None:
         self.add_cycle("123", "cycle-123")
         self.add_cycle("456", "cycle-456")
         script = ROOT / "scripts" / "work_item_outcomes.py"
@@ -336,35 +337,36 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.assertEqual(0, explicit.returncode, explicit.stderr)
         self.assertEqual("explicit", json.loads(explicit.stdout)["event"]["source"])
 
-        temporary = self.database.parent / "bin"
-        temporary.mkdir()
-        fake_gh = temporary / "gh"
-        fake_gh.write_text(
-            "#!" + sys.executable + "\n"
-            "import json, sys\n"
-            "if sys.argv[1] == 'pr':\n"
-            "    print(json.dumps({'number': int(sys.argv[3]), 'mergedAt': '2026-10-05T10:00:00Z', "
-            "'updatedAt': '2026-10-05T10:00:00Z'}))\n"
-            "elif sys.argv[3] == '123':\n"
-            "    print(json.dumps({'number': 123, 'state': 'CLOSED', 'stateReason': 'COMPLETED', "
-            "'updatedAt': '2026-10-06T10:00:00Z', 'closedByPullRequestsReferences': [{'number': 44}]}))\n"
-            "else:\n"
-            "    print('query failed', file=sys.stderr)\n"
-            "    raise SystemExit(1)\n",
-            encoding="utf-8",
-        )
-        fake_gh.chmod(0o755)
-        env = os.environ.copy()
-        env["PATH"] = str(temporary) + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
-            [sys.executable, str(script), "--database", str(self.database), "reconcile",
-             "--repo-id", "owner/repo", "--repository", "owner/repo"],
-            text=True, capture_output=True, check=False, env=env,
-        )
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 123, "state": "CLOSED", "stateReason": "COMPLETED",
+                "updatedAt": "2026-10-06T10:00:00Z",
+                "closedByPullRequestsReferences": [{"number": 44}],
+            }), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 44, "mergedAt": "2026-10-05T10:00:00Z",
+                "updatedAt": "2026-10-05T10:00:00Z",
+            }), ""),
+            subprocess.CompletedProcess([], 1, "", "query failed"),
+        ])
+        reconcile = outcomes.reconcile_github
 
-        self.assertEqual(1, result.returncode)
-        self.assertEqual({"updated": 1, "failed": 1}, json.loads(result.stdout))
-        self.assertIn("no observation recorded", result.stderr)
+        def reconcile_from_cli(telemetry, *, repo_id: str, repository: str):
+            return reconcile(telemetry, repo_id=repo_id, repository=repository, runner=runner)
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(outcomes, "reconcile_github", side_effect=reconcile_from_cli):
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = outcomes.main([
+                    "--database", str(self.database), "reconcile", "--repo-id", "owner/repo",
+                    "--repository", "owner/repo",
+                ])
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual({"updated": 1, "failed": 1}, json.loads(stdout.getvalue()))
+        self.assertIn("no observation recorded", stderr.getvalue())
+        self.assertEqual(3, runner.call_count)
+        self.assertEqual(["gh", "pr", "view", "44"], runner.call_args_list[1].args[0][:4])
         self.assertEqual("resolved", self.store.latest_work_item_disposition(
             "owner/repo", "github", "owner/repo", "123")["outcome"])
         self.assertEqual(["44"], self.store.latest_work_item_disposition(
