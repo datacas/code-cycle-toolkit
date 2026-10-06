@@ -561,6 +561,34 @@ class StatsTests(unittest.TestCase):
         self.assertIn("Resolution rounds: **6** across 4 closed cycle(s)", markdown)
         self.assertNotIn("cycle-private", json.dumps(report))
 
+    def test_work_item_outcomes_count_one_issue_across_cycles_and_keep_ready_unknown(self) -> None:
+        for cycle_id in ("cycle-one", "cycle-two"):
+            self.store.record_stage("owner/repo", "120", "implement",
+                                    record_kind="dispatch", cycle_id=cycle_id)
+        self.store.record_stage("owner/repo", "121", "coordinate", status="READY_FOR_MANUAL_MERGE",
+                                record_kind="cycle", cycle_id="cycle-three")
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="pr_merged", source="explicit",
+            observed_at="2026-10-02T10:00:00Z", cycle_ids=["cycle-one", "cycle-two"],
+            pull_request_ids=["44"], merged_pr_ids=["44"],
+        )
+
+        rows = stats._read_rows(self.database, "owner/repo")
+        dispositions = stats._read_dispositions(self.database, "owner/repo")
+        report = stats.aggregate(rows, repo_id="owner/repo", now=self.as_of(),
+                                 dispositions=dispositions)
+        outcomes = report["summary"]["work_item_outcomes"]
+        markdown = stats.render_markdown(report)
+
+        self.assertEqual((2, 1, 1), (outcomes["items"], outcomes["recorded"], outcomes["unobserved"]))
+        self.assertEqual({"resolved": 0, "closed_unresolved": 0, "pr_merged": 1,
+                          "reopened": 0, "reverted": 0, "unknown": 1}, outcomes["outcomes"])
+        self.assertEqual({"linked": 1, "merged": 1, "resolving": 0, "reverted": 0},
+                         outcomes["pull_requests"])
+        self.assertNotIn('"120"', json.dumps(report))
+        self.assertIn("does not imply that the work item is resolved", markdown)
+
     def test_stop_reasons_and_repeated_findings_are_reported(self) -> None:
         self.record_cycle(0)  # a closing row from before schema 7
         for index, (reason, repeated) in enumerate(

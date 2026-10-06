@@ -72,6 +72,46 @@ def _read_rows(database: Path, repo_id: str) -> list[dict]:
         raise StatsError("could not read the local telemetry database") from error
 
 
+def _read_dispositions(database: Path, repo_id: str) -> list[dict]:
+    """Read the optional append-only work-item ledger without opening it for writes."""
+    if not database.is_file():
+        return []
+    uri = database.resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'work_item_disposition_events'"
+            ).fetchone()
+            if not exists:
+                return []
+            events = []
+            for raw in connection.execute(
+                "SELECT event_id, repo_id, provider, external_repository, work_item_id, outcome, "
+                "source, observed_at, recorded_at, cycle_ids, pull_request_ids, merged_pr_ids, "
+                "resolving_pr_ids, reverted_pr_ids "
+                "FROM work_item_disposition_events WHERE repo_id = ? "
+                "ORDER BY observed_at, recorded_at, event_id",
+                (repo_id,),
+            ):
+                event = dict(raw)
+                event["repository"] = event.pop("external_repository")
+                for name in ("cycle_ids", "pull_request_ids", "merged_pr_ids",
+                             "resolving_pr_ids", "reverted_pr_ids"):
+                    try:
+                        event[name] = json.loads(event[name])
+                    except (TypeError, json.JSONDecodeError):
+                        event[name] = []
+                events.append(event)
+            return events
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise StatsError("could not read the local telemetry database") from error
+
+
 def _timestamp(row: dict) -> datetime | None:
     try:
         value = datetime.fromisoformat(row["recorded_at"].replace("Z", "+00:00"))
@@ -262,6 +302,87 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
     }
 
 
+def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
+    """Count one latest disposition per provider work item, never per cycle."""
+    task_cycles: dict[str, set[str]] = defaultdict(set)
+    cycle_tasks: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        cycle_id = row["payload"].get("cycle_id")
+        if cycle_id:
+            task_id = str(row["task_id"])
+            task_cycles[task_id].add(str(cycle_id))
+            cycle_tasks[str(cycle_id)].add(task_id)
+
+    if not task_cycles:
+        return {
+            "items": 0,
+            "recorded": 0,
+            "unobserved": 0,
+            "outcomes": {name: 0 for name in
+                         ("resolved", "closed_unresolved", "pr_merged", "reopened", "reverted", "unknown")},
+            "sources": {"provider_query": 0, "explicit": 0},
+            "pull_requests": {"linked": 0, "merged": 0, "resolving": 0, "reverted": 0},
+        }
+
+    latest: dict[tuple[str, str, str, str], dict] = {}
+    for event in events:
+        identity = (str(event["repo_id"]), str(event["provider"]),
+                    str(event["repository"]), str(event["work_item_id"]))
+        previous = latest.get(identity)
+        ordering = (str(event.get("observed_at", "")), str(event.get("recorded_at", "")),
+                    int(event.get("event_id", 0) or 0))
+        prior_ordering = ((str(previous.get("observed_at", "")),
+                           str(previous.get("recorded_at", "")),
+                           int(previous.get("event_id", 0) or 0)) if previous else None)
+        if prior_ordering is None or ordering > prior_ordering:
+            latest[identity] = event
+
+    events_by_task: dict[str, list[tuple[tuple, dict]]] = defaultdict(list)
+    for identity, event in latest.items():
+        linked_tasks = {str(event["work_item_id"])} & task_cycles.keys()
+        for cycle_id in event.get("cycle_ids", []):
+            linked_tasks.update(cycle_tasks.get(str(cycle_id), set()))
+        ordering = (str(event.get("observed_at", "")), str(event.get("recorded_at", "")),
+                    int(event.get("event_id", 0) or 0))
+        for task_id in linked_tasks:
+            events_by_task[task_id].append((ordering, event))
+
+    unique_items: dict[tuple, dict] = {}
+    for task_id in task_cycles:
+        candidates = events_by_task.get(task_id, [])
+        if candidates:
+            ordering, event = max(candidates, key=lambda item: item[0])
+            identity = (str(event["repo_id"]), str(event["provider"]),
+                        str(event["repository"]), str(event["work_item_id"]))
+            unique_items[identity] = event
+        else:
+            unique_items[("unobserved", task_id)] = {"outcome": "unknown", "source": None}
+
+    outcomes = Counter(item.get("outcome", "unknown") for item in unique_items.values())
+    sources = Counter(item["source"] for item in unique_items.values()
+                      if item.get("source") in {"provider_query", "explicit"})
+    pull_requests = {name: set() for name in ("linked", "merged", "resolving", "reverted")}
+    for item in unique_items.values():
+        provider = str(item.get("provider", ""))
+        repository = str(item.get("repository", ""))
+        for metric, field in (("linked", "pull_request_ids"), ("merged", "merged_pr_ids"),
+                              ("resolving", "resolving_pr_ids"), ("reverted", "reverted_pr_ids")):
+            pull_requests[metric].update(
+                (provider, repository, str(pull_request_id))
+                for pull_request_id in item.get(field, [])
+            )
+    return {
+        "items": len(unique_items),
+        "recorded": sum(1 for item in unique_items.values()
+                         if item.get("source") in {"provider_query", "explicit"}),
+        "unobserved": sum(1 for item in unique_items.values() if not item.get("source")),
+        "outcomes": {name: outcomes[name] for name in
+                     ("resolved", "closed_unresolved", "pr_merged", "reopened", "reverted", "unknown")},
+        "sources": {"provider_query": sources["provider_query"], "explicit": sources["explicit"]},
+        "pull_requests": {name: len(values) for name, values in pull_requests.items()},
+    }
+
+
 #: The stages that leave a head behind, whose checks say whether it was green.
 HEAD_PRODUCING_ROLES = frozenset({"implement", "resolve"})
 CHECK_STATES = ("green", "failed", "pending", "none")
@@ -390,7 +511,8 @@ def _forecast_accuracy(rows: list[dict], minimum: int) -> dict:
 
 
 def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
-              now: datetime | None = None, minimum: int = MINIMUM_SAMPLE) -> dict:
+              now: datetime | None = None, minimum: int = MINIMUM_SAMPLE,
+              dispositions: list[dict] | None = None) -> dict:
     """Build a JSON-safe report without returning raw telemetry rows."""
     now = now or datetime.now(timezone.utc)
     rows = [row for row in rows if row.get("repo_id") == repo_id]
@@ -547,6 +669,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
             },
             "verdicts": _counter(verdicts),
             "cycle_outcomes": _cycle_outcomes(current),
+            "work_item_outcomes": _work_item_outcomes(current, dispositions or []),
             "findings": {
                 name: {"count": findings[name] if findings_measured[name] else None,
                        "measured": findings_measured[name]}
@@ -724,6 +847,25 @@ def render_markdown(report: dict) -> str:
     if rounds["measured"]:
         lines += ["", f"Resolution rounds: **{rounds['total']}** across {rounds['measured']} "
                       f"closed cycle(s) (mean {rounds['mean']:.1f})."]
+
+    work_items = summary["work_item_outcomes"]
+    lines += ["", "### Work-item outcomes", ""]
+    lines += _count_table("Disposition", "Unique work items", work_items["outcomes"],
+                          empty="No work item with a recorded cycle in this period.")
+    if work_items["items"]:
+        lines += ["", f"**{work_items['recorded']} of {work_items['items']}** work items have an "
+                  f"observed disposition; {work_items['unobserved']} remain unknown because no "
+                  "provider or explicit outcome has been recorded."]
+        lines.append(
+            f"Disposition records by source: {work_items['sources']['provider_query']} provider query, "
+            f"{work_items['sources']['explicit']} explicit. A merged PR is reported separately and "
+            "does not imply that the work item is resolved."
+        )
+        pull_requests = work_items["pull_requests"]
+        lines.append(
+            f"Linked PRs: {pull_requests['merged']} of {pull_requests['linked']} merged; "
+            f"{pull_requests['resolving']} resolving and {pull_requests['reverted']} reverted."
+        )
 
     lines += ["", "### Findings by severity", ""]
     findings = summary["findings"]
@@ -924,7 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo_id = _report_config(args.cwd)
         rows = _read_rows(args.database, repo_id)
-        report = aggregate(rows, repo_id=repo_id, days=None if args.all_time else args.days)
+        dispositions = _read_dispositions(args.database, repo_id)
+        report = aggregate(rows, repo_id=repo_id, days=None if args.all_time else args.days,
+                           dispositions=dispositions)
     except StatsError as error:
         print(f"cc-stats: {error}", file=sys.stderr)
         return 2

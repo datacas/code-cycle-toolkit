@@ -718,6 +718,20 @@ cost, and harness fields are unmeasured and unknown rather than zero. The
 `Telemetry.dispatch_attempts`, `usage_totals`, and `cost_totals` queries expose
 the new history; `cycle_outcome()` includes attempts alongside logical stages.
 
+Schema 14 adds the append-only `work_item_disposition_events` and
+`work_item_reconciliation_failures` tables. Disposition events record provider
+observations and explicit work-item outcomes separately from cycle rows,
+including the provider/repository/item identity, linked cycle and PR references,
+outcome, source, and observation/recording timestamps. Failed queries record a
+safe failure category and timestamp in the separate failure table without
+changing the disposition. Repeated unchanged or stale snapshots do not add
+disposition events. Existing stage and cycle rows are not rewritten, and a work
+item without a disposition remains unknown.
+Each provider, repository, work-item, cycle, and pull-request value passes the
+opaque-reference check; outcome and source values are closed vocabularies.
+PR merge and revert associations are stored per PR, and a revert can revoke a
+resolution only when it names a merged PR in the resolving snapshot.
+
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
 `(cycle_id, stage_seq)`, without that selector being installed while the run is
