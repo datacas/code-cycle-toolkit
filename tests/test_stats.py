@@ -703,6 +703,58 @@ class StatsTests(unittest.TestCase):
         self.assertEqual({"resolved": 1, "closed_unresolved": 0, "pr_merged": 0,
                           "reopened": 0, "reverted": 0, "unknown": 0}, outcomes["outcomes"])
 
+    def test_work_item_outcomes_fold_legacy_cycle_into_its_only_known_scope(self) -> None:
+        self.store.record_stage(
+            "owner/code", "120", "implement", record_kind="dispatch", cycle_id="cycle-legacy",
+        )
+        self.store.record_stage(
+            "owner/code", "120", "implement", record_kind="dispatch", cycle_id="cycle-scoped",
+            work_item_provider="github", work_item_repository="owner/issues",
+        )
+        self.store.record_work_item_disposition(
+            repo_id="owner/code", provider="github", repository="owner/issues",
+            work_item_id="120", outcome="resolved", source="explicit",
+            observed_at="2026-10-01T10:00:00Z", cycle_ids=["cycle-scoped"],
+        )
+
+        rows = stats._read_rows(self.database, "owner/code")
+        dispositions = stats._read_dispositions(self.database, "owner/code")
+        report = stats.aggregate(rows, repo_id="owner/code", now=self.as_of(),
+                                 dispositions=dispositions)
+        outcomes = report["summary"]["work_item_outcomes"]
+
+        self.assertEqual((1, 1, 0),
+                         (outcomes["items"], outcomes["recorded"], outcomes["unobserved"]))
+        self.assertEqual({"resolved": 1, "closed_unresolved": 0, "pr_merged": 0,
+                          "reopened": 0, "reverted": 0, "unknown": 0}, outcomes["outcomes"])
+
+    def test_work_item_outcomes_keep_legacy_cycle_unknown_when_scopes_are_ambiguous(self) -> None:
+        self.store.record_stage(
+            "owner/code", "120", "implement", record_kind="dispatch", cycle_id="cycle-legacy",
+        )
+        for cycle_id, external_repository in (("cycle-a", "org/repo-a"),
+                                              ("cycle-b", "org/repo-b")):
+            self.store.record_stage(
+                "owner/code", "120", "implement", record_kind="dispatch", cycle_id=cycle_id,
+                work_item_provider="github", work_item_repository=external_repository,
+            )
+        self.store.record_work_item_disposition(
+            repo_id="owner/code", provider="github", repository="org/repo-a",
+            work_item_id="120", outcome="resolved", source="explicit",
+            observed_at="2026-10-01T10:00:00Z", cycle_ids=["cycle-a"],
+        )
+
+        rows = stats._read_rows(self.database, "owner/code")
+        dispositions = stats._read_dispositions(self.database, "owner/code")
+        report = stats.aggregate(rows, repo_id="owner/code", now=self.as_of(),
+                                 dispositions=dispositions)
+        outcomes = report["summary"]["work_item_outcomes"]
+
+        self.assertEqual((3, 1, 2),
+                         (outcomes["items"], outcomes["recorded"], outcomes["unobserved"]))
+        self.assertEqual({"resolved": 1, "closed_unresolved": 0, "pr_merged": 0,
+                          "reopened": 0, "reverted": 0, "unknown": 2}, outcomes["outcomes"])
+
     def test_stop_reasons_and_repeated_findings_are_reported(self) -> None:
         self.record_cycle(0)  # a closing row from before schema 7
         for index, (reason, repeated) in enumerate(

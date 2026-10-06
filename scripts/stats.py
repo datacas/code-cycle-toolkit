@@ -385,11 +385,18 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
             unique_items[identity] = latest[identity]
             associated_legacy_cycles.add(cycle_key)
 
+    # A legacy cycle still unmatched belongs to its task's only known scope;
+    # when several scopes remain possible it stays one unknown legacy group.
+    task_identities: dict[tuple[str, str], set[tuple[str, str, str, str]]] = defaultdict(set)
+    for identity in unique_items:
+        task_identities[(identity[0], identity[3])].add(identity)
+
     unobserved_legacy_items = {
         (cycle_key[0], task_id)
         for cycle_key, task_ids in cycle_tasks.items()
         if cycle_key not in cycle_identity and cycle_key not in associated_legacy_cycles
         for task_id in task_ids
+        if len(task_identities.get((cycle_key[0], task_id), ())) != 1
     }
     for repo_id, task_id in unobserved_legacy_items:
         unique_items[("unobserved", repo_id, task_id)] = {
