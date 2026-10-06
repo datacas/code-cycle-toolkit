@@ -1,0 +1,146 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--reporter=line,json",
+      "--output=out/skipped/artifacts",
+      "--grep",
+      "@MISC-SKIP-001"
+    ],
+    "configFile": "/work/project/playwright.config.ts",
+    "rootDir": "/work/project/tests/behavioral",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/out/skipped/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/behavioral",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [
+    {
+      "title": "misc.spec.ts",
+      "file": "misc.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "M-SKIPPED",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "MISC-SKIP-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [
+                {
+                  "type": "skip",
+                  "description": "skipped on purpose",
+                  "location": {
+                    "file": "/work/project/tests/behavioral/misc.spec.ts",
+                    "line": 3,
+                    "column": 8
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "skipped",
+                  "duration": 1,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:35:49.203Z",
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "description": "skipped on purpose",
+                      "location": {
+                        "file": "/work/project/tests/behavioral/misc.spec.ts",
+                        "line": 3,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "cef128c16bb2b5432af5-01f26af892378416e52f",
+          "file": "misc.spec.ts",
+          "line": 2,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-05T09:35:48.844Z",
+    "duration": 388.0439999999999,
+    "expected": 0,
+    "skipped": 1,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

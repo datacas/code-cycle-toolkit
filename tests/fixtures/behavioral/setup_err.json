@@ -1,0 +1,166 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--reporter=line,json",
+      "--output=out/setup_err/artifacts",
+      "--retries=0",
+      "--grep",
+      "@MISC-SETUP-001"
+    ],
+    "configFile": "/work/project/playwright.config.ts",
+    "rootDir": "/work/project/tests/behavioral",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/out/setup_err/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/behavioral",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [
+    {
+      "title": "misc.spec.ts",
+      "file": "misc.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "setup group",
+          "file": "misc.spec.ts",
+          "line": 5,
+          "column": 6,
+          "specs": [
+            {
+              "title": "M-SETUP",
+              "ok": false,
+              "tags": [
+                "behavioral",
+                "MISC-SETUP-001"
+              ],
+              "tests": [
+                {
+                  "timeout": 15000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 2,
+                      "error": {
+                        "message": "Error: beforeEach boom",
+                        "stack": "Error: beforeEach boom\n    at /work/project/tests/behavioral/misc.spec.ts:6:39",
+                        "location": {
+                          "file": "/work/project/tests/behavioral/misc.spec.ts",
+                          "column": 39,
+                          "line": 6
+                        },
+                        "snippet": "  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/work/project/tests/behavioral/misc.spec.ts",
+                            "column": 39,
+                            "line": 6
+                          },
+                          "message": "Error: beforeEach boom\n\n  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |\n    at /work/project/tests/behavioral/misc.spec.ts:6:39"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-05T09:35:50.087Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/work/project/out/setup_err/artifacts/misc-setup-group-M-SETUP/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/work/project/tests/behavioral/misc.spec.ts",
+                        "column": 39,
+                        "line": 6
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "cef128c16bb2b5432af5-4d88cb2e64163fd6245d",
+              "file": "misc.spec.ts",
+              "line": 7,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-05T09:35:49.710Z",
+    "duration": 420.45199999999994,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

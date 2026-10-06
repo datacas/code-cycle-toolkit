@@ -1,0 +1,1379 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--reporter=line,json",
+      "--retries=1",
+      "--output=out/run1/artifacts"
+    ],
+    "configFile": "/work/project/playwright.config.ts",
+    "rootDir": "/work/project/tests/behavioral",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 4
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/out/run1/artifacts",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 4
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/behavioral",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [
+    {
+      "title": "fail.spec.ts",
+      "file": "fail.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "F-TOHAVETEXT",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-TEXT-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1638,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:4:36",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 36,
+                      "line": 4
+                    },
+                    "snippet": "  2 | test('F-TOHAVETEXT', { tag: ['@behavioral', '@FAIL-TEXT-001'] }, async ({ page }) => {\n  3 |   await page.goto('/login');\n> 4 |   await expect(page.locator('h1')).toHaveText('Dashboard');\n    |                                    ^\n  5 | });\n  6 | test('F-TOBE', { tag: ['@behavioral', '@FAIL-TOBE-001'] }, async ({ page }) => {\n  7 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 36,
+                        "line": 4
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n\n\n  2 | test('F-TOHAVETEXT', { tag: ['@behavioral', '@FAIL-TEXT-001'] }, async ({ page }) => {\n  3 |   await page.goto('/login');\n> 4 |   await expect(page.locator('h1')).toHaveText('Dashboard');\n    |                                    ^\n  5 | });\n  6 | test('F-TOBE', { tag: ['@behavioral', '@FAIL-TOBE-001'] }, async ({ page }) => {\n  7 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:4:36"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:54.008Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 36,
+                    "line": 4
+                  }
+                },
+                {
+                  "workerIndex": 7,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1778,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:4:36",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 36,
+                      "line": 4
+                    },
+                    "snippet": "  2 | test('F-TOHAVETEXT', { tag: ['@behavioral', '@FAIL-TEXT-001'] }, async ({ page }) => {\n  3 |   await page.goto('/login');\n> 4 |   await expect(page.locator('h1')).toHaveText('Dashboard');\n    |                                    ^\n  5 | });\n  6 | test('F-TOBE', { tag: ['@behavioral', '@FAIL-TOBE-001'] }, async ({ page }) => {\n  7 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 36,
+                        "line": 4
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"Dashboard\"\u001b[39m\nReceived: \u001b[31m\"Login\"\u001b[39m\nTimeout:  1500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" locator('h1') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    16 × locator resolved to <h1>Login</h1>\u001b[22m\n\u001b[2m       - unexpected value \"Login\"\u001b[22m\n\n\n  2 | test('F-TOHAVETEXT', { tag: ['@behavioral', '@FAIL-TEXT-001'] }, async ({ page }) => {\n  3 |   await page.goto('/login');\n> 4 |   await expect(page.locator('h1')).toHaveText('Dashboard');\n    |                                    ^\n  5 | });\n  6 | test('F-TOBE', { tag: ['@behavioral', '@FAIL-TOBE-001'] }, async ({ page }) => {\n  7 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:4:36"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:34:56.107Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOHAVETEXT-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 36,
+                    "line": 4
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-4d6e36058450dd8c568f",
+          "file": "fail.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "F-TOBE",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-TOBE-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 8,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 149,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m\n    at /work/project/tests/behavioral/fail.spec.ts:9:13",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 13,
+                      "line": 9
+                    },
+                    "snippet": "   7 |   await page.goto('/login');\n   8 |   const n = await page.locator('#count').innerText();\n>  9 |   expect(n).toBe('5');\n     |             ^\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n  12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 13,
+                        "line": 9
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m\n\n   7 |   await page.goto('/login');\n   8 |   const n = await page.locator('#count').innerText();\n>  9 |   expect(n).toBe('5');\n     |             ^\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n  12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n    at /work/project/tests/behavioral/fail.spec.ts:9:13"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:58.352Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 13,
+                    "line": 9
+                  }
+                },
+                {
+                  "workerIndex": 9,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 216,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m\n    at /work/project/tests/behavioral/fail.spec.ts:9:13",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 13,
+                      "line": 9
+                    },
+                    "snippet": "   7 |   await page.goto('/login');\n   8 |   const n = await page.locator('#count').innerText();\n>  9 |   expect(n).toBe('5');\n     |             ^\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n  12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 13,
+                        "line": 9
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"5\"\u001b[39m\nReceived: \u001b[31m\"3\"\u001b[39m\n\n   7 |   await page.goto('/login');\n   8 |   const n = await page.locator('#count').innerText();\n>  9 |   expect(n).toBe('5');\n     |             ^\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n  12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n    at /work/project/tests/behavioral/fail.spec.ts:9:13"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:34:58.900Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBE-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 13,
+                    "line": 9
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-26dd50208d99c8e29916",
+          "file": "fail.spec.ts",
+          "line": 6,
+          "column": 5
+        },
+        {
+          "title": "F-TOEQUAL",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-TOEQUAL-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 10,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 9,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m\n    at /work/project/tests/behavioral/fail.spec.ts:12:31",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 31,
+                      "line": 12
+                    },
+                    "snippet": "  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n> 12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n     |                               ^\n  13 | });\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 31,
+                        "line": 12
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m\n\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n> 12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n     |                               ^\n  13 | });\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:12:31"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:59.549Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOEQUAL/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 31,
+                    "line": 12
+                  }
+                },
+                {
+                  "workerIndex": 11,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 8,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m\n    at /work/project/tests/behavioral/fail.spec.ts:12:31",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 31,
+                      "line": 12
+                    },
+                    "snippet": "  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n> 12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n     |                               ^\n  13 | });\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 31,
+                        "line": 12
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // deep equality\u001b[22m\n\n\u001b[32m- Expected  - 1\u001b[39m\n\u001b[31m+ Received  + 1\u001b[39m\n\n\u001b[2m  Object {\u001b[22m\n\u001b[2m    \"a\": 1,\u001b[22m\n\u001b[2m    \"b\": Array [\u001b[22m\n\u001b[2m      1,\u001b[22m\n\u001b[32m-     3,\u001b[39m\n\u001b[31m+     2,\u001b[39m\n\u001b[2m    ],\u001b[22m\n\u001b[2m  }\u001b[22m\n\n  10 | });\n  11 | test('F-TOEQUAL', { tag: ['@behavioral', '@FAIL-TOEQUAL-001'] }, async () => {\n> 12 |   expect({ a: 1, b: [1, 2] }).toEqual({ a: 1, b: [1, 3] });\n     |                               ^\n  13 | });\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:12:31"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:34:59.880Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOEQUAL-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOEQUAL-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 31,
+                    "line": 12
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-1158ad1e86550ed62ba9",
+          "file": "fail.spec.ts",
+          "line": 11,
+          "column": 5
+        },
+        {
+          "title": "F-TOBEVISIBLE",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-VISIBLE-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 12,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1592,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:16:46",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 46,
+                      "line": 16
+                    },
+                    "snippet": "  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n> 16 |   await expect(page.locator('#nonexistent')).toBeVisible();\n     |                                              ^\n  17 | });\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 46,
+                        "line": 16
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n\n\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n> 16 |   await expect(page.locator('#nonexistent')).toBeVisible();\n     |                                              ^\n  17 | });\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:16:46"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:35:00.207Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 46,
+                    "line": 16
+                  }
+                },
+                {
+                  "workerIndex": 13,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1748,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:16:46",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 46,
+                      "line": 16
+                    },
+                    "snippet": "  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n> 16 |   await expect(page.locator('#nonexistent')).toBeVisible();\n     |                                              ^\n  17 | });\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 46,
+                        "line": 16
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#nonexistent')\nExpected: visible\nTimeout: 1500ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" locator('#nonexistent') with timeout 1500ms\u001b[22m\n\u001b[2m  - waiting for locator('#nonexistent')\u001b[22m\n\n\n  14 | test('F-TOBEVISIBLE', { tag: ['@behavioral', '@FAIL-VISIBLE-001'] }, async ({ page }) => {\n  15 |   await page.goto('/login');\n> 16 |   await expect(page.locator('#nonexistent')).toBeVisible();\n     |                                              ^\n  17 | });\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n    at /work/project/tests/behavioral/fail.spec.ts:16:46"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:35:02.209Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-TOBEVISIBLE-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 46,
+                    "line": 16
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-2be2e0605e2912482bb4",
+          "file": "fail.spec.ts",
+          "line": 14,
+          "column": 5
+        },
+        {
+          "title": "F-SELECTOR-TIMEOUT",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-SELECTOR-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 14,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1602,
+                  "error": {
+                    "message": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n",
+                    "stack": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:20:31",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 31,
+                      "line": 20
+                    },
+                    "snippet": "  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n> 20 |   await page.locator('#nope').click();\n     |                               ^\n  21 | });\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 31,
+                        "line": 20
+                      },
+                      "message": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n\n\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n> 20 |   await page.locator('#nope').click();\n     |                               ^\n  21 | });\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n    at /work/project/tests/behavioral/fail.spec.ts:20:31"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:35:04.410Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 31,
+                    "line": 20
+                  }
+                },
+                {
+                  "workerIndex": 15,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 1714,
+                  "error": {
+                    "message": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n",
+                    "stack": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n\n    at /work/project/tests/behavioral/fail.spec.ts:20:31",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 31,
+                      "line": 20
+                    },
+                    "snippet": "  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n> 20 |   await page.locator('#nope').click();\n     |                               ^\n  21 | });\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 31,
+                        "line": 20
+                      },
+                      "message": "TimeoutError: locator.click: Timeout 1500ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#nope')\u001b[22m\n\n\n  18 | test('F-SELECTOR-TIMEOUT', { tag: ['@behavioral', '@FAIL-SELECTOR-001'] }, async ({ page }) => {\n  19 |   await page.goto('/login');\n> 20 |   await page.locator('#nope').click();\n     |                               ^\n  21 | });\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n    at /work/project/tests/behavioral/fail.spec.ts:20:31"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:35:06.406Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-SELECTOR-TIMEOUT-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 31,
+                    "line": 20
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-586fd4d6a5e42f3bb435",
+          "file": "fail.spec.ts",
+          "line": 18,
+          "column": 5
+        },
+        {
+          "title": "F-HTTP-404",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "FAIL-HTTP-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 16,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 137,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m\n    at /work/project/tests/behavioral/fail.spec.ts:24:23",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 23,
+                      "line": 24
+                    },
+                    "snippet": "  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n> 24 |   expect(r?.status()).toBe(200);\n     |                       ^\n  25 | });\n  26 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 23,
+                        "line": 24
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m\n\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n> 24 |   expect(r?.status()).toBe(200);\n     |                       ^\n  25 | });\n  26 |\n    at /work/project/tests/behavioral/fail.spec.ts:24:23"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:35:08.468Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 23,
+                    "line": 24
+                  }
+                },
+                {
+                  "workerIndex": 17,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 172,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m\n    at /work/project/tests/behavioral/fail.spec.ts:24:23",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/fail.spec.ts",
+                      "column": 23,
+                      "line": 24
+                    },
+                    "snippet": "  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n> 24 |   expect(r?.status()).toBe(200);\n     |                       ^\n  25 | });\n  26 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/fail.spec.ts",
+                        "column": 23,
+                        "line": 24
+                      },
+                      "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m200\u001b[39m\nReceived: \u001b[31m404\u001b[39m\n\n  22 | test('F-HTTP-404', { tag: ['@behavioral', '@FAIL-HTTP-001'] }, async ({ page }) => {\n  23 |   const r = await page.goto('/missing');\n> 24 |   expect(r?.status()).toBe(200);\n     |                       ^\n  25 | });\n  26 |\n    at /work/project/tests/behavioral/fail.spec.ts:24:23"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:35:08.919Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/fail-F-HTTP-404-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/fail.spec.ts",
+                    "column": 23,
+                    "line": 24
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-0ac3f92d803b5e38057a",
+          "file": "fail.spec.ts",
+          "line": 22,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "title": "misc.spec.ts",
+      "file": "misc.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "M-SKIPPED",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "MISC-SKIP-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [
+                {
+                  "type": "skip",
+                  "description": "skipped on purpose",
+                  "location": {
+                    "file": "/work/project/tests/behavioral/misc.spec.ts",
+                    "line": 3,
+                    "column": 8
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "skipped",
+                  "duration": 2,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:53.977Z",
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "description": "skipped on purpose",
+                      "location": {
+                        "file": "/work/project/tests/behavioral/misc.spec.ts",
+                        "line": 3,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "cef128c16bb2b5432af5-01f26af892378416e52f",
+          "file": "misc.spec.ts",
+          "line": 2,
+          "column": 5
+        }
+      ],
+      "suites": [
+        {
+          "title": "setup group",
+          "file": "misc.spec.ts",
+          "line": 5,
+          "column": 6,
+          "specs": [
+            {
+              "title": "M-SETUP",
+              "ok": false,
+              "tags": [
+                "behavioral",
+                "MISC-SETUP-001"
+              ],
+              "tests": [
+                {
+                  "timeout": 15000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "failed",
+                      "duration": 2,
+                      "error": {
+                        "message": "Error: beforeEach boom",
+                        "stack": "Error: beforeEach boom\n    at /work/project/tests/behavioral/misc.spec.ts:6:39",
+                        "location": {
+                          "file": "/work/project/tests/behavioral/misc.spec.ts",
+                          "column": 39,
+                          "line": 6
+                        },
+                        "snippet": "  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/work/project/tests/behavioral/misc.spec.ts",
+                            "column": 39,
+                            "line": 6
+                          },
+                          "message": "Error: beforeEach boom\n\n  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |\n    at /work/project/tests/behavioral/misc.spec.ts:6:39"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-05T09:34:54.014Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/work/project/out/run1/artifacts/misc-setup-group-M-SETUP/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/work/project/tests/behavioral/misc.spec.ts",
+                        "column": 39,
+                        "line": 6
+                      }
+                    },
+                    {
+                      "workerIndex": 4,
+                      "parallelIndex": 1,
+                      "status": "failed",
+                      "duration": 2,
+                      "error": {
+                        "message": "Error: beforeEach boom",
+                        "stack": "Error: beforeEach boom\n    at /work/project/tests/behavioral/misc.spec.ts:6:39",
+                        "location": {
+                          "file": "/work/project/tests/behavioral/misc.spec.ts",
+                          "column": 39,
+                          "line": 6
+                        },
+                        "snippet": "  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/work/project/tests/behavioral/misc.spec.ts",
+                            "column": 39,
+                            "line": 6
+                          },
+                          "message": "Error: beforeEach boom\n\n  4 | });\n  5 | test.describe('setup group', () => {\n> 6 |   test.beforeEach(async () => { throw new Error('beforeEach boom'); });\n    |                                       ^\n  7 |   test('M-SETUP', { tag: ['@behavioral', '@MISC-SETUP-001'] }, async () => { expect(1).toBe(1); });\n  8 | });\n  9 |\n    at /work/project/tests/behavioral/misc.spec.ts:6:39"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2026-10-05T09:34:54.445Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/work/project/out/run1/artifacts/misc-setup-group-M-SETUP-retry1/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/work/project/out/run1/artifacts/misc-setup-group-M-SETUP-retry1/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/work/project/tests/behavioral/misc.spec.ts",
+                        "column": 39,
+                        "line": 6
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "cef128c16bb2b5432af5-4d88cb2e64163fd6245d",
+              "file": "misc.spec.ts",
+              "line": 7,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "pass.spec.ts",
+      "file": "pass.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "login page renders",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "AUTH-LOGIN-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [
+                {
+                  "type": "covers",
+                  "description": "issue:151",
+                  "location": {
+                    "file": "/work/project/tests/behavioral/pass.spec.ts",
+                    "line": 2,
+                    "column": 5
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 190,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:53.974Z",
+                  "annotations": [
+                    {
+                      "type": "covers",
+                      "description": "issue:151",
+                      "location": {
+                        "file": "/work/project/tests/behavioral/pass.spec.ts",
+                        "line": 2,
+                        "column": 5
+                      }
+                    }
+                  ],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "71e2857e93188465eaa5-a9350ed811e136bef6ac",
+          "file": "pass.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "login page renders (variant)",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "AUTH-LOGIN-0010"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 2,
+                  "status": "passed",
+                  "duration": 109,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:54.282Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "71e2857e93188465eaa5-f50b840d6dc6fb658f58",
+          "file": "pass.spec.ts",
+          "line": 7,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "title": "retry.spec.ts",
+      "file": "retry.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "R-FLAKY",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "RETRY-FLAKY-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 3,
+                  "parallelIndex": 3,
+                  "status": "failed",
+                  "duration": 185,
+                  "error": {
+                    "message": "Error: fails on first attempt only\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m",
+                    "stack": "Error: fails on first attempt only\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n    at /work/project/tests/behavioral/retry.spec.ts:4:53",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/retry.spec.ts",
+                      "column": 53,
+                      "line": 4
+                    },
+                    "snippet": "  2 | test('R-FLAKY', { tag: ['@behavioral', '@RETRY-FLAKY-001'] }, async ({ page }, info) => {\n  3 |   await page.goto('/login');\n> 4 |   expect(info.retry, 'fails on first attempt only').toBeGreaterThan(0);\n    |                                                     ^\n  5 | });\n  6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n  7 |   await page.goto('/login');"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/retry.spec.ts",
+                        "column": 53,
+                        "line": 4
+                      },
+                      "message": "Error: fails on first attempt only\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n\n  2 | test('R-FLAKY', { tag: ['@behavioral', '@RETRY-FLAKY-001'] }, async ({ page }, info) => {\n  3 |   await page.goto('/login');\n> 4 |   expect(info.retry, 'fails on first attempt only').toBeGreaterThan(0);\n    |                                                     ^\n  5 | });\n  6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n  7 |   await page.goto('/login');\n    at /work/project/tests/behavioral/retry.spec.ts:4:53"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:53.971Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/retry-R-FLAKY/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/retry-R-FLAKY/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/retry.spec.ts",
+                    "column": 53,
+                    "line": 4
+                  }
+                },
+                {
+                  "workerIndex": 5,
+                  "parallelIndex": 3,
+                  "status": "passed",
+                  "duration": 258,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:34:54.626Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/retry-R-FLAKY-retry1/video.webm"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/retry-R-FLAKY-retry1/trace.zip"
+                    }
+                  ]
+                }
+              ],
+              "status": "flaky"
+            }
+          ],
+          "id": "1d4db9983fd58b264f38-f1086d4e3c8f7eb1fde3",
+          "file": "retry.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "R-REPEATED",
+          "ok": false,
+          "tags": [
+            "behavioral",
+            "RETRY-REPEAT-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 5,
+                  "parallelIndex": 3,
+                  "status": "failed",
+                  "duration": 105,
+                  "error": {
+                    "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m",
+                    "stack": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n    at /work/project/tests/behavioral/retry.spec.ts:8:38",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/retry.spec.ts",
+                      "column": 38,
+                      "line": 8
+                    },
+                    "snippet": "   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/retry.spec.ts",
+                        "column": 38,
+                        "line": 8
+                      },
+                      "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m0\u001b[39m\n\n   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |\n    at /work/project/tests/behavioral/retry.spec.ts:8:38"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-05T09:34:54.969Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED/error-context.md"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/retry.spec.ts",
+                    "column": 38,
+                    "line": 8
+                  }
+                },
+                {
+                  "workerIndex": 6,
+                  "parallelIndex": 1,
+                  "status": "failed",
+                  "duration": 221,
+                  "error": {
+                    "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m",
+                    "stack": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m\n    at /work/project/tests/behavioral/retry.spec.ts:8:38",
+                    "location": {
+                      "file": "/work/project/tests/behavioral/retry.spec.ts",
+                      "column": 38,
+                      "line": 8
+                    },
+                    "snippet": "   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |"
+                  },
+                  "errors": [
+                    {
+                      "location": {
+                        "file": "/work/project/tests/behavioral/retry.spec.ts",
+                        "column": 38,
+                        "line": 8
+                      },
+                      "message": "Error: always fails\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeLessThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: < \u001b[32m0\u001b[39m\nReceived:   \u001b[31m1\u001b[39m\n\n   6 | test('R-REPEATED', { tag: ['@behavioral', '@RETRY-REPEAT-001'] }, async ({ page }, info) => {\n   7 |   await page.goto('/login');\n>  8 |   expect(info.retry, 'always fails').toBeLessThan(0);\n     |                                      ^\n   9 | });\n  10 |\n    at /work/project/tests/behavioral/retry.spec.ts:8:38"
+                    }
+                  ],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 1,
+                  "startTime": "2026-10-05T09:34:55.382Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED-retry1/test-failed-1.png"
+                    },
+                    {
+                      "name": "video",
+                      "contentType": "video/webm",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED-retry1/video.webm"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED-retry1/error-context.md"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "/work/project/out/run1/artifacts/retry-R-REPEATED-retry1/trace.zip"
+                    }
+                  ],
+                  "errorLocation": {
+                    "file": "/work/project/tests/behavioral/retry.spec.ts",
+                    "column": 38,
+                    "line": 8
+                  }
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "1d4db9983fd58b264f38-eee0bd3d5102fe26d657",
+          "file": "retry.spec.ts",
+          "line": 6,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-05T09:34:53.381Z",
+    "duration": 15813.738,
+    "expected": 2,
+    "skipped": 1,
+    "unexpected": 8,
+    "flaky": 1
+  }
+}

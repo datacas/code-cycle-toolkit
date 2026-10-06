@@ -1,0 +1,87 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--reporter=line,json",
+      "--output=out/only_forbid/artifacts",
+      "-c",
+      "playwright.only.config.ts",
+      "--forbid-only"
+    ],
+    "configFile": "/work/project/playwright.only.config.ts",
+    "rootDir": "/work/project/tests/only",
+    "failOnFlakyTests": false,
+    "forbidOnly": true,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {},
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/out/only_forbid/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/only",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [],
+  "errors": [
+    {
+      "message": "Error: item focused with '.only' is not allowed due to the '--forbid-only' CLI flag: \"only.spec.ts O-ONLY\"",
+      "location": {
+        "file": "/work/project/tests/only/only.spec.ts",
+        "line": 2,
+        "column": 6
+      },
+      "snippet": "\u001b[90m   at \u001b[39monly.spec.ts:2\n\n  1 | import { test, expect } from '@playwright/test';\n> 2 | test.only('O-ONLY', { tag: ['@behavioral', '@ONLY-001'] }, async () => { expect(1).toBe(1); });\n    |      ^\n  3 | test('O-OTHER', { tag: ['@behavioral', '@ONLY-002'] }, async () => { expect(1).toBe(1); });\n  4 |"
+    }
+  ],
+  "stats": {
+    "startTime": "2026-10-05T09:36:00.529Z",
+    "duration": 124.68799999999999,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}
