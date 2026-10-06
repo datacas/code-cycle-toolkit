@@ -57,14 +57,14 @@ def map_github_state(
     normalized_state = (state or "").strip().upper()
     reason = (state_reason or "").strip().upper()
     if normalized_state == "CLOSED":
+        if reason in {"NOT_PLANNED", "DUPLICATE"}:
+            return "closed_unresolved"
         if previous_outcome in {"reopened", "reverted"}:
             if reason == "COMPLETED" and _later_timestamp(closed_at, previous_observed_at):
                 return "resolved"
             return previous_outcome
         if reason == "COMPLETED":
             return "resolved"
-        if reason in {"NOT_PLANNED", "DUPLICATE"}:
-            return "closed_unresolved"
         return previous_outcome if previous_outcome in WORK_ITEM_OUTCOMES - {"unknown"} else "unknown"
     if normalized_state == "OPEN":
         if previous_outcome in {"resolved", "closed_unresolved"}:
@@ -80,14 +80,14 @@ def map_plane_group(
 ) -> str:
     """Map a Plane state group to a work-item disposition."""
     normalized = (group or "").strip().casefold()
+    if normalized in {"cancelled", "canceled"}:
+        return "closed_unresolved"
     if previous == "reverted":
         if normalized in {"completed", "complete", "done"} and completion_after_previous:
             return "resolved"
         return "reverted"
     if normalized in {"completed", "complete", "done"}:
         return "resolved"
-    if normalized in {"cancelled", "canceled"}:
-        return "closed_unresolved"
     if previous in {"resolved", "closed_unresolved"}:
         return "reopened"
     if previous in {"pr_merged", "reopened", "reverted"}:
@@ -120,6 +120,8 @@ def map_jira_resolution(
         outcome = _JIRA_RESOLUTIONS.get(resolution.strip().casefold())
     if outcome not in {"resolved", "closed_unresolved"}:
         return "unknown"
+    if outcome == "closed_unresolved":
+        return outcome
     if previous == "reverted":
         return "resolved" if outcome == "resolved" and completion_after_previous else "reverted"
     return outcome

@@ -337,24 +337,26 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
         if prior_ordering is None or ordering > prior_ordering:
             latest[identity] = event
 
-    events_by_task: dict[str, list[tuple[tuple, dict]]] = defaultdict(list)
+    events_by_task_identity: dict[str, dict[tuple[str, str, str, str], dict]] = defaultdict(dict)
     for identity, event in latest.items():
-        linked_tasks = {str(event["work_item_id"])} & task_cycles.keys()
-        for cycle_id in event.get("cycle_ids", []):
-            linked_tasks.update(cycle_tasks.get(str(cycle_id), set()))
-        ordering = (str(event.get("observed_at", "")), str(event.get("recorded_at", "")),
-                    int(event.get("event_id", 0) or 0))
+        work_item_id = identity[3]
+        cycle_ids = {str(cycle_id) for cycle_id in event.get("cycle_ids", [])}
+        linked_tasks = {
+            task_id
+            for cycle_id in cycle_ids
+            for task_id in cycle_tasks.get(cycle_id, set())
+            if task_id == work_item_id
+        }
+        if not cycle_ids:
+            linked_tasks = {work_item_id} & task_cycles.keys()
         for task_id in linked_tasks:
-            events_by_task[task_id].append((ordering, event))
+            events_by_task_identity[task_id][identity] = event
 
-    unique_items: dict[tuple, dict] = {}
+    unique_items: dict[tuple[str, str, str, str] | tuple[str, str], dict] = {}
     for task_id in task_cycles:
-        candidates = events_by_task.get(task_id, [])
+        candidates = events_by_task_identity.get(task_id, {})
         if candidates:
-            ordering, event = max(candidates, key=lambda item: item[0])
-            identity = (str(event["repo_id"]), str(event["provider"]),
-                        str(event["repository"]), str(event["work_item_id"]))
-            unique_items[identity] = event
+            unique_items.update(candidates)
         else:
             unique_items[("unobserved", task_id)] = {"outcome": "unknown", "source": None}
 

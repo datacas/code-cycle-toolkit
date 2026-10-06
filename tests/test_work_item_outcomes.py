@@ -211,6 +211,19 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.assertEqual("reopened", outcomes.map_jira_resolution("In Progress", None,
                                                                   previous="resolved"))
 
+
+    def test_explicit_unresolved_closures_override_older_reopened_and_reverted_states(self) -> None:
+        reopened = {"outcome": "reopened", "observed_at": "2026-10-01T10:00:00+00:00"}
+        reverted = {"outcome": "reverted", "observed_at": "2026-10-01T10:00:00+00:00"}
+
+        self.assertEqual("closed_unresolved", outcomes.map_github_state(
+            "CLOSED", "NOT_PLANNED", reopened, closed_at="2026-10-02T10:00:00Z"))
+        self.assertEqual("closed_unresolved", outcomes.map_github_state(
+            "CLOSED", "DUPLICATE", reverted, closed_at="2026-10-02T10:00:00Z"))
+        self.assertEqual("closed_unresolved", outcomes.map_plane_group("cancelled", "reverted"))
+        self.assertEqual("closed_unresolved", outcomes.map_jira_resolution(
+            "Done", "Duplicate", previous="reverted"))
+
     def test_failed_github_query_does_not_replace_a_prior_disposition(self) -> None:
         self.add_cycle("123", "cycle-123")
         self.add_cycle("456", "cycle-456")
