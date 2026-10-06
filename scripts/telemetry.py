@@ -74,7 +74,7 @@ from pathlib import Path
 #: 13: additive attempt, execution-variant, harness-snapshot, usage, cost,
 #: update, and conflict tables. Existing stage rows are not rewritten; old
 #: attempts and usage remain unknown rather than being filled with zero.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -281,6 +281,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "repeated_findings": ("count", None),
     # cycle correlation (schema 3)
     "cycle_id": ("identifier", None),
+    # numeric pull-request reference emitted by an implementation verdict
+    "pull_request_id": ("identifier", None),
     "stage_seq": ("count", None),
     "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle", "shadow"})),
     # where the cycle began (schema 5)
@@ -483,6 +485,16 @@ MAX_IDENTIFIER_LENGTH = 200
 
 #: A reference: alphanumerics and the punctuation real selectors use.
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/#@:+-]*$")
+
+WORK_ITEM_PROVIDERS = frozenset({"github", "plane", "jira"})
+WORK_ITEM_OUTCOMES = frozenset({
+    "resolved", "closed_unresolved", "pr_merged", "reopened", "reverted", "unknown",
+})
+WORK_ITEM_SOURCES = frozenset({"provider_query", "explicit"})
+WORK_ITEM_RECONCILIATION_FAILURES = frozenset({
+    "provider_unavailable", "provider_query_failed", "invalid_snapshot",
+    "pull_request_query_failed",
+})
 
 #: Published credential formats. Not a guess about what a secret looks like —
 #: these are documented prefixes, and rejecting them catches the paste that
@@ -714,6 +726,49 @@ CREATE TABLE IF NOT EXISTS cost_measures (
 );
 CREATE INDEX IF NOT EXISTS cost_attempt_active
     ON cost_measures (attempt_id, superseded_by_id, basis, component);
+-- Additive schema 14: provider-observed work-item transitions are separate
+-- from cycle rows so review or merge status cannot become issue resolution.
+CREATE TABLE IF NOT EXISTS work_item_disposition_events (
+    event_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version       INTEGER NOT NULL,
+    repo_id              TEXT NOT NULL,
+    provider             TEXT NOT NULL CHECK(provider IN ('github', 'plane', 'jira')),
+    external_repository  TEXT NOT NULL,
+    work_item_id         TEXT NOT NULL,
+    outcome              TEXT NOT NULL CHECK(outcome IN
+                             ('resolved', 'closed_unresolved', 'pr_merged',
+                              'reopened', 'reverted', 'unknown')),
+    source               TEXT NOT NULL CHECK(source IN ('provider_query', 'explicit')),
+    observed_at          TEXT NOT NULL,
+    recorded_at          TEXT NOT NULL,
+    cycle_ids            TEXT NOT NULL,
+    pull_request_ids     TEXT NOT NULL,
+    merged_pr_ids        TEXT NOT NULL,
+    resolving_pr_ids     TEXT NOT NULL,
+    reverted_pr_ids      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_item_disposition_latest
+    ON work_item_disposition_events
+       (repo_id, provider, external_repository, work_item_id,
+        observed_at, recorded_at, event_id);
+CREATE TABLE IF NOT EXISTS work_item_reconciliation_failures (
+    failure_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version       INTEGER NOT NULL,
+    repo_id              TEXT NOT NULL,
+    provider             TEXT NOT NULL CHECK(provider IN ('github', 'plane', 'jira')),
+    external_repository  TEXT NOT NULL,
+    work_item_id         TEXT NOT NULL,
+    failure_kind         TEXT NOT NULL CHECK(failure_kind IN
+                             ('provider_unavailable', 'provider_query_failed',
+                              'invalid_snapshot', 'pull_request_query_failed')),
+    pull_request_id      TEXT,
+    observed_at          TEXT NOT NULL,
+    recorded_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_item_reconciliation_failure_latest
+    ON work_item_reconciliation_failures
+       (repo_id, provider, external_repository, work_item_id,
+        observed_at, recorded_at, failure_id);
 """
 
 
@@ -1755,6 +1810,202 @@ class Telemetry:
                 record["payload"] = json.loads(record["payload"] or "{}")
                 out.append(record)
             return out
+
+    @staticmethod
+    def _work_item_reference(value: str, field: str) -> str:
+        checked = _checked("task_id", value)
+        if (not checked or not isinstance(checked, str) or
+                not IDENTIFIER_PATTERN.fullmatch(checked)):
+            raise TelemetryError(f"{field} must be a short opaque reference")
+        return checked
+
+    @classmethod
+    def _work_item_reference_list(cls, values, field: str) -> list[str]:
+        if values is None:
+            return []
+        if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+            raise TelemetryError(f"{field} must be a list of opaque references")
+        return list(dict.fromkeys(cls._work_item_reference(value, field) for value in values))
+
+    @staticmethod
+    def _decode_work_item_disposition(row) -> dict:
+        event = dict(row)
+        for column, key in (("cycle_ids", "cycle_ids"),
+                            ("pull_request_ids", "pull_request_ids"),
+                            ("merged_pr_ids", "merged_pr_ids"),
+                            ("resolving_pr_ids", "resolving_pr_ids"),
+                            ("reverted_pr_ids", "reverted_pr_ids")):
+            try:
+                event[key] = json.loads(event[column])
+            except (TypeError, json.JSONDecodeError):
+                event[key] = []
+        event["repository"] = event.pop("external_repository")
+        return event
+
+    def latest_work_item_disposition(
+        self, repo_id: str, provider: str, repository: str, work_item_id: str
+    ) -> dict | None:
+        """Return the latest recorded transition for one external work item."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM work_item_disposition_events "
+                "WHERE repo_id = ? AND provider = ? AND external_repository = ? "
+                "AND work_item_id = ? "
+                "ORDER BY observed_at DESC, recorded_at DESC, event_id DESC LIMIT 1",
+                (repo_id, provider, repository, work_item_id),
+            ).fetchone()
+        return self._decode_work_item_disposition(row) if row else None
+
+    def work_item_disposition_events(self, repo_id: str | None = None) -> list[dict]:
+        """Return append-only disposition transitions, optionally repository-scoped."""
+        query = "SELECT * FROM work_item_disposition_events"
+        params = ()
+        if repo_id is not None:
+            query += " WHERE repo_id = ?"
+            params = (repo_id,)
+        query += " ORDER BY observed_at, recorded_at, event_id"
+        with closing(self._connect()) as connection:
+            return [self._decode_work_item_disposition(row)
+                    for row in connection.execute(query, params)]
+
+    def record_work_item_reconciliation_failure(
+        self, *, repo_id: str, provider: str, repository: str, work_item_id: str,
+        failure_kind: str, pull_request_id: str | None = None,
+        observed_at: str | None = None,
+    ) -> dict:
+        """Append a safe failure category without changing a disposition."""
+        repo_id = self._work_item_reference(repo_id, "repo_id")
+        repository = self._work_item_reference(repository, "repository")
+        work_item_id = self._work_item_reference(work_item_id, "work_item_id")
+        if not isinstance(provider, str) or provider not in WORK_ITEM_PROVIDERS:
+            raise TelemetryError("provider must be github, plane, or jira")
+        if not isinstance(failure_kind, str) or failure_kind not in WORK_ITEM_RECONCILIATION_FAILURES:
+            raise TelemetryError("unknown work-item reconciliation failure kind")
+        if pull_request_id is not None:
+            pull_request_id = self._work_item_reference(pull_request_id, "pull_request_id")
+        observed = self._timestamp(observed_at)
+        recorded = self._timestamp()
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                "INSERT INTO work_item_reconciliation_failures "
+                "(schema_version, repo_id, provider, external_repository, work_item_id, "
+                " failure_kind, pull_request_id, observed_at, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (SCHEMA_VERSION, repo_id, provider, repository, work_item_id,
+                 failure_kind, pull_request_id, observed, recorded),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM work_item_reconciliation_failures WHERE failure_id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        return dict(row)
+
+    def work_item_reconciliation_failures(self, repo_id: str | None = None) -> list[dict]:
+        query = "SELECT * FROM work_item_reconciliation_failures"
+        params = ()
+        if repo_id is not None:
+            query += " WHERE repo_id = ?"
+            params = (repo_id,)
+        query += " ORDER BY observed_at, recorded_at, failure_id"
+        with closing(self._connect()) as connection:
+            return [dict(row) for row in connection.execute(query, params)]
+
+    def record_work_item_disposition(
+        self, *, repo_id: str, provider: str, repository: str, work_item_id: str,
+        outcome: str, source: str, observed_at: str | None = None,
+        cycle_ids=(), pull_request_ids=(), merged_pr_ids=(), resolving_pr_ids=(), reverted_pr_ids=(),
+    ) -> dict:
+        """Append a work-item transition; unchanged and stale snapshots are no-ops."""
+        repo_id = self._work_item_reference(repo_id, "repo_id")
+        repository = self._work_item_reference(repository, "repository")
+        work_item_id = self._work_item_reference(work_item_id, "work_item_id")
+        if not isinstance(provider, str) or provider not in WORK_ITEM_PROVIDERS:
+            raise TelemetryError("provider must be github, plane, or jira")
+        if not isinstance(outcome, str) or outcome not in WORK_ITEM_OUTCOMES:
+            raise TelemetryError("unknown work-item disposition")
+        if not isinstance(source, str) or source not in WORK_ITEM_SOURCES:
+            raise TelemetryError("source must be provider_query or explicit")
+        cycle_ids = self._work_item_reference_list(cycle_ids, "cycle_id")
+        pull_request_ids = self._work_item_reference_list(pull_request_ids, "pull_request_id")
+        merged_pr_ids = self._work_item_reference_list(merged_pr_ids, "merged_pr_id")
+        resolving_pr_ids = self._work_item_reference_list(resolving_pr_ids, "resolving_pr_id")
+        reverted_pr_ids = self._work_item_reference_list(reverted_pr_ids, "reverted_pr_id")
+        if outcome != "reverted" and reverted_pr_ids:
+            raise TelemetryError("reverted pull requests require the reverted outcome")
+        observed = self._timestamp(observed_at)
+        recorded = self._timestamp()
+        with closing(self._connect()) as connection:
+            previous = connection.execute(
+                "SELECT * FROM work_item_disposition_events "
+                "WHERE repo_id = ? AND provider = ? AND external_repository = ? "
+                "AND work_item_id = ? "
+                "ORDER BY observed_at DESC, recorded_at DESC, event_id DESC LIMIT 1",
+                (repo_id, provider, repository, work_item_id),
+            ).fetchone()
+            if previous:
+                current = self._decode_work_item_disposition(previous)
+                if observed < current["observed_at"]:
+                    return {"created": False, "reason": "stale", "event": current}
+                explicit_resolver_unchanged = (
+                    source != "explicit" or
+                    set(resolving_pr_ids).issubset(set(current["resolving_pr_ids"]))
+                )
+                if (outcome == current["outcome"] and
+                        set(cycle_ids).issubset(set(current["cycle_ids"])) and
+                        set(pull_request_ids).issubset(set(current["pull_request_ids"])) and
+                        set(merged_pr_ids).issubset(set(current["merged_pr_ids"])) and
+                        set(reverted_pr_ids).issubset(set(current["reverted_pr_ids"])) and
+                        explicit_resolver_unchanged):
+                    return {"created": False, "reason": "unchanged", "event": current}
+                cycle_ids = list(dict.fromkeys(current["cycle_ids"] + cycle_ids))
+                pull_request_ids = list(dict.fromkeys(current["pull_request_ids"] + pull_request_ids))
+                merged_pr_ids = list(dict.fromkeys(current["merged_pr_ids"] + merged_pr_ids))
+                reverted_pr_ids = list(dict.fromkeys(current["reverted_pr_ids"] + reverted_pr_ids))
+                if outcome == current["outcome"]:
+                    # A newly merged PR is a transition for that PR, but it
+                    # must not rewrite the resolving-PR snapshot of an item.
+                    # A person may explicitly associate an additional PR later.
+                    if source == "explicit" and outcome == "resolved":
+                        resolving_pr_ids = list(dict.fromkeys(
+                            current["resolving_pr_ids"] + resolving_pr_ids
+                        ))
+                    else:
+                        resolving_pr_ids = current["resolving_pr_ids"]
+                elif outcome in {"reopened", "reverted"}:
+                    if outcome == "reverted" and current["outcome"] not in {"resolved", "reverted"}:
+                        raise TelemetryError("only a currently resolved work item can be marked reverted")
+                    resolving_pr_ids = current["resolving_pr_ids"]
+            elif outcome == "reverted":
+                raise TelemetryError("a reverted outcome needs a previously resolved work item")
+            if not set(resolving_pr_ids).issubset(pull_request_ids):
+                raise TelemetryError("resolving pull requests must also be linked pull requests")
+            if not set(merged_pr_ids).issubset(pull_request_ids):
+                raise TelemetryError("merged pull requests must also be linked pull requests")
+            if outcome == "pr_merged" and not merged_pr_ids:
+                raise TelemetryError("pr_merged requires at least one linked PR observed as merged")
+            if outcome == "reverted":
+                if not reverted_pr_ids:
+                    raise TelemetryError("a reverted outcome must name the resolving pull request that was reverted")
+                if not set(reverted_pr_ids).issubset(resolving_pr_ids):
+                    raise TelemetryError("only resolving pull requests can revoke work-item resolution")
+                if not set(reverted_pr_ids).issubset(merged_pr_ids):
+                    raise TelemetryError("only merged pull requests can be recorded as reverted")
+            cursor = connection.execute(
+                "INSERT INTO work_item_disposition_events "
+                "(schema_version, repo_id, provider, external_repository, work_item_id, outcome, source, "
+                " observed_at, recorded_at, cycle_ids, pull_request_ids, merged_pr_ids, resolving_pr_ids, "
+                " reverted_pr_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (SCHEMA_VERSION, repo_id, provider, repository, work_item_id, outcome, source,
+                 observed, recorded, json.dumps(cycle_ids), json.dumps(pull_request_ids),
+                 json.dumps(merged_pr_ids), json.dumps(resolving_pr_ids), json.dumps(reverted_pr_ids)),
+            )
+            connection.commit()
+            event = connection.execute(
+                "SELECT * FROM work_item_disposition_events WHERE event_id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        return {"created": True, "event": self._decode_work_item_disposition(event)}
 
     def first_pass_rate(
         self, repo_id: str, profile: str | None = None, *, minimum: int = MINIMUM_SAMPLE

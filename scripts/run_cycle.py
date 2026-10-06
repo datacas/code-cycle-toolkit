@@ -416,8 +416,8 @@ class Reported:
         """A safe change-request reference, including the legacy alias.
 
         The identifier is inserted into a later stage's prompt, so accept only
-        a short scalar made from reference characters. It is never stored in
-        telemetry.
+        a short scalar made from reference characters. Telemetry stores only a
+        numeric pull-request identifier when the reference has a known shape.
         """
         if not self.payload:
             return None
@@ -433,6 +433,21 @@ class Reported:
                 continue
             if safe_reference(reference):
                 return reference
+        return None
+
+    @property
+    def telemetry_pull_request_id(self) -> str | None:
+        """Return only the numeric suffix of a recognized PR reference."""
+        reference = self.change_request_id
+        if not reference:
+            return None
+        if reference.isdecimal() and int(reference) > 0:
+            return reference
+        for marker in ("/pull/", "/pull-requests/", "#"):
+            if marker in reference:
+                number = reference.rsplit(marker, 1)[-1]
+                if number.isdecimal() and int(number) > 0:
+                    return number
         return None
 
     @property
@@ -1598,12 +1613,17 @@ def run_cycle(
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
+            pull_request_id = (
+                reported.telemetry_pull_request_id if role == "implement" else None
+            )
             recorder.record_verdict(role, reported.status,
                                     **findings,
                                     **(_forecast(reported.payload) if role == "implement" else {}),
                                     **_tests(reported.payload, boundary_rule=(
                                         boundary_rule_fired(recorder.latest_change))),
-                                    **_checks(reported.payload))
+                                    **_checks(reported.payload),
+                                    **({"pull_request_id": pull_request_id}
+                                       if pull_request_id else {}))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
         # Only a completed stage enters the history the ladder reads. The

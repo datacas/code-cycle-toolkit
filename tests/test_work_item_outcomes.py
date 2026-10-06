@@ -1,0 +1,377 @@
+"""Provider-observed work-item dispositions remain separate from cycle outcomes."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import telemetry as tm  # noqa: E402
+import work_item_outcomes as outcomes  # noqa: E402
+
+
+class WorkItemOutcomeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.database = Path(temporary.name) / "telemetry.sqlite"
+        self.store = tm.Telemetry(self.database)
+
+    def add_cycle(self, task_id: str, cycle_id: str) -> None:
+        self.store.record_stage("owner/repo", task_id, "implement",
+                                record_kind="dispatch", cycle_id=cycle_id)
+
+    def test_schema_fourteen_records_transitions_and_deduplicates_snapshots(self) -> None:
+        first = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-01T10:00:00Z", cycle_ids=["cycle-1"],
+            pull_request_ids=["44"], resolving_pr_ids=["44"],
+        )
+        repeated = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-02T10:00:00Z", cycle_ids=["cycle-1"],
+            pull_request_ids=["44"], resolving_pr_ids=["44"],
+        )
+        stale = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="reopened", source="provider_query",
+            observed_at="2026-09-30T10:00:00Z",
+        )
+
+        self.assertTrue(first["created"])
+        self.assertFalse(repeated["created"])
+        self.assertEqual("unchanged", repeated["reason"])
+        self.assertFalse(stale["created"])
+        self.assertEqual("stale", stale["reason"])
+        self.assertEqual(14, tm.SCHEMA_VERSION)
+        self.assertEqual(1, len(self.store.work_item_disposition_events("owner/repo")))
+        event = self.store.latest_work_item_disposition("owner/repo", "github", "owner/repo", "120")
+        self.assertEqual(["cycle-1"], event["cycle_ids"])
+        self.assertEqual(["44"], event["resolving_pr_ids"])
+        self.assertEqual("2026-10-01T10:00:00+00:00", event["observed_at"])
+
+        reopened = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="reopened", source="provider_query",
+            observed_at="2026-10-03T10:00:00Z",
+        )
+        self.assertTrue(reopened["created"])
+        self.assertEqual("reopened", self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "120")["outcome"])
+
+    def test_disposition_rejects_secret_shaped_references_and_bad_links(self) -> None:
+        common = dict(repo_id="owner/repo", provider="github", repository="owner/repo",
+                      work_item_id="120", source="explicit")
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_work_item_disposition(**{**common, "work_item_id": "ghp_not-a-reference"},
+                                                    outcome="resolved")
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_work_item_disposition(**common, outcome="resolved",
+                                                    pull_request_ids=["44"], resolving_pr_ids=["45"])
+        self.assertEqual([], self.store.work_item_disposition_events())
+
+    def test_per_pr_merge_updates_do_not_rewrite_the_resolving_pr_snapshot(self) -> None:
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-01T10:00:00Z", pull_request_ids=["44"],
+            merged_pr_ids=["44"], resolving_pr_ids=["44"],
+        )
+        linked_later = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-01T12:00:00Z", cycle_ids=["cycle-2"],
+            pull_request_ids=["44", "45"], resolving_pr_ids=["44", "45"],
+        )
+        self.assertTrue(linked_later["created"])
+        self.assertEqual(["44", "45"], linked_later["event"]["pull_request_ids"])
+        self.assertEqual(["44"], linked_later["event"]["resolving_pr_ids"])
+
+        later_merge = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-02T10:00:00Z", pull_request_ids=["44", "45"],
+            merged_pr_ids=["44", "45"], resolving_pr_ids=["44", "45"],
+        )
+
+        self.assertTrue(later_merge["created"])
+        latest = self.store.latest_work_item_disposition("owner/repo", "github", "owner/repo", "120")
+        self.assertEqual(["44", "45"], latest["merged_pr_ids"])
+        self.assertEqual(["44"], latest["resolving_pr_ids"])
+        self.assertEqual(3, len(self.store.work_item_disposition_events("owner/repo")))
+
+    def test_a_later_pr_joins_the_resolving_snapshot_only_when_explicitly_associated(self) -> None:
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-01T10:00:00Z", pull_request_ids=["44"],
+            merged_pr_ids=["44"], resolving_pr_ids=["44"],
+        )
+        linked_later = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-02T10:00:00Z", pull_request_ids=["44", "45"],
+            resolving_pr_ids=["44", "45"],
+        )
+        self.assertTrue(linked_later["created"])
+        self.assertEqual(["44"], linked_later["event"]["resolving_pr_ids"])
+
+        corrected = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="explicit",
+            observed_at="2026-10-03T10:00:00Z", pull_request_ids=["45"],
+            resolving_pr_ids=["45"],
+        )
+
+        self.assertTrue(corrected["created"])
+        self.assertEqual(["44", "45"], corrected["event"]["resolving_pr_ids"])
+
+    def test_only_reverting_a_merged_resolving_pr_revokes_resolution(self) -> None:
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-01T10:00:00Z", pull_request_ids=["44", "45"],
+            merged_pr_ids=["44", "45"], resolving_pr_ids=["44"],
+        )
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_work_item_disposition(
+                repo_id="owner/repo", provider="github", repository="owner/repo",
+                work_item_id="120", outcome="reverted", source="provider_query",
+                observed_at="2026-10-02T10:00:00Z", reverted_pr_ids=["45"],
+            )
+        self.assertEqual("resolved", self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "120")["outcome"])
+
+        recorded = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="reverted", source="provider_query",
+            observed_at="2026-10-03T10:00:00Z", reverted_pr_ids=["44"],
+        )
+        self.assertTrue(recorded["created"])
+        self.assertEqual("reverted", recorded["event"]["outcome"])
+        self.assertEqual(["44"], recorded["event"]["resolving_pr_ids"])
+
+        completed_again = self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="120", outcome="resolved", source="provider_query",
+            observed_at="2026-10-04T10:00:00Z", pull_request_ids=["44"],
+            merged_pr_ids=["44"], resolving_pr_ids=["44"],
+        )
+        self.assertTrue(completed_again["created"])
+        self.assertEqual("resolved", completed_again["event"]["outcome"])
+        self.assertEqual(["44"], completed_again["event"]["reverted_pr_ids"])
+
+    def test_provider_mappings_keep_unknown_distinct_and_allow_custom_jira_resolutions(self) -> None:
+        self.assertEqual("resolved", outcomes.map_github_state("CLOSED", "COMPLETED"))
+        self.assertEqual("closed_unresolved", outcomes.map_github_state("CLOSED", "DUPLICATE"))
+        self.assertEqual("reopened", outcomes.map_github_state("OPEN", None, "resolved"))
+        self.assertEqual("pr_merged", outcomes.map_github_state("OPEN", None, "pr_merged"))
+        self.assertEqual("unknown", outcomes.map_github_state("OPEN", None))
+        reverted = {"outcome": "reverted", "observed_at": "2026-10-03T10:00:00+00:00"}
+        self.assertEqual("reverted", outcomes.map_github_state(
+            "CLOSED", "COMPLETED", reverted, closed_at="2026-10-01T10:00:00Z"))
+        self.assertEqual("resolved", outcomes.map_github_state(
+            "CLOSED", "COMPLETED", reverted, closed_at="2026-10-04T10:00:00Z"))
+        self.assertEqual("unknown", outcomes.map_github_issue({
+            "state": "OPEN", "closedByPullRequestsReferences": [{"number": 44, "mergedAt": "now"}],
+        })["outcome"])
+        self.assertEqual("resolved", outcomes.map_plane_group("completed"))
+        self.assertEqual("closed_unresolved", outcomes.map_plane_group("cancelled"))
+        self.assertEqual("unknown", outcomes.map_plane_group("started"))
+        self.assertEqual("reopened", outcomes.map_plane_group("started", "resolved"))
+        self.assertEqual("reverted", outcomes.map_plane_group("completed", "reverted"))
+        self.assertEqual("resolved", outcomes.map_plane_group(
+            "completed", "reverted", completion_after_previous=True))
+        self.assertEqual("unknown", outcomes.map_jira_resolution("Done", None))
+        self.assertEqual("unknown", outcomes.map_jira_resolution("Done", "Custom Resolution"))
+        self.assertEqual("resolved", outcomes.map_jira_resolution(
+            "Done", "Custom Resolution", {"Custom Resolution": "resolved"}))
+        self.assertEqual("closed_unresolved", outcomes.map_jira_resolution(
+            "Done", "Won't Do"))
+        self.assertEqual("reverted", outcomes.map_jira_resolution(
+            "Done", "Fixed", previous="reverted"))
+        self.assertEqual("resolved", outcomes.map_jira_resolution(
+            "Done", "Fixed", previous="reverted", completion_after_previous=True))
+        self.assertEqual("unknown", outcomes.map_jira_resolution(
+            "Done", "Custom Resolution", previous="reverted"))
+        self.assertEqual("unknown", outcomes.map_jira_resolution("In Progress", "Fixed"))
+        self.assertEqual("reopened", outcomes.map_jira_resolution("In Progress", None,
+                                                                  previous="resolved"))
+
+    def test_failed_github_query_does_not_replace_a_prior_disposition(self) -> None:
+        self.add_cycle("123", "cycle-123")
+        self.add_cycle("456", "cycle-456")
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="owner/repo",
+            work_item_id="456", outcome="resolved", source="explicit",
+            observed_at="2026-10-01T09:00:00Z", cycle_ids=["cycle-456"],
+        )
+        responses = [
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 123, "state": "CLOSED", "stateReason": "COMPLETED",
+                "updatedAt": "2026-10-02T10:00:00Z",
+                "closedByPullRequestsReferences": [],
+            }), ""),
+            subprocess.CompletedProcess([], 1, "", "provider unavailable"),
+        ]
+        runner = Mock(side_effect=responses)
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/repo", repository="owner/repo", runner=runner
+        )
+
+        self.assertEqual((1, 1), (updated, failed))
+        self.assertEqual("resolved", self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123")["outcome"])
+        preserved = self.store.latest_work_item_disposition("owner/repo", "github", "owner/repo", "456")
+        self.assertEqual("resolved", preserved["outcome"])
+        self.assertEqual("explicit", preserved["source"])
+        self.assertEqual("2026-10-01T09:00:00+00:00", preserved["observed_at"])
+        failures = [failure for failure in self.store.work_item_reconciliation_failures("owner/repo")
+                    if failure["work_item_id"] == "456"]
+        self.assertEqual(1, len(failures))
+        self.assertEqual("provider_query_failed", failures[0]["failure_kind"])
+        self.assertTrue(failures[0]["observed_at"])
+
+    def test_failed_linked_pr_query_does_not_record_issue_resolution(self) -> None:
+        self.add_cycle("123", "cycle-123")
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 123, "state": "CLOSED", "stateReason": "COMPLETED",
+                "updatedAt": "2026-10-02T10:00:00Z",
+                "closedByPullRequestsReferences": [{"number": 44}],
+            }), ""),
+            subprocess.CompletedProcess([], 1, "", "provider unavailable"),
+        ])
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/repo", repository="owner/repo", runner=runner
+        )
+
+        self.assertEqual((0, 1), (updated, failed))
+        self.assertIsNone(self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123"))
+        failures = self.store.work_item_reconciliation_failures("owner/repo")
+        self.assertEqual("pull_request_query_failed", failures[0]["failure_kind"])
+        self.assertEqual("44", failures[0]["pull_request_id"])
+
+    def test_invalid_linked_pr_snapshot_records_failure_without_disposition(self) -> None:
+        self.add_cycle("123", "cycle-123")
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "number": 123, "state": "CLOSED", "stateReason": "COMPLETED",
+                "updatedAt": "2026-10-02T10:00:00Z",
+                "closedByPullRequestsReferences": [{"number": 44}],
+            }), ""),
+            subprocess.CompletedProcess([], 0, "[]", ""),
+        ])
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/repo", repository="owner/repo", runner=runner
+        )
+
+        self.assertEqual((0, 1), (updated, failed))
+        self.assertIsNone(self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123"))
+        failure = self.store.work_item_reconciliation_failures("owner/repo")[0]
+        self.assertEqual("pull_request_query_failed", failure["failure_kind"])
+        self.assertEqual("44", failure["pull_request_id"])
+
+    def test_reconcile_snapshots_a_pull_request_from_a_toolkit_cycle(self) -> None:
+        self.add_cycle("123", "cycle-123")
+        self.store.record_stage("owner/repo", "123", "implement",
+                                record_kind="verdict", cycle_id="cycle-123",
+                                pull_request_id="44")
+
+        def runner(command, **_kwargs):
+            if command[1] == "issue":
+                snapshot = {
+                    "number": 123, "state": "CLOSED", "stateReason": "COMPLETED",
+                    "updatedAt": "2026-10-06T10:00:00Z",
+                    "closedAt": "2026-10-06T10:00:00Z",
+                    "closedByPullRequestsReferences": [],
+                }
+            else:
+                self.assertEqual("44", command[3])
+                snapshot = {
+                    "number": 44, "mergedAt": "2026-10-05T10:00:00Z",
+                    "updatedAt": "2026-10-05T10:00:00Z",
+                }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(snapshot), stderr="")
+
+        updated, failed = outcomes.reconcile_github(
+            self.store, repo_id="owner/repo", repository="owner/repo", runner=runner
+        )
+
+        latest = self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123"
+        )
+        self.assertEqual((1, 0), (updated, failed))
+        self.assertEqual(["44"], latest["pull_request_ids"])
+        self.assertEqual(["44"], latest["resolving_pr_ids"])
+
+    def test_real_cli_records_explicit_observations_and_queries_through_gh(self) -> None:
+        self.add_cycle("123", "cycle-123")
+        self.add_cycle("456", "cycle-456")
+        script = ROOT / "scripts" / "work_item_outcomes.py"
+        explicit = subprocess.run(
+            [sys.executable, str(script), "--database", str(self.database), "record",
+             "--repo-id", "owner/repo", "--provider", "jira", "--repository", "PROJECT",
+             "--work-item-id", "PROJECT-77", "--outcome", "resolved",
+             "--observed-at", "2026-10-01T10:00:00Z"],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, explicit.returncode, explicit.stderr)
+        self.assertEqual("explicit", json.loads(explicit.stdout)["event"]["source"])
+
+        temporary = self.database.parent / "bin"
+        temporary.mkdir()
+        fake_gh = temporary / "gh"
+        fake_gh.write_text(
+            "#!" + sys.executable + "\n"
+            "import json, sys\n"
+            "if sys.argv[1] == 'pr':\n"
+            "    print(json.dumps({'number': int(sys.argv[3]), 'mergedAt': '2026-10-05T10:00:00Z', "
+            "'updatedAt': '2026-10-05T10:00:00Z'}))\n"
+            "elif sys.argv[3] == '123':\n"
+            "    print(json.dumps({'number': 123, 'state': 'CLOSED', 'stateReason': 'COMPLETED', "
+            "'updatedAt': '2026-10-06T10:00:00Z', 'closedByPullRequestsReferences': [{'number': 44}]}))\n"
+            "else:\n"
+            "    print('query failed', file=sys.stderr)\n"
+            "    raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(temporary) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [sys.executable, str(script), "--database", str(self.database), "reconcile",
+             "--repo-id", "owner/repo", "--repository", "owner/repo"],
+            text=True, capture_output=True, check=False, env=env,
+        )
+
+        self.assertEqual(1, result.returncode)
+        self.assertEqual({"updated": 1, "failed": 1}, json.loads(result.stdout))
+        self.assertIn("no observation recorded", result.stderr)
+        self.assertEqual("resolved", self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123")["outcome"])
+        self.assertEqual(["44"], self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "123")["merged_pr_ids"])
+        self.assertIsNone(self.store.latest_work_item_disposition(
+            "owner/repo", "github", "owner/repo", "456"))
+
+
+if __name__ == "__main__":
+    unittest.main()

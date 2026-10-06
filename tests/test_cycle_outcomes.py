@@ -196,6 +196,16 @@ class DispatchObservationTests(CycleTestCase):
 
 
 class SeparationTests(CycleTestCase):
+    def test_ready_for_manual_merge_does_not_create_a_work_item_disposition(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+        recorder.stage("implement", "work")
+        recorder.close("READY_FOR_MANUAL_MERGE")
+
+        cycle = self.store.cycle_outcome("owner/repo", recorder.cycle_id)
+
+        self.assertEqual("READY_FOR_MANUAL_MERGE", cycle["outcome"]["status"])
+        self.assertEqual([], self.store.work_item_disposition_events("owner/repo"))
+
     def test_dispatch_rows_carry_no_outcome_and_are_never_rewritten(self) -> None:
         recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
         recorder.stage("implement", "work")
@@ -325,6 +335,17 @@ class DriverTests(RunCycleTestCase):
         self.assertIs(True, cycle["outcome"]["tests_passed"])
         self.assertEqual("claimed", cycle["outcome"]["tests_basis"])
         self.assertIs(True, cycle["outcome"]["first_pass_approved"])
+
+    def test_an_implementer_pr_reference_is_captured_as_a_numeric_identifier(self) -> None:
+        implementer = Talker(
+            "codex", block("IMPLEMENTED", change_request_id="https://github.com/owner/api/pull/44")
+        )
+
+        self.run_cycle(implementer, Talker("claude"))
+
+        verdict = [row for row in self.rows()
+                   if row["role"] == "implement" and row["payload"].get("record_kind") == "verdict"][0]
+        self.assertEqual("44", verdict["payload"]["pull_request_id"])
 
     def test_the_checks_of_the_final_head_reach_the_verdict(self) -> None:
         """#77: whether a stage's head was green is recorded beside its claim."""

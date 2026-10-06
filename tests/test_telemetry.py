@@ -695,8 +695,9 @@ class DispatchAttemptTests(TelemetryTestCase):
             parent_attempt_id=parent, relationship=relationship,
         )
 
-    def test_schema_13_keeps_old_stage_rows_unmeasured(self) -> None:
-        self.store.record_stage("repo", "old-task", "implement", cycle_id="old-cycle", stage_seq=1)
+    def test_schema_13_stage_rows_remain_unmeasured_after_schema_14(self) -> None:
+        with unittest.mock.patch.object(tm, "SCHEMA_VERSION", 13):
+            self.store.record_stage("repo", "old-task", "implement", cycle_id="old-cycle", stage_seq=1)
 
         self.assertEqual(13, self.store.rows("repo")[0]["schema_version"])
         self.assertEqual([], self.store.dispatch_attempts("repo", cycle_id="old-cycle"))
