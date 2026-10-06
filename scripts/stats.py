@@ -353,11 +353,21 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
             events_by_task_identity[task_id][identity] = event
 
     unique_items: dict[tuple[str, str, str, str] | tuple[str, str], dict] = {}
-    for task_id in task_cycles:
+    for task_id, cycle_ids in task_cycles.items():
         candidates = events_by_task_identity.get(task_id, {})
-        if candidates:
-            unique_items.update(candidates)
-        else:
+        unique_items.update(candidates)
+
+        linked_cycle_ids: set[str] = set()
+        for event in candidates.values():
+            event_cycle_ids = {str(cycle_id) for cycle_id in event.get("cycle_ids", [])}
+            # Preserve the legacy task-level association when an event has no
+            # cycle IDs; otherwise track exactly which cycles have an outcome.
+            linked_cycle_ids.update(event_cycle_ids or cycle_ids)
+
+        # A task ID can now have an observed repository identity and leftover
+        # cycles with no identity/outcome event. Keep that remaining group as
+        # one unknown item, regardless of how many cycles it contains.
+        if cycle_ids - linked_cycle_ids:
             unique_items[("unobserved", task_id)] = {"outcome": "unknown", "source": None}
 
     outcomes = Counter(item.get("outcome", "unknown") for item in unique_items.values())

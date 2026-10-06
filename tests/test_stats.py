@@ -615,6 +615,27 @@ class StatsTests(unittest.TestCase):
         self.assertEqual({"resolved": 1, "closed_unresolved": 1, "pr_merged": 0,
                           "reopened": 0, "reverted": 0, "unknown": 0}, outcomes["outcomes"])
 
+    def test_work_item_outcomes_keep_unobserved_same_id_cycles_as_unknown(self) -> None:
+        for cycle_id in ("cycle-repo-a", "cycle-repo-b", "cycle-repo-b-again"):
+            self.store.record_stage("owner/repo", "120", "implement",
+                                    record_kind="dispatch", cycle_id=cycle_id)
+        self.store.record_work_item_disposition(
+            repo_id="owner/repo", provider="github", repository="org/repo-a",
+            work_item_id="120", outcome="resolved", source="explicit",
+            observed_at="2026-10-01T10:00:00Z", cycle_ids=["cycle-repo-a"],
+        )
+
+        rows = stats._read_rows(self.database, "owner/repo")
+        dispositions = stats._read_dispositions(self.database, "owner/repo")
+        report = stats.aggregate(rows, repo_id="owner/repo", now=self.as_of(),
+                                 dispositions=dispositions)
+        outcomes = report["summary"]["work_item_outcomes"]
+
+        self.assertEqual((2, 1, 1),
+                         (outcomes["items"], outcomes["recorded"], outcomes["unobserved"]))
+        self.assertEqual({"resolved": 1, "closed_unresolved": 0, "pr_merged": 0,
+                          "reopened": 0, "reverted": 0, "unknown": 1}, outcomes["outcomes"])
+
     def test_stop_reasons_and_repeated_findings_are_reported(self) -> None:
         self.record_cycle(0)  # a closing row from before schema 7
         for index, (reason, repeated) in enumerate(
