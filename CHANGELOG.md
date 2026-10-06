@@ -5,6 +5,13 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- The Linux validation job and the release job run on the self-hosted runner
+  (`self-hosted, Linux, X64`). The validation job skips pull requests from
+  forks, so untrusted code never reaches that runner. The PowerShell installer
+  job stays on `windows-latest`.
+
 ## [0.5.0] - 2026-09-30
 
 ### Added
