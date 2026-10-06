@@ -385,19 +385,25 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
             unique_items[identity] = latest[identity]
             associated_legacy_cycles.add(cycle_key)
 
-    # A legacy cycle still unmatched belongs to its task's only known scope;
-    # when several scopes remain possible it stays one unknown legacy group.
+    # A legacy cycle still unmatched belongs to its task's only known scope,
+    # whether a cycle or a ledger event revealed it; when several scopes remain
+    # possible it stays one unknown legacy group.
     task_identities: dict[tuple[str, str], set[tuple[str, str, str, str]]] = defaultdict(set)
-    for identity in unique_items:
+    for identity in (*unique_items, *latest):
         task_identities[(identity[0], identity[3])].add(identity)
 
-    unobserved_legacy_items = {
-        (cycle_key[0], task_id)
-        for cycle_key, task_ids in cycle_tasks.items()
-        if cycle_key not in cycle_identity and cycle_key not in associated_legacy_cycles
-        for task_id in task_ids
-        if len(task_identities.get((cycle_key[0], task_id), ())) != 1
-    }
+    unobserved_legacy_items = set()
+    for cycle_key, task_ids in cycle_tasks.items():
+        if cycle_key in cycle_identity or cycle_key in associated_legacy_cycles:
+            continue
+        for task_id in task_ids:
+            known = task_identities.get((cycle_key[0], task_id), set())
+            if len(known) == 1:
+                identity = next(iter(known))
+                if identity not in unique_items:
+                    unique_items[identity] = latest[identity]
+            else:
+                unobserved_legacy_items.add((cycle_key[0], task_id))
     for repo_id, task_id in unobserved_legacy_items:
         unique_items[("unobserved", repo_id, task_id)] = {
             "outcome": "unknown",
@@ -420,11 +426,14 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
                     # A qualified reference identifies the PR independently
                     # of the provider used to observe its linked work item.
                     pull_requests[metric].add((pr_repository, pr_number))
+                elif provider == "github":
+                    # A GitHub work item's repository is its PR repository, so
+                    # a bare number names the same PR as the qualified form.
+                    pull_requests[metric].add((repository, reference))
                 else:
-                    # Older ledger references carry only a PR number, so their
-                    # work-item repository remains the only known scope.
-                    pr_repository, pr_number = repository, reference
-                    pull_requests[metric].add((provider, pr_repository, pr_number))
+                    # Other providers' bare numbers are only meaningful within
+                    # their own work-item repository.
+                    pull_requests[metric].add((provider, repository, reference))
     return {
         "items": len(unique_items),
         "recorded": sum(1 for item in unique_items.values()

@@ -137,6 +137,10 @@ Reconciliation selects identity-bearing cycles for the requested provider and
 repository. A legacy cycle without stored identity is attached only when no
 known cycle puts that task ID in a different scope; if the known cycles span
 multiple scopes, the legacy cycle stays unassociated rather than being guessed.
+Statistics apply the same rule: a legacy cycle counts under the only scope known
+for its task ID, whether a scoped cycle or a recorded disposition revealed it,
+and otherwise stays one unknown item. A bare PR number from a GitHub work item
+counts as the same PR as its qualified `owner/repo#number` form.
 
 Run reconciliation on demand; there is no background polling. The current
 standalone query adapter uses the authenticated `gh` CLI and visits work items
