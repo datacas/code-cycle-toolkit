@@ -433,8 +433,11 @@ class LocalOnlyPolicyTests(RunCycleTestCase):
         self.assertEqual(rc.UNRESOLVED_END, report.status)
         self.assertEqual(1, len(implementer.dispatch_kwargs))
         self.assertTrue(implementer.dispatch_kwargs[0]["writes"])
-        self.assertEqual((str(root / ".git"),),
-                         implementer.dispatch_kwargs[0]["writable_dirs"])
+        actual_common_dir, = implementer.dispatch_kwargs[0]["writable_dirs"]
+        self.assertEqual(
+            os.path.normcase(str((root / ".git").resolve())),
+            os.path.normcase(str(Path(actual_common_dir).resolve())),
+        )
 
     def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
         temporary = tempfile.TemporaryDirectory()
