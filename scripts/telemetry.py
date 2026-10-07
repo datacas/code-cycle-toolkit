@@ -75,7 +75,8 @@ from pathlib import Path
 #: update, and conflict tables. Existing stage rows are not rewritten; old
 #: attempts and usage remain unknown rather than being filled with zero.
 #: 15: start evidence and classified attempt errors; migrate only the projection.
-SCHEMA_VERSION = 15
+#: 16: append-only recovery references; attempts retain their failed outcome.
+SCHEMA_VERSION = 16
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -149,6 +150,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "model_requested": ("identifier", None),
     "model_resolved": ("identifier", None),
     "dispatch_attempt_id": ("identifier", None),
+    "recovery_head_sha": ("identifier", None),
+    "recovery_comment_id": ("identifier", None),
+    "recovery_state": ("token", frozenset({"recovered_pending_verification"})),
     "execution_variant_id": ("identifier", None),
     "harness_snapshot_id": ("identifier", None),
     "model_resolution": ("token", frozenset({
@@ -675,6 +679,19 @@ CREATE INDEX IF NOT EXISTS dispatch_attempts_task
     ON dispatch_attempts (repo_id, task_id, cycle_id);
 CREATE INDEX IF NOT EXISTS dispatch_attempts_external_id
     ON dispatch_attempts (external_dispatch_id);
+CREATE TABLE IF NOT EXISTS stage_recoveries (
+    attempt_id TEXT PRIMARY KEY REFERENCES dispatch_attempts(attempt_id),
+    change_request_id TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    comment_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state = 'recovered_pending_verification'),
+    created_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS stage_recoveries_no_update
+BEFORE UPDATE ON stage_recoveries BEGIN SELECT RAISE(ABORT, 'recovery is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS stage_recoveries_no_delete
+BEFORE DELETE ON stage_recoveries BEGIN SELECT RAISE(ABORT, 'recovery is append-only'); END;
 CREATE TABLE IF NOT EXISTS dispatch_attempt_updates (
     update_id             TEXT PRIMARY KEY,
     attempt_id            TEXT NOT NULL REFERENCES dispatch_attempts(attempt_id),
@@ -1546,6 +1563,36 @@ class Telemetry:
         with closing(self._connect()) as connection:
             row = connection.execute("SELECT * FROM dispatch_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
             return dict(row) if row else None
+
+    def record_recovery(self, attempt_id: str, *, change_request_id: str,
+                        head_sha: str, comment_id: str) -> None:
+        """Append references to provisional evidence; leave the attempt failed."""
+        attempt_id = self._checked("dispatch_attempt_id", attempt_id)
+        change_request_id = self._checked("pull_request_id", change_request_id)
+        head_sha = self._checked("recovery_head_sha", head_sha)
+        comment_id = self._checked("recovery_comment_id", comment_id)
+        state = self._checked("recovery_state", "recovered_pending_verification")
+        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            raise TelemetryError("recovery requires a full head SHA")
+        with closing(self._connect()) as connection:
+            attempt = connection.execute(
+                "SELECT outcome FROM dispatch_attempts WHERE attempt_id=?", (attempt_id,),
+            ).fetchone()
+            if attempt is None or attempt["outcome"] != "failed":
+                raise TelemetryError("only a failed attempt can be recovered")
+            connection.execute(
+                "INSERT INTO stage_recoveries VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (attempt_id, change_request_id, head_sha, comment_id, state,
+                 self._timestamp(), SCHEMA_VERSION),
+            )
+            connection.commit()
+
+    def recoveries(self, attempt_id: str) -> list[dict]:
+        attempt_id = self._checked("dispatch_attempt_id", attempt_id)
+        with closing(self._connect()) as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM stage_recoveries WHERE attempt_id=?", (attempt_id,),
+            )]
 
     def execution_variant(self, variant_id: str) -> dict | None:
         variant_id = self._checked("execution_variant_id", variant_id)

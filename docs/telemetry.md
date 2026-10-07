@@ -177,6 +177,22 @@ the stop report and live status snapshot, bounded and redacted before display.
 They never enter telemetry. The [What is never recorded](#what-is-never-recorded)
 boundary remains unchanged.
 
+### Stage recoveries (schema 16)
+
+`stage_recoveries` is an append-only table keyed by `attempt_id` and linked to
+`dispatch_attempts`. A row is written when a stage that omitted its structured
+result is recovered from attempt-attributed comment evidence (see [Review
+lifecycle → Missing structured result recovery](review-cycle.md#missing-structured-result-recovery)).
+Each row stores only references: PR ID, full head SHA, provider comment ID,
+creation time, schema version, and the closed state
+`recovered_pending_verification`. Repository, work item, cycle and stage are
+recovered through the attempt foreign key. No comment body, execution excerpt,
+finding narrative or receipt JSON enters this table. SQL triggers reject
+updates and deletions. Opening a schema-15 database creates the table without
+rewriting existing attempts or their update logs; the recovered attempt keeps
+its failed outcome. The later verifier has its own normal dispatch and verdict
+records, so recovery never masquerades as a successful stage verdict.
+
 ### Work-item outcomes (schema 14)
 
 Work-item disposition events are stored in a separate append-only table. Each
