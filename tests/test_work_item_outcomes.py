@@ -70,7 +70,7 @@ class WorkItemOutcomeTests(unittest.TestCase):
         self.assertEqual("unchanged", repeated["reason"])
         self.assertFalse(stale["created"])
         self.assertEqual("stale", stale["reason"])
-        self.assertEqual(15, tm.SCHEMA_VERSION)
+        self.assertEqual(16, tm.SCHEMA_VERSION)
         self.assertEqual(1, len(self.store.work_item_disposition_events("owner/repo")))
         event = self.store.latest_work_item_disposition("owner/repo", "github", "owner/repo", "120")
         self.assertEqual(["cycle-1"], event["cycle_ids"])

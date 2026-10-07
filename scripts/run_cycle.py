@@ -17,8 +17,8 @@ reads what came back.
 **It does not infer a verdict.** A review's outcome is read from the structured
 result the executor was explicitly asked to emit — every review skill documents
 that block as opt-in on request — and never from an exit code or from prose.
-When the block is absent the cycle stops and says the verdict is unknown, which
-is a fact worth recording, unlike a guess that looks like data forever after.
+When the block is absent, attempt-attributed comment evidence may advance only
+to verification. It never supplies a verdict; insufficient evidence stops.
 
 **A dispatch that succeeded is not a stage that worked.** Those are two facts
 about different layers and the store keeps them apart: `outcome` says the call
@@ -82,8 +82,10 @@ from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from review_contract import (
     RESOLUTION_RUN,
     REVIEW_RUN,
+    ContractError,
     RunStatuses,
     claimed_fix_survivals,
+    stage_evidence,
 )
 from router import (
     ESCALATION_PROFILES,
@@ -1410,6 +1412,86 @@ def _status_of(payload: dict) -> str | None:
     return status
 
 
+def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
+                      change_request_id: str | None, cwd: str | None,
+                      trusted_authors: tuple[str, ...]) -> dict:
+    """Read authoritative GitHub evidence, with no prose-based inference."""
+    if not trusted_authors:
+        raise CycleDriverError("recovery requires review.trusted_authors")
+
+    def call(args):
+        try:
+            result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise CycleDriverError("recovery GitHub tooling unavailable or timed out") from error
+        if result.returncode:
+            raise CycleDriverError("recovery could not read GitHub evidence")
+        try:
+            return json.loads(result.stdout)
+        except ValueError as error:
+            raise CycleDriverError("recovery received malformed GitHub evidence") from error
+
+    if change_request_id is None:
+        branch = _git_line(cwd, ["branch", "--show-current"], 30)
+        if not branch:
+            raise CycleDriverError("recovery could not identify the working branch")
+        pulls = call(["gh", "pr", "list", "--repo", repo_id, "--head", branch,
+                      "--state", "open", "--json", "number"])
+        if (not isinstance(pulls, list) or len(pulls) != 1
+                or not isinstance(pulls[0], dict) or not isinstance(pulls[0].get("number"), int)):
+            raise CycleDriverError("recovery needs one open PR for the working branch")
+        change_request_id = str(pulls[0]["number"])
+    pull = call(["gh", "pr", "view", change_request_id, "--repo", repo_id,
+                 "--json", "number,state,headRefOid"])
+    head = pull.get("headRefOid") if isinstance(pull, dict) else None
+    if (not head or str(pull.get("number")) != change_request_id
+            or pull.get("state") != "OPEN" or _git_line(cwd, ["rev-parse", "HEAD"], 30) != head):
+        raise CycleDriverError("recovery requires the checked-out open PR head")
+    pages = call(["gh", "api", "--paginate", "--slurp",
+                  f"repos/{repo_id}/issues/{change_request_id}/comments"])
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise CycleDriverError("recovery received malformed comment pages")
+    trusted = {author.casefold() for author in trusted_authors}
+    candidates = []
+    for comment in (comment for page in pages for comment in page):
+        if not isinstance(comment, dict) or not isinstance(comment.get("user"), dict):
+            raise CycleDriverError("recovery received no comment author metadata")
+        if (comment.get("user", {}).get("login") or "").casefold() not in trusted:
+            continue
+        body = comment.get("body") or ""
+        if attempt_id in body and re.search(r'"status"\s*:\s*"(?:BLOCKED|FAILED)"', body):
+            raise CycleDriverError("recovery contradicts a BLOCKED or FAILED result")
+        try:
+            receipts = stage_evidence(body)
+        except ContractError as error:
+            # A malformed attempt-attributed receipt cannot be silently ignored.
+            if attempt_id in body:
+                raise CycleDriverError(str(error)) from error
+            continue
+        for receipt in receipts:
+            if receipt["attempt_id"] != attempt_id:
+                continue
+            if (receipt["repo"] != repo_id or receipt["stage"] != role
+                    or receipt["change_request_id"] != change_request_id
+                    or receipt["head_sha"] != head):
+                raise CycleDriverError("recovery evidence scope does not match attempt, PR and head")
+            # A blocked receipt or a published blocked structured result vetoes recovery.
+            if (receipt["status"] in {"BLOCKED", "FAILED"}
+                    or re.search(r'"status"\s*:\s*"(?:BLOCKED|FAILED)"', body)):
+                raise CycleDriverError("recovery contradicts a BLOCKED or FAILED result")
+            expected = {"implement": {"IMPLEMENTED"}, "resolve": {"RESOLVED", "PARTIALLY_RESOLVED"},
+                        "review": {"APPROVED", "CHANGES_REQUESTED"},
+                        "rereview": {"APPROVED", "CHANGES_REQUESTED"}}[role]
+            if receipt["status"] not in expected:
+                raise CycleDriverError("recovery evidence has no completed-stage claim")
+            if not isinstance(comment.get("id"), int):
+                raise CycleDriverError("recovery received no comment reference")
+            candidates.append({**receipt, "comment_id": str(comment["id"])})
+    if len(candidates) != 1:
+        raise CycleDriverError("recovery requires exactly one attributable comment receipt")
+    return candidates[0]
+
+
 def _work_item_scope(
     config: dict, repo_id: str, repository_override: str | None = None
 ) -> tuple[str | None, str | None]:
@@ -1464,6 +1546,7 @@ def run_cycle(
     work_item_provider: str | None = None,
     work_item_repository: str | None = None,
     code_host: str | None = None,
+    trusted_authors: tuple[str, ...] = (),
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1676,19 +1759,87 @@ def run_cycle(
                             stop_reason="readiness_unconfirmed")
             escalated = True
 
+    pending_recovery: dict | None = None
+
     def advance(role: str, instruction: str = "", *,
-                change_request_id: str | None = None) -> tuple[Reported, CycleReport | None]:
+                change_request_id: str | None = None,
+                recover: bool = True) -> tuple[Reported, CycleReport | None]:
         """Run one stage and decide whether the cycle may continue past it.
 
         Every reason to stop is here rather than repeated per stage: a stop
         condition that has to be remembered four times is one that will be
         missing from the fourth.
         """
+        nonlocal pending_recovery
+        if pending_recovery is not None:
+            ids = [item["id"] for item in pending_recovery.get("finding_outcomes", [])
+                   if item["status"] in {"resolved", "not_applicable"}]
+            instruction += (
+                f" Verify recovered attempt {pending_recovery['attempt_id']} at head "
+                f"{pending_recovery['head_sha']}. Execute verification for every claimed "
+                f"finding ID: {', '.join(ids) or '(none)'}. Report head_sha and explicit "
+                "verified_findings outcomes (resolved, still_open, not_applicable). "
+                "A reopened finding follows the normal resolution loop."
+            )
         outcome, reported, tampered, findings = run(
             role, instruction, change_request_id=change_request_id)
+        result = outcome.result
+        if (recover and pending_recovery is None and tampered is None and reported.status is None
+                and result is not None and not result.asynchronous
+                and result.error_code in {"unreadable_result", "no_error_report"}
+                and code_host == "github" and not local_only):
+            attempt_id = result.artifacts.get("dispatch_attempt_id")
+            try:
+                if not attempt_id:
+                    raise CycleDriverError("recovery requires a recorded dispatch attempt")
+                receipt = recovery_evidence(
+                    repo_id, role, attempt_id, change_request_id=change_request_id,
+                    cwd=cwd, trusted_authors=trusted_authors)
+                telemetry.record_recovery(
+                    attempt_id, change_request_id=receipt["change_request_id"],
+                    head_sha=receipt["head_sha"], comment_id=receipt["comment_id"])
+            except (CycleDriverError, TelemetryError) as error:
+                return reported, stop(f"{role} recovery rejected: {error}", reported=reported)
+            pending_recovery = receipt
+            report.stage_details[-1].status = "recovered_pending_verification"
+            if role in {"review", "rereview"}:
+                return advance(role, "Obtain a structured verdict for the recovered review.",
+                               change_request_id=receipt["change_request_id"], recover=False)
+            if role == "resolve":
+                history.append(RunStatuses(RESOLUTION_RUN, {
+                    item["id"]: item["status"] for item in receipt.get("finding_outcomes", [])}))
+            return Reported(present=True, status="recovered_pending_verification",
+                            payload={"change_request_id": receipt["change_request_id"],
+                                     "head_sha": receipt["head_sha"]}), None
         stopped = unfinished(outcome, reported, tampered)
         if stopped is not None:
             return reported, stopped
+        if pending_recovery is not None:
+            try:
+                current_receipt = recovery_evidence(
+                    repo_id, pending_recovery["stage"], pending_recovery["attempt_id"],
+                    change_request_id=pending_recovery["change_request_id"],
+                    cwd=cwd, trusted_authors=trusted_authors)
+            except CycleDriverError as error:
+                return reported, stop(f"recovered stage not completed: {error}", reported=reported)
+            claims = {item["id"] for item in pending_recovery.get("finding_outcomes", [])
+                      if item["status"] in {"resolved", "not_applicable"}}
+            payload = reported.payload or {}
+            verified = payload.get("verified_findings", [])
+            verified_statuses = _finding_statuses({"verified_findings": verified}, "rereview")
+            verified_ids = {item["id"] for item in verified
+                            if isinstance(item, dict) and isinstance(item.get("id"), str)} if isinstance(verified, list) else set()
+            if (not reported.completes(role)
+                    or current_receipt != pending_recovery
+                    or payload.get("head_sha") != pending_recovery["head_sha"]
+                    or payload.get("reviewed_head_sha", payload.get("head_sha")) != pending_recovery["head_sha"]
+                    or _git_line(cwd, ["rev-parse", "HEAD"], 30) != pending_recovery["head_sha"]
+                    or (claims and (verified_statuses is None or not claims.issubset(verified_ids)))
+                    or (reported.status == "APPROVED" and verified_statuses
+                        and any(verified_statuses.get(finding_id) == "open" for finding_id in claims))):
+                return reported, stop("recovered stage not completed: verifier did not confirm "
+                                      "the recovered head and every claimed finding", reported=reported)
+            pending_recovery = None
         # The dispatch and the work are different facts. This records what the
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
@@ -2551,6 +2702,8 @@ def main(argv: list[str] | None = None) -> int:
                 work_item_provider=work_item_provider,
                 work_item_repository=work_item_repository,
                 code_host=code_host,
+                trusted_authors=tuple(((config.get("code_cycle") or {}).get("review") or {}).get(
+                    "trusted_authors", [])),
             )
     except CycleDriverError as error:
         parser.error(str(error))

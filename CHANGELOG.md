@@ -7,6 +7,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- Missing structured stage results can recover as pending verification from
+  schema-2, attempt-attributed trusted PR comments. Schema 16 stores recovery
+  references separately from failed dispatch attempts. Comment-only fixes
+  proceed to rereview; recovered reviews retry once for a structured verdict.
+  Recovery never infers approval.
+
 - Dispatch attempts use schema 15 with `start_state` and cause-specific
   `error_code` values. `operating_quota` becomes `quota`,
   `operating_availability` becomes `unavailable`, and legacy `dispatch_failed`,

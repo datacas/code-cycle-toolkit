@@ -64,8 +64,8 @@ Reviews always cover the **accumulated diff from the merge base to the current h
 A published comment carries three kinds of machine-readable line. Their tokens stay in English whatever language the prose uses.
 
 ```text
-#### [CCR-20260918-001] · senior_reviewer · anthropic/claude-sonnet-5→claude-sonnet-5 · high · schema:1
-#### [CCT-20260918-001] · cheap_coder · openai/gpt-6-luna→? · high · triaged:0123…4567 · schema:1
+#### [CCR-20260918-001] · senior_reviewer · anthropic/claude-sonnet-5→claude-sonnet-5 · high · schema:2
+#### [CCT-20260918-001] · cheap_coder · openai/gpt-6-luna→? · high · triaged:0123…4567 · schema:2
 #### [REV-004] · medium · resolved · valid · blocks:yes — Short title
 ```
 
@@ -137,6 +137,38 @@ code_cycle:
 - The whole history is read in order. Other authors are ignored (and noted), and a malformed trusted comment is skipped rather than halting recovery.
 - Ordinary discussion without contract headings starts an empty record.
 - A later comment updates findings; it doesn't replace them. Leaving out an ID never deletes it. Two different titles under one ID are a collision, and recovery stops with `BLOCKED` rather than guessing.
+
+## Missing structured result recovery
+
+Review contract schema 2 adds an attempt receipt to the published PR summary.
+Schema-1 run lines remain readable, but tokenless historical evidence cannot
+automatically recover a missing result. When the runtime supplies `attempt_id`,
+publish this metadata with the actual repository, PR, stage, current full head
+SHA, functional status, and explicit outcomes for this attempt:
+
+```text
+<!-- code-cycle-stage {"schema":2,"repo":"owner/repository","change_request_id":"123","stage":"resolve","attempt_id":"attempt-runtime-token","head_sha":"0123456789abcdef0123456789abcdef01234567","status":"RESOLVED","finding_outcomes":[{"id":"REV-001","status":"resolved"}]} -->
+```
+
+This is evidence, not a replacement for `ORCHESTRATION_RESULT`. Finding headers
+alone never establish a resolution claim. A receipt with `BLOCKED` or `FAILED`
+vetoes recovery. The GitHub runtime reads the open PR and its complete paginated
+comment history using `gh`, checks provider-authenticated trusted authors, and
+requires exactly one receipt matching repository, PR, stage, attempt and SHA.
+The checked-out SHA must also equal the PR head. Changed-SHA, stale-attempt,
+ambiguous, malformed or untrusted evidence stops the cycle with a reason.
+
+An eligible missing-result attempt remains failed. Its recovery is separately
+recorded as `recovered_pending_verification`. Recovered implementation advances
+to review; recovered resolution, including a comment-only resolution without a
+push, advances to rereview. The verifier must execute the verification, report
+the recovered head, and explicitly confirm or reopen every claimed finding ID.
+Reopened findings invalidate those claims and feed the ordinary survivals ladder
+and resolution limit. A recovered review or rereview is dispatched once more
+for a structured verdict; another missing result stops it. Recovery itself
+never records `APPROVED` or reaches `READY_FOR_MANUAL_MERGE`. Only the subsequent
+structured verifier result can do that. Other code hosts keep their existing
+missing-result stop until a provider-specific evidence reader is available.
 
 ## Security triage
 

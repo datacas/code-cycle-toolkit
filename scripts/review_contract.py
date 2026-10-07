@@ -23,11 +23,12 @@ published finding, new or previous.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SEPARATOR = "·"
 ARROW = "→"
@@ -59,6 +60,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _SCHEMA_RE = re.compile(r"^schema:(\d+)$")
 _TRIAGED_RE = re.compile(r"^triaged:(.+)$")
 _BLOCKS_RE = re.compile(r"^blocks:(yes|no)$")
+_STAGE_EVIDENCE_RE = re.compile(r"<!-- code-cycle-stage\s+(.*?)\s*-->", re.DOTALL)
 
 
 class ContractError(ValueError):
@@ -67,6 +69,41 @@ class ContractError(ValueError):
 
 class FindingCollisionError(ContractError):
     """One stable finding ID was reused for a different finding."""
+
+
+def stage_evidence(text: str) -> list[dict]:
+    """Read schema-2 attempt receipts, never infer claims from finding headers.
+
+    These receipts are provisional evidence, not structured stage verdicts.
+    The caller must authenticate their author and match every scope reference.
+    """
+    receipts = []
+    for raw in _STAGE_EVIDENCE_RE.findall(text):
+        try:
+            value = json.loads(raw)
+        except ValueError as error:
+            raise ContractError("malformed stage evidence") from error
+        if not isinstance(value, dict) or value.get("schema") != 2:
+            raise ContractError("stage evidence requires schema 2")
+        for key in ("repo", "change_request_id", "stage", "attempt_id", "head_sha", "status"):
+            if not isinstance(value.get(key), str) or not value[key]:
+                raise ContractError(f"stage evidence requires {key}")
+        if not re.fullmatch(r"[0-9a-f]{40}", value["head_sha"]):
+            raise ContractError("stage evidence requires a full head SHA")
+        outcomes = value.get("finding_outcomes", [])
+        if not isinstance(outcomes, list):
+            raise ContractError("stage evidence outcomes must be a list")
+        ids = set()
+        for item in outcomes:
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("id"), str)
+                    or not re.fullmatch(r"REV-[0-9]{3,}", item["id"])
+                    or item.get("status") not in FINDING_STATUSES
+                    or item["id"] in ids):
+                raise ContractError("invalid or duplicate stage evidence outcome")
+            ids.add(item["id"])
+        receipts.append(value)
+    return receipts
 
 
 @dataclass(frozen=True)
