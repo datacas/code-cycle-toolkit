@@ -120,7 +120,7 @@ including `BLOCKED`. It is distinct from executor availability and
 
 Structured executor signals take precedence over stderr and exit status.
 Codex reads terminal errors from JSON events, including `task_complete` and
-`codex_error_info`. When the stream lacks that error, it reads the session log
+`codex_error_info`. On a failed or incomplete run, when the stream lacks that error, it reads the session log
 under `CODEX_HOME/sessions` identified by this invocation's `thread.started`
 ID, verifying the log's session ID. It never selects a different run's newest
 log. Claude reads its stream-json error/result envelope. Assistant prose is
@@ -149,11 +149,17 @@ before rerouting (#173).
 | `operating_availability` | `unavailable` | Per-executor evidence |
 | `authenticated_session`, `bypass_acknowledgement`, `folder_trust`, `hook_trust`, `trusted_directory` | `unavailable` | Per-executor evidence |
 | `orchestration_context`, `review_workspace_isolation`, `review_workspace_mismatch`, `review_workspace_conflict`, `provider_agent_mapping` | `precondition` | `not_started` for checks before launch |
-| `publication_access`, `proven_readiness`, `read_only_enforcement`, `disposable_workspace`, `workspace_policy` | `precondition` | Checks before launch; no attempt row when refused by the outer gate |
-| `read_only_verification` | `contract_violation` | `started` after a run; the outer fingerprint precheck creates no attempt row |
+| `publication_access`, `proven_readiness`, `read_only_enforcement`, `disposable_workspace`, `workspace_policy` | `precondition` | `not_started` for checks before launch; no attempt row when refused by the outer gate |
+| `read_only_verification` | `contract_violation` | `not_started` when the fingerprint precheck refuses launch; a violation detected after execution is `started` |
 
 The mapping is explicit and tested; new capabilities cannot fall through to a
 default class.
+
+Workspace fingerprints used only to infer start activity hash at most 128 dirty
+or untracked files and 8 MiB in total. Exceeding either budget supplies no
+workspace start evidence; stream evidence still applies, otherwise the state
+remains `unknown`. Positive stream evidence skips the second fingerprint.
+Read-only contract verification has no such budget and remains exhaustive.
 
 **Migration:** a schema-14 store is detected by the absence of `start_state`,
 since there is no database-level version marker. Initialization adds the

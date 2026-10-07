@@ -130,14 +130,62 @@ class ExecutorFailureTests(unittest.TestCase):
             "read_only_verification": "contract_violation",
         }
         self.assertEqual(expected, ex.CAPABILITY_ERROR_CODES)
+        class Refused(ex.Adapter):
+            name = "codex"
+
+            def dispatch(self, target, task, **kw):
+                return self._blocked(target, task, "pre-launch refusal")
+
         for capability, code in expected.items():
-            state = "started" if capability == "read_only_verification" else "not_started"
-            result = ex.DispatchResult(ex.DispatchOutcome.BLOCKED, "codex", TARGET,
-                                       missing_capability=capability, start_state=state)
-            self.assertEqual((code, state), (result.failure_code, result.start_state))
+            result = ex.dispatch(
+                router.RoutingDecision("implement", TARGET, router.RoutingMode.PRODUCTION),
+                capability, ex.Registry([Refused()]), writes=True,
+                probes={"codex": ex.ProbeResult("codex", ex.Availability.READY, "fixture")},
+            )
+            self.assertEqual((code, "not_started"), (result.failure_code, result.start_state))
         with self.assertRaisesRegex(ex.ExecutorError, "unmapped missing_capability"):
             ex.DispatchResult(ex.DispatchOutcome.BLOCKED, "codex", TARGET,
                               missing_capability="future_capability").failure_code
+
+    def test_outer_prechecks_refuse_without_starting_an_attempt(self):
+        cases = (
+            ("publication_access", {"publishes": True}, ex.Availability.READY, False),
+            ("publication_access", {"publishes": True}, ex.Availability.READY, True),
+            ("operating_availability", {}, ex.Availability.UNKNOWN, False),
+            ("proven_readiness", {}, ex.Availability.AUTHENTICATED, False),
+            ("read_only_enforcement", {"writes": False}, ex.Availability.READY, False),
+            ("disposable_workspace", {"workspace_policy": "disposable"}, ex.Availability.READY, False),
+            ("workspace_policy", {"workspace_policy": "workspace_write"}, ex.Availability.READY, False),
+            ("read_only_verification", {"writes": False}, ex.Availability.READY, False),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for capability, kwargs, availability, preflight in cases:
+                with self.subTest(capability=capability, preflight=preflight):
+                    adapter = ex.CodexAdapter()
+                    mode = (router.RoutingMode.CALIBRATION if capability == "proven_readiness"
+                            else router.RoutingMode.PRODUCTION)
+                    supports = capability not in {"read_only_enforcement", "disposable_workspace", "workspace_policy"}
+                    with patch.object(adapter, "dispatch") as launch, \
+                            patch.object(adapter, "supports_workspace_policy", return_value=supports), \
+                            patch.object(adapter, "publication_access", return_value=(preflight, "fixture")), \
+                            patch.object(ex, "_publication_preflight", return_value=(False, "fixture")), \
+                            patch.object(adapter, "requires_publication_preflight", preflight):
+                        attempts = []
+                        result = ex.dispatch(
+                            router.RoutingDecision("implement", TARGET, mode), "work",
+                            ex.Registry([adapter]), cwd=directory,
+                            policy=ex.ReadinessPolicy.ATTEMPT,
+                            probes={"codex": ex.ProbeResult("codex", availability, "fixture",
+                                                          provable_ceiling=availability)},
+                            on_dispatch_attempt=lambda: attempts.append("attempt"),
+                            **{"writes": True, **kwargs},
+                        )
+                    self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+                    self.assertEqual(capability, result.missing_capability)
+                    self.assertEqual((ex.CAPABILITY_ERROR_CODES[capability], "not_started"),
+                                     (result.failure_code, result.start_state))
+                    launch.assert_not_called()
+                    self.assertEqual([], attempts)
 
     def test_contract_and_operator_failures(self):
         for outcome, code in ((ex.DispatchOutcome.CONTRACT_VIOLATION, "contract_violation"),
@@ -151,6 +199,63 @@ class ExecutorFailureTests(unittest.TestCase):
         self.assertNotIn("sk-", excerpt)
         self.assertNotIn("secret", excerpt)
         self.assertIn("[redacted]", ex.failure_excerpt(text, 500))
+
+    def test_redaction_preserves_words_and_masks_additional_credentials(self):
+        words = "worktree task-172 disk-full risk-high"
+        self.assertEqual(words, ex.failure_excerpt(words))
+        for secret in ("sk-secret123", "xoxb-1234-abcd", "AKIAIOSFODNN7EXAMPLE",
+                       "api_key" + "=abc123secret", "token: abc123secret", "password" + "=hunter2",
+                       "secret='two words'", "access_token" + '="two words"',
+                       "Authorization: Basic dXNlcjpwYXNz", "Authorization: Bearer abc.def"):
+            with self.subTest(secret=secret):
+                excerpt = ex.failure_excerpt(secret)
+                self.assertIn("[redacted]", excerpt)
+                self.assertNotIn(secret.split("=")[-1], excerpt)
+        for key in ("api_key", "password", "access_token", "client_secret"):
+            excerpt = ex.failure_excerpt(json.dumps({key: "two secret words"}))
+            self.assertIn("[redacted]", excerpt)
+            self.assertNotIn("two secret words", excerpt)
+
+    def test_success_skips_session_lookup_and_second_workspace_fingerprint(self):
+        for output in (stream({"type": "thread.started", "thread_id": "T"},
+                              {"type": "turn.completed"}),
+                       stream({"type": "item.completed", "item": {
+                           "type": "agent_message", "text": "finished"}})):
+            with patch.object(ex.CodexAdapter, "_session_events") as logs, \
+                    patch.object(ex, "_workspace_fingerprint", return_value={}) as fingerprints:
+                result = ex.CodexAdapter().dispatch(TARGET, "work", cwd=tempfile.gettempdir(),
+                    runner=lambda *a, **k: subprocess.CompletedProcess([], 0, output, ""))
+            self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+            self.assertEqual("started", result.start_state)
+            logs.assert_not_called()
+            self.assertEqual(1, fingerprints.call_count)
+
+    def test_missing_result_still_reads_correlated_session_on_zero_exit(self):
+        with patch.object(ex.CodexAdapter, "_session_events", return_value=[failed("server_overloaded")]) as logs:
+            result = ex.CodexAdapter().dispatch(TARGET, "work", cwd=tempfile.gettempdir(),
+                runner=lambda *a, **k: subprocess.CompletedProcess([], 0,
+                    stream({"type": "thread.started", "thread_id": "T"}), ""))
+        logs.assert_called_once()
+        self.assertEqual("capacity", result.failure_code)
+
+    def test_workspace_start_budget_does_not_limit_read_only_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["git", "init", directory], capture_output=True, check=True)
+            subprocess.run(["git", "-C", directory, "-c", "user.name=Fixture",
+                            "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"],
+                           capture_output=True, check=True)
+            path = Path(directory) / "dirty.txt"
+            path.write_bytes(b"12345")
+            self.assertIsNone(ex._workspace_fingerprint(directory, max_bytes=4))
+            self.assertIsNone(ex._workspace_fingerprint(directory, max_files=0))
+            before = ex._checkout_fingerprint(directory)
+            path.write_bytes(b"12346")
+            self.assertNotEqual(before, ex._checkout_fingerprint(directory))
+            with patch.object(ex, "_workspace_fingerprint", return_value=None):
+                result = self.dispatch(stream(failed(started=False)))
+                unknown = self.dispatch(stream(failed()))
+            self.assertEqual("not_started", result.start_state)
+            self.assertEqual("unknown", unknown.start_state)
 
     def test_workspace_change_is_start_evidence_without_a_stream(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -209,9 +209,13 @@ def failure_excerpt(text: str, limit: int = 400) -> str:
     """Transient diagnostic only; mask before bounding, including terminal escapes."""
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(text))
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    text = re.sub(r"(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)",
+    text = re.sub(r"(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[A-Z0-9]{16})(?![A-Za-z0-9_])",
                   "[redacted]", str(text))
-    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*", r"\1[redacted]", text)
+    text = re.sub(r"(?i)((?:bearer|basic)\s+)[A-Za-z0-9._~+/-]+=*", r"\1[redacted]", text)
+    text = re.sub(
+        r"(?i)([\"']?\b(?:[A-Za-z0-9]+[_-])*(?:key|token|secret|password)\b[\"']?\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1[redacted]", text,
+    )
     return " ".join(text.split())[:limit]
 
 
@@ -935,15 +939,18 @@ class NativeAdapter(Adapter):
         argv = self.readable(argv, read_dirs)
         worker_cwd = cwd or os.getcwd()
         try:
-            workspace_before = _checkout_fingerprint(worker_cwd)
+            workspace_before = _workspace_fingerprint(worker_cwd, max_files=128, max_bytes=8 << 20)
         except Exception:
             workspace_before = None
 
         def observed_start(events):
             state = _start_evidence(events)
+            if state == "started":
+                return state
             if workspace_before is not None:
                 try:
-                    if _checkout_fingerprint(worker_cwd) != workspace_before:
+                    after = _workspace_fingerprint(worker_cwd, max_files=128, max_bytes=8 << 20)
+                    if after is not None and after != workspace_before:
                         return "started"
                 except Exception:
                     pass
@@ -989,7 +996,18 @@ class NativeAdapter(Adapter):
         )
         events = _events(stdout)
         signal = _error_signal(events)
-        if self.name == "codex" and signal is None:
+        terminal_success = any(event.get("type") in {"turn.completed", "task_complete"}
+                               for event in events) and signal is None
+        has_agent_result = any(
+            isinstance(event.get("item"), dict)
+            and event["item"].get("type") == "agent_message"
+            and isinstance(event["item"].get("text"), str)
+            and event["item"]["text"].strip()
+            for event in events
+        )
+        if (self.name == "codex" and signal is None
+                and (completed.returncode != 0
+                     or (not terminal_success and not has_agent_result))):
             session_events = self._session_events(events)
             events += session_events
             signal = _error_signal(session_events)
@@ -1263,6 +1281,12 @@ def _remote_ref_fingerprint(root: str) -> str:
 
 
 def _checkout_fingerprint(path: str) -> dict:
+    """Exhaustive checkout evidence for the read-only contract."""
+    return _workspace_fingerprint(path)
+
+
+def _workspace_fingerprint(path: str, *, max_files: int | None = None,
+                           max_bytes: int | None = None) -> dict | None:
     """What a read-only stage must leave exactly as it found it.
 
     HEAD, the branch ref, the porcelain status including every untracked file,
@@ -1271,6 +1295,9 @@ def _checkout_fingerprint(path: str) -> dict:
     dirty, and a read-only stage is not required to start from a clean tree.
     Ignored files are left out because nobody commits them; file contents are
     digested and never kept.
+
+    Optional budgets are used only for best-effort start evidence. Exceeding
+    one returns None. Read-only contract callers omit them and remain exhaustive.
     """
     root = _git_output(path, "rev-parse", "--show-toplevel")
     head = _git_output(root, "rev-parse", "HEAD")
@@ -1280,15 +1307,27 @@ def _checkout_fingerprint(path: str) -> dict:
     changed = _git_output(
         root, "ls-files", "-z", "--modified", "--others", "--exclude-standard",
     )
+    paths = sorted(set(filter(None, changed.split("\0"))))
+    if max_files is not None and len(paths) > max_files:
+        return None
     files = []
-    for relative in sorted(set(filter(None, changed.split("\0")))):
+    remaining = max_bytes
+    for relative in paths:
         full = os.path.join(root, relative)
         if os.path.islink(full):
             files.append((relative, "link", os.readlink(full)))
         elif os.path.isfile(full):
             digest = hashlib.sha256()
             with open(full, "rb") as handle:
-                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                while True:
+                    size = 1 << 20 if remaining is None else min(1 << 20, remaining + 1)
+                    chunk = handle.read(size)
+                    if not chunk:
+                        break
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            return None
                     digest.update(chunk)
             files.append((relative, "file", digest.hexdigest()))
         else:
@@ -2010,6 +2049,7 @@ def dispatch(
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,
                 missing_capability="publication_access", detail=detail,
+                start_state="not_started",
                 readiness_policy=policy, dispatched_from=probe.availability,
             )
         if adapter.requires_publication_preflight:
@@ -2018,6 +2058,7 @@ def dispatch(
                 return DispatchResult(
                     DispatchOutcome.BLOCKED, target.executor, target,
                     missing_capability="publication_access", detail=detail,
+                    start_state="not_started",
                     readiness_policy=policy, dispatched_from=probe.availability,
                 )
 
@@ -2026,6 +2067,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="operating_availability",
+            start_state="not_started",
             detail=f"{target.executor} is {probe.availability.value}: {probe.proof}",
             readiness_policy=policy, dispatched_from=probe.availability,
         )
@@ -2037,6 +2079,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="proven_readiness",
+            start_state="not_started",
             detail=("a calibration dispatch requires demonstrated readiness; "
                     f"{target.executor} could only show {probe.availability.value}"),
             readiness_policy=policy, dispatched_from=probe.availability,
@@ -2084,6 +2127,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability=capability,
+            start_state="not_started",
             detail=detail,
             readiness_policy=policy, dispatched_from=probe.availability,
         )
@@ -2147,6 +2191,7 @@ def dispatch(
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,
                 missing_capability="read_only_verification", detail=result,
+                start_state="not_started",
                 readiness_policy=policy, dispatched_from=probe.availability,
             )
     else:

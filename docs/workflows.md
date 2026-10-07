@@ -11,7 +11,8 @@ When a dispatch stops a cycle, `CycleReport.explain()` shows the attempt's
 observed error. `cycle_status.py --line` shows those same details on the final
 status line. An unmapped error also shows the raw executor code, for example
 `codex_error_info=foo`. Credential-shaped strings such as `sk-…`, `ghp_…`,
-and bearer tokens are masked before the excerpt is bounded. These diagnostics
+Slack tokens, AWS access-key IDs, Basic/Bearer credentials, and named
+key/token/secret/password assignments are masked before the excerpt is bounded. These diagnostics
 are transient report/status data, never telemetry payloads.
 
 Read `capacity` as temporary overload, `quota` as an exhausted usage window,
