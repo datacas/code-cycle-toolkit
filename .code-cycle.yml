@@ -11,6 +11,43 @@ code_cycle:
     # must block recovery rather than treating contract state as finding-free.
     trusted_authors:
       - datacas
+  profiles:
+    cheap_coder:
+      primary: "codex:openai/gpt-6-luna high"
+      fallback: "claude:anthropic/claude-sonnet-5-5 high"
+
+    deep_coder:
+      primary: "codex:openai/gpt-6.1-sol medium"
+      fallback: "claude:anthropic/claude-opus-5-5 high"
+
+    reviewer:
+      primary: "claude:anthropic/claude-sonnet-5-5 high"
+      fallback: "codex:openai/gpt-6-luna high"
+
+    senior_reviewer:
+      primary: "claude:anthropic/claude-opus-5-5 high"
+      fallback: "codex:openai/gpt-6.1-sol medium"
+
+    security:
+      primary: "claude:anthropic/claude-opus-5-5 high"
+      fallback: "codex:openai/gpt-6.1-sol high"
+
+    coordinator:
+      primary: "claude:anthropic/claude-sonnet-5-5 medium"
+      fallback: "codex:openai/gpt-6-luna medium"
+
+    auxiliary_tool:
+      primary: "codex:openai/gpt-6-luna medium"
+
+    cheap_tool:
+      primary: "claude:anthropic/claude-sonnet-5-5 low"
+      fallback: "codex:openai/gpt-6-luna low"
+
+  routing:
+    strategy: measured
+
+  orchestration:
+    mode: auto        
   # Experimental candidates for a reviewer comparison that has not run yet.
   # `reviewer_b` matches the default `reviewer` profile (gpt-6-sol high), so
   # the comparison asks whether `reviewer_a` could replace it; nothing presumes
