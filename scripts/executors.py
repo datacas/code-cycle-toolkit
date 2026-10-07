@@ -2171,6 +2171,17 @@ def dispatch(
         if cwd is not None:
             call_kw["cwd"] = cwd
         attempt_id = on_dispatch_attempt() if on_dispatch_attempt is not None else dispatch_attempt_id
+        if attempt_id is not None and any(skill in prompt for skill in (
+                "cc-implement-issue", "cc-initial-review", "cc-resolve-comments", "cc-rereview")):
+            prompt += (
+                f"\n\nRuntime attempt_id: {attempt_id}. In the published change-request "
+                "summary include a schema-2 receipt as <!-- code-cycle-stage {JSON} --> "
+                "with schema: 2, repo, change_request_id (string), stage, attempt_id, "
+                "head_sha (full current PR SHA), status, and finding_outcomes "
+                "(explicit objects with id and status for this attempt only). "
+                "Use the actual functional status, including BLOCKED when applicable. "
+                "This receipt is evidence only; still emit the requested structured result."
+            )
         if isinstance(adapter, NativeAdapter):
             if attempt_id is not None:
                 call_kw["dispatch_attempt_id"] = attempt_id

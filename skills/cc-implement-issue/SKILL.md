@@ -58,6 +58,28 @@ publication attempt returns HTTP 403 or 404 through another tool, retry once
 with `gh` before reporting `BLOCKED`, and name the failed tool in the report.
 For Bitbucket, use its configured tooling.
 
+## Attempt-attributed recovery evidence
+
+When the runtime supplies `attempt_id`, include a schema-2 receipt in the
+published change-request summary comment using this exact envelope:
+`<!-- code-cycle-stage {JSON} -->`. The JSON carries `schema: 2`, `repo`,
+`change_request_id` as a string, `stage` (`implement`, `review`, `resolve`, or
+`rereview`), the supplied `attempt_id`, current full `head_sha`, actual
+functional `status`, and `finding_outcomes` as explicit `{ "id": "REV-001",
+"status": "resolved" }` objects for this attempt only. Use `open`, `resolved`,
+or `not_applicable` for outcome statuses. An attempt that claims no resolutions
+uses an empty list. Never copy outcomes from a preserved header as this
+attempt's claims. Publish the receipt even for a comment-only resolution, and
+use `BLOCKED` when blocked; never invent an attempt token in a manual run.
+New run lines use `schema:2`; schema-1 history remains readable.
+
+This receipt supplements the requested structured result. It permits only
+pending verification when that result is missing; it never establishes approval.
+When verifying recovered work, execute checks for every injected claimed ID,
+report `head_sha` and explicit `verified_findings` outcomes, and reopen a claim
+as `still_open` when verification rejects it. Follow the normal verdict and
+resolution loop for reopened findings.
+
 ## Output language
 
 Write every published artefact — PR comments, thread replies, commit messages,

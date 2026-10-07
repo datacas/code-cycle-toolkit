@@ -48,6 +48,28 @@ GitHub publication attempt returns HTTP 403 or 404 through another tool, retry
 once with `gh` before reporting `BLOCKED`, and name the failed tool in the
 report. For Bitbucket, use its configured tooling.
 
+## Attempt-attributed recovery evidence
+
+When the runtime supplies `attempt_id`, include a schema-2 receipt in the
+published change-request summary comment using this exact envelope:
+`<!-- code-cycle-stage {JSON} -->`. The JSON carries `schema: 2`, `repo`,
+`change_request_id` as a string, `stage` (`implement`, `review`, `resolve`, or
+`rereview`), the supplied `attempt_id`, current full `head_sha`, actual
+functional `status`, and `finding_outcomes` as explicit `{ "id": "REV-001",
+"status": "resolved" }` objects for this attempt only. Use `open`, `resolved`,
+or `not_applicable` for outcome statuses. An attempt that claims no resolutions
+uses an empty list. Never copy outcomes from a preserved header as this
+attempt's claims. Publish the receipt even for a comment-only resolution, and
+use `BLOCKED` when blocked; never invent an attempt token in a manual run.
+New run lines use `schema:2`; schema-1 history remains readable.
+
+This receipt supplements the requested structured result. It permits only
+pending verification when that result is missing; it never establishes approval.
+When verifying recovered work, execute checks for every injected claimed ID,
+report `head_sha` and explicit `verified_findings` outcomes, and reopen a claim
+as `still_open` when verification rejects it. Follow the normal verdict and
+resolution loop for reopened findings.
+
 ## Output language
 
 Write every published artefact — PR comments, thread replies, commit messages,
@@ -308,11 +330,11 @@ A review run line opens each published review and identifies the run that
 produced the findings below it:
 
 ```text
-#### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:1
+#### [CCR-20260918-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:2
 ```
 
 ```text
-#### [CCR-20260924-003] · manual · openai/gpt-6-sol→? · high · schema:1
+#### [CCR-20260924-003] · manual · openai/gpt-6-sol→? · high · schema:2
 ```
 
 Its tokens are the run ID, the profile, `provider/model_requested→model_resolved`,
@@ -361,14 +383,14 @@ A triage run line records that every finding was classified, and the commit they
 were all judged against:
 
 ```text
-#### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
+#### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:2
 ```
 
 Without runtime routing, a resolver uses the same `manual` and host-value rules
 for its `CCT-` line:
 
 ```text
-#### [CCT-20260924-004] · manual · openai/gpt-6-sol→? · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:1
+#### [CCT-20260924-004] · manual · openai/gpt-6-sol→? · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:2
 ```
 
 Every finding the comment publishes — new or previous — carries this header
