@@ -349,6 +349,11 @@ def format_progress_line(status: dict) -> str:
             parts.append("stop " + field(stop_reason, "unknown"))
         if reason:
             parts.append(field(reason, "stopped"))
+        if final_stage is not None and final_stage.get("error_code"):
+            parts.append("error_code=" + field(final_stage["error_code"], "unknown"))
+            parts.append("start_state=" + field(final_stage.get("start_state"), "unknown"))
+            if final_stage.get("failure_detail"):
+                parts.append(field(final_stage["failure_detail"], "", limit=600))
         count = int(status.get("decision_count", 0) or 0)
         question = status.get("question")
         if count:
@@ -653,6 +658,10 @@ class CycleStatusWriter:
             stage["outcome"] = result.outcome.value if result else "blocked"
             stage["status"] = status
             stage["finished"] = True
+            if result is not None and getattr(result, "failure_code", None) is not None:
+                stage["error_code"] = result.failure_code
+                stage["start_state"] = result.start_state
+                stage["failure_detail"] = result.failure_summary()
             self._workspace_generation += 1
             usage = _usage_summary(result)
             if usage:

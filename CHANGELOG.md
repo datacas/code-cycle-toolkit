@@ -7,6 +7,13 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- Dispatch attempts use schema 15 with `start_state` and cause-specific
+  `error_code` values. `operating_quota` becomes `quota`,
+  `operating_availability` becomes `unavailable`, and legacy `dispatch_failed`,
+  `executor_error`, and `unknown` become `executor_error` in the attempt
+  projection. Historical update logs retain their original tokens. Stop
+  reports show bounded, redacted executor diagnostics outside telemetry.
+
 - The Linux validation job and the release job run on the self-hosted runner
   (`self-hosted, Linux, X64`). The validation job skips pull requests from
   forks, so untrusted code never reaches that runner. The PowerShell installer

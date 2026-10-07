@@ -51,7 +51,8 @@ import signal
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
@@ -61,6 +62,7 @@ from executors import (
     DispatchResult,
     ReadinessPolicy,
     Registry,
+    failure_excerpt,
     _paths_overlap,
     _remove_workspace,
 )
@@ -556,6 +558,8 @@ class CycleReport:
                 lines.append(f"           {findings}")
             lines.extend(f"           warning: {warning}"
                          for warning in details.warnings)
+            if result is not None and result.failure_code is not None:
+                lines.append("           " + result.failure_summary())
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
         if self.reason:
@@ -1570,6 +1574,24 @@ def run_cycle(
                 _remove_workspace(str(directory))
         report.stages.append(outcome)
         reported = read_structured_result(outcome.result)
+        if (outcome.succeeded and outcome.result is not None
+                and not outcome.result.asynchronous and reported.status is None):
+            result = outcome.result
+            has_output = bool(result.agent_output.strip())
+            code = "unreadable_result" if has_output else "no_error_report"
+            detail = "no parseable structured stage result"
+            if has_output:
+                detail += ": " + failure_excerpt(result.agent_output)
+            outcome.result = replace(result, error_code=code,
+                                     detail=failure_excerpt(detail))
+            if outcome.rows:
+                attempt_id = result.artifacts.get("dispatch_attempt_id")
+                if attempt_id:
+                    telemetry.update_dispatch_attempt(
+                        attempt_id, {"error_code": code, "outcome": "failed", "lifecycle_state": "failed"},
+                        update_id=f"update-{uuid.uuid4().hex}",
+                        correction_reason="parser_correction",
+                    )
         findings = _findings(reported.payload, role)
         warnings = _stage_warnings(outcome)
         reported_status = reported.status if outcome.succeeded else None
@@ -2222,7 +2244,7 @@ def _why(outcome: StageOutcome) -> str:
         return f"{outcome.role} was not routed anywhere: {reasons}"
     # `detail` is the executor's own stderr or stdout, so it is exactly as
     # untrusted as the agent's prose and reaches the same terminal.
-    detail = readable(result.detail)
+    detail = readable(failure_excerpt(result.detail))
     if result.missing_capability:
         return (f"{outcome.role} on {result.executor} is missing "
                 f"{result.missing_capability}: {detail}")

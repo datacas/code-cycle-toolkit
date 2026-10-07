@@ -192,6 +192,123 @@ HUMAN_ACTION_CAPABILITIES = frozenset({
     "trusted_directory",
 })
 
+# Closed mapping: availability is not the vocabulary of attempt failures.
+CAPABILITY_ERROR_CODES = {
+    "operating_quota": "quota", "operating_availability": "unavailable",
+    **{key: "unavailable" for key in HUMAN_ACTION_CAPABILITIES},
+    **{key: "precondition" for key in (
+        "orchestration_context", "review_workspace_isolation", "review_workspace_mismatch",
+        "review_workspace_conflict", "provider_agent_mapping", "publication_access",
+        "proven_readiness", "read_only_enforcement", "disposable_workspace", "workspace_policy",
+    )},
+    "read_only_verification": "contract_violation",
+}
+
+
+def failure_excerpt(text: str, limit: int = 400) -> str:
+    """Transient diagnostic only; mask before bounding, including terminal escapes."""
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(text))
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[A-Z0-9]{16})(?![A-Za-z0-9_])",
+                  "[redacted]", str(text))
+    text = re.sub(r"(?i)((?:bearer|basic)\s+)[A-Za-z0-9._~+/-]+=*", r"\1[redacted]", text)
+    # A name starts only where its run starts, so a long `-`/`_` run is scanned once.
+    text = re.sub(
+        r"(?i)([\"']?(?<![A-Za-z0-9_-])(?:[A-Za-z0-9_-]*[_-])?(?:key|token|secret|password)\b[\"']?\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1[redacted]", text,
+    )
+    return " ".join(text.split())[:limit]
+
+
+def _events(stdout: str) -> list[dict]:
+    events = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            # Session logs wrap event_msg and response_item in payload.
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                events.append({"type": event.get("type"), **payload})
+            else:
+                events.append(event)
+    return events
+
+
+def _start_evidence(events: list[dict]) -> str:
+    negative = False
+    for event in events:
+        kind = event.get("type")
+        kind = kind if isinstance(kind, str) else ""
+        item = event.get("item") or {}
+        if (kind in {"thread.started", "session_meta", "tool_use", "function_call",
+                     "custom_tool_call", "exec_command_begin", "mcp_tool_call_begin"}
+                or (kind == "system" and event.get("subtype") == "init")
+                or (kind in {"item.started", "item.completed"} and isinstance(item, dict)
+                    and item.get("type") in {"command_execution", "tool_call", "mcp_tool_call",
+                                             "collab_tool_call", "file_change", "agent_message"})
+                or event.get("start_state") == "started"):
+            return "started"
+        if event.get("session_id"):
+            return "started"
+        message = event.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in message["content"]
+        ):
+            return "started"
+        negative |= event.get("start_state") == "not_started" or event.get("started") is False
+    return "not_started" if negative else "unknown"
+
+
+def _error_signal(events: list[dict]) -> tuple[str | None, str] | None:
+    """Only executor errors, never assistant prose; terminal errors take priority."""
+    signals = []
+    for event in events:
+        kind = event.get("type", "")
+        kind = kind if isinstance(kind, str) else ""
+        if not (event.get("is_error") is True or event.get("error")
+                or event.get("codex_error_info")
+                or kind in {"turn.failed", "failure"} or "error" in kind.lower()
+                or (kind == "result" and str(event.get("subtype", "")).startswith("error"))):
+            if kind in {"turn.completed", "task_complete", "result"}:
+                # An executor can recover from an intermediate stream error.
+                signals.clear()
+            continue
+        error = event.get("error")
+        error = error if isinstance(error, dict) else {"message": error}
+        code = event.get("codex_error_info") or error.get("codex_error_info") or error.get("code")
+        if isinstance(code, dict):
+            code = next(iter(code), None)
+        message = (error.get("message") or event.get("message") or event.get("result")
+                   or event.get("errors") or event.get("subtype") or "")
+        signals.append((str(code) if code is not None else None, str(message)))
+    return signals[-1] if signals else None
+
+
+def _error_class(code: str | None, message: str) -> str:
+    # An unmapped structured code stays executor_error, irrespective of prose.
+    code = str(code) if code is not None else None
+    mapping = {"server_overloaded": "capacity", "usage_limit_exceeded": "quota",
+               "unauthorized": "auth", "authentication_error": "auth",
+               "stream_disconnected": "transport", "connection_failed": "transport"}
+    if code in mapping:
+        return mapping[code]
+    if code not in {None, "other"}:
+        return "executor_error"
+    lowered = message.lower()
+    for token, markers in (
+        ("auth", ("401", "unauthorized", "invalid api key", "missing credentials")),
+        ("transport", ("connection refused", "connection reset", "stream disconnect", "network error")),
+        ("capacity", ("at capacity", "server overloaded")),
+        ("quota", ("usage limit", "quota exceeded", "hit your limit", "rate limit")),
+    ):
+        if any(marker in lowered for marker in markers):
+            return token
+    return "executor_error"
+
 
 @dataclass(frozen=True)
 class DispatchResult:
@@ -224,6 +341,37 @@ class DispatchResult:
     cost_measures: tuple[dict, ...] = ()
     #: The physical call's lifecycle is independent of usage availability.
     lifecycle_state: str | None = None
+    error_code: str | None = None
+    start_state: str = "unknown"
+    #: Untrusted executor code and diagnostic: report only, never persisted.
+    raw_error_code: str | None = None
+
+    @property
+    def failure_code(self) -> str | None:
+        if self.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+            return "contract_violation"
+        if self.outcome is DispatchOutcome.INTERRUPTED:
+            return "interrupted"
+        if self.lifecycle_state == "timed_out":
+            return "timeout"
+        if self.outcome is DispatchOutcome.BLOCKED:
+            try:
+                return CAPABILITY_ERROR_CODES[self.missing_capability]
+            except KeyError as exc:
+                raise ExecutorError(f"unmapped missing_capability: {self.missing_capability}") from exc
+        if self.error_code is not None:
+            return self.error_code
+        return None if self.outcome is DispatchOutcome.SUCCEEDED else "no_error_report"
+
+    def failure_summary(self) -> str:
+        if self.failure_code is None:
+            return ""
+        parts = [f"error_code={self.failure_code}", f"start_state={self.start_state}"]
+        if self.failure_code == "executor_error" and self.raw_error_code:
+            parts.append(f"{self.executor}_error_info={failure_excerpt(self.raw_error_code, 80)}")
+        if self.detail:
+            parts.append(failure_excerpt(self.detail))
+        return " · ".join(parts)
 
     @property
     def learned_availability(self) -> Availability | None:
@@ -426,7 +574,7 @@ class Adapter:
     def _blocked(self, target: Target, capability: str, detail: str) -> DispatchResult:
         return DispatchResult(
             DispatchOutcome.BLOCKED, self.name, target,
-            missing_capability=capability, detail=detail,
+            missing_capability=capability, detail=failure_excerpt(detail), start_state="not_started",
         )
 
     def supports_non_writing(self, **dispatch_kwargs) -> bool:
@@ -797,6 +945,24 @@ class NativeAdapter(Adapter):
             argv = self.argv(target, task, cwd, writes, **argv_options)
         argv = self.readable(argv, read_dirs)
         worker_cwd = cwd or os.getcwd()
+        try:
+            workspace_before = _workspace_fingerprint(worker_cwd, max_files=128, max_bytes=8 << 20)
+        except Exception:
+            workspace_before = None
+
+        def observed_start(events):
+            state = _start_evidence(events)
+            if state == "started":
+                return state
+            if workspace_before is not None:
+                try:
+                    after = _workspace_fingerprint(worker_cwd, max_files=128, max_bytes=8 << 20)
+                    if after is not None and after != workspace_before:
+                        return "started"
+                except Exception:
+                    pass
+            return state
+
         if on_workspace is not None:
             on_workspace(worker_cwd)
         try:
@@ -819,10 +985,14 @@ class NativeAdapter(Adapter):
                 detail=f"no result within {timeout}s; the run may still be alive",
                 usage_observations=usage, cost_measures=costs,
                 lifecycle_state="timed_out",
+                error_code="timeout", start_state=observed_start(_events(partial_stdout)),
             )
         except Exception as exc:
-            return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc),
-                                  lifecycle_state="failed")
+            not_launched = isinstance(exc, OSError)
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target,
+                                  detail=failure_excerpt(str(exc)), lifecycle_state="failed",
+                                  error_code="precondition" if not_launched else "executor_error",
+                                  start_state="not_started" if not_launched else "unknown")
 
         if on_workspace is not None:
             on_workspace(worker_cwd)
@@ -831,18 +1001,61 @@ class NativeAdapter(Adapter):
         usage, costs = normalize_executor_output(
             self.name, stdout, dispatch_attempt_id or "attempt-unlinked",
         )
-        evidence = {"usage_observations": usage, "cost_measures": costs}
+        events = _events(stdout)
+        signal = _error_signal(events)
+        terminal_success = any(event.get("type") in {"turn.completed", "task_complete"}
+                               for event in events) and signal is None
+        has_agent_result = any(
+            isinstance(event.get("item"), dict)
+            and event["item"].get("type") == "agent_message"
+            and isinstance(event["item"].get("text"), str)
+            and event["item"]["text"].strip()
+            for event in events
+        )
+        if (self.name == "codex" and signal is None
+                and (completed.returncode != 0
+                     or (not terminal_success and not has_agent_result))):
+            session_events = self._session_events(events)
+            events += session_events
+            signal = _error_signal(session_events)
+        start_state = observed_start(events)
+        evidence = {"usage_observations": usage, "cost_measures": costs,
+                    "start_state": start_state}
+        if signal is not None:
+            raw_code, message = signal
+            friction = self._markers_in(message)
+            code = _error_class(raw_code, message)
+            # Preserve availability signals without letting them overrule a
+            # structured code (especially a new executor code).
+            if code == "quota":
+                friction = ("operating_quota", message)
+            elif raw_code not in {None, "other"}:
+                friction = None
+            if friction is not None:
+                capability, _ = friction
+                return replace(self._blocked(target, capability, message), **evidence,
+                               raw_error_code=raw_code, lifecycle_state="failed")
+            return DispatchResult(
+                DispatchOutcome.FAILED, self.name, target,
+                detail=failure_excerpt(message), error_code=code, raw_error_code=raw_code,
+                **evidence, lifecycle_state="failed",
+            )
         friction = self.classify_failure(
-            completed.returncode, completed.stderr or "", completed.stdout or ""
+            completed.returncode, completed.stderr or "", ""
         )
         if friction is not None:
             capability, detail = friction
-            return replace(self._blocked(target, capability, detail), **evidence,
+            observed = failure_excerpt(completed.stderr or detail)
+            return replace(self._blocked(target, capability, observed), **evidence,
                            lifecycle_state="failed")
         if completed.returncode != 0:
+            stderr = completed.stderr or ""
+            message = "\n".join(line for line in stderr.splitlines()
+                                if line.strip() != "Reading additional input from stdin...")
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
-                detail=(completed.stderr or completed.stdout or "").strip()[:400],
+                detail=failure_excerpt(message),
+                error_code=_error_class(None, message) if message.strip() else "no_error_report",
                 artifacts={"argv": argv, "returncode": completed.returncode},
                 **evidence, lifecycle_state="failed",
             )
@@ -869,6 +1082,24 @@ class NativeAdapter(Adapter):
             model_resolved=resolved, artifacts=artifacts, agent_output=spoken,
             **evidence, lifecycle_state="completed",
         )
+
+    def _session_events(self, events: list[dict]) -> list[dict]:
+        """Read only the session identified by this invocation, never the newest log."""
+        thread_ids = [event.get("thread_id") for event in events
+                      if event.get("type") == "thread.started"]
+        root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
+        for thread_id in thread_ids:
+            if not isinstance(thread_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,80}", thread_id):
+                continue
+            for path in root.glob(f"**/*{thread_id}.jsonl"):
+                try:
+                    logged = _events(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError):
+                    continue
+                # The filename alone is not authority for session identity.
+                if any(event.get("id") == thread_id for event in logged):
+                    return logged
+        return []
 
     def classify_failure(self, returncode: int, stderr: str, stdout: str) -> tuple[str, str] | None:
         """Recognise a failure that a human, not a retry, has to resolve.
@@ -1061,6 +1292,12 @@ def _remote_ref_fingerprint(root: str) -> str:
 
 
 def _checkout_fingerprint(path: str) -> dict:
+    """Exhaustive checkout evidence for the read-only contract."""
+    return _workspace_fingerprint(path)
+
+
+def _workspace_fingerprint(path: str, *, max_files: int | None = None,
+                           max_bytes: int | None = None) -> dict | None:
     """What a read-only stage must leave exactly as it found it.
 
     HEAD, the branch ref, the porcelain status including every untracked file,
@@ -1069,6 +1306,9 @@ def _checkout_fingerprint(path: str) -> dict:
     dirty, and a read-only stage is not required to start from a clean tree.
     Ignored files are left out because nobody commits them; file contents are
     digested and never kept.
+
+    Optional budgets are used only for best-effort start evidence. Exceeding
+    one returns None. Read-only contract callers omit them and remain exhaustive.
     """
     root = _git_output(path, "rev-parse", "--show-toplevel")
     head = _git_output(root, "rev-parse", "HEAD")
@@ -1078,15 +1318,27 @@ def _checkout_fingerprint(path: str) -> dict:
     changed = _git_output(
         root, "ls-files", "-z", "--modified", "--others", "--exclude-standard",
     )
+    paths = sorted(set(filter(None, changed.split("\0"))))
+    if max_files is not None and len(paths) > max_files:
+        return None
     files = []
-    for relative in sorted(set(filter(None, changed.split("\0")))):
+    remaining = max_bytes
+    for relative in paths:
         full = os.path.join(root, relative)
         if os.path.islink(full):
             files.append((relative, "link", os.readlink(full)))
         elif os.path.isfile(full):
             digest = hashlib.sha256()
             with open(full, "rb") as handle:
-                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                while True:
+                    size = 1 << 20 if remaining is None else min(1 << 20, remaining + 1)
+                    chunk = handle.read(size)
+                    if not chunk:
+                        break
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            return None
                     digest.update(chunk)
             files.append((relative, "file", digest.hexdigest()))
         else:
@@ -1187,7 +1439,8 @@ def _read_only_violation(result: DispatchResult, artifacts: dict,
     else:
         detail = "read-only contract violation: " + problem
     return replace(result, outcome=DispatchOutcome.CONTRACT_VIOLATION,
-                   missing_capability=None, detail=detail, artifacts=artifacts)
+                   missing_capability=None, detail=detail, artifacts=artifacts,
+                   error_code="contract_violation", start_state="started")
 
 
 def _remove_read_only_path(function, path, exc_info, root=None) -> None:
@@ -1611,9 +1864,22 @@ class OrcaAdapter(Adapter):
             payload = json.loads(completed.stdout or "{}")
         except subprocess.TimeoutExpired:
             return DispatchResult(DispatchOutcome.FAILED, self.name, target,
-                                  detail=f"no receipt within {timeout}s; the worker may still be alive")
+                                  detail=f"no receipt within {timeout}s; the worker may still be alive",
+                                  error_code="timeout", lifecycle_state="timed_out")
+        except json.JSONDecodeError:
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target,
+                                  detail="the executor returned an unreadable receipt",
+                                  error_code="unreadable_result")
         except Exception as exc:
-            return DispatchResult(DispatchOutcome.FAILED, self.name, target, detail=str(exc))
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target,
+                                  detail=failure_excerpt(str(exc)),
+                                  error_code="precondition" if isinstance(exc, OSError) else "executor_error",
+                                  start_state="not_started" if isinstance(exc, OSError) else "unknown")
+
+        if not isinstance(payload, dict):
+            return DispatchResult(DispatchOutcome.FAILED, self.name, target,
+                                  detail="the executor returned a non-object receipt",
+                                  error_code="unreadable_result")
 
         if on_workspace is not None:
             on_workspace(worker_cwd)
@@ -1631,7 +1897,10 @@ class OrcaAdapter(Adapter):
                       or f"worker-start exited {completed.returncode}")
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
-                detail=str(detail)[:400],
+                detail=failure_excerpt(detail),
+                error_code=_error_class(error.get("code"), str(detail)) if error else "no_error_report",
+                raw_error_code=error.get("code"),
+                start_state="started" if result.get("dispatchId") else "unknown",
                 artifacts={"argv": argv, "returncode": completed.returncode,
                            "stage": result.get("stage"),
                            "failedStage": result.get("failedStage"),
@@ -1643,6 +1912,7 @@ class OrcaAdapter(Adapter):
         state = result.get("state")
         artifacts = {"argv": argv, "dispatchId": result.get("dispatchId"),
                      "state": state, "launch": result.get("launch")}
+        start_state = "started" if result.get("dispatchId") else "unknown"
         if review_workspace is not None:
             artifacts["reviewWorkspace"] = {
                 "path": review_workspace.path,
@@ -1656,16 +1926,19 @@ class OrcaAdapter(Adapter):
                 model_resolved=resolved,
                 detail=f"requested {target.model}, the receipt reports {resolved}",
                 artifacts=artifacts,
+                start_state=start_state,
             )
         if state != "ready":
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target, model_resolved=resolved,
-                detail=str(result.get("lastError") or f"worker state {state!r}")[:400],
+                detail=failure_excerpt(result.get("lastError") or f"worker state {state!r}"),
+                error_code="executor_error" if result.get("lastError") else "no_error_report",
+                start_state=start_state,
                 artifacts=artifacts,
             )
         return DispatchResult(DispatchOutcome.SUCCEEDED, self.name, target,
                               model_resolved=resolved, artifacts=artifacts,
-                              asynchronous=True)
+                              asynchronous=True, start_state=start_state)
 
     def probe(self, runner=_run, which=shutil.which) -> ProbeResult:
         if not which(self.binary):
@@ -1787,6 +2060,7 @@ def dispatch(
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,
                 missing_capability="publication_access", detail=detail,
+                start_state="not_started",
                 readiness_policy=policy, dispatched_from=probe.availability,
             )
         if adapter.requires_publication_preflight:
@@ -1795,6 +2069,7 @@ def dispatch(
                 return DispatchResult(
                     DispatchOutcome.BLOCKED, target.executor, target,
                     missing_capability="publication_access", detail=detail,
+                    start_state="not_started",
                     readiness_policy=policy, dispatched_from=probe.availability,
                 )
 
@@ -1803,6 +2078,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="operating_availability",
+            start_state="not_started",
             detail=f"{target.executor} is {probe.availability.value}: {probe.proof}",
             readiness_policy=policy, dispatched_from=probe.availability,
         )
@@ -1814,6 +2090,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability="proven_readiness",
+            start_state="not_started",
             detail=("a calibration dispatch requires demonstrated readiness; "
                     f"{target.executor} could only show {probe.availability.value}"),
             readiness_policy=policy, dispatched_from=probe.availability,
@@ -1861,6 +2138,7 @@ def dispatch(
         return DispatchResult(
             DispatchOutcome.BLOCKED, target.executor, target,
             missing_capability=capability,
+            start_state="not_started",
             detail=detail,
             readiness_policy=policy, dispatched_from=probe.availability,
         )
@@ -1927,6 +2205,7 @@ def dispatch(
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,
                 missing_capability="read_only_verification", detail=result,
+                start_state="not_started",
                 readiness_policy=policy, dispatched_from=probe.availability,
             )
     else:

@@ -95,7 +95,87 @@ or local paths. Identical normalized components share a fingerprint.
 Historical stage rows remain queryable. They have no new attempt or usage rows;
 the new fields are unmeasured and must be read as unknown, never as zero.
 
-The field-by-field schema, correlation keys, and schema versions 1–14 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+The field-by-field schema, correlation keys, and schema history are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+
+### Dispatch failure evidence (schema 15)
+
+`dispatch_attempts.error_code` describes the cause of a non-succeeded attempt,
+including `BLOCKED`. It is distinct from executor availability and
+`missing_capability`, whose vocabulary is unchanged.
+
+| `error_code` | Meaning |
+|---|---|
+| `capacity` | Temporarily overloaded model or server; Codex `server_overloaded` |
+| `quota` | Exhausted usage window; Codex `usage_limit_exceeded` |
+| `auth` | Missing or rejected credentials, including a reported 401 |
+| `transport` | Network/API connection failure or stream disconnect |
+| `timeout` | Dispatch exceeded its time limit; work may still be alive |
+| `unreadable_result` | Output exists but contains no parseable structured stage result |
+| `unavailable` | Executor unavailable or waiting on an interactive prompt |
+| `contract_violation` | Wrong model ran or the read-only contract could not be established |
+| `interrupted` | Operator signal stopped the cycle |
+| `precondition` | Runtime/workspace condition failed before launch |
+| `executor_error` | Executor reported an error not mapped to a specific class |
+| `no_error_report` | No stage result and no executor error report |
+
+Structured executor signals take precedence over stderr and exit status.
+Codex reads terminal errors from JSON events, including `task_complete` and
+`codex_error_info`. On a failed or incomplete run, when the stream lacks that error, it reads the session log
+under `CODEX_HOME/sessions` identified by this invocation's `thread.started`
+ID, verifying the log's session ID. It never selects a different run's newest
+log. Claude reads its stream-json error/result envelope. Assistant prose is
+not an executor error. The Codex stdin banner is ignored in stderr fallback.
+An unmapped structured code stays `executor_error` even when its message
+contains a familiar error phrase. `unclassified` is not used.
+
+`dispatch_attempts.start_state` uses the typed gate `attempt_start_state`:
+
+| State | Evidence |
+|---|---|
+| `started` | Codex session (`thread.started`), tool/command/file-change or agent-message event; Claude session init/session ID or tool-use event; observed Git workspace change; Orca dispatch receipt ID |
+| `not_started` | Explicit executor `started: false`/`start_state: not_started`, a pre-launch capability refusal, or failure to spawn the process |
+| `unknown` | No positive evidence either way, such as timeout with no stream, a non-streamed run or asynchronous launch with no receipt ID |
+
+Any activity overrides negative evidence. Process launch, lifecycle `running`,
+and a timer alone do not prove agent work started. `unknown` may refine to
+`started` or `not_started`, and `not_started` may refine to `started`.
+`started` never reverts, including during corrections; other transitions
+produce conflicts. Recovery must reconcile `unknown` as though it started
+before rerouting (#173).
+
+| `missing_capability` | Attempt `error_code` | Start evidence |
+|---|---|---|
+| `operating_quota` | `quota` | Per-executor evidence |
+| `operating_availability` | `unavailable` | Per-executor evidence |
+| `authenticated_session`, `bypass_acknowledgement`, `folder_trust`, `hook_trust`, `trusted_directory` | `unavailable` | Per-executor evidence |
+| `orchestration_context`, `review_workspace_isolation`, `review_workspace_mismatch`, `review_workspace_conflict`, `provider_agent_mapping` | `precondition` | `not_started` for checks before launch |
+| `publication_access`, `proven_readiness`, `read_only_enforcement`, `disposable_workspace`, `workspace_policy` | `precondition` | `not_started` for checks before launch; no attempt row when refused by the outer gate |
+| `read_only_verification` | `contract_violation` | `not_started` when the fingerprint precheck refuses launch; a violation detected after execution is `started` |
+
+The mapping is explicit and tested; new capabilities cannot fall through to a
+default class.
+
+Workspace fingerprints used only to infer start activity hash at most 128 dirty
+or untracked files and 8 MiB in total. Exceeding either budget supplies no
+workspace start evidence; stream evidence still applies, otherwise the state
+remains `unknown`. Positive stream evidence skips the second fingerprint.
+Read-only contract verification has no such budget and remains exhaustive.
+
+**Migration:** a schema-14 store is detected by the absence of `start_state`,
+since there is no database-level version marker. Initialization adds the
+column with `unknown` for old rows and rewrites only
+`dispatch_attempts.error_code`: `operating_quota` → `quota`,
+`operating_availability` → `unavailable`, and `dispatch_failed`,
+`executor_error`, `unknown` → `executor_error`. Other values remain unchanged.
+The append-only `dispatch_attempt_updates` log, including `patch_json` and
+`patch_hash`, is untouched; its readers accept historical tokens. New writes
+reject the removed values. The migration is transactional and idempotent and
+does not backfill from session logs.
+
+**Diagnostics:** observed excerpts and raw executor error codes live only in
+the stop report and live status snapshot, bounded and redacted before display.
+They never enter telemetry. The [What is never recorded](#what-is-never-recorded)
+boundary remains unchanged.
 
 ### Work-item outcomes (schema 14)
 

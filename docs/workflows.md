@@ -2,7 +2,41 @@
 
 The same stages can be driven six ways. They differ in who runs each stage, what gets automated, and what gets recorded, not in what a stage does. A review run by hand and a review run by an orchestrator follow the same skill.
 
-**On this page:** [Choosing a workflow](#choosing-a-workflow) · [Single skills](#single-skills) · [Manual cycle](#manual-cycle) · [cc-orchestrator](#cc-orchestrator) · [Claude + Codex mode](#claude--codex-mode) · [cc-orca-orchestrator](#cc-orca-orchestrator) · [Runtime driver](#runtime-driver-run_cyclepy) · [Common rules](#rules-every-workflow-shares)
+**On this page:** [Stop report](#stop-report) · [Choosing a workflow](#choosing-a-workflow) · [Single skills](#single-skills) · [Manual cycle](#manual-cycle) · [cc-orchestrator](#cc-orchestrator) · [Claude + Codex mode](#claude--codex-mode) · [cc-orca-orchestrator](#cc-orca-orchestrator) · [Runtime driver](#runtime-driver-run_cyclepy) · [Common rules](#rules-every-workflow-shares)
+
+## Stop report
+
+When a dispatch stops a cycle, `CycleReport.explain()` shows the attempt's
+`error_code`, `start_state`, and a bounded, redacted excerpt of the executor's
+observed error. `cycle_status.py --line` shows those same details on the final
+status line. An unmapped error also shows the raw executor code, for example
+`codex_error_info=foo`. Credential-shaped strings such as `sk-…`, `ghp_…`,
+Slack tokens, AWS access-key IDs, Basic/Bearer credentials, and named
+key/token/secret/password assignments are masked before the excerpt is bounded. These diagnostics
+are transient report/status data, never telemetry payloads.
+
+Read `capacity` as temporary overload, `quota` as an exhausted usage window,
+`auth` as a credential failure, and `transport` as a connection failure.
+`timeout` means the time limit expired and does not establish that work stopped.
+`unavailable` names executor availability or an interactive prompt;
+`contract_violation` names a wrong model or a failed read-only boundary;
+`interrupted` means an operator signal stopped the cycle.
+`unreadable_result` means output exists without a parseable structured result.
+
+`executor_error` means the executor supplied an error the runtime cannot map;
+its raw code helps diagnose it without guessing from assistant prose.
+`no_error_report` means neither a result nor an executor error report was
+available; it does not imply overload or exhausted quota. `precondition`
+means a runtime or workspace requirement failed before launch. See the
+[failure and capability tables](telemetry.md#dispatch-failure-evidence-schema-15)
+for the complete mapping.
+
+`started` has positive session, tool, workspace-change or receipt evidence.
+`not_started` has positive evidence that no agent work ran. `unknown` means
+evidence was unavailable, including timeouts with no stream and launches
+without a receipt. Reconcile `unknown` as though it started before considering
+another dispatch: absence of evidence does not make a retry safe. This report
+adds evidence; automatic rerouting is separate work.
 
 ## Choosing a workflow
 
