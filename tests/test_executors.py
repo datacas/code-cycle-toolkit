@@ -382,6 +382,41 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
 
+    def test_git_common_dir_reaches_only_writing_codex_dispatches(self) -> None:
+        cwd = git_repo(self)
+        common_dir = str(cwd / ".git")
+        cases = (
+            (ex.CodexAdapter(), TARGET, True, True),
+            (ex.CodexAdapter(), TARGET, False, False),
+            (ex.ClaudeAdapter(), router.parse_target(
+                "claude:anthropic/claude-sonnet-5-5 high"), True, False),
+        )
+
+        for adapter, target, writes, should_forward in cases:
+            with self.subTest(executor=adapter.name, writes=writes):
+                readiness = ex.ProbeResult(
+                    adapter.name, ex.Availability.AUTHENTICATED, "credential present",
+                    provable_ceiling=ex.Availability.AUTHENTICATED,
+                )
+                result = ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, adapter.name, target,
+                    model_resolved=target.model,
+                )
+                with patch.object(adapter, "dispatch", return_value=result) as invoke:
+                    actual = ex.dispatch(
+                        decision(target), "work", ex.Registry([adapter]),
+                        cwd=str(cwd), writes=writes,
+                        writable_dirs=(common_dir,),
+                        probes={adapter.name: readiness},
+                    )
+
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, actual.outcome)
+                forwarded = invoke.call_args.kwargs.get("writable_dirs")
+                if should_forward:
+                    self.assertEqual((common_dir,), forwarded)
+                else:
+                    self.assertIsNone(forwarded)
+
     def test_a_blocked_decision_is_never_re_routed_here(self) -> None:
         """The router already decided; substituting now would falsify the record."""
         with self.assertRaises(ex.ExecutorError):

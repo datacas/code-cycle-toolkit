@@ -866,6 +866,12 @@ passes that from the role, and the adapters turn it into their own CLI's terms:
 the bypass flags are not in any argument list this builds, asserted over the
 commands rather than over the source text.
 
+There is one additional root for a writing Codex stage in a linked worktree:
+the Git common directory, so Git can update shared objects and refs. This root
+also exposes shared hooks and configuration and refs for other branches to
+writes from that stage. It is a deliberate trade-off for Git operations in the
+worktree; read-only and non-Codex dispatches do not receive it.
+
 The two CLIs default in opposite directions, which nobody had declared. `codex
 exec` is read-only unless told otherwise — four canary runs had an implementer
 that could not implement, reporting `BLOCKED` on "the read-only workspace" while

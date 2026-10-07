@@ -396,6 +396,46 @@ class WorktreeDirectoryTests(unittest.TestCase):
                          rc.configured_worktree_dir(config))
 
 class LocalOnlyPolicyTests(RunCycleTestCase):
+    def test_writing_codex_stage_receives_the_linked_git_common_dir(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "repo"
+        root.mkdir()
+        subprocess.run(["git", "-C", str(root), "init", "--initial-branch=main"],
+                       check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"],
+                       check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email",
+                        "test@example.invalid"], check=True)
+        (root / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"],
+                       check=True, capture_output=True, text=True)
+        worktree = root / ".worktree" / "task-177"
+        worktree.parent.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-b",
+                        "task-177", str(worktree)], check=True,
+                       capture_output=True, text=True)
+
+        class CapturingTalker(Talker):
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+                self.dispatch_kwargs = []
+
+            def dispatch(self, target, task, **kw):
+                self.dispatch_kwargs.append(kw)
+                return super().dispatch(target, task, **kw)
+
+        implementer, reviewer = CapturingTalker("codex"), Talker("claude")
+        report = self.run_cycle(implementer, reviewer, cwd=str(worktree),
+                                local_only=True)
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual(1, len(implementer.dispatch_kwargs))
+        self.assertTrue(implementer.dispatch_kwargs[0]["writes"])
+        self.assertEqual((str(root / ".git"),),
+                         implementer.dispatch_kwargs[0]["writable_dirs"])
+
     def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

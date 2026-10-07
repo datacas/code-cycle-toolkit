@@ -24,7 +24,11 @@ Herdr is optional when running the suite: with `HERDR_ENV` unset, worktree
 selection uses Git directly; dedicated Herdr tests opt into the flag and mock
 the command. Writing Codex dispatches from linked worktrees grant the worktree's
 Git common directory as an additional writable root; read-only dispatches do
-not receive that access.
+not receive that access. This grants the writing stage access to shared metadata
+for the repository, including hooks, configuration, and refs for every branch.
+The wider root is required because Git stores linked-worktree objects and refs
+in the common directory; use it only for Codex stages that write the selected
+worktree, and account for the broader access when reviewing the sandbox boundary.
 
 ## Complete evidence
 
