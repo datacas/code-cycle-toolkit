@@ -212,8 +212,9 @@ def failure_excerpt(text: str, limit: int = 400) -> str:
     text = re.sub(r"(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[A-Z0-9]{16})(?![A-Za-z0-9_])",
                   "[redacted]", str(text))
     text = re.sub(r"(?i)((?:bearer|basic)\s+)[A-Za-z0-9._~+/-]+=*", r"\1[redacted]", text)
+    # A name starts only where its run starts, so a long `-`/`_` run is scanned once.
     text = re.sub(
-        r"(?i)([\"']?\b(?:[A-Za-z0-9]+[_-])*(?:key|token|secret|password)\b[\"']?\s*[:=]\s*)"
+        r"(?i)([\"']?(?<![A-Za-z0-9_-])(?:[A-Za-z0-9_-]*[_-])?(?:key|token|secret|password)\b[\"']?\s*[:=]\s*)"
         r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1[redacted]", text,
     )
     return " ".join(text.split())[:limit]

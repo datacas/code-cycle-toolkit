@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -215,6 +216,18 @@ class ExecutorFailureTests(unittest.TestCase):
             excerpt = ex.failure_excerpt(json.dumps({key: "two secret words"}))
             self.assertIn("[redacted]", excerpt)
             self.assertNotIn("two secret words", excerpt)
+        for words in ("max_tokens=100", "monkey=1", "token expired"):
+            self.assertEqual(words, ex.failure_excerpt(words))
+
+    def test_redaction_is_linear_on_long_separator_runs(self):
+        # The previous name pattern took seconds on 16 KB and minutes on 40 KB.
+        for text in ("a-" * 8000, "a_" * 8000, "x-" * 8000 + "api_key" + "=abc123secret"):
+            with self.subTest(size=len(text), tail=text[-12:]):
+                started = time.perf_counter()
+                excerpt = ex.failure_excerpt(text, len(text))
+                self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertNotIn("abc123secret", excerpt)
+        self.assertIn("[redacted]", excerpt)
 
     def test_success_skips_session_lookup_and_second_workspace_fingerprint(self):
         for output in (stream({"type": "thread.started", "thread_id": "T"},
