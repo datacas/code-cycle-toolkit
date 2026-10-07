@@ -29,6 +29,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_AGENT = ROOT / "tests" / "fakes" / "fake_agent.py"
 
+sys.path.insert(0, str(ROOT / "tests"))
+from test_support import isolate_host_environment  # noqa: E402
+
+
+_restore_host_environment = None
+
+
+def setUpModule() -> None:
+    global _restore_host_environment
+    _restore_host_environment = isolate_host_environment()
+
+
+def tearDownModule() -> None:
+    if _restore_host_environment is not None:
+        _restore_host_environment()
+
 
 @unittest.skipIf(os.name == "nt", "the fake agents are POSIX executables")
 @unittest.skipUnless(shutil.which("bash"), "bash is not available")

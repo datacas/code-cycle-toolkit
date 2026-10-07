@@ -11,6 +11,25 @@ The toolkit counts something as verified only after it has run it. This page exp
 5. **A pass that couldn't run isn't a passed check.** A missing delegated skill is reported as a degraded pass.
 6. **Compacted output isn't evidence.** A stage judges the whole diff and cites uncompacted output. When it can't obtain either, the affected part is unverified. See [Complete evidence](#complete-evidence).
 
+## Running the suite across agent hosts
+
+Tests that exercise worktree selection or executor dispatch clear inherited
+`HERDR_*`, `CODEX_*`, `CLAUDE_*`, and `ORCA_*` variables, plus `CODE_CYCLE_HOME`,
+`XDG_CONFIG_HOME`, and `APPDATA`. A test that needs one of those settings sets
+it explicitly in its own scope. `CODEX_HOME` points to an empty temporary
+directory during those modules so Codex auth checks cannot fall through to the
+developer's home directory. This keeps a developer's host selection, credential
+path, and telemetry location from changing unrelated test behavior.
+Herdr is optional when running the suite: with `HERDR_ENV` unset, worktree
+selection uses Git directly; dedicated Herdr tests opt into the flag and mock
+the command. Writing Codex dispatches from linked worktrees grant the worktree's
+Git common directory as an additional writable root; read-only dispatches do
+not receive that access. This grants the writing stage access to shared metadata
+for the repository, including hooks, configuration, and refs for every branch.
+The wider root is required because Git stores linked-worktree objects and refs
+in the common directory; use it only for Codex stages that write the selected
+worktree, and account for the broader access when reviewing the sandbox boundary.
+
 ## Complete evidence
 
 A host can change what an agent sees of a command's output. A command-rewriting
