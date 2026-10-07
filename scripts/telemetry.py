@@ -74,7 +74,8 @@ from pathlib import Path
 #: 13: additive attempt, execution-variant, harness-snapshot, usage, cost,
 #: update, and conflict tables. Existing stage rows are not rewritten; old
 #: attempts and usage remain unknown rather than being filled with zero.
-SCHEMA_VERSION = 14
+#: 15: start evidence and classified attempt errors; migrate only the projection.
+SCHEMA_VERSION = 15
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -340,9 +341,11 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "launched", "running", "completed", "failed", "timed_out", "interrupted",
     })),
     "attempt_error_code": ("token", frozenset({
-        "dispatch_failed", "executor_error", "timeout", "contract_violation",
-        "interrupted", "operating_quota", "operating_availability", "unknown",
+        "capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
+        "unavailable", "contract_violation", "interrupted", "precondition",
+        "executor_error", "no_error_report",
     })),
+    "attempt_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "external_dispatch_id": ("identifier", None),
     "pricing_snapshot_id": ("identifier", None),
     "attempt_source": ("token", frozenset({"runtime", "codex", "claude", "orca", "provider", "operator"})),
@@ -657,6 +660,8 @@ CREATE TABLE IF NOT EXISTS dispatch_attempts (
     outcome                 TEXT CHECK(outcome IN
                               ('succeeded', 'blocked', 'failed', 'contract_violation', 'interrupted')),
     error_code              TEXT,
+    start_state             TEXT NOT NULL DEFAULT 'unknown'
+                            CHECK(start_state IN ('started', 'not_started', 'unknown')),
     external_dispatch_id    TEXT,
     started_at              TEXT NOT NULL,
     finished_at             TEXT,
@@ -976,7 +981,26 @@ class Telemetry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
+            self._migrate_dispatch_attempts(connection)
             connection.commit()
+
+    @staticmethod
+    def _migrate_dispatch_attempts(connection) -> None:
+        """Schema 15: upgrade the projection without rewriting its audit log."""
+        connection.execute("BEGIN IMMEDIATE")
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(dispatch_attempts)")}
+        if "start_state" not in columns:
+            connection.execute(
+                "ALTER TABLE dispatch_attempts ADD COLUMN start_state TEXT NOT NULL "
+                "DEFAULT 'unknown' CHECK(start_state IN ('started', 'not_started', 'unknown'))"
+            )
+            connection.execute(
+                "UPDATE dispatch_attempts SET error_code = CASE error_code "
+                "WHEN 'operating_quota' THEN 'quota' "
+                "WHEN 'operating_availability' THEN 'unavailable' "
+                "ELSE 'executor_error' END WHERE error_code IN "
+                "('operating_quota', 'operating_availability', 'dispatch_failed', 'executor_error', 'unknown')"
+            )
 
     def _model_names(self, repo_id: str | None = None) -> frozenset:
         """Build this instance's closed model set, raising if defaults fail."""
@@ -1361,7 +1385,7 @@ class Telemetry:
             raise TelemetryError("partial_result must be a mapping of typed fields")
         allowed = {
             "lifecycle_state", "outcome", "model_resolved", "duration_ms", "started_at",
-            "finished_at", "external_dispatch_id", "error_code", "usage_observations", "cost_measures",
+            "finished_at", "external_dispatch_id", "error_code", "start_state", "usage_observations", "cost_measures",
         }
         unknown = set(partial_result) - allowed
         if unknown:
@@ -1370,7 +1394,7 @@ class Telemetry:
         attempt = self.attempt(attempt_id)
         if attempt is None:
             raise TelemetryError("unknown dispatch attempt")
-        for key in ("lifecycle_state", "outcome", "error_code", "external_dispatch_id"):
+        for key in ("lifecycle_state", "outcome", "error_code", "start_state", "external_dispatch_id"):
             if key not in partial_result or partial_result[key] is None:
                 continue
             value = partial_result[key]
@@ -1380,6 +1404,8 @@ class Telemetry:
                 value = self._checked("outcome", value)
             elif key == "error_code":
                 value = self._checked("attempt_error_code", value)
+            elif key == "start_state":
+                value = self._checked("attempt_start_state", value)
             else:
                 value = self._safe_external_reference("external_dispatch_id", value)
             clean[key] = value
@@ -1463,6 +1489,13 @@ class Telemetry:
                         conflicts.append(key)
                         continue
                     if current in {"completed", "failed", "timed_out", "interrupted"} and value != current and correction_reason is None:
+                        self._conflict(connection, attempt_id, key, current, value, observed_at, source)
+                        conflicts.append(key)
+                        continue
+                elif key == "start_state":
+                    if current != value and not (
+                        current == "unknown" or (current == "not_started" and value == "started")
+                    ):
                         self._conflict(connection, attempt_id, key, current, value, observed_at, source)
                         conflicts.append(key)
                         continue

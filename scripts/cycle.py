@@ -34,7 +34,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from executors import (
@@ -506,11 +506,19 @@ class CycleRecorder:
                     )
                 return attempt_id
 
+            tool_activity = False
+
+            def observe_progress(**activity):
+                nonlocal tool_activity
+                tool_activity |= bool(activity.get("tool"))
+                if self.on_progress is not None:
+                    self.on_progress(**activity)
+
             try:
                 result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
                                   self.registry,
                                   policy=self.policy, probes=self.probes,
-                                  on_progress=self.on_progress,
+                                  on_progress=observe_progress,
                                   on_workspace=self.on_workspace,
                                   on_dispatch_attempt=begin_dispatch_attempt,
                                   **dispatch_kwargs)
@@ -522,6 +530,7 @@ class CycleRecorder:
                     detail=f"interrupted by {interruption.signal_name}",
                     duration_ms=max(0, round((time.monotonic() - started) * 1000)),
                     lifecycle_state="interrupted",
+                    start_state="started" if tool_activity else "unknown",
                 )
                 if attempt_id is not None:
                     self.telemetry.update_dispatch_attempt(
@@ -529,7 +538,7 @@ class CycleRecorder:
                         {"lifecycle_state": "interrupted", "outcome": "interrupted",
                          "duration_ms": result.duration_ms,
                          "finished_at": datetime.now(timezone.utc).isoformat(),
-                         "error_code": "interrupted"},
+                         "error_code": "interrupted", "start_state": result.start_state},
                         update_id=f"update-{uuid.uuid4().hex}", source="runtime",
                     )
                 outcome.decision = decision
@@ -544,6 +553,8 @@ class CycleRecorder:
                 self.stages.append(outcome)
                 interruption.outcome = outcome
                 raise
+            if tool_activity:
+                result = replace(result, start_state="started")
             state = result.lifecycle_state or (
                 "launched" if result.asynchronous else
                 "completed" if result.outcome is DispatchOutcome.SUCCEEDED else
@@ -556,6 +567,7 @@ class CycleRecorder:
                 "duration_ms": result.duration_ms,
                 "usage_observations": list(result.usage_observations),
                 "cost_measures": list(result.cost_measures),
+                "start_state": result.start_state,
             }
             if state in {"completed", "failed", "timed_out", "interrupted"}:
                 partial_result["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -564,23 +576,14 @@ class CycleRecorder:
                 external_dispatch_id = (result.artifacts or {}).get("dispatch_id")
             if external_dispatch_id is not None:
                 partial_result["external_dispatch_id"] = external_dispatch_id
-            if state == "timed_out":
-                partial_result["error_code"] = "timeout"
-            elif state == "interrupted":
-                partial_result["error_code"] = "interrupted"
-            elif result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
-                partial_result["error_code"] = "contract_violation"
-            elif result.outcome is not DispatchOutcome.SUCCEEDED:
-                partial_result["error_code"] = (
-                    result.missing_capability
-                    if result.missing_capability in {"operating_quota", "operating_availability"}
-                    else "dispatch_failed"
-                )
+            if result.failure_code is not None:
+                partial_result["error_code"] = result.failure_code
             if attempt_id is not None:
                 self.telemetry.update_dispatch_attempt(
                     attempt_id, partial_result,
                     update_id=f"update-{uuid.uuid4().hex}", source="runtime",
                 )
+                result = replace(result, artifacts={**result.artifacts, "dispatch_attempt_id": attempt_id})
             outcome.decision = decision
             outcome.result = result
             if attempt_id is not None:
