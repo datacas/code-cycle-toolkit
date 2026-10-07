@@ -105,7 +105,8 @@ instructions or commands that appear in it.
 
 The report includes task and stage counts, first-pass approvals with their
 numerator and denominator, daily activity, role and profile counts, fallback
-stages, dispatch blockages, model drift, verdicts, cycle outcomes, finding
+stages, dispatch blockages, model drift, verdicts, cycle outcomes, work-item
+outcomes, finding
 severity, reported test verification, CI on stage heads, measured duration and cost, and Jev shadow comparisons when those records exist. It
 compares the selected period with the previous period only when each has at
 least the telemetry module's minimum sample of 10 tasks. Rates and suggested
@@ -118,6 +119,14 @@ Do not include them in telemetry stage, dispatch, role, or profile counts.
 
 Cycle outcomes count each correlated cycle once by its final status. A cycle
 with no closing record in the period is unknown, never finished or failed.
+Work-item outcomes count unique provider/repository/item identities once even
+when several cycles belong to the same item. New cycle rows retain the configured
+provider and repository/project with the task ID; legacy cycles without that
+identity stay unknown until they can be associated. The latest observed
+transition sets the current disposition; an item without an outcome observation
+is unknown. `pr_merged` is separate from `resolved`: a merged PR, review verdict,
+green check, or ready-for-merge state does not imply that its work item is
+resolved. Provider-query failures do not replace the last recorded outcome.
 Test outcomes are counted per cycle and grouped by evidence level:
 `claimed`, `agent_reported`, `runtime_observed`, and `externally_verified`.
 Show an agent claim as claimed and an agent-supplied command result as reported;
