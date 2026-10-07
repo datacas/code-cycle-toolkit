@@ -17,6 +17,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import executors as ex  # noqa: E402
 import cycle_status  # noqa: E402
 import router  # noqa: E402
+from test_support import isolate_host_environment  # noqa: E402
+
+
+_restore_host_environment = None
+
+
+def setUpModule() -> None:
+    global _restore_host_environment
+    _restore_host_environment = isolate_host_environment()
+
+
+def tearDownModule() -> None:
+    if _restore_host_environment is not None:
+        _restore_host_environment()
 
 
 def present(_name):
@@ -368,6 +382,41 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
 
+    def test_git_common_dir_reaches_only_writing_codex_dispatches(self) -> None:
+        cwd = git_repo(self)
+        common_dir = str(cwd / ".git")
+        cases = (
+            (ex.CodexAdapter(), TARGET, True, True),
+            (ex.CodexAdapter(), TARGET, False, False),
+            (ex.ClaudeAdapter(), router.parse_target(
+                "claude:anthropic/claude-sonnet-5-5 high"), True, False),
+        )
+
+        for adapter, target, writes, should_forward in cases:
+            with self.subTest(executor=adapter.name, writes=writes):
+                readiness = ex.ProbeResult(
+                    adapter.name, ex.Availability.AUTHENTICATED, "credential present",
+                    provable_ceiling=ex.Availability.AUTHENTICATED,
+                )
+                result = ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, adapter.name, target,
+                    model_resolved=target.model,
+                )
+                with patch.object(adapter, "dispatch", return_value=result) as invoke:
+                    actual = ex.dispatch(
+                        decision(target), "work", ex.Registry([adapter]),
+                        cwd=str(cwd), writes=writes,
+                        writable_dirs=(common_dir,),
+                        probes={adapter.name: readiness},
+                    )
+
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, actual.outcome)
+                forwarded = invoke.call_args.kwargs.get("writable_dirs")
+                if should_forward:
+                    self.assertEqual((common_dir,), forwarded)
+                else:
+                    self.assertIsNone(forwarded)
+
     def test_a_blocked_decision_is_never_re_routed_here(self) -> None:
         """The router already decided; substituting now would falsify the record."""
         with self.assertRaises(ex.ExecutorError):
@@ -518,6 +567,25 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual("do the thing", seen["argv"][-1])
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertTrue(result.model_matches_request)
+
+    def test_codex_adds_git_common_dir_only_for_workspace_write(self) -> None:
+        common_dir = "/repo/.git"
+        write_argv = ex.CodexAdapter().argv(
+            TARGET, "implement", cwd="/repo/.worktree/task-1", writes=True,
+            writable_dirs=(common_dir,),
+        )
+        read_argv = ex.CodexAdapter().argv(
+            TARGET, "review", cwd="/repo/.worktree/task-1", writes=False,
+            writable_dirs=(common_dir,),
+        )
+
+        self.assertEqual(
+            ["--add-dir", common_dir],
+            write_argv[write_argv.index("--add-dir"):write_argv.index("--add-dir") + 2],
+        )
+        self.assertEqual("implement", write_argv[-1])
+        self.assertNotIn("--add-dir", read_argv)
+        self.assertEqual("review", read_argv[-1])
 
     def test_claude_runs_in_print_mode_and_never_with_a_bypass_flag(self) -> None:
         """A run needing elevated permissions is a run a human should see."""

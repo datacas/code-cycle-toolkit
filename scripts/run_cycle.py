@@ -923,6 +923,25 @@ def _main_repository_root(repository_root: Path, run=subprocess.run) -> Path:
     return repository_root
 
 
+def _git_common_directory(workspace: str, run=subprocess.run) -> str | None:
+    """Return the shared Git metadata directory for a linked worktree."""
+    if not _is_linked_worktree(Path(workspace)):
+        return None
+    result = run(
+        ["git", "rev-parse", "--git-common-dir"], cwd=workspace,
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        # Some in-process tests use a marker file to model a worktree without
+        # creating Git metadata. A real selected worktree resolves this path;
+        # leave synthetic workspaces alone.
+        return None
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = Path(workspace) / common
+    return str(common.resolve())
+
+
 def _default_base_ref(repository_root: Path, config: dict, run=subprocess.run) -> str:
     section = config.get("code_cycle")
     repository = section.get("repository") if isinstance(section, dict) else None
@@ -1511,6 +1530,9 @@ def run_cycle(
     dispatch_kwargs = {}
     if cwd:
         dispatch_kwargs["cwd"] = cwd
+        common_directory = _git_common_directory(cwd)
+        if common_directory:
+            dispatch_kwargs["writable_dirs"] = (common_directory,)
     if timeout is not None:
         dispatch_kwargs["timeout"] = timeout
 

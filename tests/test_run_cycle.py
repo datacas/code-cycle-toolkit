@@ -34,6 +34,20 @@ import run_cycle as rc  # noqa: E402
 import stats  # noqa: E402
 import telemetry as tm  # noqa: E402
 from test_cycle import ScriptedAdapter  # noqa: E402
+from test_support import isolate_host_environment  # noqa: E402
+
+
+_restore_host_environment = None
+
+
+def setUpModule() -> None:
+    global _restore_host_environment
+    _restore_host_environment = isolate_host_environment()
+
+
+def tearDownModule() -> None:
+    if _restore_host_environment is not None:
+        _restore_host_environment()
 
 
 def block(status: str, **fields) -> str:
@@ -382,6 +396,49 @@ class WorktreeDirectoryTests(unittest.TestCase):
                          rc.configured_worktree_dir(config))
 
 class LocalOnlyPolicyTests(RunCycleTestCase):
+    def test_writing_codex_stage_receives_the_linked_git_common_dir(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "repo"
+        root.mkdir()
+        subprocess.run(["git", "-C", str(root), "init", "--initial-branch=main"],
+                       check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"],
+                       check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email",
+                        "test@example.invalid"], check=True)
+        (root / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"],
+                       check=True, capture_output=True, text=True)
+        worktree = root / ".worktree" / "task-177"
+        worktree.parent.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-b",
+                        "task-177", str(worktree)], check=True,
+                       capture_output=True, text=True)
+
+        class CapturingTalker(Talker):
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+                self.dispatch_kwargs = []
+
+            def dispatch(self, target, task, **kw):
+                self.dispatch_kwargs.append(kw)
+                return super().dispatch(target, task, **kw)
+
+        implementer, reviewer = CapturingTalker("codex"), Talker("claude")
+        report = self.run_cycle(implementer, reviewer, cwd=str(worktree),
+                                local_only=True)
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual(1, len(implementer.dispatch_kwargs))
+        self.assertTrue(implementer.dispatch_kwargs[0]["writes"])
+        actual_common_dir, = implementer.dispatch_kwargs[0]["writable_dirs"]
+        self.assertEqual(
+            os.path.normcase(str((root / ".git").resolve())),
+            os.path.normcase(str(Path(actual_common_dir).resolve())),
+        )
+
     def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1582,6 +1639,7 @@ class WorkspaceSelectionTests(unittest.TestCase):
             )
             self.assert_same_path(root / ".worktree", base)
             self.assert_same_path(root / ".worktree" / "task-151", selected)
+            self.assert_same_path(root / ".git", rc._git_common_directory(selected))
             self.assertTrue((Path(selected) / ".git").is_file())
             self.assertEqual("task-151", self.git(selected, "branch", "--show-current"))
             self.assertEqual("main", self.git(root, "branch", "--show-current"))
@@ -1590,6 +1648,29 @@ class WorkspaceSelectionTests(unittest.TestCase):
                 "151", "owner/api", config, cwd=str(root),
             )
             self.assert_same_path(selected, selected_again)
+
+    def test_herdr_environment_in_the_invoking_shell_is_neutralized(self) -> None:
+        """A host flag and a failing stub cannot divert this test from Git."""
+        with tempfile.TemporaryDirectory() as temporary:
+            stub_dir = Path(temporary) / "bin"
+            stub_dir.mkdir()
+            stub = stub_dir / "herdr"
+            stub.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+            stub.chmod(0o755)
+            environment = dict(os.environ)
+            environment["HERDR_ENV"] = "1"
+            environment["PATH"] = os.pathsep.join(
+                (str(stub_dir), environment.get("PATH", ""))
+            )
+
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "tests.test_run_cycle.WorkspaceSelectionTests."
+                 "test_default_creates_and_then_reuses_the_task_worktree"],
+                cwd=ROOT, env=environment, capture_output=True, text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr or result.stdout)
 
     def test_matching_active_task_worktree_uses_repository_base_in_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
