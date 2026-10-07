@@ -1,6 +1,7 @@
 """Failure evidence crosses the process boundary; prose never enters the store."""
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -231,13 +232,13 @@ class StoreFailureTests(unittest.TestCase):
         old_column = ("    start_state             TEXT NOT NULL DEFAULT 'unknown'\n"
                       "                            CHECK(start_state IN ('started', 'not_started', 'unknown')),\n")
         old_path = self.path.parent / "old.sqlite"
-        with sqlite3.connect(old_path) as conn:
+        with closing(sqlite3.connect(old_path)) as conn, conn:
             conn.executescript(tm.SCHEMA.replace(old_column, ""))
         with patch.object(tm.Telemetry, "_migrate_dispatch_attempts", lambda *a: None):
             old = tm.Telemetry(old_path)
             ids = [self.attempt(old) for _ in range(6)]
         codes = ("operating_quota", "operating_availability", "dispatch_failed", "executor_error", "unknown", "timeout")
-        with sqlite3.connect(old_path) as conn:
+        with closing(sqlite3.connect(old_path)) as conn, conn:
             for index, (attempt, code) in enumerate(zip(ids, codes)):
                 conn.execute("UPDATE dispatch_attempts SET error_code=? WHERE attempt_id=?", (code, attempt))
                 conn.execute("INSERT INTO dispatch_attempt_updates "
@@ -248,7 +249,7 @@ class StoreFailureTests(unittest.TestCase):
         self.assertEqual(["quota", "unavailable", "executor_error", "executor_error", "executor_error", "timeout"],
                          [migrated.attempt(attempt)["error_code"] for attempt in ids])
         self.assertEqual(["unknown"] * 6, [migrated.attempt(attempt)["start_state"] for attempt in ids])
-        with sqlite3.connect(old_path) as conn:
+        with closing(sqlite3.connect(old_path)) as conn:
             self.assertEqual(before, conn.execute("SELECT * FROM dispatch_attempt_updates").fetchall())
         self.assertEqual("operating_quota", migrated.attempt_updates(ids[0])[0]["patch"]["error_code"])
         tm.Telemetry(old_path)
@@ -271,7 +272,7 @@ class StoreFailureTests(unittest.TestCase):
         line = cycle_status.format_progress_line(statuses[-1])
         cli = subprocess.run([sys.executable, str(ROOT / "scripts" / "cycle_status.py"),
                               "--line", "--status-dir", str(self.path.parent / "status")],
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(0, cli.returncode, cli.stderr)
         self.assertIn("error_code=executor_error", cli.stdout)
         self.assertNotIn("sk-secret123", cli.stdout)
@@ -282,7 +283,7 @@ class StoreFailureTests(unittest.TestCase):
             self.assertNotIn("ghp_secret456", output)
         attempts = self.store.dispatch_attempts("repo")
         self.assertEqual(("executor_error", "started"), (attempts[0]["error_code"], attempts[0]["start_state"]))
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             database = "\n".join(conn.iterdump())
         for forbidden in ("sk-secret123", "ghp_secret456", "future_code", "failure sk", "[redacted]"):
             self.assertNotIn(forbidden, database)
