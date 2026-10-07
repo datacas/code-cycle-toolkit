@@ -1,0 +1,400 @@
+{
+  "config": {
+    "argv": [
+      "/usr/bin/node",
+      "/work/project/node_modules/.bin/playwright",
+      "test",
+      "--list",
+      "--reporter=json"
+    ],
+    "configFile": "/work/project/playwright.config.ts",
+    "rootDir": "/work/project/tests/behavioral",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {},
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/work/project/test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "",
+        "name": "",
+        "testDir": "/work/project/tests/behavioral",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 15000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.63.0",
+    "workers": 8,
+    "webServer": {
+      "command": "node server.mjs",
+      "url": "http://127.0.0.1:4173/login",
+      "reuseExistingServer": true
+    }
+  },
+  "suites": [
+    {
+      "title": "fail.spec.ts",
+      "file": "fail.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "F-TOHAVETEXT",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-TEXT-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-4d6e36058450dd8c568f",
+          "file": "fail.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "F-TOBE",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-TOBE-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-26dd50208d99c8e29916",
+          "file": "fail.spec.ts",
+          "line": 6,
+          "column": 5
+        },
+        {
+          "title": "F-TOEQUAL",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-TOEQUAL-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-1158ad1e86550ed62ba9",
+          "file": "fail.spec.ts",
+          "line": 11,
+          "column": 5
+        },
+        {
+          "title": "F-TOBEVISIBLE",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-VISIBLE-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-2be2e0605e2912482bb4",
+          "file": "fail.spec.ts",
+          "line": 14,
+          "column": 5
+        },
+        {
+          "title": "F-SELECTOR-TIMEOUT",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-SELECTOR-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-586fd4d6a5e42f3bb435",
+          "file": "fail.spec.ts",
+          "line": 18,
+          "column": 5
+        },
+        {
+          "title": "F-HTTP-404",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "FAIL-HTTP-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "079ba3fd7f4fe9f10950-0ac3f92d803b5e38057a",
+          "file": "fail.spec.ts",
+          "line": 22,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "title": "misc.spec.ts",
+      "file": "misc.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "M-SKIPPED",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "MISC-SKIP-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "cef128c16bb2b5432af5-01f26af892378416e52f",
+          "file": "misc.spec.ts",
+          "line": 2,
+          "column": 5
+        }
+      ],
+      "suites": [
+        {
+          "title": "setup group",
+          "file": "misc.spec.ts",
+          "line": 5,
+          "column": 6,
+          "specs": [
+            {
+              "title": "M-SETUP",
+              "ok": true,
+              "tags": [
+                "behavioral",
+                "MISC-SETUP-001"
+              ],
+              "tests": [
+                {
+                  "timeout": 15000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [],
+                  "status": "skipped"
+                }
+              ],
+              "id": "cef128c16bb2b5432af5-4d88cb2e64163fd6245d",
+              "file": "misc.spec.ts",
+              "line": 7,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "pass.spec.ts",
+      "file": "pass.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "login page renders",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "AUTH-LOGIN-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [
+                {
+                  "type": "covers",
+                  "description": "issue:151",
+                  "location": {
+                    "file": "/work/project/tests/behavioral/pass.spec.ts",
+                    "line": 2,
+                    "column": 5
+                  }
+                }
+              ],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "71e2857e93188465eaa5-a9350ed811e136bef6ac",
+          "file": "pass.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "login page renders (variant)",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "AUTH-LOGIN-0010"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "71e2857e93188465eaa5-f50b840d6dc6fb658f58",
+          "file": "pass.spec.ts",
+          "line": 7,
+          "column": 5
+        }
+      ]
+    },
+    {
+      "title": "retry.spec.ts",
+      "file": "retry.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "R-FLAKY",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "RETRY-FLAKY-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "1d4db9983fd58b264f38-f1086d4e3c8f7eb1fde3",
+          "file": "retry.spec.ts",
+          "line": 2,
+          "column": 5
+        },
+        {
+          "title": "R-REPEATED",
+          "ok": true,
+          "tags": [
+            "behavioral",
+            "RETRY-REPEAT-001"
+          ],
+          "tests": [
+            {
+              "timeout": 15000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [],
+              "status": "skipped"
+            }
+          ],
+          "id": "1d4db9983fd58b264f38-eee0bd3d5102fe26d657",
+          "file": "retry.spec.ts",
+          "line": 6,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-05T09:36:17.072Z",
+    "duration": 13.675000000000011,
+    "expected": 0,
+    "skipped": 12,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

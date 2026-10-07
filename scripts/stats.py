@@ -72,6 +72,46 @@ def _read_rows(database: Path, repo_id: str) -> list[dict]:
         raise StatsError("could not read the local telemetry database") from error
 
 
+def _read_dispositions(database: Path, repo_id: str) -> list[dict]:
+    """Read the optional append-only work-item ledger without opening it for writes."""
+    if not database.is_file():
+        return []
+    uri = database.resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'work_item_disposition_events'"
+            ).fetchone()
+            if not exists:
+                return []
+            events = []
+            for raw in connection.execute(
+                "SELECT event_id, repo_id, provider, external_repository, work_item_id, outcome, "
+                "source, observed_at, recorded_at, cycle_ids, pull_request_ids, merged_pr_ids, "
+                "resolving_pr_ids, reverted_pr_ids "
+                "FROM work_item_disposition_events WHERE repo_id = ? "
+                "ORDER BY observed_at, recorded_at, event_id",
+                (repo_id,),
+            ):
+                event = dict(raw)
+                event["repository"] = event.pop("external_repository")
+                for name in ("cycle_ids", "pull_request_ids", "merged_pr_ids",
+                             "resolving_pr_ids", "reverted_pr_ids"):
+                    try:
+                        event[name] = json.loads(event[name])
+                    except (TypeError, json.JSONDecodeError):
+                        event[name] = []
+                events.append(event)
+            return events
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise StatsError("could not read the local telemetry database") from error
+
+
 def _timestamp(row: dict) -> datetime | None:
     try:
         value = datetime.fromisoformat(row["recorded_at"].replace("Z", "+00:00"))
@@ -262,6 +302,150 @@ def _cycle_outcomes(rows: list[dict]) -> dict:
     }
 
 
+def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
+    """Count one latest disposition per provider work item, never per cycle."""
+    cycle_tasks: dict[tuple[str, str], set[str]] = defaultdict(set)
+    cycle_identity_candidates: dict[
+        tuple[str, str], set[tuple[str, str, str, str]]
+    ] = defaultdict(set)
+    task_cycles: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for row in rows:
+        payload = row.get("payload") or {}
+        cycle_id = payload.get("cycle_id")
+        if not cycle_id:
+            continue
+        repo_id = str(row.get("repo_id", ""))
+        cycle_key = (repo_id, str(cycle_id))
+        task_id = str(row["task_id"])
+        cycle_tasks[cycle_key].add(task_id)
+        task_cycles[task_id].add(cycle_key)
+
+        provider = payload.get("work_item_provider")
+        repository = payload.get("work_item_repository")
+        if provider and repository:
+            cycle_identity_candidates[cycle_key].add(
+                (repo_id, str(provider), str(repository), task_id)
+            )
+
+    if not task_cycles:
+        return {
+            "items": 0,
+            "recorded": 0,
+            "unobserved": 0,
+            "outcomes": {name: 0 for name in
+                         ("resolved", "closed_unresolved", "pr_merged", "reopened", "reverted", "unknown")},
+            "sources": {"provider_query": 0, "explicit": 0},
+            "pull_requests": {"linked": 0, "merged": 0, "resolving": 0, "reverted": 0},
+        }
+
+    latest: dict[tuple[str, str, str, str], dict] = {}
+    for event in events:
+        identity = (str(event["repo_id"]), str(event["provider"]),
+                    str(event["repository"]), str(event["work_item_id"]))
+        previous = latest.get(identity)
+        ordering = (str(event.get("observed_at", "")), str(event.get("recorded_at", "")),
+                    int(event.get("event_id", 0) or 0))
+        prior_ordering = ((str(previous.get("observed_at", "")),
+                           str(previous.get("recorded_at", "")),
+                           int(previous.get("event_id", 0) or 0)) if previous else None)
+        if prior_ordering is None or ordering > prior_ordering:
+            latest[identity] = event
+
+    cycle_identity: dict[tuple[str, str], tuple[str, str, str, str]] = {
+        cycle_key: next(iter(identities))
+        for cycle_key, identities in cycle_identity_candidates.items()
+        if len(identities) == 1
+    }
+    unique_items: dict[tuple[str, str, str, str] | tuple[str, str, str], dict] = {}
+    for identity in set(cycle_identity.values()):
+        unique_items[identity] = latest.get(
+            identity, {"outcome": "unknown", "source": None}
+        )
+
+    # Older stage rows predate the per-cycle identity fields. An event that
+    # names one of those cycles can still identify it; an unmatched legacy
+    # cycle stays unknown instead of being guessed from its bare task ID.
+    legacy_event_candidates: dict[
+        tuple[str, str], set[tuple[str, str, str, str]]
+    ] = defaultdict(set)
+    for identity, event in latest.items():
+        cycle_ids = event.get("cycle_ids", [])
+        if not isinstance(cycle_ids, (list, tuple)):
+            continue
+        for cycle_id in cycle_ids:
+            cycle_key = (identity[0], str(cycle_id))
+            if cycle_key in cycle_identity or identity[3] not in cycle_tasks.get(cycle_key, set()):
+                continue
+            legacy_event_candidates[cycle_key].add(identity)
+
+    associated_legacy_cycles = set()
+    for cycle_key, identities in legacy_event_candidates.items():
+        if len(identities) == 1:
+            identity = next(iter(identities))
+            unique_items[identity] = latest[identity]
+            associated_legacy_cycles.add(cycle_key)
+
+    # A legacy cycle still unmatched belongs to its task's only known scope,
+    # whether a cycle or a ledger event revealed it; when several scopes remain
+    # possible it stays one unknown legacy group.
+    task_identities: dict[tuple[str, str], set[tuple[str, str, str, str]]] = defaultdict(set)
+    for identity in (*unique_items, *latest):
+        task_identities[(identity[0], identity[3])].add(identity)
+
+    unobserved_legacy_items = set()
+    for cycle_key, task_ids in cycle_tasks.items():
+        if cycle_key in cycle_identity or cycle_key in associated_legacy_cycles:
+            continue
+        for task_id in task_ids:
+            known = task_identities.get((cycle_key[0], task_id), set())
+            if len(known) == 1:
+                identity = next(iter(known))
+                if identity not in unique_items:
+                    unique_items[identity] = latest[identity]
+            else:
+                unobserved_legacy_items.add((cycle_key[0], task_id))
+    for repo_id, task_id in unobserved_legacy_items:
+        unique_items[("unobserved", repo_id, task_id)] = {
+            "outcome": "unknown",
+            "source": None,
+        }
+
+    outcomes = Counter(item.get("outcome", "unknown") for item in unique_items.values())
+    sources = Counter(item["source"] for item in unique_items.values()
+                      if item.get("source") in {"provider_query", "explicit"})
+    pull_requests = {name: set() for name in ("linked", "merged", "resolving", "reverted")}
+    for item in unique_items.values():
+        provider = str(item.get("provider", ""))
+        repository = str(item.get("repository", ""))
+        for metric, field in (("linked", "pull_request_ids"), ("merged", "merged_pr_ids"),
+                              ("resolving", "resolving_pr_ids"), ("reverted", "reverted_pr_ids")):
+            for pull_request_id in item.get(field, []):
+                reference = str(pull_request_id)
+                if "#" in reference:
+                    pr_repository, pr_number = reference.rsplit("#", 1)
+                    # A qualified reference identifies the PR independently
+                    # of the provider used to observe its linked work item.
+                    pull_requests[metric].add((pr_repository, pr_number))
+                elif provider == "github":
+                    # A GitHub work item's repository is its PR repository, so
+                    # a bare number names the same PR as the qualified form.
+                    pull_requests[metric].add((repository, reference))
+                else:
+                    # Other providers' bare numbers are only meaningful within
+                    # their own work-item repository.
+                    pull_requests[metric].add((provider, repository, reference))
+    return {
+        "items": len(unique_items),
+        "recorded": sum(1 for item in unique_items.values()
+                         if item.get("source") in {"provider_query", "explicit"}),
+        "unobserved": sum(1 for item in unique_items.values() if not item.get("source")),
+        "outcomes": {name: outcomes[name] for name in
+                     ("resolved", "closed_unresolved", "pr_merged", "reopened", "reverted", "unknown")},
+        "sources": {"provider_query": sources["provider_query"], "explicit": sources["explicit"]},
+        "pull_requests": {name: len(values) for name, values in pull_requests.items()},
+    }
+
+
 #: The stages that leave a head behind, whose checks say whether it was green.
 HEAD_PRODUCING_ROLES = frozenset({"implement", "resolve"})
 CHECK_STATES = ("green", "failed", "pending", "none")
@@ -390,7 +574,8 @@ def _forecast_accuracy(rows: list[dict], minimum: int) -> dict:
 
 
 def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
-              now: datetime | None = None, minimum: int = MINIMUM_SAMPLE) -> dict:
+              now: datetime | None = None, minimum: int = MINIMUM_SAMPLE,
+              dispositions: list[dict] | None = None) -> dict:
     """Build a JSON-safe report without returning raw telemetry rows."""
     now = now or datetime.now(timezone.utc)
     rows = [row for row in rows if row.get("repo_id") == repo_id]
@@ -547,6 +732,7 @@ def aggregate(rows: list[dict], *, repo_id: str, days: int | None = 30,
             },
             "verdicts": _counter(verdicts),
             "cycle_outcomes": _cycle_outcomes(current),
+            "work_item_outcomes": _work_item_outcomes(current, dispositions or []),
             "findings": {
                 name: {"count": findings[name] if findings_measured[name] else None,
                        "measured": findings_measured[name]}
@@ -724,6 +910,25 @@ def render_markdown(report: dict) -> str:
     if rounds["measured"]:
         lines += ["", f"Resolution rounds: **{rounds['total']}** across {rounds['measured']} "
                       f"closed cycle(s) (mean {rounds['mean']:.1f})."]
+
+    work_items = summary["work_item_outcomes"]
+    lines += ["", "### Work-item outcomes", ""]
+    lines += _count_table("Disposition", "Unique work items", work_items["outcomes"],
+                          empty="No work item with a recorded cycle in this period.")
+    if work_items["items"]:
+        lines += ["", f"**{work_items['recorded']} of {work_items['items']}** work items have an "
+                  f"observed disposition; {work_items['unobserved']} remain unknown because no "
+                  "provider or explicit outcome has been recorded."]
+        lines.append(
+            f"Disposition records by source: {work_items['sources']['provider_query']} provider query, "
+            f"{work_items['sources']['explicit']} explicit. A merged PR is reported separately and "
+            "does not imply that the work item is resolved."
+        )
+        pull_requests = work_items["pull_requests"]
+        lines.append(
+            f"Linked PRs: {pull_requests['merged']} of {pull_requests['linked']} merged; "
+            f"{pull_requests['resolving']} resolving and {pull_requests['reverted']} reverted."
+        )
 
     lines += ["", "### Findings by severity", ""]
     findings = summary["findings"]
@@ -924,7 +1129,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo_id = _report_config(args.cwd)
         rows = _read_rows(args.database, repo_id)
-        report = aggregate(rows, repo_id=repo_id, days=None if args.all_time else args.days)
+        dispositions = _read_dispositions(args.database, repo_id)
+        report = aggregate(rows, repo_id=repo_id, days=None if args.all_time else args.days,
+                           dispositions=dispositions)
     except StatsError as error:
         print(f"cc-stats: {error}", file=sys.stderr)
         return 2

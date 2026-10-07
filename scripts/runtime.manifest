@@ -19,9 +19,11 @@ telemetry.py
 cycle_status.py
 profile_config.py
 stats.py
+work_item_outcomes.py
 security_gate.py
 review_contract.py
 stage_signals.py
 jev_shadow.py
 issue_review.py
 stop_questions.py
+behavioral.py

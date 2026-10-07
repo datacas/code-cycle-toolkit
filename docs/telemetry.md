@@ -2,7 +2,7 @@
 
 When the runtime drives a cycle, every stage writes rows to a local SQLite database. `cc-stats` turns those rows into a per-repository report. This page covers what is recorded, what never is, and how to read it.
 
-**On this page:** [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)
+**On this page:** [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [Work-item outcomes](#work-item-outcomes) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)
 
 ## When rows are written
 
@@ -95,7 +95,67 @@ or local paths. Identical normalized components share a fingerprint.
 Historical stage rows remain queryable. They have no new attempt or usage rows;
 the new fields are unmeasured and must be read as unknown, never as zero.
 
-The field-by-field schema, correlation keys, and schema versions 1–13 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+The field-by-field schema, correlation keys, and schema versions 1–14 are in [Instrumentation → Telemetry](instrumentation.md#telemetry).
+
+### Work-item outcomes (schema 14)
+
+Work-item disposition events are stored in a separate append-only table. Each
+transition records the provider, repository or project, work-item ID, linked
+cycle and PR IDs, outcome, source (`provider_query` or `explicit`), and both
+the provider's `observed_at` and the local `recorded_at`, and per-PR merged
+references. No work-item text,
+comments, or PR descriptions are copied. Repeated snapshots with an unchanged
+disposition and associations, and snapshots older than the latest observed
+transition, are ignored.
+Implementation verdicts keep only a numeric PR identifier from the reported
+change-request reference, so reconciliation can include toolkit-created PRs.
+The event qualifies that identifier with the cycled code repository when it
+differs from the work-item repository. PR links returned by GitHub retain their
+own repository too; event references use `owner/repo#number` when a PR is in a
+different repository from the work item. Older unqualified event references
+are interpreted in the work-item repository.
+
+Outcomes are `resolved`, `closed_unresolved`, `pr_merged`, `reopened`,
+`reverted`, and `unknown`. GitHub's `COMPLETED` close reason maps to resolved;
+`NOT_PLANNED` and `DUPLICATE` map to closed unresolved. An open issue is marked
+reopened after a previously observed closed state. A merge, green check, review
+verdict, or ready-for-merge result does not imply issue resolution. Plane's
+completed and cancelled groups and Jira's Done category plus a configured
+resolution mapping are normalized by the provider mapping layer; missing or
+unmapped Jira resolutions stay unknown. When a work item is resolved, the
+linked resolving PRs are snapshotted at that transition; a later PR merge is
+tracked per PR without changing that resolving snapshot. A `reverted` event
+must identify a previously merged resolving PR; an unrelated PR cannot revoke
+the resolution. A later-linked PR remains non-resolving unless a person
+explicitly associates it with `--resolving-pr-id`.
+
+Cycle rows retain the configured issue provider and repository/project
+with the task ID. GitHub defaults to the repository being cycled; Plane and
+Jira use `code_cycle.issue.project`. Pass `--work-item-repository` when a
+work item belongs to a different repository or project.
+Reconciliation selects identity-bearing cycles for the requested provider and
+repository. A legacy cycle without stored identity is attached only when no
+known cycle puts that task ID in a different scope; if the known cycles span
+multiple scopes, the legacy cycle stays unassociated rather than being guessed.
+Statistics apply the same rule: a legacy cycle counts under the only scope known
+for its task ID, whether a scoped cycle or a recorded disposition revealed it,
+and otherwise stays one unknown item. A bare PR number from a GitHub work item
+counts as the same PR as its qualified `owner/repo#number` form.
+
+Run reconciliation on demand; there is no background polling. The current
+standalone query adapter uses the authenticated `gh` CLI and visits work items
+with recorded cycles. A failed query appends a timestamped safe failure category
+to `work_item_reconciliation_failures`, creates no disposition transition, and
+leaves the prior disposition intact. To record a person-supplied observation or
+explicit PR association, use the entry command:
+
+```sh
+python3 scripts/work_item_outcomes.py reconcile \
+  --repo-id datacas/code-cycle-toolkit --repository datacas/code-cycle-toolkit
+python3 scripts/work_item_outcomes.py record \
+  --repo-id datacas/code-cycle-toolkit --provider github \
+  --repository datacas/code-cycle-toolkit --work-item-id 120 --outcome resolved
+```
 
 ## What is never recorded
 
@@ -104,7 +164,7 @@ The field-by-field schema, correlation keys, and schema versions 1–13 are in [
 - comments or work-item text;
 - credentials. Model names must be in a closed set (the default profiles plus the models your `profiles` declare). References are checked against a selector grammar and rejected when they start with a known credential prefix (`sk-`, `ghp_`, `AKIA`, `xox`, …).
 
-Every field, column or payload key, goes through one typed gate (`telemetry.FIELD_SPECS`). A value that doesn't fit is **refused loudly** rather than silently dropped. An executor-reported model name that isn't in the known set is stored as `null` with `model_resolution: mismatch_unrecognized`.
+Stage columns and payload keys go through one typed gate (`telemetry.FIELD_SPECS`). Work-item ledger references and provider/outcome/source tokens use a separate typed boundary. A value that doesn't fit is **refused loudly** rather than silently dropped. An executor-reported model name that isn't in the known set is stored as `null` with `model_resolution: mismatch_unrecognized`.
 
 > [!NOTE]
 > No shape rule can tell a model name from a secret. The guarantee is the closed model set plus where references come from (`.code-cycle.yml` and the issue provider, not free text). See [Instrumentation → What the identifier rule does and does not guarantee](instrumentation.md#what-the-identifier-rule-does-and-does-not-guarantee).
@@ -118,6 +178,7 @@ Every field, column or payload key, goes through one typed gate (`telemetry.FIEL
 - **Model drift:** the requested model versus the model the executor reported. Executors that report nothing (Codex) are counted as unmeasured, not as agreement.
 - **Rules versus Jev:** agreement and outcome comparisons from shadow rows.
 - **Cycle outcomes:** how runs ended and why they stopped, how many rounds they took, how many had a finding that survived a claimed fix, and whether tests ran. Cycles recorded before schema 7 show an unknown stop reason.
+- **Work-item outcomes:** one current disposition per unique provider work item across all cycles in the period. Unobserved outcomes stay unknown; merged PRs are counted separately from resolution. The report contains aggregates only, not provider IDs.
 - **Test evidence:** per-cycle outcomes grouped by `claimed`, `agent_reported`, `runtime_observed`, and `externally_verified`, plus the agent's conclusion tokens as a separate breakdown. Historical rows without a basis count as `claimed`.
 - **Boundary verification:** how many cycles whose change required a boundary run had evidence of one. Cycles that did not require one are left out.
 - **Forecast accuracy:** predicted flags and size estimates compared with the first review dispatch in the same cycle; rates and error bands remain unknown below the minimum sample.
