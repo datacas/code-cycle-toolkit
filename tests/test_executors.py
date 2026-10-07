@@ -17,6 +17,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import executors as ex  # noqa: E402
 import cycle_status  # noqa: E402
 import router  # noqa: E402
+from test_support import isolate_host_environment  # noqa: E402
+
+
+_restore_host_environment = None
+
+
+def setUpModule() -> None:
+    global _restore_host_environment
+    _restore_host_environment = isolate_host_environment()
+
+
+def tearDownModule() -> None:
+    if _restore_host_environment is not None:
+        _restore_host_environment()
 
 
 def present(_name):
@@ -518,6 +532,25 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual("do the thing", seen["argv"][-1])
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertTrue(result.model_matches_request)
+
+    def test_codex_adds_git_common_dir_only_for_workspace_write(self) -> None:
+        common_dir = "/repo/.git"
+        write_argv = ex.CodexAdapter().argv(
+            TARGET, "implement", cwd="/repo/.worktree/task-1", writes=True,
+            writable_dirs=(common_dir,),
+        )
+        read_argv = ex.CodexAdapter().argv(
+            TARGET, "review", cwd="/repo/.worktree/task-1", writes=False,
+            writable_dirs=(common_dir,),
+        )
+
+        self.assertEqual(
+            ["--add-dir", common_dir],
+            write_argv[write_argv.index("--add-dir"):write_argv.index("--add-dir") + 2],
+        )
+        self.assertEqual("implement", write_argv[-1])
+        self.assertNotIn("--add-dir", read_argv)
+        self.assertEqual("review", read_argv[-1])
 
     def test_claude_runs_in_print_mode_and_never_with_a_bypass_flag(self) -> None:
         """A run needing elevated permissions is a run a human should see."""

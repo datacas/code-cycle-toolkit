@@ -767,6 +767,7 @@ class NativeAdapter(Adapter):
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
+                 writable_dirs: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
@@ -781,14 +782,19 @@ class NativeAdapter(Adapter):
         screen blind is not something this layer will do — it reports the
         missing capability and stops.
         """
+        argv_options = {}
+        if self.name == "codex" and writable_dirs:
+            argv_options["writable_dirs"] = writable_dirs
         if publishes and publication_permissions:
             argv = self.argv(
                 target, task, cwd, writes, True,
                 publication_permissions=publication_permissions,
+                **argv_options,
             )
+        elif publishes:
+            argv = self.argv(target, task, cwd, writes, True, **argv_options)
         else:
-            argv = (self.argv(target, task, cwd, writes, True)
-                    if publishes else self.argv(target, task, cwd, writes))
+            argv = self.argv(target, task, cwd, writes, **argv_options)
         argv = self.readable(argv, read_dirs)
         worker_cwd = cwd or os.getcwd()
         if on_workspace is not None:
@@ -953,7 +959,8 @@ class CodexAdapter(NativeAdapter):
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
-             publication_permissions: tuple[str, ...] = ()) -> list[str]:
+             publication_permissions: tuple[str, ...] = (),
+             writable_dirs: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -982,6 +989,9 @@ class CodexAdapter(NativeAdapter):
             argv += ["-s", "workspace-write" if writes else "read-only"]
         if cwd:
             argv += ["-C", cwd]
+        if writes:
+            for directory in writable_dirs:
+                argv += ["--add-dir", directory]
         return argv + [task]
 
     def agent_output(self, stdout: str) -> str:
@@ -1869,6 +1879,9 @@ def dispatch(
     # editable under `acceptEdits`, and evidence must stay outside the writable
     # boundary of the stage it is evidence for.
     read_dirs = tuple(kw.pop("read_dirs", ()) or ())
+    writable_dirs = tuple(kw.pop("writable_dirs", ()) or ())
+    if target.executor == "codex" and kw.get("writes", False) and writable_dirs:
+        kw["writable_dirs"] = writable_dirs
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 
