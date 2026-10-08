@@ -213,6 +213,11 @@ DEFAULT_PROFILES: dict[str, dict] = {
                        "fallback": "claude:anthropic/claude-opus-5-5 high"},
 }
 
+
+def stage_fallback(decision: RoutingDecision, profiles: dict | None = None) -> Target | None:
+    """Resolve the same profile's fallback without rediscovering configuration."""
+    return (profiles or load_profiles())[decision.profile].fallback
+
 # Relative cost per profile, same unit as CostEstimate.
 PROFILE_COST = {
     "cheap_tool": 0.1,

@@ -130,10 +130,8 @@ class ProbeHonestyTests(unittest.TestCase):
     """A probe reports what it demonstrated, never what it hopes."""
 
     def test_executor_runner_detaches_stdin(self) -> None:
-        with patch.object(ex.subprocess, "run", return_value=completed()) as run:
-            ex._run(["codex", "exec"])
-
-        self.assertIs(subprocess.DEVNULL, run.call_args.kwargs["stdin"])
+        result = ex._run([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"])
+        self.assertEqual("''\n", result.stdout)
 
     def test_a_missing_binary_is_unknown_not_installed(self) -> None:
         result = ex.CodexAdapter().probe(which=lambda _name: None)

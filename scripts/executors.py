@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import threading
 import shutil
 import subprocess
@@ -343,6 +344,8 @@ class DispatchResult:
     lifecycle_state: str | None = None
     error_code: str | None = None
     start_state: str = "unknown"
+    #: Exit evidence, independent of start evidence. False includes unknown.
+    process_exited: bool = False
     #: Untrusted executor code and diagnostic: report only, never persisted.
     raw_error_code: str | None = None
 
@@ -433,13 +436,9 @@ class DispatchResult:
 
 def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
          on_output=None) -> subprocess.CompletedProcess:
-    if on_output is None:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-                              stdin=subprocess.DEVNULL)
-
     process = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        cwd=cwd, stdin=subprocess.DEVNULL,
+        cwd=cwd, stdin=subprocess.DEVNULL, start_new_session=os.name == "posix",
     )
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -447,7 +446,7 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
     def drain(stream, lines: list[str], publish: bool = False) -> None:
         for line in iter(stream.readline, ""):
             lines.append(line)
-            if publish:
+            if publish and on_output is not None:
                 try:
                     on_output(line)
                 except Exception:
@@ -464,23 +463,42 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
     try:
         returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
+        exited = _reap_process_group(process)
         stdout_thread.join()
         stderr_thread.join()
-        raise subprocess.TimeoutExpired(
+        error = subprocess.TimeoutExpired(
             argv, timeout, output="".join(stdout_lines), stderr="".join(stderr_lines),
-        ) from exc
+        )
+        error.process_exited = exited
+        raise error from exc
     except BaseException:
-        # The cycle was interrupted while the agent ran. `subprocess.run`, on the
-        # path above, already stops its child on the way out; this one must too,
-        # or the agent keeps editing a checkout nothing supervises any more.
-        _stop_process(process)
+        # An interrupted cycle must not leave an agent or its children editing
+        # a checkout that nothing supervises any more.
+        _reap_process_group(process)
         raise
+    exited = _reap_process_group(process)
     stdout_thread.join()
     stderr_thread.join()
-    return subprocess.CompletedProcess(argv, returncode,
-                                       "".join(stdout_lines), "".join(stderr_lines))
+    completed = subprocess.CompletedProcess(argv, returncode,
+                                            "".join(stdout_lines), "".join(stderr_lines))
+    completed.process_exited = exited
+    return completed
+
+
+def _reap_process_group(process: subprocess.Popen) -> bool:
+    """Stop remaining descendants before declaring a POSIX dispatch exited."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        return True
+    # Reaping the parent alone cannot prove Windows descendants have exited.
+    if process.poll() is None:
+        process.kill()
+    process.wait()
+    return False
 
 
 def _stop_process(process: subprocess.Popen, grace: float = 5) -> None:
@@ -982,10 +1000,13 @@ class NativeAdapter(Adapter):
             )
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
-                detail=f"no result within {timeout}s; the run may still be alive",
+                detail=(f"no result within {timeout}s; process group reaped"
+                        if getattr(timeout_error, "process_exited", False) else
+                        f"no result within {timeout}s; the run may still be alive"),
                 usage_observations=usage, cost_measures=costs,
                 lifecycle_state="timed_out",
                 error_code="timeout", start_state=observed_start(_events(partial_stdout)),
+                process_exited=getattr(timeout_error, "process_exited", False),
             )
         except Exception as exc:
             not_launched = isinstance(exc, OSError)
@@ -1020,7 +1041,8 @@ class NativeAdapter(Adapter):
             signal = _error_signal(session_events)
         start_state = observed_start(events)
         evidence = {"usage_observations": usage, "cost_measures": costs,
-                    "start_state": start_state}
+                    "start_state": start_state,
+                    "process_exited": getattr(completed, "process_exited", False)}
         if signal is not None:
             raw_code, message = signal
             friction = self._markers_in(message)

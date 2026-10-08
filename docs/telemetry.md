@@ -128,6 +128,13 @@ not an executor error. The Codex stdin banner is ignored in stderr fallback.
 An unmapped structured code stays `executor_error` even when its message
 contains a familiar error phrase. `unclassified` is not used.
 
+Dispatch rows carry closed `reroute_action` (`reroute` or `stop`) and
+`reroute_reason` tokens for eligible failures, plus `process_exited`,
+`reroute_error_code` and `reroute_start_state`. The fallback row retains the
+parent's failure and start evidence and its existing `parent_attempt_id` link.
+These are payload fields; snapshots, comment bodies and diagnostic prose are
+never stored. See [Availability and fallback](routing.md#availability-and-fallback).
+
 `dispatch_attempts.start_state` uses the typed gate `attempt_start_state`:
 
 | State | Evidence |

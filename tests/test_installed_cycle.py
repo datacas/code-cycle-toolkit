@@ -275,6 +275,21 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual("succeeded", fallback["outcome"])
         self.assertEqual("HUMAN_INTERVENTION", self.rows()[-1]["status"])
 
+    def test_capacity_reroutes_at_the_installed_process_boundary(self) -> None:
+        result = self.run_cycle("--issue-review", "off", FAKE_CAPACITY="codex")
+        self.assertEqual(1, result.returncode)
+        implement = [row for row in self.rows() if row["role"] == "implement"]
+        self.assertEqual(["codex", "claude"], [row["executor"] for row in implement[:2]])
+        first, second = implement[:2]
+        self.assertEqual("failed", first["outcome"])
+        self.assertEqual("succeeded", second["outcome"])
+        for row in (first, second):
+            payload = json.loads(row["payload"])
+            self.assertEqual("capacity", payload["reroute_error_code"])
+            self.assertEqual("not_started", payload["reroute_start_state"])
+        self.assertEqual(True, json.loads(first["payload"])["process_exited"])
+        self.assertEqual("fallback", json.loads(second["payload"])["dispatch_relationship"])
+
     def test_a_review_that_reports_no_verdict_stops_the_cycle(self) -> None:
         """An unknown verdict is recorded as unknown, never guessed from a
         successful exit."""
