@@ -1235,6 +1235,34 @@ class PermissionTests(unittest.TestCase):
             self.assertEqual(15, seen["kwargs"]["timeout"])
             self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
 
+    def test_git_metadata_probe_preserves_sandbox_error_when_markers_are_absent(self) -> None:
+        error = "app-server socket directory must have mode 0700"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            common = Path(temporary) / ".git"
+            worktree = common / "worktrees" / "task-203"
+            worktree.mkdir(parents=True)
+            roots = (str(common), str(worktree))
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, "", error)
+
+            unlink = Path.unlink
+
+            def fail_if_missing_probe_marker(path, *args, **kwargs):
+                if path.name.startswith(".code-cycle-write-probe-") and not path.exists():
+                    raise OSError(30, "Read-only file system", str(path))
+                return unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_if_missing_probe_marker):
+                allowed, detail = ex.CodexAdapter().probe_git_metadata_write(
+                    TARGET, temporary, roots, runner=runner,
+                )
+
+        self.assertFalse(allowed)
+        self.assertIn("sandbox probe exited 1", detail)
+        self.assertIn(error, detail)
+
     @unittest.skipIf(os.name == "nt", "fake Codex executable uses a POSIX shebang")
     def test_git_metadata_probe_crosses_the_cli_process_boundary(self) -> None:
         fake_cli = (

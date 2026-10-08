@@ -1241,7 +1241,16 @@ class CodexAdapter(NativeAdapter):
             failed = False
             for marker in markers:
                 try:
-                    marker.unlink(missing_ok=True)
+                    marker.stat()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    failed = True
+                    continue
+                try:
+                    marker.unlink()
+                except FileNotFoundError:
+                    pass
                 except OSError:
                     failed = True
             return not failed
