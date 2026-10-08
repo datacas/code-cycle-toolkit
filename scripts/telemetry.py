@@ -43,6 +43,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 #: 1: the original stage row. 2: adds the pre-routing signals below, all in
 #: `payload`, so a version-1 row is still read as it was written; the version
@@ -514,6 +515,80 @@ WORK_ITEM_RECONCILIATION_FAILURES = frozenset({
     "provider_unavailable", "provider_query_failed", "invalid_snapshot",
     "pull_request_query_failed",
 })
+
+
+@dataclass(frozen=True)
+class WorkItemIdentity:
+    """The canonical identity of an external tracker work item (Issue #185).
+
+    Every metric added to Code Cycle Toolkit declares its grouping identity
+    first: per cycle, work item, stage, attempt, or dispatch.
+    """
+    provider: str
+    repository: str
+    work_item_id: str
+    work_item_type: str = "issue"
+    host: str | None = None
+
+    def __post_init__(self) -> None:
+        prov = (self.provider or "").strip().lower()
+        repo = (self.repository or "").strip()
+        host = self.host
+        if repo.startswith(("http://", "https://")):
+            parsed = urlparse(repo)
+            if not host:
+                host = parsed.netloc.lower()
+            repo = parsed.path.strip("/")
+        elif "@" in repo and ":" in repo:
+            parts = repo.split(":", 1)
+            if not host:
+                host = parts[0].split("@")[-1].lower()
+            repo = parts[1].strip("/")
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        repo = repo.strip("/")
+        if prov in {"github", "gitlab"} or (host and "github" in host):
+            repo = repo.lower()
+
+        item_id = (str(self.work_item_id) if self.work_item_id is not None else "").strip().lstrip("#")
+        item_type = (self.work_item_type or "issue").strip().lower()
+
+        object.__setattr__(self, "provider", prov)
+        object.__setattr__(self, "repository", repo)
+        object.__setattr__(self, "work_item_id", item_id)
+        object.__setattr__(self, "work_item_type", item_type)
+        object.__setattr__(self, "host", host.lower() if host else None)
+
+    @property
+    def is_unknown(self) -> bool:
+        """Return True if this identity represents an unknown or unobserved work item."""
+        return (
+            not self.provider
+            or not self.repository
+            or not self.work_item_id
+            or self.provider == "unknown"
+            or self.repository == "unknown"
+            or self.work_item_id == "unknown"
+        )
+
+    @classmethod
+    def unknown(cls) -> WorkItemIdentity:
+        """Return the canonical unknown work-item identity."""
+        return cls(provider="unknown", repository="unknown", work_item_id="unknown")
+
+    def as_tuple(self) -> tuple[str, str, str]:
+        """Return (provider, repository, work_item_id)."""
+        return (self.provider, self.repository, self.work_item_id)
+
+    def as_scoped_tuple(self, repo_id: str) -> tuple[str, str, str, str]:
+        """Return (repo_id, provider, repository, work_item_id)."""
+        return (str(repo_id), self.provider, self.repository, self.work_item_id)
+
+    def __str__(self) -> str:
+        if self.is_unknown:
+            return "unknown"
+        host_prefix = f"{self.host}/" if self.host else ""
+        return f"{self.provider}:{host_prefix}{self.repository}#{self.work_item_id}"
 
 #: Published credential formats. Not a guess about what a secret looks like —
 #: these are documented prefixes, and rejecting them catches the paste that
