@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A CLI agent that runs nothing, for driving a whole cycle without providers.
+"""A CLI agent fake for driving a whole cycle without providers.
 
 Installed under both `codex` and `claude` on a temporary PATH. It answers
 `--version`, reports the model it was asked for the way the real binary does,
@@ -25,12 +25,17 @@ It writes each CLI's real envelope — Codex NDJSON with `item.completed`, Claud
 one JSON object with `result` — because that is what a canary found the driver
 could not read. A fake that printed the block as plain text passed every test
 while the real thing did not work.
+
+It executes only the runtime's explicit Git metadata write-probe command; all
+agent prompts still receive scripted answers without running their contents.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -179,6 +184,13 @@ def main(argv: list[str]) -> int:
         print(f"{NAME} 0.138.0-fake")
         return 0
 
+    model = flag(argv, "-m", "--model") or "unknown"
+    prompt = prompt_of(argv)
+    if "CODE_CYCLE_WRITE_PROBE_OK" in prompt:
+        command = shlex.split(prompt.split("any other action: ", 1)[1])
+        result = subprocess.run(command, check=False)
+        return result.returncode
+
     if os.environ.get("FAKE_QUOTA") == NAME:
         print(json.dumps({"type": "error", "started": False,
                           "message": "usage limit reached for this window"}))
@@ -191,8 +203,6 @@ def main(argv: list[str]) -> int:
                           "message": "Selected model is at capacity"}))
         return 1
 
-    model = flag(argv, "-m", "--model") or "unknown"
-    prompt = prompt_of(argv)
     said = [f"prompt received: {prompt}"]
 
     if os.environ.get("FAKE_HANG") == NAME and "cc-implement-issue" in prompt:

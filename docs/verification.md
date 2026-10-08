@@ -29,6 +29,16 @@ for the repository, including hooks, configuration, and refs for every branch.
 The wider root is required because Git stores linked-worktree objects and refs
 in the common directory; use it only for Codex stages that write the selected
 worktree, and account for the broader access when reviewing the sandbox boundary.
+Because Codex also protects `.git` and the resolved worktree gitdir under
+additional roots, writing publish dispatches add scoped filesystem write rules
+for both the common Git directory and the selected worktree's private Git
+directory through `code_cycle_publish_write`. Before routing an implementation
+stage to Codex, the runtime runs a write-and-verify probe with the same argv
+builder; if it fails, that stage is routed to another eligible publisher before
+agent dispatch and the route reason is recorded. This expands the grant beyond
+the worktree itself, so keep the probe and both roots limited to writing
+publication stages. Land issue #203 before issue #190, whose executor refactor
+reorganizes the dispatch path this fix covers.
 
 ## Complete evidence
 

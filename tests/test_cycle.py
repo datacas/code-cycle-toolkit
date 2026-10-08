@@ -79,6 +79,55 @@ class CycleTestCase(unittest.TestCase):
 class FullCycleTests(CycleTestCase):
     """implement -> review -> resolve -> rereview, every step persisted."""
 
+    def test_failed_codex_git_metadata_probe_routes_before_implementation_dispatch(self) -> None:
+        class ProbeFailingCodex(ScriptedAdapter):
+            def probe_git_metadata_write(self, target, cwd, writable_dirs):
+                self.probe_arguments = (target, cwd, writable_dirs)
+                return False, "worktree gitdir is read-only"
+
+        codex = ProbeFailingCodex("codex")
+        claude = ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = (str(Path(temporary) / ".git"),
+                     str(Path(temporary) / ".git" / "worktrees" / "task-203"))
+            outcome = recorder.stage(
+                "implement", "implement issue 203", cwd=temporary,
+                writable_dirs=roots,
+            )
+
+        self.assertEqual([], codex.dispatched)
+        self.assertEqual(1, len(claude.dispatched))
+        self.assertEqual("claude", outcome.decision.target.executor)
+        self.assertIn("routed to claude before dispatch", outcome.decision.reasons[-1])
+        self.assertIn("worktree gitdir is read-only", cy.routing_context(outcome.decision))
+        self.assertEqual(roots, codex.probe_arguments[2])
+
+    def test_failed_probe_does_not_route_to_an_executor_without_publish_access(self) -> None:
+        class ProbeFailingCodex(ScriptedAdapter):
+            def probe_git_metadata_write(self, target, cwd, writable_dirs):
+                return False, "worktree gitdir is read-only"
+
+        class NonPublisher(ScriptedAdapter):
+            def publication_access(self, probe, *, writes):
+                return False, "publication is unavailable"
+
+        codex = ProbeFailingCodex("codex")
+        non_publisher = NonPublisher("claude")
+        recorder = self.recorder([codex, non_publisher])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = recorder.stage(
+                "implement", "implement issue 203", cwd=temporary,
+                writable_dirs=(str(Path(temporary) / ".git"),),
+            )
+
+        self.assertTrue(outcome.decision.blocked)
+        self.assertEqual([], codex.dispatched)
+        self.assertEqual([], non_publisher.dispatched)
+        self.assertIn("no available executor", outcome.decision.reasons[-1])
+
     def test_a_whole_cycle_leaves_a_row_for_every_stage(self) -> None:
         codex = ScriptedAdapter("codex")
         claude = ScriptedAdapter("claude")

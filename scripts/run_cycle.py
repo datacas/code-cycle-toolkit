@@ -948,6 +948,19 @@ def _git_common_directory(workspace: str, run=subprocess.run) -> str | None:
     return str(common.resolve())
 
 
+def _git_worktree_directory(workspace: str, run=subprocess.run) -> str | None:
+    """Return the per-worktree Git directory when workspace is linked."""
+    if not _is_linked_worktree(Path(workspace)):
+        return None
+    result = run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=workspace,
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return str(Path(result.stdout.strip()).resolve())
+
+
 def _default_base_ref(repository_root: Path, config: dict, run=subprocess.run) -> str:
     section = config.get("code_cycle")
     repository = section.get("repository") if isinstance(section, dict) else None
@@ -1620,7 +1633,11 @@ def run_cycle(
         dispatch_kwargs["cwd"] = cwd
         common_directory = _git_common_directory(cwd)
         if common_directory:
-            dispatch_kwargs["writable_dirs"] = (common_directory,)
+            worktree_directory = _git_worktree_directory(cwd)
+            dispatch_kwargs["writable_dirs"] = tuple(dict.fromkeys(
+                directory for directory in (common_directory, worktree_directory)
+                if directory
+            ))
     if timeout is not None:
         dispatch_kwargs["timeout"] = timeout
 

@@ -175,12 +175,15 @@ def routing_context(decision: RoutingDecision) -> str:
     resolved model is not stated: only the executor can report it, afterwards.
     """
     target = decision.target
-    return (f"Routing for this stage, decided by the runtime: profile "
+    line = (f"Routing for this stage, decided by the runtime: profile "
             f"`{decision.profile}`, requested model "
             f"`{target.provider}/{target.model}`, effort `{target.effort}`. "
             "Copy these values verbatim into any run line you write; do not "
             "infer them from your own configuration. Write the resolved model "
             "as `?`, because the executor has not reported it to you.")
+    route_note = next((reason for reason in decision.reasons
+                       if reason.startswith("Codex linked-worktree Git metadata probe failed:")), None)
+    return f"{line} {route_note}" if route_note else line
 
 
 class CycleError(ValueError):
@@ -429,36 +432,68 @@ class CycleRecorder:
             eligible = self.registry.compatible_executors(
                 workspace_policy, **dispatch_kwargs,
             )
-            decision = route(
-                role, self.signals, self.availability,
-                mode=self.mode, profiles=self.profiles,
-                eligible_executors=eligible,
-                strategy=self.routing_strategy,
-                selector=selector,
-                first_pass_rate=(
-                    self.first_pass_rate.value
-                    if self.first_pass_rate is not None and self.first_pass_rate.known
-                    else None
-                ),
-                rate_observations=(
-                    self.first_pass_rate.observations
-                    if self.first_pass_rate is not None else None
-                ),
-                rate_minimum=(
-                    self.first_pass_rate.minimum
-                    if self.first_pass_rate is not None else None
-                ),
-                rate_known=(
-                    self.first_pass_rate.known
-                    if self.first_pass_rate is not None else None
-                ),
-                rate_explanation=(
-                    self.first_pass_rate.explain()
-                    if self.first_pass_rate is not None else None
-                ),
-            )
+            def select(candidates):
+                return route(
+                    role, self.signals, self.availability,
+                    mode=self.mode, profiles=self.profiles,
+                    eligible_executors=candidates,
+                    strategy=self.routing_strategy,
+                    selector=selector,
+                    first_pass_rate=(
+                        self.first_pass_rate.value
+                        if self.first_pass_rate is not None and self.first_pass_rate.known
+                        else None
+                    ),
+                    rate_observations=(
+                        self.first_pass_rate.observations
+                        if self.first_pass_rate is not None else None
+                    ),
+                    rate_minimum=(
+                        self.first_pass_rate.minimum
+                        if self.first_pass_rate is not None else None
+                    ),
+                    rate_known=(
+                        self.first_pass_rate.known
+                        if self.first_pass_rate is not None else None
+                    ),
+                    rate_explanation=(
+                        self.first_pass_rate.explain()
+                        if self.first_pass_rate is not None else None
+                    ),
+                )
+
+            decision = select(eligible)
             if fallback_decision is not None:
                 decision = fallback_decision
+            if (role == "implement" and publishes and writes
+                    and not decision.blocked and decision.target.executor == "codex"
+                    and dispatch_kwargs.get("writable_dirs")):
+                adapter = self.registry.get("codex")
+                probe_write = getattr(adapter, "probe_git_metadata_write", None)
+                if callable(probe_write):
+                    allowed, detail = probe_write(
+                        decision.target, dispatch_kwargs["cwd"],
+                        tuple(dispatch_kwargs["writable_dirs"]),
+                    )
+                    if not allowed:
+                        eligible = [name for name in eligible if name != "codex"]
+                        eligible = [
+                            name for name in eligible
+                            if self.registry.get(name).publication_access(
+                                (self.probes or {}).get(name)
+                                or self.registry.get(name).probe(),
+                                writes=True,
+                            )[0]
+                        ]
+                        decision = select(eligible)
+                        note = ("Codex linked-worktree Git metadata probe failed: "
+                                f"{detail}; routed to "
+                                f"{decision.target.executor if decision.target else 'no available executor'} "
+                                "before dispatch.")
+                        decision = replace(
+                            decision, reasons=decision.reasons + (note,),
+                        )
+                        fallback_decision = None
             if attempt == 0:
                 first = (decision, signals)
             if decision.blocked:

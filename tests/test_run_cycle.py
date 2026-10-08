@@ -433,10 +433,14 @@ class LocalOnlyPolicyTests(RunCycleTestCase):
         self.assertEqual(rc.UNRESOLVED_END, report.status)
         self.assertEqual(1, len(implementer.dispatch_kwargs))
         self.assertTrue(implementer.dispatch_kwargs[0]["writes"])
-        actual_common_dir, = implementer.dispatch_kwargs[0]["writable_dirs"]
+        actual_common_dir, actual_worktree_dir = implementer.dispatch_kwargs[0]["writable_dirs"]
         self.assertEqual(
             os.path.normcase(str((root / ".git").resolve())),
             os.path.normcase(str(Path(actual_common_dir).resolve())),
+        )
+        self.assertEqual(
+            os.path.normcase(str((root / ".git" / "worktrees" / "task-177").resolve())),
+            os.path.normcase(str(Path(actual_worktree_dir).resolve())),
         )
 
     def test_local_only_prompt_is_explicit_and_recorded(self) -> None:
@@ -1640,6 +1644,10 @@ class WorkspaceSelectionTests(unittest.TestCase):
             self.assert_same_path(root / ".worktree", base)
             self.assert_same_path(root / ".worktree" / "task-151", selected)
             self.assert_same_path(root / ".git", rc._git_common_directory(selected))
+            self.assert_same_path(
+                root / ".git" / "worktrees" / "task-151",
+                rc._git_worktree_directory(selected),
+            )
             self.assertTrue((Path(selected) / ".git").is_file())
             self.assertEqual("task-151", self.git(selected, "branch", "--show-current"))
             self.assertEqual("main", self.git(root, "branch", "--show-current"))

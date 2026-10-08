@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
+import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1162,6 +1166,97 @@ class PermissionTests(unittest.TestCase):
         self.assertIn('default_permissions="code_cycle_publish_write"', argv)
         self.assertIn('permissions.code_cycle_publish_write.extends=":workspace"', argv)
         self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
+
+    def test_codex_publish_profile_reopens_only_the_supplied_git_roots(self) -> None:
+        common = "/repo/.git"
+        worktree = "/repo/.git/worktrees/task-203"
+        argv = ex.CodexAdapter().argv(
+            TARGET, "implement", writes=True, publishes=True,
+            writable_dirs=(common, worktree),
+        )
+
+        self.assertIn("--add-dir", argv)
+        self.assertIn(common, argv)
+        self.assertIn(worktree, argv)
+        self.assertIn(
+            f'permissions.code_cycle_publish_write.filesystem.{json.dumps(common)}="write"',
+            argv,
+        )
+        self.assertIn(
+            f'permissions.code_cycle_publish_write.filesystem.{json.dumps(worktree)}="write"',
+            argv,
+        )
+
+    def test_git_metadata_probe_uses_publish_argv_and_cleans_its_markers(self) -> None:
+        adapter = ex.CodexAdapter()
+        with tempfile.TemporaryDirectory() as temporary:
+            common = Path(temporary) / ".git"
+            worktree = common / "worktrees" / "task-203"
+            common.mkdir()
+            worktree.mkdir(parents=True)
+            roots = (str(common), str(worktree))
+            seen = {}
+
+            def runner(argv, **kwargs):
+                seen["argv"] = argv
+                seen["kwargs"] = kwargs
+                prompt = argv[-1]
+                command = shlex.split(prompt.split("any other action: ", 1)[1])
+                script = command[2]
+                for path_text, token_text in re.findall(
+                    r"Path\((.+?)\)\.write_text\((.+?)\)", script,
+                ):
+                    Path(ast.literal_eval(path_text)).write_text(ast.literal_eval(token_text))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            allowed, detail = adapter.probe_git_metadata_write(
+                TARGET, temporary, roots, runner=runner,
+            )
+
+            self.assertTrue(allowed, detail)
+            self.assertIn("-m", seen["argv"])
+            self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
+            self.assertEqual(temporary, seen["kwargs"]["cwd"])
+            self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
+
+    def test_git_metadata_probe_crosses_the_cli_process_boundary(self) -> None:
+        fake_cli = (
+            "#!/usr/bin/env python3\n"
+            "import ast, os, pathlib, re, shlex, sys\n"
+            "if os.getenv('CODE_CYCLE_PROBE_FAIL'): sys.exit(7)\n"
+            "prompt = sys.argv[-1]\n"
+            "command = shlex.split(prompt.split('any other action: ', 1)[1])\n"
+            "script = command[2]\n"
+            "for path, token in re.findall(r\"Path\\((.+?)\\)\\.write_text\\((.+?)\\)\", script):\n"
+            "    pathlib.Path(ast.literal_eval(path)).write_text(ast.literal_eval(token))\n"
+            "print('CODE_CYCLE_WRITE_PROBE_OK')\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            common = root / ".git"
+            worktree = common / "worktrees" / "task-203"
+            common.mkdir()
+            worktree.mkdir(parents=True)
+            binary = root / "codex"
+            binary.write_text(fake_cli)
+            binary.chmod(0o755)
+            roots = (str(common), str(worktree))
+            with patch.dict(os.environ, {"PATH": str(root) + os.pathsep + os.environ["PATH"]}):
+                allowed, detail = ex.CodexAdapter().probe_git_metadata_write(
+                    TARGET, str(root), roots,
+                )
+
+            self.assertTrue(allowed, detail)
+            self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
+            with patch.dict(os.environ, {
+                "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                "CODE_CYCLE_PROBE_FAIL": "1",
+            }):
+                allowed, detail = ex.CodexAdapter().probe_git_metadata_write(
+                    TARGET, str(root), roots,
+                )
+            self.assertFalse(allowed)
+            self.assertIn("exited 7", detail)
 
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""

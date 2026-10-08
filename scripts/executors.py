@@ -33,12 +33,15 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import threading
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -1210,6 +1213,68 @@ class CodexAdapter(NativeAdapter):
             return False, "Codex permission profiles (required for scoped publication access) need CLI 0.138.0 or later"
         return True, "Codex permission profile scopes network access to code hosts and preserves the stage filesystem boundary"
 
+    def probe_git_metadata_write(
+        self, target: Target, cwd: str, writable_dirs: tuple[str, ...], *,
+        runner=subprocess.run,
+    ) -> tuple[bool, str]:
+        """Prove the exact Codex publish argv can write linked-worktree metadata."""
+        if not writable_dirs:
+            return True, "no additional Git metadata roots are required"
+        tokens = [uuid.uuid4().hex for _ in writable_dirs]
+        markers = [Path(directory) / f".code-cycle-write-probe-{uuid.uuid4().hex}"
+                   for directory in writable_dirs]
+        writes = "; ".join(
+            f"Path({str(marker)!r}).write_text({token!r})"
+            for marker, token in zip(markers, tokens)
+        )
+        script = f"from pathlib import Path; {writes}; print('CODE_CYCLE_WRITE_PROBE_OK')"
+        command = (
+            subprocess.list2cmdline([sys.executable, "-c", script])
+            if os.name == "nt" else shlex.join([sys.executable, "-c", script])
+        )
+        prompt = (
+            "Run exactly this Python command in a terminal, and do not perform "
+            f"any other action: {command}"
+        )
+        argv = self.argv(
+            target, prompt, cwd=cwd, writes=True, publishes=True,
+            writable_dirs=writable_dirs,
+        )
+        try:
+            result = runner(
+                argv, cwd=cwd, capture_output=True, text=True, timeout=90,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            for marker in markers:
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return False, f"Codex Git metadata write probe could not run ({type(exc).__name__})"
+        verified = False
+        if result.returncode == 0:
+            try:
+                verified = all(
+                    marker.is_file() and marker.read_text() == token
+                    for marker, token in zip(markers, tokens)
+                )
+            except OSError:
+                verified = False
+        cleanup_failed = False
+        for marker in markers:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                cleanup_failed = True
+        if cleanup_failed:
+            return False, "Codex Git metadata write probe could not remove its temporary markers"
+        if result.returncode != 0:
+            return False, f"Codex Git metadata write probe exited {result.returncode}"
+        if not verified:
+            return False, "Codex could not verify every linked-worktree Git metadata root"
+        return True, "Codex wrote and verified each linked-worktree Git metadata root"
+
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
@@ -1245,6 +1310,11 @@ class CodexAdapter(NativeAdapter):
         if writes:
             for directory in writable_dirs:
                 argv += ["--add-dir", directory]
+                if publishes:
+                    argv += [
+                        "-c",
+                        f'permissions.code_cycle_publish_write.filesystem.{json.dumps(directory)}="write"',
+                    ]
         return argv + [task]
 
     def agent_output(self, stdout: str) -> str:
