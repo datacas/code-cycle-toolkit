@@ -1193,10 +1193,10 @@ class PermissionTests(unittest.TestCase):
             {
                 common: "write",
                 worktree: "write",
-                f"{common}/hooks": "read",
-                f"{common}/config": "read",
-                f"{worktree}/hooks": "read",
-                f"{worktree}/config.worktree": "read",
+                str(Path(common) / "hooks"): "read",
+                str(Path(common) / "config"): "read",
+                str(Path(worktree) / "hooks"): "read",
+                str(Path(worktree) / "config.worktree"): "read",
             },
             entries,
         )
