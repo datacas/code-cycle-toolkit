@@ -16,11 +16,10 @@ Two things it deliberately does not do.
 observes. Neither of those modules learns that SQLite exists; a decision engine
 that writes to a database is one that cannot be tested as a decision engine.
 
-**It does not hide the rerouting.** When a dispatch discovers that an executor's
-window is exhausted — the only moment that is knowable for a native executor —
-the recorder updates availability and routes once more, and **both** decisions
-are recorded. The abandoned one is the whole point: a fallback whose first
-attempt left no trace makes fallbacks look free.
+**It does not hide the rerouting.** Eligible failures can use a stage-local
+fallback once, after exit proof and effect reconciliation. Both decisions and
+the evidence behind the reroute are recorded; later stages retain their own
+availability. A fallback whose first attempt left no trace makes retries look free.
 
 Friction a person must clear is the other half of that rule, and the one easier
 to get wrong: a sign-in screen is evidence about availability too, so "we
@@ -47,6 +46,7 @@ from executors import (
     dispatch,
 )
 from harness import build_harness_snapshot
+from reroute import effect_snapshot, reconcile
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
     RoutingDecision,
@@ -55,6 +55,7 @@ from router import (
     TaskSignals,
     escalation_selector,
     models_from_profiles,
+    stage_fallback,
     route,
     rule_selector,
 )
@@ -252,6 +253,7 @@ class CycleRecorder:
         stage_started: Callable[[str, RoutingDecision], None] | None = None,
         on_progress: Callable[..., None] | None = None,
         skills_by_role: dict[str, str] | None = None,
+        change_request_id: str | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -290,6 +292,7 @@ class CycleRecorder:
         # decisions on either side of the change become unexplainable.
         self.probes = probes
         self.skills_by_role = dict(skills_by_role or {})
+        self.change_request_id = change_request_id
         # Already resolved by whoever loaded the repository's configuration.
         # The recorder does not go looking for a file: a component that reads
         # configuration on its own is one that can disagree with the caller
@@ -416,8 +419,11 @@ class CycleRecorder:
         self.latest_change = change
         parent_attempt_id = None
         parent_executor = None
+        fallback_decision = None
+        parent_failure = {}
         for attempt in range(2):
             signals = self._pre_routing(role, change)
+            signals.update(parent_failure)
             if escalated:
                 signals["escalated"] = True
             eligible = self.registry.compatible_executors(
@@ -451,6 +457,8 @@ class CycleRecorder:
                     if self.first_pass_rate is not None else None
                 ),
             )
+            if fallback_decision is not None:
+                decision = fallback_decision
             if attempt == 0:
                 first = (decision, signals)
             if decision.blocked:
@@ -508,6 +516,20 @@ class CycleRecorder:
 
             tool_activity = False
 
+            def snapshot():
+                try:
+                    return effect_snapshot(
+                        dispatch_kwargs.get("cwd"), self.repo_id, publishes=publishes,
+                        change_request_id=self.change_request_id,
+                        issue_repo=self.work_item_identity_fields.get("work_item_repository"),
+                        issue_id=self.task_id if publishes else None,
+                    )
+                except Exception:
+                    return None
+
+            before = (snapshot() if (writes or publishes)
+                      and self.mode is not RoutingMode.CALIBRATION else None)
+
             def observe_progress(**activity):
                 nonlocal tool_activity
                 tool_activity |= bool(activity.get("tool"))
@@ -555,6 +577,46 @@ class CycleRecorder:
                 raise
             if tool_activity:
                 result = replace(result, start_state="started")
+            retry = False
+            if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
+                action, reason = "stop", "retry_exhausted"
+                fallback = stage_fallback(decision, self.profiles)
+                if self.mode is RoutingMode.CALIBRATION:
+                    reason = "calibration"
+                elif attempt == 0 and attempt_id is not None:
+                    if result.asynchronous or not result.process_exited:
+                        reason = "exit_unproven"
+                    elif result.needs_human_action:
+                        reason = "human_action"
+                    elif result.start_state == "not_started":
+                        action, reason = "reroute", "not_started"
+                    elif not writes and not publishes:
+                        action, reason = "reroute", "no_effects"
+                    else:
+                        action, reason = reconcile(before, snapshot())
+                    if action == "reroute":
+                        if fallback is None or fallback == decision.target:
+                            action, reason = "stop", "no_fallback"
+                        elif (fallback.executor not in eligible or not self.availability.get(
+                                fallback.executor, Availability.UNKNOWN).dispatchable):
+                            action, reason = "stop", "fallback_unavailable"
+                signals.update(reroute_action=action, reroute_reason=reason,
+                               process_exited=result.process_exited,
+                               reroute_error_code=result.failure_code,
+                               reroute_start_state=result.start_state)
+                retry = action == "reroute"
+                if retry:
+                    fallback_decision = replace(
+                        decision, target=fallback, used_fallback=True,
+                        reasons=decision.reasons + (f"stage fallback after {result.failure_code}",),
+                    )
+                    parent_failure = {
+                        "reroute_error_code": result.failure_code,
+                        "reroute_start_state": result.start_state,
+                        "reroute_action": action, "reroute_reason": reason,
+                    }
+                else:
+                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}")
             state = result.lifecycle_state or (
                 "launched" if result.asynchronous else
                 "completed" if result.outcome is DispatchOutcome.SUCCEEDED else
@@ -595,19 +657,8 @@ class CycleRecorder:
             if result.outcome is not DispatchOutcome.SUCCEEDED:
                 self.failed_attempts += 1
 
-            learned = result.learned_availability
-            can_retry = (
-                attempt == 0
-                and attempt_id is not None
-                and learned is not None
-                and not result.needs_human_action
-                and self.mode is not RoutingMode.CALIBRATION
-            )
-            if not can_retry:
+            if not retry:
                 break
-            # The evidence a probe could not have had. Recorded already, above,
-            # so the abandoned attempt keeps its row.
-            self.availability[result.executor] = learned
             parent_attempt_id = attempt_id
             parent_executor = decision.target.executor
 

@@ -49,6 +49,8 @@ class ScriptedAdapter(ex.Adapter):
             missing_capability=capability,
             readiness_policy=ex.ReadinessPolicy.ATTEMPT,
             dispatched_from=self._availability,
+            start_state="not_started" if capability else "started",
+            process_exited=True,
         )
 
     def publication_access(self, probe, *, writes):
@@ -57,6 +59,9 @@ class ScriptedAdapter(ex.Adapter):
 
 class CycleTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        snapshot = patch("cycle.effect_snapshot", return_value=None)
+        snapshot.start()
+        self.addCleanup(snapshot.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.store = tm.Telemetry(Path(temporary.name) / "t.sqlite")
@@ -600,6 +605,119 @@ class RerouteRecordingTests(CycleTestCase):
         self.assertEqual(1, len(self.store.rows("owner/repo")))
         self.assertFalse(outcome.rerouted)
         self.assertEqual([], claude.dispatched)
+
+
+class FailedDispatchRerouteTests(CycleTestCase):
+    def run_failure(self, role="implement", *, code="capacity", start="not_started",
+                    exited=True, asynchronous=False, second_code=None, **kwargs):
+        class FailureAdapter(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                self.dispatched.append(task)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    error_code=self.code, start_state=start,
+                    process_exited=exited, asynchronous=asynchronous,
+                )
+        primary = FailureAdapter("codex")
+        primary.code = code
+        fallback = FailureAdapter("claude") if second_code else ScriptedAdapter("claude")
+        fallback.code = second_code
+        recorder = self.recorder([primary, fallback], **kwargs)
+        return recorder, primary, fallback, recorder.stage(role, "work")
+
+    def test_transient_failures_reroute_once_and_record_the_cause(self):
+        for code in ("capacity", "transport", "timeout", "quota"):
+            with self.subTest(code=code):
+                recorder, primary, fallback, outcome = self.run_failure(code=code)
+                self.assertTrue(outcome.succeeded)
+                self.assertEqual((1, 1), (len(primary.dispatched), len(fallback.dispatched)))
+                rows = self.store.rows("owner/repo", "API-055")[-2:]
+                for row in rows:
+                    self.assertEqual(code, row["payload"]["reroute_error_code"])
+                    self.assertEqual("not_started", row["payload"]["reroute_start_state"])
+                self.assertEqual(ex.Availability.READY, recorder.availability["codex"])
+                recorder.stage("implement", "later stage")
+                self.assertEqual(2, len(primary.dispatched))
+
+    def test_no_reroute_without_exit_proof_including_async(self):
+        for exited, asynchronous in ((False, False), (True, True)):
+            _, _, fallback, outcome = self.run_failure(exited=exited, asynchronous=asynchronous)
+            self.assertFalse(outcome.rerouted)
+            self.assertFalse(fallback.dispatched)
+            self.assertIn("exit_unproven", outcome.result.detail)
+
+    def test_second_failure_stops_even_when_it_is_quota(self):
+        _, _, _, outcome = self.run_failure(second_code="quota")
+        self.assertTrue(outcome.rerouted)
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual(2, len(outcome.attempts))
+        self.assertIn("retry_exhausted", outcome.result.detail)
+
+    def test_nontransient_errors_never_reroute(self):
+        for code in ("auth", "unavailable", "precondition", "executor_error",
+                     "unreadable_result", "no_error_report", "contract_violation", "interrupted"):
+            _, _, fallback, outcome = self.run_failure(code=code)
+            self.assertFalse(outcome.rerouted)
+            self.assertFalse(fallback.dispatched)
+
+    def test_calibration_never_reroutes_capacity(self):
+        _, _, fallback, outcome = self.run_failure(mode=router.RoutingMode.CALIBRATION)
+        self.assertFalse(outcome.rerouted)
+        self.assertFalse(fallback.dispatched)
+
+    def test_missing_identical_or_unavailable_fallback_stops(self):
+        for kind in ("missing", "identical", "unavailable"):
+            profiles = router.load_profiles()
+            original = profiles["cheap_coder"]
+            profiles["cheap_coder"] = router.Profile(
+                original.name, original.primary,
+                None if kind == "missing" else original.primary if kind == "identical" else original.fallback,
+            )
+            availability = {"codex": ex.Availability.READY,
+                            "claude": ex.Availability.INSTALLED if kind == "unavailable" else ex.Availability.READY}
+            _, _, fallback, outcome = self.run_failure(profiles=profiles, availability=availability)
+            self.assertFalse(outcome.rerouted)
+            self.assertFalse(fallback.dispatched)
+
+    def test_started_and_unknown_writing_attempts_reconcile(self):
+        clean = {"dirty": False, "workspace": {"head": "old"}, "remote": "old",
+                 "pulls": [], "comments": []}
+        changes = (
+            ({}, True, "no_effects"),
+            ({"dirty": True}, False, "dirty_workspace"),
+            ({"workspace": {"head": "new"}}, False, "workspace_changed"),
+            ({"remote": "new"}, False, "remote_changed"),
+            ({"comments": ["published"]}, False, "publication_changed"),
+            ({"pulls": ["new PR"]}, False, "publication_changed"),
+        )
+        for start in ("started", "unknown"):
+            for change, retry, reason in changes:
+                with self.subTest(start=start, change=change):
+                    with patch("cycle.effect_snapshot", side_effect=[clean, {**clean, **change}]):
+                        _, _, fallback, outcome = self.run_failure(start=start)
+                    self.assertEqual(retry, outcome.rerouted)
+                    self.assertEqual(retry, bool(fallback.dispatched))
+                    first = self.store.rows("owner/repo")[-2 if retry else -1]
+                    self.assertEqual(reason, first["payload"]["reroute_reason"])
+
+    def test_review_publication_is_reconciled_despite_read_only_workspace(self):
+        clean = {"dirty": False, "workspace": {}, "remote": "old", "comments": []}
+        # The default review primary is Claude; make Codex the primary here.
+        profiles = router.load_profiles()
+        old = profiles["reviewer"]
+        profiles["reviewer"] = router.Profile(old.name, profiles["cheap_coder"].primary,
+                                               profiles["cheap_coder"].fallback)
+        with patch("cycle.effect_snapshot", side_effect=[clean, {**clean, "comments": ["review"]}]):
+            _, _, fallback, outcome = self.run_failure("review", start="started", profiles=profiles)
+        self.assertFalse(outcome.rerouted)
+        self.assertFalse(fallback.dispatched)
+        self.assertIn("publication_changed", outcome.result.detail)
+
+    def test_unknown_effect_evidence_stops(self):
+        _, _, fallback, outcome = self.run_failure(start="unknown")
+        self.assertFalse(outcome.rerouted)
+        self.assertFalse(fallback.dispatched)
+        self.assertIn("evidence_unavailable", outcome.result.detail)
 
 
 class ProbeTests(CycleTestCase):

@@ -212,6 +212,16 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "used_fallback": ("flag", None),
     "security_sensitive": ("flag", None),
     # payload-only
+    "process_exited": ("flag", None),
+    "reroute_action": ("token", frozenset({"reroute", "stop"})),
+    "reroute_reason": ("token", frozenset({
+        "retry_exhausted", "calibration", "exit_unproven", "human_action",
+        "no_fallback", "fallback_unavailable", "not_started", "no_effects",
+        "evidence_unavailable", "dirty_workspace", "workspace_changed",
+        "remote_changed", "publication_changed",
+    })),
+    "reroute_error_code": ("token", frozenset({"capacity", "transport", "timeout", "quota"})),
+    "reroute_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "routing_reason_count": ("count", None),
     "routing_rate_observations": ("count", None),
     "routing_rate_minimum": ("count", None),

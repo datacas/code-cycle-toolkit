@@ -180,7 +180,15 @@ def main(argv: list[str]) -> int:
         return 0
 
     if os.environ.get("FAKE_QUOTA") == NAME:
+        print(json.dumps({"type": "error", "started": False,
+                          "message": "usage limit reached for this window"}))
         print("usage limit reached for this window", file=sys.stderr)
+        return 1
+
+    if os.environ.get("FAKE_CAPACITY") == NAME:
+        print(json.dumps({"type": "error", "started": False,
+                          "codex_error_info": "server_overloaded",
+                          "message": "Selected model is at capacity"}))
         return 1
 
     model = flag(argv, "-m", "--model") or "unknown"
