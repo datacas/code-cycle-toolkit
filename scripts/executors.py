@@ -1206,6 +1206,20 @@ class CodexAdapter(NativeAdapter):
         "not inside a trusted directory": "trusted_directory",
         "sign in": "authenticated_session",
     }
+    LINKED_MAIN_WORKTREE_STATE_FILES = (
+        "HEAD", "index", "ORIG_HEAD", "FETCH_HEAD", "COMMIT_EDITMSG",
+        "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+        "REBASE_HEAD", "AUTO_MERGE", "BISECT_START", "BISECT_LOG",
+        "BISECT_NAMES", "BISECT_EXPECTED_REV", "MERGE_AUTOSTASH",
+        "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "SQUASH_MSG", "logs/HEAD",
+    )
+    LINKED_MAIN_WORKTREE_STATE_DIRS = (
+        "sequencer", "rebase-apply", "rebase-merge", "bisect",
+    )
+    LINKED_MAIN_WORKTREE_REF_DIRS = (
+        "refs/bisect", "refs/worktree", "refs/rewritten",
+        "logs/refs/bisect", "logs/refs/worktree", "logs/refs/rewritten",
+    )
 
     def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
         if probe.version is None or probe.version < (0, 138, 0):
@@ -1216,41 +1230,154 @@ class CodexAdapter(NativeAdapter):
         self, target: Target, cwd: str, writable_dirs: tuple[str, ...], *,
         runner=subprocess.run,
     ) -> tuple[bool, str]:
-        """Prove the publish filesystem rules with a local sandboxed command."""
+        """Check the required Git writes and that redirect/config paths stay read-only."""
         if not writable_dirs:
             return True, "no additional Git metadata roots are required"
-        tokens = [uuid.uuid4().hex for _ in writable_dirs]
-        markers = [Path(directory) / f".code-cycle-write-probe-{uuid.uuid4().hex}"
-                   for directory in writable_dirs]
+        common = Path(writable_dirs[0])
+        linked = len(writable_dirs) > 1
+        writable_paths = [common, common / "objects", common / "refs", common / "logs"]
+        if linked:
+            writable_paths.append(Path(writable_dirs[-1]))
+        for directory in writable_paths:
+            if not directory.is_dir():
+                return False, f"required Git metadata directory is missing: {directory.name}"
+        write_markers = [
+            directory / f".code-cycle-write-probe-{uuid.uuid4().hex}"
+            for directory in writable_paths
+        ]
+        protected_paths: list[tuple[Path, bool]] = [
+            (common / "config", False),
+            (common / "config.lock", False),
+            (common / "config.worktree", False),
+            (common / "config.worktree.lock", False),
+            (common / "hooks", True),
+        ]
+        if linked:
+            worktree = Path(writable_dirs[-1])
+            git_pointer = Path(cwd) / ".git"
+            if git_pointer.is_file():
+                protected_paths.append((git_pointer, False))
+            protected_paths.extend(
+                (common / name, False)
+                for name in (
+                    *self.LINKED_MAIN_WORKTREE_STATE_FILES,
+                    *(f"{name}.lock" for name in self.LINKED_MAIN_WORKTREE_STATE_FILES),
+                )
+            )
+            protected_paths.extend(
+                (common / name, True)
+                for name in self.LINKED_MAIN_WORKTREE_STATE_DIRS
+            )
+            protected_paths.extend(
+                (common / name, True)
+                for name in self.LINKED_MAIN_WORKTREE_REF_DIRS
+            )
+            protected_paths.extend((
+                (worktree / "commondir", False),
+                (worktree / "gitdir", False),
+                (worktree / "config.worktree", False),
+                (worktree / "config.worktree.lock", False),
+                (worktree / "hooks", True),
+            ))
+            # Packed refs are root-level files, so Codex must grant the common
+            # directory. Protect main-worktree state and linked-worktree pointers.
+            protected_paths.append((common / "worktrees", True))
+        else:
+            # Other linked worktrees share this directory and remain protected.
+            protected_paths.append((common / "worktrees", True))
+
+        tokens = [uuid.uuid4().hex for _ in write_markers]
+        cleanup_tokens = dict(zip(write_markers, tokens))
+        protected_checks: list[tuple[Path, bool, Path | None, str | None]] = []
+        for path, is_directory in protected_paths:
+            if is_directory:
+                if path.exists() and not path.is_dir():
+                    return False, f"protected Git metadata directory has an unexpected file: {path.name}"
+                marker = path / f".code-cycle-deny-probe-{uuid.uuid4().hex}"
+                token = uuid.uuid4().hex
+                cleanup_tokens[marker] = token
+                protected_checks.append((path, True, marker, token))
+            elif path.exists():
+                protected_checks.append((path, False, None, None))
+            else:
+                # Exclusive creation cannot overwrite a concurrently created file.
+                token = uuid.uuid4().hex
+                cleanup_tokens[path] = token
+                protected_checks.append((path, False, path, token))
+
         writes = "; ".join(
-            f"Path({str(marker)!r}).write_text({token!r})"
-            for marker, token in zip(markers, tokens)
+            f"Path({json.dumps(str(marker))}).write_text({json.dumps(token)})"
+            for marker, token in zip(write_markers, tokens)
         )
-        script = f"from pathlib import Path; {writes}; print('CODE_CYCLE_WRITE_PROBE_OK')"
+        script_lines = [
+            "from pathlib import Path; import errno, os",
+            "def create_exclusive(name, token):",
+            " fd=os.open(name, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)",
+            " try:",
+            "  payload=token.encode(); offset=0",
+            "  while offset < len(payload):",
+            "   count=os.write(fd, payload[offset:])",
+            "   if count <= 0: raise OSError('short write during Git metadata probe')",
+            "   offset += count",
+            " finally: os.close(fd)",
+            writes,
+        ]
+        for path, is_directory, marker, token in protected_checks:
+            script_lines.extend(("try:",))
+            if is_directory:
+                script_lines.extend((
+                    f" p=Path({json.dumps(str(path))})",
+                    f" target={json.dumps(str(marker))}",
+                    " try: p.mkdir()",
+                    " except FileExistsError:",
+                    "  try:",
+                    "   fd=os.open(str(p), os.O_WRONLY|os.O_APPEND); os.close(fd)",
+                    "  except IsADirectoryError:",
+                    f"   create_exclusive(target, {json.dumps(token)})",
+                    " else:",
+                    "  p.rmdir()",
+                    f"  raise SystemExit({json.dumps(f'protected Git metadata path is writable: {path.name}')})",
+                ))
+            elif token is None:
+                script_lines.extend((
+                    f" p=Path({json.dumps(str(path))})",
+                    " fd=os.open(str(p), os.O_WRONLY|os.O_APPEND); os.close(fd)",
+                ))
+            else:
+                script_lines.extend((
+                    " try:",
+                    f"  create_exclusive({json.dumps(str(path))}, {json.dumps(token)})",
+                    " except FileExistsError:",
+                    f"  fd=os.open({json.dumps(str(path))}, os.O_WRONLY|os.O_APPEND); os.close(fd)",
+                ))
+            script_lines.extend((
+                "except OSError as exc:",
+                " if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS): raise",
+                " pass",
+                "else:",
+                f" raise SystemExit({json.dumps(f'protected Git metadata path is writable: {path.name}')})",
+            ))
+        script = "\n".join(script_lines) + "\n"
         profile = "code_cycle_publish_write"
-        filesystem = self._publish_filesystem_rules(writable_dirs)
+        filesystem = self._publish_filesystem_rules(writable_dirs, cwd=cwd)
         argv = [
             self.binary, "sandbox", "--permission-profile", profile,
             "--cd", cwd,
+        ]
+        argv.extend((
             "-c", f'permissions.{profile}.extends=":workspace"',
             "-c", f"permissions.{profile}.filesystem={filesystem}",
             "--", sys.executable, "-c", script,
-        ]
+        ))
 
         def cleanup_markers() -> bool:
             failed = False
-            for marker in markers:
+            for marker, token in cleanup_tokens.items():
                 try:
-                    marker.stat()
+                    if marker.is_file() and marker.read_text() == token:
+                        marker.unlink()
                 except FileNotFoundError:
                     continue
-                except OSError:
-                    failed = True
-                    continue
-                try:
-                    marker.unlink()
-                except FileNotFoundError:
-                    pass
                 except OSError:
                     failed = True
             return not failed
@@ -1278,14 +1405,14 @@ class CodexAdapter(NativeAdapter):
             try:
                 verified = all(
                     marker.is_file() and marker.read_text() == token
-                    for marker, token in zip(markers, tokens)
+                    for marker, token in zip(write_markers, tokens)
                 )
             except OSError:
                 verified = False
         if not cleanup_markers():
             return False, "Codex Git metadata write probe could not remove its temporary markers"
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:400]
+            detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:1000]
             suffix = f": {detail}" if detail else ""
             return False, f"Codex Git metadata sandbox probe exited {result.returncode}{suffix}"
         if not verified:
@@ -1293,21 +1420,64 @@ class CodexAdapter(NativeAdapter):
         return True, "Codex sandbox wrote and verified each linked-worktree Git metadata root"
 
     @staticmethod
-    def _publish_filesystem_rules(writable_dirs: tuple[str, ...]) -> str:
-        """Serialize all permissions in one TOML override, keeping paths as values."""
-        entries = [(directory, "write") for directory in writable_dirs]
-        if writable_dirs:
-            common = Path(writable_dirs[0])
+    def _publish_filesystem_rules(
+        writable_dirs: tuple[str, ...], *, cwd: str | None = None,
+    ) -> str:
+        """Serialize narrow Git data grants and read-only metadata pointers."""
+        if not writable_dirs:
+            return "{}"
+        common = Path(writable_dirs[0])
+        if len(writable_dirs) > 1:
+            worktree = Path(writable_dirs[-1])
+            entries = [
+                # packed-refs is a file; granting it directly makes Codex's
+                # Linux sandbox treat it as a synthetic mount directory.
+                # Grant the common root and carve out all redirect/execution
+                # paths explicitly instead.
+                (str(common), "write"),
+                (str(common / "objects"), "write"),
+                (str(common / "refs"), "write"),
+                (str(common / "logs"), "write"),
+                (str(common / "worktrees"), "read"),
+                (str(worktree), "write"),
+                (str(worktree / "hooks"), "read"),
+                (str(worktree / "config.worktree"), "read"),
+                (str(worktree / "config.worktree.lock"), "read"),
+                (str(worktree / "commondir"), "read"),
+                (str(worktree / "gitdir"), "read"),
+            ]
+            if cwd and Path(cwd) / ".git" != common:
+                # Keep the workspace's Git indirection immutable so a later
+                # dispatch cannot redirect these grants to another repository.
+                entries.append((str(Path(cwd) / ".git"), "deny"))
+            entries.extend(
+                (str(common / name), "deny")
+                for name in (
+                    *CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES,
+                    *(f"{name}.lock" for name in CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES),
+                    *CodexAdapter.LINKED_MAIN_WORKTREE_STATE_DIRS,
+                    *CodexAdapter.LINKED_MAIN_WORKTREE_REF_DIRS,
+                )
+            )
             entries.extend((
                 (str(common / "hooks"), "read"),
                 (str(common / "config"), "read"),
+                (str(common / "config.lock"), "read"),
+                (str(common / "config.worktree"), "read"),
+                (str(common / "config.worktree.lock"), "read"),
             ))
-        if len(writable_dirs) > 1:
-            worktree = Path(writable_dirs[-1])
-            entries.extend((
-                (str(worktree / "hooks"), "read"),
-                (str(worktree / "config.worktree"), "read"),
-            ))
+        else:
+            # A main worktree needs its root-level index and HEAD, but must not
+            # be able to redirect another linked worktree through its gitdir.
+            entries = [
+                (str(common), "write"),
+                (str(common / "hooks"), "read"),
+                (str(common / "config"), "read"),
+                (str(common / "config.lock"), "read"),
+                (str(common / "config.worktree"), "read"),
+                (str(common / "config.worktree.lock"), "read"),
+                (str(common / "worktrees"), "read"),
+            ]
         return "{" + ",".join(
             f"{json.dumps(path)}={json.dumps(access)}"
             for path, access in entries
@@ -1352,7 +1522,7 @@ class CodexAdapter(NativeAdapter):
                 argv += [
                     "-c",
                     "permissions.code_cycle_publish_write.filesystem="
-                    f"{self._publish_filesystem_rules(writable_dirs)}",
+                    f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
                 ]
         return argv + [task]
 

@@ -26,17 +26,35 @@ the command. Writing Codex dispatches from linked worktrees grant the worktree's
 Git common directory as an additional writable root; read-only dispatches do
 not receive that access. This grants the writing stage access to shared metadata
 for the repository, including hooks, configuration, and refs for every branch.
-Git stores linked-worktree objects and refs in the common directory, and the
-selected worktree's private Git directory stores its index and HEAD. Codex
-writing publish dispatches grant both roots through the
-`code_cycle_publish_write` filesystem profile. The common directory's `hooks`
-and `config` paths, and the private directory's `hooks` and `config.worktree`
-paths, are explicitly read-only. This prevents replacing hooks or redirecting
-Git through the repository's common or per-worktree config. Other metadata
-under those roots remains writable for Git operations; review this access
-boundary when changing the profile. A separately configured
-`core.hooksPath` inside the writable source workspace is outside these
-metadata carve-outs and remains writable.
+Git stores linked-worktree objects, refs, packed refs, and logs in the common
+directory, while the selected worktree's private Git directory stores its
+index and HEAD. Codex writing publish dispatches grant write access to the
+common directory and selected private directory. Codex's Linux sandbox cannot
+grant the root-level `packed-refs` file as a file path, so the common root must
+be writable. Its `worktrees`, `hooks`, `config`, `config.lock`, `config.worktree`,
+and `config.worktree.lock` paths, the main worktree's `HEAD`, index, pseudorefs,
+rebase, merge, bisect, sequencer and reflog state with their lockfiles, and
+the main worktree's `refs/bisect`, `refs/worktree`, and `refs/rewritten`
+directories and reflogs. The private directory's `hooks`,
+`config.worktree`, `config.worktree.lock`, `commondir`, and `gitdir` paths, are
+read-only. The linked workspace's `.git` gitfile is denied too, so a writing
+stage cannot redirect a later dispatch's metadata grants to another worktree.
+The private pointer files must stay protected: Git follows `commondir` to find
+shared configuration and hooks. For a main worktree, the
+common directory remains writable for its index and HEAD, while its `worktrees`
+directory is read-only so another linked worktree's pointers cannot be changed.
+The probe verifies representative writes and checks that protected paths deny
+writes. A separately configured `core.hooksPath` inside the writable source
+workspace remains outside these Git metadata rules. The common refs remain
+writable for publication across branches; this filesystem boundary does not
+restrict ref names, so stage instructions and GitHub branch protections remain
+part of the publication boundary.
+
+Before granting linked-worktree metadata, the runtime ignores Git directory,
+worktree, index, and object-directory environment overrides. It also checks
+that the workspace `.git` file, private `gitdir` and `commondir` pointers, and
+Git's resolved paths agree and that the private directory is registered below
+the selected common directory's `worktrees` directory.
 
 Before dispatching any writing publish stage to Codex, the runtime runs a
 deterministic local command with `codex sandbox` and the same filesystem rules.

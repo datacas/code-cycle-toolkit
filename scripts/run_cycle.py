@@ -929,36 +929,77 @@ def _main_repository_root(repository_root: Path, run=subprocess.run) -> Path:
     return repository_root
 
 
-def _git_common_directory(workspace: str, run=subprocess.run) -> str | None:
-    """Return the shared Git metadata directory for a linked worktree."""
-    if not _is_linked_worktree(Path(workspace)):
+def _linked_worktree_metadata(
+    workspace: str, run=subprocess.run,
+) -> tuple[str, str] | None:
+    """Resolve linked-worktree Git paths only when all pointers agree."""
+    root = Path(workspace).resolve()
+    marker = root / ".git"
+    if not _is_linked_worktree(marker.parent):
         return None
-    result = run(
-        ["git", "rev-parse", "--git-common-dir"], cwd=workspace,
-        capture_output=True, text=True, check=False,
+    marker_text = marker.read_text(encoding="utf-8", errors="strict").strip()
+    target_text = marker_text.removeprefix("gitdir:").strip()
+    if marker_text == target_text:
+        return None
+    target = Path(target_text)
+    if not target.is_absolute():
+        target = root / target
+    target = target.resolve()
+
+    # A caller's Git path overrides must not select some other repository.
+    clean_env = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        clean_env.pop(name, None)
+    common_result = run(
+        ["git", "rev-parse", "--git-common-dir"], cwd=root,
+        capture_output=True, text=True, check=False, env=clean_env,
     )
-    if result.returncode != 0 or not result.stdout.strip():
-        # Some in-process tests use a marker file to model a worktree without
-        # creating Git metadata. A real selected worktree resolves this path;
-        # leave synthetic workspaces alone.
+    private_result = run(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=root,
+        capture_output=True, text=True, check=False, env=clean_env,
+    )
+    if (common_result.returncode != 0 or not common_result.stdout.strip()
+            or private_result.returncode != 0 or not private_result.stdout.strip()):
+        # Synthetic worktree markers in tests have no Git metadata.
         return None
-    common = Path(result.stdout.strip())
+    common = Path(common_result.stdout.strip())
     if not common.is_absolute():
-        common = Path(workspace) / common
-    return str(common.resolve())
+        common = root / common
+    common = common.resolve()
+    private = Path(private_result.stdout.strip()).resolve()
+    pointer_root = common / "worktrees"
+    if target != private or not private.is_relative_to(pointer_root):
+        return None
+
+    commondir = private / "commondir"
+    gitdir = private / "gitdir"
+    try:
+        shared = Path(commondir.read_text(encoding="utf-8").strip())
+        if not shared.is_absolute():
+            shared = private / shared
+        checkout = Path(gitdir.read_text(encoding="utf-8").strip())
+        if not checkout.is_absolute():
+            checkout = private / checkout
+        if shared.resolve() != common or checkout.resolve() != marker.resolve():
+            return None
+    except (OSError, UnicodeError):
+        return None
+    return str(common), str(private)
+
+
+def _git_common_directory(workspace: str, run=subprocess.run) -> str | None:
+    """Return the shared Git metadata directory for a valid linked worktree."""
+    metadata = _linked_worktree_metadata(workspace, run)
+    return metadata[0] if metadata else None
 
 
 def _git_worktree_directory(workspace: str, run=subprocess.run) -> str | None:
-    """Return the per-worktree Git directory when workspace is linked."""
-    if not _is_linked_worktree(Path(workspace)):
-        return None
-    result = run(
-        ["git", "rev-parse", "--absolute-git-dir"], cwd=workspace,
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return str(Path(result.stdout.strip()).resolve())
+    """Return the per-worktree Git directory for a valid linked worktree."""
+    metadata = _linked_worktree_metadata(workspace, run)
+    return metadata[1] if metadata else None
 
 
 def _default_base_ref(repository_root: Path, config: dict, run=subprocess.run) -> str:

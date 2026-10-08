@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import re
 import sys
 import time
 from pathlib import Path
@@ -182,7 +182,102 @@ def main(argv: list[str]) -> int:
             command = argv[argv.index("--") + 1:]
         except (ValueError, IndexError):
             return 2
-        return subprocess.run(command, check=False).returncode
+        filesystem = next((
+            argv[index + 1].split("=", 1)[1]
+            for index, value in enumerate(argv[:-1])
+            if value == "-c" and argv[index + 1].startswith(
+                "permissions.code_cycle_publish_write.filesystem=",
+            )
+        ), "")
+        entries = {
+            json.loads(path): json.loads(access)
+            for path, access in re.findall(
+                r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem,
+            )
+        }
+        if not entries:
+            return 2
+        common = next(iter(entries))
+        worktree = next((
+            path for path, access in entries.items()
+            if access == "write"
+            and path.startswith(os.path.join(common, "worktrees") + os.sep)
+        ), None)
+        required_readonly = [
+            os.path.join(common, name)
+            for name in ("config", "config.lock", "config.worktree",
+                         "config.worktree.lock", "hooks", "worktrees")
+        ]
+        required_denied = []
+        if worktree is not None:
+            workspace = flag(argv, "--cd")
+            git_pointer = os.path.join(workspace, ".git") if workspace else None
+            if git_pointer and git_pointer != common:
+                required_denied.append(git_pointer)
+            main_state = (
+                "HEAD", "index", "ORIG_HEAD", "FETCH_HEAD", "COMMIT_EDITMSG",
+                "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                "REBASE_HEAD", "AUTO_MERGE", "BISECT_START", "BISECT_LOG",
+                "BISECT_NAMES", "BISECT_EXPECTED_REV", "MERGE_AUTOSTASH",
+                "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "SQUASH_MSG", "logs/HEAD",
+            )
+            required_denied.extend(
+                os.path.join(common, name) for name in main_state
+            )
+            required_denied.extend(
+                os.path.join(common, name + ".lock") for name in main_state
+            )
+            required_denied.extend(os.path.join(common, name) for name in (
+                "sequencer", "rebase-apply", "rebase-merge", "bisect",
+                "refs/bisect", "refs/worktree", "refs/rewritten",
+                "logs/refs/bisect", "logs/refs/worktree", "logs/refs/rewritten",
+            ))
+            required_readonly.extend(os.path.join(worktree, name) for name in (
+                "commondir", "gitdir", "config.worktree",
+                "config.worktree.lock",
+            ))
+            if entries.get(common) != "write":
+                return 2
+        else:
+            required_readonly.append(os.path.join(common, "worktrees"))
+        if any(entries.get(path) != "read" for path in required_readonly):
+            return 2
+        if any(entries.get(path) != "deny" for path in required_denied):
+            return 2
+
+        def writable(path: Path) -> bool:
+            matches = [
+                (len(root), access)
+                for root, access in entries.items()
+                if str(path) == root or str(path).startswith(root + os.sep)
+            ]
+            return bool(matches) and max(matches)[1] == "write"
+
+        required_writes = [
+            Path(common) / name
+            for name in ("objects", "refs", "logs", "packed-refs", "packed-refs.lock")
+        ]
+        if worktree is not None:
+            required_writes.append(Path(worktree))
+        if any(not writable(path) for path in required_writes):
+            return 2
+
+        script = command[-1]
+        marker_pairs = re.findall(
+            r'Path\(("(?:\\.|[^"])*\.code-cycle-write-probe-[^"]*")\)'
+            r'\.write_text\(("(?:\\.|[^"])*")\)',
+            script,
+        )
+        if not marker_pairs:
+            return 2
+        for path_text, token_text in marker_pairs:
+            path = Path(json.loads(path_text))
+            if not writable(path):
+                return 2
+            token = json.loads(token_text)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(token)
+        return 0
 
     if "--version" in argv:
         # Exercise the current Codex permission-profile path in installed-cycle

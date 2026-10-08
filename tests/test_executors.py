@@ -1190,25 +1190,111 @@ class PermissionTests(unittest.TestCase):
             for path, access in re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)
         }
         self.assertEqual(
+            len(entries),
+            len(re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)),
+        )
+        self.assertEqual(
             {
                 common: "write",
+                str(Path(common) / "objects"): "write",
+                str(Path(common) / "refs"): "write",
+                str(Path(common) / "logs"): "write",
+                str(Path(common) / "worktrees"): "read",
                 worktree: "write",
                 str(Path(common) / "hooks"): "read",
                 str(Path(common) / "config"): "read",
+                str(Path(common) / "config.lock"): "read",
+                str(Path(common) / "config.worktree"): "read",
+                str(Path(common) / "config.worktree.lock"): "read",
                 str(Path(worktree) / "hooks"): "read",
                 str(Path(worktree) / "config.worktree"): "read",
+                str(Path(worktree) / "config.worktree.lock"): "read",
+                str(Path(worktree) / "commondir"): "read",
+                str(Path(worktree) / "gitdir"): "read",
+                **{
+                    str(Path(common) / name): "deny"
+                    for name in (
+                        *ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES,
+                        *(f"{name}.lock" for name in ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES),
+                        *ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_DIRS,
+                        *ex.CodexAdapter.LINKED_MAIN_WORKTREE_REF_DIRS,
+                    )
+                },
             },
             entries,
         )
+        for name in (
+            *ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES,
+            *(f"{name}.lock" for name in ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_FILES),
+            *ex.CodexAdapter.LINKED_MAIN_WORKTREE_STATE_DIRS,
+            *ex.CodexAdapter.LINKED_MAIN_WORKTREE_REF_DIRS,
+        ):
+            self.assertEqual("deny", entries[str(Path(common) / name)])
         self.assertTrue(filesystem.startswith("{"))
+
+    def test_main_worktree_profile_protects_other_linked_worktree_metadata(self) -> None:
+        common = "/repo/.git"
+        argv = ex.CodexAdapter().argv(
+            TARGET, "implement", writes=True, publishes=True,
+            writable_dirs=(common,),
+        )
+        filesystem = next(
+            value.split("=", 1)[1]
+            for flag, value in zip(argv, argv[1:])
+            if flag == "-c" and value.startswith(
+                "permissions.code_cycle_publish_write.filesystem=",
+            )
+        )
+        entries = {
+            json.loads(path): json.loads(access)
+            for path, access in re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)
+        }
+        self.assertEqual(
+            len(entries),
+            len(re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)),
+        )
+        self.assertEqual("write", entries[common])
+        self.assertEqual("read", entries[str(Path(common) / "worktrees")])
+        self.assertEqual("read", entries[str(Path(common) / "hooks")])
+        self.assertEqual("read", entries[str(Path(common) / "config")])
+        self.assertEqual("read", entries[str(Path(common) / "config.lock")])
+        self.assertEqual("read", entries[str(Path(common) / "config.worktree")])
+        self.assertEqual("read", entries[str(Path(common) / "config.worktree.lock")])
+
+    def test_linked_workspace_gitfile_cannot_redirect_metadata_grants(self) -> None:
+        common = "/repo/.git"
+        worktree = "/repo/.git/worktrees/task-203"
+        cwd = "/repo/.worktree/task-203"
+        argv = ex.CodexAdapter().argv(
+            TARGET, "implement", writes=True, publishes=True, cwd=cwd,
+            writable_dirs=(common, worktree),
+        )
+        filesystem = next(
+            value.split("=", 1)[1]
+            for flag, value in zip(argv, argv[1:])
+            if flag == "-c" and value.startswith(
+                "permissions.code_cycle_publish_write.filesystem=",
+            )
+        )
+        entries = {
+            json.loads(path): json.loads(access)
+            for path, access in re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)
+        }
+        self.assertEqual("deny", entries[str(Path(cwd) / ".git")])
 
     def test_git_metadata_probe_uses_publish_argv_and_cleans_its_markers(self) -> None:
         adapter = ex.CodexAdapter()
         with tempfile.TemporaryDirectory() as temporary:
             common = Path(temporary) / ".git"
             worktree = common / "worktrees" / "task-203"
-            common.mkdir()
+            (common / "objects").mkdir(parents=True)
+            (common / "refs").mkdir()
+            (common / "logs").mkdir()
+            (common / "hooks").mkdir()
+            (common / "config").write_text("[core]\n")
             worktree.mkdir(parents=True)
+            (worktree / "commondir").write_text("../..\n")
+            (worktree / "gitdir").write_text("/repo/.git\n")
             roots = (str(common), str(worktree))
             seen = {}
 
@@ -1219,7 +1305,9 @@ class PermissionTests(unittest.TestCase):
                 for path_text, token_text in re.findall(
                     r"Path\((.+?)\)\.write_text\((.+?)\)", script,
                 ):
-                    Path(ast.literal_eval(path_text)).write_text(ast.literal_eval(token_text))
+                    path = Path(ast.literal_eval(path_text))
+                    if ".code-cycle-write-probe-" in path.name:
+                        path.write_text(ast.literal_eval(token_text))
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             allowed, detail = adapter.probe_git_metadata_write(
@@ -1229,11 +1317,38 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(allowed, detail)
             self.assertEqual("sandbox", seen["argv"][1])
             self.assertIn("--permission-profile", seen["argv"])
+            self.assertNotIn("--add-dir", seen["argv"])
             self.assertNotIn("exec", seen["argv"])
             self.assertNotIn("-m", seen["argv"])
             self.assertEqual(temporary, seen["kwargs"]["cwd"])
             self.assertEqual(15, seen["kwargs"]["timeout"])
-            self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
+            self.assertIn(str(worktree / "commondir"), seen["argv"][-1])
+            self.assertIn(str(worktree / "gitdir"), seen["argv"][-1])
+            self.assertIn(str(common / "logs"), seen["argv"][-1])
+            self.assertIn(str(common), seen["argv"][-1])
+            self.assertIn(str(common / "worktrees"), seen["argv"][-1])
+            for protected in (
+                common / "hooks",
+                common / "config",
+                common / "config.lock",
+                common / "config.worktree",
+                common / "config.worktree.lock",
+                worktree / "hooks",
+                worktree / "commondir",
+                worktree / "gitdir",
+                worktree / "config.worktree",
+                worktree / "config.worktree.lock",
+            ):
+                self.assertIn(str(protected), seen["argv"][-1])
+            for name in (
+                *adapter.LINKED_MAIN_WORKTREE_STATE_FILES,
+                *(f"{name}.lock" for name in adapter.LINKED_MAIN_WORKTREE_STATE_FILES),
+                *adapter.LINKED_MAIN_WORKTREE_STATE_DIRS,
+                *adapter.LINKED_MAIN_WORKTREE_REF_DIRS,
+            ):
+                self.assertIn(str(common / name), seen["argv"][-1])
+            self.assertFalse(list(common.rglob(".code-cycle-write-probe-*")))
+            self.assertFalse(list(common.rglob(".code-cycle-deny-probe-*")))
 
     def test_git_metadata_probe_preserves_sandbox_error_when_markers_are_absent(self) -> None:
         error = "app-server socket directory must have mode 0700"
@@ -1241,6 +1356,9 @@ class PermissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             common = Path(temporary) / ".git"
             worktree = common / "worktrees" / "task-203"
+            (common / "objects").mkdir(parents=True)
+            (common / "refs").mkdir()
+            (common / "logs").mkdir()
             worktree.mkdir(parents=True)
             roots = (str(common), str(worktree))
 
@@ -1263,20 +1381,83 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("sandbox probe exited 1", detail)
         self.assertIn(error, detail)
 
+    def test_git_metadata_probe_preserves_malformed_protected_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            common = Path(temporary) / ".git"
+            worktree = common / "worktrees" / "task-203"
+            (common / "objects").mkdir(parents=True)
+            (common / "refs").mkdir()
+            (common / "logs").mkdir()
+            worktree.mkdir(parents=True)
+            malformed_hooks = common / "hooks"
+            malformed_hooks.write_text("keep this file\n")
+
+            allowed, detail = ex.CodexAdapter().probe_git_metadata_write(
+                TARGET, temporary, (str(common), str(worktree)),
+                runner=lambda *args, **kwargs: self.fail("unexpected sandbox launch"),
+            )
+            self.assertFalse(allowed)
+            self.assertIn("unexpected file: hooks", detail)
+            self.assertEqual("keep this file\n", malformed_hooks.read_text())
+
+    def test_git_metadata_probe_does_not_remove_a_marker_with_another_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            common = Path(temporary) / ".git"
+            worktree = common / "worktrees" / "task-203"
+            (common / "objects").mkdir(parents=True)
+            (common / "refs").mkdir()
+            (common / "logs").mkdir()
+            (common / "hooks").mkdir()
+            (common / "config").write_text("[core]\n")
+            worktree.mkdir(parents=True)
+            (worktree / "commondir").write_text("../..\n")
+            (worktree / "gitdir").write_text("/repo/.git\n")
+            foreign_marker = None
+
+            def runner(argv, **kwargs):
+                nonlocal foreign_marker
+                matches = re.findall(
+                    r'Path\(("(?:\\.|[^"])*\.code-cycle-write-probe-[^"]*")\)'
+                    r'\.write_text\(("(?:\\.|[^"])*")\)',
+                    argv[-1],
+                )
+                foreign_marker = Path(ast.literal_eval(matches[0][0]))
+                foreign_marker.write_text("not this probe's token")
+                return subprocess.CompletedProcess(argv, 1, "", "simulated failure")
+
+            allowed, detail = ex.CodexAdapter().probe_git_metadata_write(
+                TARGET, temporary, (str(common), str(worktree)), runner=runner,
+            )
+            self.assertFalse(allowed)
+            self.assertIn("sandbox probe exited 1", detail)
+            self.assertIsNotNone(foreign_marker)
+            assert foreign_marker is not None
+            self.assertEqual("not this probe's token", foreign_marker.read_text())
+            foreign_marker.unlink()
+
     @unittest.skipIf(os.name == "nt", "fake Codex executable uses a POSIX shebang")
     def test_git_metadata_probe_crosses_the_cli_process_boundary(self) -> None:
-        fake_cli = (
-            "#!/usr/bin/env python3\n"
-            "import os, subprocess, sys\n"
-            "if os.getenv('CODE_CYCLE_PROBE_FAIL'): sys.exit(7)\n"
-            "command = sys.argv[sys.argv.index('--') + 1:]\n"
-            "sys.exit(subprocess.run(command, check=False).returncode)\n"
-        )
+        fake_cli = r"""#!/usr/bin/env python3
+import json, os, re, sys
+if os.getenv('CODE_CYCLE_PROBE_FAIL'): sys.exit(7)
+args = sys.argv[1:]
+filesystem = next(v.split('=', 1)[1] for v in args
+                  if v.startswith('permissions.code_cycle_publish_write.filesystem='))
+if any(name not in filesystem for name in ('commondir', 'gitdir', '/logs', 'worktrees')): sys.exit(8)
+script = args[args.index('--') + 1:][-1]
+pattern = r'Path\(("(?:\\.|[^"])*\.code-cycle-write-probe-[^"]*")\)\.write_text\(("(?:\\.|[^"])*")\)'
+for path, token in re.findall(pattern, script):
+    path = json.loads(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as marker: marker.write(json.loads(token))
+"""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             common = root / ".git"
             worktree = common / "worktrees" / "task-203"
-            common.mkdir()
+            (common / "objects").mkdir(parents=True)
+            (common / "refs").mkdir()
+            (common / "logs").mkdir()
             worktree.mkdir(parents=True)
             binary = root / "codex"
             binary.write_text(fake_cli)
@@ -1288,7 +1469,7 @@ class PermissionTests(unittest.TestCase):
                 )
 
             self.assertTrue(allowed, detail)
-            self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
+            self.assertFalse(list(common.rglob(".code-cycle-write-probe-*")))
             with patch.dict(os.environ, {
                 "PATH": str(root) + os.pathsep + os.environ["PATH"],
                 "CODE_CYCLE_PROBE_FAIL": "1",

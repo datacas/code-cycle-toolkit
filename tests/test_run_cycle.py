@@ -1648,6 +1648,16 @@ class WorkspaceSelectionTests(unittest.TestCase):
                 root / ".git" / "worktrees" / "task-151",
                 rc._git_worktree_directory(selected),
             )
+            with mock.patch.dict(os.environ, {
+                "GIT_DIR": str(Path(temporary) / "other.git"),
+                "GIT_COMMON_DIR": str(Path(temporary) / "other-common.git"),
+                "GIT_WORK_TREE": str(Path(temporary) / "other-worktree"),
+            }):
+                self.assert_same_path(root / ".git", rc._git_common_directory(selected))
+                self.assert_same_path(
+                    root / ".git" / "worktrees" / "task-151",
+                    rc._git_worktree_directory(selected),
+                )
             self.assertTrue((Path(selected) / ".git").is_file())
             self.assertEqual("task-151", self.git(selected, "branch", "--show-current"))
             self.assertEqual("main", self.git(root, "branch", "--show-current"))
