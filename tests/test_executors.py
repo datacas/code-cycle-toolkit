@@ -1201,8 +1201,13 @@ class PermissionTests(unittest.TestCase):
                 seen["argv"] = argv
                 seen["kwargs"] = kwargs
                 prompt = argv[-1]
-                command = shlex.split(prompt.split("any other action: ", 1)[1])
-                script = command[2]
+                command = prompt.split("any other action: ", 1)[1]
+                if os.name == "nt":
+                    script_start = command.index("from pathlib import Path; ")
+                    script_end = command.index("; print('CODE_CYCLE_WRITE_PROBE_OK')", script_start)
+                    script = command[script_start:script_end]
+                else:
+                    script = shlex.split(command)[2]
                 for path_text, token_text in re.findall(
                     r"Path\((.+?)\)\.write_text\((.+?)\)", script,
                 ):
@@ -1219,6 +1224,7 @@ class PermissionTests(unittest.TestCase):
             self.assertEqual(temporary, seen["kwargs"]["cwd"])
             self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
 
+    @unittest.skipIf(os.name == "nt", "fake Codex executable uses a POSIX shebang")
     def test_git_metadata_probe_crosses_the_cli_process_boundary(self) -> None:
         fake_cli = (
             "#!/usr/bin/env python3\n"
