@@ -465,7 +465,7 @@ class CycleRecorder:
             decision = select(eligible)
             if fallback_decision is not None:
                 decision = fallback_decision
-            if (role == "implement" and publishes and writes
+            if (publishes and writes
                     and not decision.blocked and decision.target.executor == "codex"
                     and dispatch_kwargs.get("writable_dirs")):
                 adapter = self.registry.get("codex")

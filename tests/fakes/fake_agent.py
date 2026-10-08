@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -178,6 +177,13 @@ def readiness_result() -> dict:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "sandbox":
+        try:
+            command = argv[argv.index("--") + 1:]
+        except (ValueError, IndexError):
+            return 2
+        return subprocess.run(command, check=False).returncode
+
     if "--version" in argv:
         # Exercise the current Codex permission-profile path in installed-cycle
         # tests, without installing either real agent.
@@ -186,11 +192,6 @@ def main(argv: list[str]) -> int:
 
     model = flag(argv, "-m", "--model") or "unknown"
     prompt = prompt_of(argv)
-    if "CODE_CYCLE_WRITE_PROBE_OK" in prompt:
-        command = shlex.split(prompt.split("any other action: ", 1)[1])
-        result = subprocess.run(command, check=False)
-        return result.returncode
-
     if os.environ.get("FAKE_QUOTA") == NAME:
         print(json.dumps({"type": "error", "started": False,
                           "message": "usage limit reached for this window"}))

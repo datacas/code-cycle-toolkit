@@ -5,7 +5,6 @@ import inspect
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -1175,17 +1174,33 @@ class PermissionTests(unittest.TestCase):
             writable_dirs=(common, worktree),
         )
 
+        filesystem = next(
+            value.split("=", 1)[1]
+            for flag, value in zip(argv, argv[1:])
+            if flag == "-c" and value.startswith(
+                "permissions.code_cycle_publish_write.filesystem=",
+            )
+        )
         self.assertIn("--add-dir", argv)
         self.assertIn(common, argv)
         self.assertIn(worktree, argv)
-        self.assertIn(
-            f'permissions.code_cycle_publish_write.filesystem.{json.dumps(common)}="write"',
-            argv,
+        self.assertRegex(filesystem, r'^\{.*\}$')
+        entries = {
+            json.loads(path): json.loads(access)
+            for path, access in re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)
+        }
+        self.assertEqual(
+            {
+                common: "write",
+                worktree: "write",
+                f"{common}/hooks": "read",
+                f"{common}/config": "read",
+                f"{worktree}/hooks": "read",
+                f"{worktree}/config.worktree": "read",
+            },
+            entries,
         )
-        self.assertIn(
-            f'permissions.code_cycle_publish_write.filesystem.{json.dumps(worktree)}="write"',
-            argv,
-        )
+        self.assertTrue(filesystem.startswith("{"))
 
     def test_git_metadata_probe_uses_publish_argv_and_cleans_its_markers(self) -> None:
         adapter = ex.CodexAdapter()
@@ -1200,14 +1215,7 @@ class PermissionTests(unittest.TestCase):
             def runner(argv, **kwargs):
                 seen["argv"] = argv
                 seen["kwargs"] = kwargs
-                prompt = argv[-1]
-                command = prompt.split("any other action: ", 1)[1]
-                if os.name == "nt":
-                    script_start = command.index("from pathlib import Path; ")
-                    script_end = command.index("; print('CODE_CYCLE_WRITE_PROBE_OK')", script_start)
-                    script = command[script_start:script_end]
-                else:
-                    script = shlex.split(command)[2]
+                script = argv[-1]
                 for path_text, token_text in re.findall(
                     r"Path\((.+?)\)\.write_text\((.+?)\)", script,
                 ):
@@ -1219,23 +1227,22 @@ class PermissionTests(unittest.TestCase):
             )
 
             self.assertTrue(allowed, detail)
-            self.assertIn("-m", seen["argv"])
-            self.assertIn('default_permissions="code_cycle_publish_write"', seen["argv"])
+            self.assertEqual("sandbox", seen["argv"][1])
+            self.assertIn("--permission-profile", seen["argv"])
+            self.assertNotIn("exec", seen["argv"])
+            self.assertNotIn("-m", seen["argv"])
             self.assertEqual(temporary, seen["kwargs"]["cwd"])
+            self.assertEqual(15, seen["kwargs"]["timeout"])
             self.assertFalse(list(common.glob(".code-cycle-write-probe-*")))
 
     @unittest.skipIf(os.name == "nt", "fake Codex executable uses a POSIX shebang")
     def test_git_metadata_probe_crosses_the_cli_process_boundary(self) -> None:
         fake_cli = (
             "#!/usr/bin/env python3\n"
-            "import ast, os, pathlib, re, shlex, sys\n"
+            "import os, subprocess, sys\n"
             "if os.getenv('CODE_CYCLE_PROBE_FAIL'): sys.exit(7)\n"
-            "prompt = sys.argv[-1]\n"
-            "command = shlex.split(prompt.split('any other action: ', 1)[1])\n"
-            "script = command[2]\n"
-            "for path, token in re.findall(r\"Path\\((.+?)\\)\\.write_text\\((.+?)\\)\", script):\n"
-            "    pathlib.Path(ast.literal_eval(path)).write_text(ast.literal_eval(token))\n"
-            "print('CODE_CYCLE_WRITE_PROBE_OK')\n"
+            "command = sys.argv[sys.argv.index('--') + 1:]\n"
+            "sys.exit(subprocess.run(command, check=False).returncode)\n"
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1262,7 +1269,7 @@ class PermissionTests(unittest.TestCase):
                     TARGET, str(root), roots,
                 )
             self.assertFalse(allowed)
-            self.assertIn("exited 7", detail)
+            self.assertIn("sandbox probe exited 7", detail)
 
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""

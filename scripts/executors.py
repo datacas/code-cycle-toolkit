@@ -33,7 +33,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import signal
 import threading
 import shutil
@@ -1217,7 +1216,7 @@ class CodexAdapter(NativeAdapter):
         self, target: Target, cwd: str, writable_dirs: tuple[str, ...], *,
         runner=subprocess.run,
     ) -> tuple[bool, str]:
-        """Prove the exact Codex publish argv can write linked-worktree metadata."""
+        """Prove the publish filesystem rules with a local sandboxed command."""
         if not writable_dirs:
             return True, "no additional Git metadata roots are required"
         tokens = [uuid.uuid4().hex for _ in writable_dirs]
@@ -1228,30 +1227,43 @@ class CodexAdapter(NativeAdapter):
             for marker, token in zip(markers, tokens)
         )
         script = f"from pathlib import Path; {writes}; print('CODE_CYCLE_WRITE_PROBE_OK')"
-        command = (
-            subprocess.list2cmdline([sys.executable, "-c", script])
-            if os.name == "nt" else shlex.join([sys.executable, "-c", script])
-        )
-        prompt = (
-            "Run exactly this Python command in a terminal, and do not perform "
-            f"any other action: {command}"
-        )
-        argv = self.argv(
-            target, prompt, cwd=cwd, writes=True, publishes=True,
-            writable_dirs=writable_dirs,
-        )
-        try:
-            result = runner(
-                argv, cwd=cwd, capture_output=True, text=True, timeout=90,
-                stdin=subprocess.DEVNULL,
-            )
-        except Exception as exc:
+        profile = "code_cycle_publish_write"
+        filesystem = self._publish_filesystem_rules(writable_dirs)
+        argv = [
+            self.binary, "sandbox", "--permission-profile", profile,
+            "--cd", cwd,
+            "-c", f'permissions.{profile}.extends=":workspace"',
+            "-c", f"permissions.{profile}.filesystem={filesystem}",
+            "--", sys.executable, "-c", script,
+        ]
+
+        def cleanup_markers() -> bool:
+            failed = False
             for marker in markers:
                 try:
                     marker.unlink(missing_ok=True)
                 except OSError:
-                    pass
-            return False, f"Codex Git metadata write probe could not run ({type(exc).__name__})"
+                    failed = True
+            return not failed
+
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix=".code-cycle-codex-probe-", dir=cwd,
+            ) as codex_home:
+                if os.name != "nt":
+                    os.chmod(codex_home, 0o700)
+                environment = os.environ.copy()
+                environment["CODEX_HOME"] = codex_home
+                result = runner(
+                    argv, cwd=cwd, capture_output=True, text=True, timeout=15,
+                    stdin=subprocess.DEVNULL, env=environment,
+                )
+        except subprocess.TimeoutExpired:
+            cleanup_markers()
+            return False, "Codex Git metadata sandbox probe timed out after 15 seconds"
+        except Exception as exc:
+            cleanup_markers()
+            return False, f"Codex Git metadata sandbox probe could not start ({type(exc).__name__})"
         verified = False
         if result.returncode == 0:
             try:
@@ -1261,19 +1273,36 @@ class CodexAdapter(NativeAdapter):
                 )
             except OSError:
                 verified = False
-        cleanup_failed = False
-        for marker in markers:
-            try:
-                marker.unlink(missing_ok=True)
-            except OSError:
-                cleanup_failed = True
-        if cleanup_failed:
+        if not cleanup_markers():
             return False, "Codex Git metadata write probe could not remove its temporary markers"
         if result.returncode != 0:
-            return False, f"Codex Git metadata write probe exited {result.returncode}"
+            detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:400]
+            suffix = f": {detail}" if detail else ""
+            return False, f"Codex Git metadata sandbox probe exited {result.returncode}{suffix}"
         if not verified:
-            return False, "Codex could not verify every linked-worktree Git metadata root"
-        return True, "Codex wrote and verified each linked-worktree Git metadata root"
+            return False, "Codex sandbox could not verify every linked-worktree Git metadata root"
+        return True, "Codex sandbox wrote and verified each linked-worktree Git metadata root"
+
+    @staticmethod
+    def _publish_filesystem_rules(writable_dirs: tuple[str, ...]) -> str:
+        """Serialize all permissions in one TOML override, keeping paths as values."""
+        entries = [(directory, "write") for directory in writable_dirs]
+        if writable_dirs:
+            common = Path(writable_dirs[0])
+            entries.extend((
+                (str(common / "hooks"), "read"),
+                (str(common / "config"), "read"),
+            ))
+        if len(writable_dirs) > 1:
+            worktree = Path(writable_dirs[-1])
+            entries.extend((
+                (str(worktree / "hooks"), "read"),
+                (str(worktree / "config.worktree"), "read"),
+            ))
+        return "{" + ",".join(
+            f"{json.dumps(path)}={json.dumps(access)}"
+            for path, access in entries
+        ) + "}"
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
@@ -1310,11 +1339,12 @@ class CodexAdapter(NativeAdapter):
         if writes:
             for directory in writable_dirs:
                 argv += ["--add-dir", directory]
-                if publishes:
-                    argv += [
-                        "-c",
-                        f'permissions.code_cycle_publish_write.filesystem.{json.dumps(directory)}="write"',
-                    ]
+            if publishes and writable_dirs:
+                argv += [
+                    "-c",
+                    "permissions.code_cycle_publish_write.filesystem="
+                    f"{self._publish_filesystem_rules(writable_dirs)}",
+                ]
         return argv + [task]
 
     def agent_output(self, stdout: str) -> str:

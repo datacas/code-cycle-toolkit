@@ -104,6 +104,28 @@ class FullCycleTests(CycleTestCase):
         self.assertIn("worktree gitdir is read-only", cy.routing_context(outcome.decision))
         self.assertEqual(roots, codex.probe_arguments[2])
 
+    def test_failed_codex_git_metadata_probe_routes_before_resolve_dispatch(self) -> None:
+        class ProbeFailingCodex(ScriptedAdapter):
+            def probe_git_metadata_write(self, target, cwd, writable_dirs):
+                self.probe_arguments = (target, cwd, writable_dirs)
+                return False, "sandbox profile rejected the config override"
+
+        codex = ProbeFailingCodex("codex")
+        claude = ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude])
+        roots = ("/repo/.git", "/repo/.git/worktrees/task-203")
+
+        outcome = recorder.stage(
+            "resolve", "resolve review findings", cwd="/repo",
+            writable_dirs=roots,
+        )
+
+        self.assertEqual([], codex.dispatched)
+        self.assertEqual(1, len(claude.dispatched))
+        self.assertEqual("claude", outcome.decision.target.executor)
+        self.assertIn("sandbox profile rejected", cy.routing_context(outcome.decision))
+        self.assertEqual(roots, codex.probe_arguments[2])
+
     def test_failed_probe_does_not_route_to_an_executor_without_publish_access(self) -> None:
         class ProbeFailingCodex(ScriptedAdapter):
             def probe_git_metadata_write(self, target, cwd, writable_dirs):
