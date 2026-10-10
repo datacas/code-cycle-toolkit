@@ -206,14 +206,16 @@ def main(argv: list[str]) -> int:
         required_readonly = [
             os.path.join(common, name)
             for name in ("config", "config.lock", "config.worktree",
-                         "config.worktree.lock", "hooks", "worktrees")
+                         "config.worktree.lock", "hooks", "worktrees",
+                         "commondir", "gitdir", "modules")
         ]
         required_denied = []
         if worktree is not None:
             workspace = flag(argv, "--cd")
             git_pointer = os.path.join(workspace, ".git") if workspace else None
             if git_pointer and git_pointer != common:
-                required_denied.append(git_pointer)
+                # Read-only, not denied: Git must still open the gitfile.
+                required_readonly.append(git_pointer)
             main_state = (
                 "HEAD", "index", "ORIG_HEAD", "FETCH_HEAD", "COMMIT_EDITMSG",
                 "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD",

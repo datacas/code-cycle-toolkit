@@ -1213,6 +1213,13 @@ class CodexAdapter(NativeAdapter):
         "BISECT_NAMES", "BISECT_EXPECTED_REV", "MERGE_AUTOSTASH",
         "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "SQUASH_MSG", "logs/HEAD",
     )
+    # Files and directories of the common directory that redirect Git to another
+    # repository or carry a second configuration: `commondir` and `gitdir` make
+    # Git read config and hooks from wherever they point, and a submodule's
+    # git directory holds its own config. Creating any of them from the sandbox
+    # would run attacker-chosen code in the next unsandboxed Git command.
+    COMMON_REDIRECT_FILES = ("commondir", "gitdir")
+    COMMON_REDIRECT_DIRS = ("modules",)
     LINKED_MAIN_WORKTREE_STATE_DIRS = (
         "sequencer", "rebase-apply", "rebase-merge", "bisect",
     )
@@ -1251,6 +1258,8 @@ class CodexAdapter(NativeAdapter):
             (common / "config.worktree", False),
             (common / "config.worktree.lock", False),
             (common / "hooks", True),
+            *((common / name, False) for name in self.COMMON_REDIRECT_FILES),
+            *((common / name, True) for name in self.COMMON_REDIRECT_DIRS),
         ]
         if linked:
             worktree = Path(writable_dirs[-1])
@@ -1357,6 +1366,20 @@ class CodexAdapter(NativeAdapter):
                 "else:",
                 f" raise SystemExit({json.dumps(f'protected Git metadata path is writable: {path.name}')})",
             ))
+        # Read-only pointers must stay readable, or Git cannot open the
+        # worktree at all; a write-only check would not notice.
+        readable = [
+            path for path, is_directory in protected_paths
+            if not is_directory and path.is_file()
+            and path.name in ("commondir", "gitdir", ".git", "config")
+        ]
+        for path in readable:
+            script_lines.extend((
+                "try:",
+                f" Path({json.dumps(str(path))}).read_bytes()",
+                "except OSError as exc:",
+                f" raise SystemExit({json.dumps(f'protected Git metadata path is not readable: {path.name}')})",
+            ))
         script = "\n".join(script_lines) + "\n"
         profile = "code_cycle_publish_write"
         filesystem = self._publish_filesystem_rules(writable_dirs, cwd=cwd)
@@ -1449,7 +1472,8 @@ class CodexAdapter(NativeAdapter):
             if cwd and Path(cwd) / ".git" != common:
                 # Keep the workspace's Git indirection immutable so a later
                 # dispatch cannot redirect these grants to another repository.
-                entries.append((str(Path(cwd) / ".git"), "deny"))
+                # It must stay readable: Git opens it to find the gitdir.
+                entries.append((str(Path(cwd) / ".git"), "read"))
             entries.extend(
                 (str(common / name), "deny")
                 for name in (
@@ -1466,6 +1490,11 @@ class CodexAdapter(NativeAdapter):
                 (str(common / "config.worktree"), "read"),
                 (str(common / "config.worktree.lock"), "read"),
             ))
+            entries.extend(
+                (str(common / name), "read")
+                for name in (*CodexAdapter.COMMON_REDIRECT_FILES,
+                             *CodexAdapter.COMMON_REDIRECT_DIRS)
+            )
         else:
             # A main worktree needs its root-level index and HEAD, but must not
             # be able to redirect another linked worktree through its gitdir.
@@ -1477,6 +1506,11 @@ class CodexAdapter(NativeAdapter):
                 (str(common / "config.worktree"), "read"),
                 (str(common / "config.worktree.lock"), "read"),
                 (str(common / "worktrees"), "read"),
+                *(
+                    (str(common / name), "read")
+                    for name in (*CodexAdapter.COMMON_REDIRECT_FILES,
+                                 *CodexAdapter.COMMON_REDIRECT_DIRS)
+                ),
             ]
         return "{" + ",".join(
             f"{json.dumps(path)}={json.dumps(access)}"

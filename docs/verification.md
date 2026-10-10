@@ -35,10 +35,16 @@ be writable. Its `worktrees`, `hooks`, `config`, `config.lock`, `config.worktree
 and `config.worktree.lock` paths, the main worktree's `HEAD`, index, pseudorefs,
 rebase, merge, bisect, sequencer and reflog state with their lockfiles, and
 the main worktree's `refs/bisect`, `refs/worktree`, and `refs/rewritten`
-directories and reflogs. The private directory's `hooks`,
+directories and reflogs. The common directory's `commondir`, `gitdir`, and
+`modules` paths are read-only as well: Git follows a `commondir` file in any Git
+directory to find configuration and hooks, so a file created there from the
+sandbox would run attacker-chosen code in the next unsandboxed Git command.
+The private directory's `hooks`,
 `config.worktree`, `config.worktree.lock`, `commondir`, and `gitdir` paths, are
-read-only. The linked workspace's `.git` gitfile is denied too, so a writing
-stage cannot redirect a later dispatch's metadata grants to another worktree.
+read-only. The linked workspace's `.git` gitfile is read-only too, so a writing
+stage cannot redirect a later dispatch's metadata grants to another worktree,
+while Git can still open it. The probe also reads the pointer files, because a
+pointer Git cannot open breaks every Git command in the worktree.
 The private pointer files must stay protected: Git follows `commondir` to find
 shared configuration and hooks. For a main worktree, the
 common directory remains writable for its index and HEAD, while its `worktrees`

@@ -1167,8 +1167,8 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
 
     def test_codex_publish_profile_reopens_only_the_supplied_git_roots(self) -> None:
-        common = "/repo/.git"
-        worktree = "/repo/.git/worktrees/task-203"
+        common = str(Path("/repo/.git"))
+        worktree = str(Path("/repo/.git/worktrees/task-203"))
         argv = ex.CodexAdapter().argv(
             TARGET, "implement", writes=True, publishes=True,
             writable_dirs=(common, worktree),
@@ -1206,6 +1206,11 @@ class PermissionTests(unittest.TestCase):
                 str(Path(common) / "config.lock"): "read",
                 str(Path(common) / "config.worktree"): "read",
                 str(Path(common) / "config.worktree.lock"): "read",
+                # Creating these in the writable common root would redirect Git
+                # (or a submodule's config) in the next unsandboxed command.
+                str(Path(common) / "commondir"): "read",
+                str(Path(common) / "gitdir"): "read",
+                str(Path(common) / "modules"): "read",
                 str(Path(worktree) / "hooks"): "read",
                 str(Path(worktree) / "config.worktree"): "read",
                 str(Path(worktree) / "config.worktree.lock"): "read",
@@ -1233,7 +1238,7 @@ class PermissionTests(unittest.TestCase):
         self.assertTrue(filesystem.startswith("{"))
 
     def test_main_worktree_profile_protects_other_linked_worktree_metadata(self) -> None:
-        common = "/repo/.git"
+        common = str(Path("/repo/.git"))
         argv = ex.CodexAdapter().argv(
             TARGET, "implement", writes=True, publishes=True,
             writable_dirs=(common,),
@@ -1260,6 +1265,8 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual("read", entries[str(Path(common) / "config.lock")])
         self.assertEqual("read", entries[str(Path(common) / "config.worktree")])
         self.assertEqual("read", entries[str(Path(common) / "config.worktree.lock")])
+        for name in ("commondir", "gitdir", "modules"):
+            self.assertEqual("read", entries[str(Path(common) / name)])
 
     def test_linked_workspace_gitfile_cannot_redirect_metadata_grants(self) -> None:
         common = "/repo/.git"
@@ -1280,10 +1287,15 @@ class PermissionTests(unittest.TestCase):
             json.loads(path): json.loads(access)
             for path, access in re.findall(r'("(?:\\.|[^"])*")=("(?:\\.|[^"])*")', filesystem)
         }
-        self.assertEqual("deny", entries[str(Path(cwd) / ".git")])
+        self.assertEqual("read", entries[str(Path(cwd) / ".git")])
 
     def test_git_metadata_probe_uses_publish_argv_and_cleans_its_markers(self) -> None:
         adapter = ex.CodexAdapter()
+
+        def escaped(path: str) -> str:
+            # The probe embeds paths as JSON strings; Windows backslashes are escaped.
+            return json.dumps(path)[1:-1]
+
         with tempfile.TemporaryDirectory() as temporary:
             common = Path(temporary) / ".git"
             worktree = common / "worktrees" / "task-203"
@@ -1322,11 +1334,11 @@ class PermissionTests(unittest.TestCase):
             self.assertNotIn("-m", seen["argv"])
             self.assertEqual(temporary, seen["kwargs"]["cwd"])
             self.assertEqual(15, seen["kwargs"]["timeout"])
-            self.assertIn(str(worktree / "commondir"), seen["argv"][-1])
-            self.assertIn(str(worktree / "gitdir"), seen["argv"][-1])
-            self.assertIn(str(common / "logs"), seen["argv"][-1])
-            self.assertIn(str(common), seen["argv"][-1])
-            self.assertIn(str(common / "worktrees"), seen["argv"][-1])
+            self.assertIn(escaped(str(worktree / "commondir")), seen["argv"][-1])
+            self.assertIn(escaped(str(worktree / "gitdir")), seen["argv"][-1])
+            self.assertIn(escaped(str(common / "logs")), seen["argv"][-1])
+            self.assertIn(escaped(str(common)), seen["argv"][-1])
+            self.assertIn(escaped(str(common / "worktrees")), seen["argv"][-1])
             for protected in (
                 common / "hooks",
                 common / "config",
@@ -1339,14 +1351,17 @@ class PermissionTests(unittest.TestCase):
                 worktree / "config.worktree",
                 worktree / "config.worktree.lock",
             ):
-                self.assertIn(str(protected), seen["argv"][-1])
+                self.assertIn(escaped(str(protected)), seen["argv"][-1])
             for name in (
                 *adapter.LINKED_MAIN_WORKTREE_STATE_FILES,
                 *(f"{name}.lock" for name in adapter.LINKED_MAIN_WORKTREE_STATE_FILES),
                 *adapter.LINKED_MAIN_WORKTREE_STATE_DIRS,
                 *adapter.LINKED_MAIN_WORKTREE_REF_DIRS,
             ):
-                self.assertIn(str(common / name), seen["argv"][-1])
+                self.assertIn(escaped(str(common / name)), seen["argv"][-1])
+            # Read-only pointers must stay readable, or Git cannot open the worktree.
+            self.assertIn(f"Path({json.dumps(str(worktree / 'commondir'))}).read_bytes()", seen["argv"][-1])
+            self.assertIn("protected Git metadata path is not readable: commondir", seen["argv"][-1])
             self.assertFalse(list(common.rglob(".code-cycle-write-probe-*")))
             self.assertFalse(list(common.rglob(".code-cycle-deny-probe-*")))
 
