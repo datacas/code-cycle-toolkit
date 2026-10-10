@@ -31,6 +31,9 @@ Guides are listed in reading order. Each one has one main topic and links to the
 | [Role workspace policy](role-workspace-policy.md) | The write permission each dispatched role has, and which executors can enforce it |
 | [Instrumentation internals](instrumentation.md) | Design reference: the comment record, paired review, routing v1, executor dispatch, telemetry schema |
 | [Codex plugin adapter contract](../skills/cc-orchestrator/references/codex-plugin-cc.md) | Discovery, handoff, and failure rules for Claude + Codex mode |
+| [ECC comparison](ecc-contrast-2026-10-10.md) | Dated comparison with the toolkit code and backlog; architectural ideas to adopt, in Spanish |
+| [Repository Knowledge & Learning](repository-knowledge-learning-design.md) | Approved design proposal: discovery, obligations, evidence, authority and cost controls; not an implemented capability |
+| [Knowledge Discovery backlog](repository-knowledge-discovery-backlog.md) | Ten implementation deliveries, dependencies and traceability to the design acceptance criteria; learning remains deferred |
 | [Plan de instrumentación y routing](Plan%20de%20instrumentaci%C3%B3n%20y%20routing.md) | Historical design plan, in Spanish. Superseded by the documents above where they differ. |
 
 ## Project
