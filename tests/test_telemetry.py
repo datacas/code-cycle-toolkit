@@ -165,6 +165,30 @@ class StorageTests(TelemetryTestCase):
 
         self.assertEqual(tm.SCHEMA_VERSION, self.store.rows()[0]["schema_version"])
 
+    def test_schema_17_validates_resolve_escalation_and_reads_legacy_defaults(self) -> None:
+        self.store.record_stage(
+            "repo", "resolve", "resolve", record_kind="dispatch",
+            escalated=True, escalation_finding_ids=["REV-001"],
+            escalation_acceptance="accepted",
+        )
+        payload = self.store.rows()[0]["payload"]
+        self.assertEqual(["REV-001"], payload["escalation_finding_ids"])
+        self.assertEqual("accepted", payload["escalation_acceptance"])
+
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage(
+                "repo", "bad", "resolve", escalation_finding_ids=["REV-001", "REV-001"])
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage(
+                "repo", "bad", "resolve", escalation_finding_ids=["private prose"])
+
+        with unittest.mock.patch.object(tm, "SCHEMA_VERSION", 16):
+            self.store.record_stage("repo", "legacy", "resolve", record_kind="dispatch")
+        legacy = self.store.rows()[1]
+        self.assertEqual(16, legacy["schema_version"])
+        self.assertFalse(legacy["payload"]["escalated"])
+        self.assertEqual([], legacy["payload"]["escalation_finding_ids"])
+
     def test_it_reopens_without_losing_rows(self) -> None:
         self.store.record_stage("repo", "t1", "implement")
 

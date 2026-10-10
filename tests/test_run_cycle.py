@@ -297,6 +297,32 @@ class RoutingStrategyTests(RunCycleTestCase):
         self.assertEqual(router.RoutingStrategy.MEASURED,
                          router.load_routing_strategy(config))
 
+    def test_resolve_effort_accepts_the_supported_values_and_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            for effort in ("low", "medium", "high", "max"):
+                with self.subTest(effort=effort):
+                    path.write_text(
+                        f"code_cycle:\n  resolve:\n    effort: {effort}\n", encoding="utf-8")
+                    config = rc.load_config(path)
+                    self.assertEqual(effort, config["code_cycle"]["resolve"]["effort"])
+            path.write_text("code_cycle: {}\n", encoding="utf-8")
+            config = rc.load_config(path)
+        self.assertNotIn("resolve", config["code_cycle"])
+
+    def test_resolve_effort_rejects_unknown_values_and_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            for body, expected in (
+                ("code_cycle:\n  resolve:\n    effort: extreme\n", "resolve.effort"),
+                ("code_cycle:\n  resolve:\n    level: high\n", "unknown key under code_cycle.resolve"),
+            ):
+                with self.subTest(body=body):
+                    path.write_text(body, encoding="utf-8")
+                    with self.assertRaises(rc.CycleDriverError) as raised:
+                        rc.load_config(path)
+                    self.assertIn(expected, str(raised.exception))
+
     def test_run_records_the_routing_strategy(self) -> None:
         self.run_cycle(
             Talker("codex", block("IMPLEMENTED")), Talker("claude"),
@@ -646,6 +672,77 @@ class MalformedResultTests(RunCycleTestCase):
 
         self.assertEqual("APPROVED", report.verdict)
         self.assertEqual(rc.APPROVED_END, report.status)
+
+
+class ResolveEffortPolicyTests(RunCycleTestCase):
+    def test_first_survival_escalates_at_max_on_the_previous_resolve_target(self) -> None:
+        finding = {"id": "REV-001", "status": "open", "severity": "high",
+                   "blocks_approval": True}
+        bodies = {
+            "implement": [block("IMPLEMENTED", change_request_id="4")],
+            "resolve": [
+                block("RESOLVED", finding_outcomes=[{"id": "REV-001", "status": "resolved"}]),
+                block("RESOLVED", finding_outcomes=[{"id": "REV-001", "status": "resolved"}]),
+            ],
+        }
+
+        class Scripted(Talker):
+            def __init__(self, name, script):
+                super().__init__(name)
+                self.script = {key: list(value) for key, value in script.items()}
+                self.targets = []
+
+            def dispatch(self, target, task, **kw):
+                skill = next(name for name in self.script if f"cc-{name}" in task)
+                self.targets.append((skill, target))
+                spoken = self.script[skill].pop(0)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                    model_resolved=target.model, artifacts={"stdout": spoken},
+                    agent_output=spoken,
+                )
+
+        coder = Scripted("codex", bodies)
+        reviewer = Scripted("claude", {
+            "initial-review": [block("CHANGES_REQUESTED", findings=[finding],
+                                      head_sha="a" * 40)],
+            "rereview": [
+                block("CHANGES_REQUESTED", verified_findings=[finding],
+                      head_sha="b" * 40),
+                block("APPROVED", verified_findings=[{**finding, "status": "resolved"}],
+                      head_sha="c" * 40),
+            ],
+        })
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna max",
+                "fallback": "claude:anthropic/claude-sonnet-5 high",
+            },
+            "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"},
+        }}})
+
+        report = rc.run_cycle(
+            "owner/api", "API-7", router.TaskSignals(), self.store,
+            profiles=profiles, registry=ex.Registry([coder, reviewer]),
+            availability={"codex": ex.Availability.READY,
+                          "claude": ex.Availability.READY},
+            issue_review="off", max_iterations=3,
+        )
+
+        resolve_targets = [target for skill, target in coder.targets if skill == "resolve"]
+        self.assertEqual(["high", "max"], [target.effort for target in resolve_targets])
+        self.assertEqual((resolve_targets[0].executor, resolve_targets[0].model),
+                         (resolve_targets[1].executor, resolve_targets[1].model))
+        self.assertTrue(report.approved)
+        resolve_rows = [row for row in self.rows()
+                        if row["role"] == "resolve"
+                        and row["payload"]["record_kind"] == "dispatch"]
+        self.assertEqual({"escalated": True,
+                          "escalation_finding_ids": ["REV-001"],
+                          "escalation_acceptance": "accepted"},
+                         {key: resolve_rows[-1]["payload"][key]
+                          for key in ("escalated", "escalation_finding_ids",
+                                      "escalation_acceptance")})
 
 
 class FunctionalStopTests(RunCycleTestCase):

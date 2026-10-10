@@ -89,7 +89,7 @@ class StageRecoveryTests(RunCycleTestCase):
         attempt = self.receipt['attempt_id']
         self.assertEqual("failed", self.store.attempt(attempt)['outcome'])
         row = self.store.recoveries(attempt)[0]
-        self.assertEqual(16, row['schema_version'])
+        self.assertEqual(17, row['schema_version'])
         self.assertEqual(self.head, row['head_sha'])
         with self.store._connect() as connection:
             for sql in ("DELETE FROM stage_recoveries", "UPDATE stage_recoveries SET comment_id='9'"):

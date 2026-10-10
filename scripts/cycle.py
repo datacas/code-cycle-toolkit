@@ -257,6 +257,7 @@ class CycleRecorder:
         on_progress: Callable[..., None] | None = None,
         skills_by_role: dict[str, str] | None = None,
         change_request_id: str | None = None,
+        resolve_effort: str | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -296,6 +297,9 @@ class CycleRecorder:
         self.probes = probes
         self.skills_by_role = dict(skills_by_role or {})
         self.change_request_id = change_request_id
+        self.resolve_effort = resolve_effort or "high"
+        if self.resolve_effort not in {"low", "medium", "high", "max"}:
+            raise CycleError("resolve effort must be one of low, medium, high, max")
         # Already resolved by whoever loaded the repository's configuration.
         # The recorder does not go looking for a file: a component that reads
         # configuration on its own is one that can disagree with the caller
@@ -355,6 +359,10 @@ class CycleRecorder:
         self.on_workspace: Callable[..., None] | None = None
 
     def stage(self, role: str, task: str, *, escalated: bool = False,
+              effort_override: str | None = None, target_override: Target | None = None,
+              target_override_used_fallback: bool = False,
+              resolve_escalated: bool = False,
+              escalation_finding_ids: tuple[str, ...] = (),
               **dispatch_kwargs) -> StageOutcome:
         """Route, dispatch and record. One call, no half-done state.
 
@@ -409,6 +417,17 @@ class CycleRecorder:
                 f"{role!r} stages must use workspace_policy={workspace_policy.value!r}, "
                 f"not {requested_policy!r}")
         dispatch_kwargs["workspace_policy"] = workspace_policy
+        if role == "resolve":
+            effort_override = effort_override or self.resolve_effort
+            if effort_override not in {"low", "medium", "high", "max"}:
+                raise CycleError("resolve effort must be one of low, medium, high, max")
+            stage_signals = {
+                "escalated": bool(resolve_escalated),
+                "escalation_finding_ids": list(escalation_finding_ids),
+                "escalation_acceptance": "unknown" if resolve_escalated else "not_applicable",
+            }
+        else:
+            stage_signals = {}
         self.stage_seq += 1
         self._latest_seq[role] = self.stage_seq
 
@@ -425,8 +444,7 @@ class CycleRecorder:
         fallback_decision = None
         parent_failure = {}
         for attempt in range(2):
-            signals = self._pre_routing(role, change)
-            signals.update(parent_failure)
+            signals = {**self._pre_routing(role, change), **stage_signals, **parent_failure}
             if escalated:
                 signals["escalated"] = True
             eligible = self.registry.compatible_executors(
@@ -463,8 +481,65 @@ class CycleRecorder:
                 )
 
             decision = select(eligible)
+            if role == "resolve" and not decision.blocked and decision.target is not None:
+                if target_override is not None:
+                    if (target_override.executor not in eligible
+                            or not self.availability.get(
+                                target_override.executor, Availability.UNKNOWN).dispatchable):
+                        decision = replace(
+                            decision, target=None, blocked=True,
+                            reasons=decision.reasons +
+                            ("the previous resolve target is no longer available",),
+                        )
+                    else:
+                        decision = replace(
+                            decision,
+                            target=replace(target_override, effort="max"),
+                            used_fallback=target_override_used_fallback,
+                            reasons=decision.reasons +
+                            ("a finding survived a claimed fix; retry at max on the previous target",),
+                        )
+                elif not decision.used_fallback:
+                    decision = replace(
+                        decision, target=replace(decision.target, effort=effort_override),
+                        reasons=decision.reasons +
+                        (f"resolve primary effort pinned to {effort_override}",),
+                    )
             if fallback_decision is not None:
                 decision = fallback_decision
+
+            # The Codex catalog is an optional pre-dispatch capability check.
+            # Missing catalogs and unlisted models remain unknown and dispatch.
+            if (role == "resolve" and not decision.blocked
+                    and decision.target is not None and decision.target.executor == "codex"
+                    and decision.target.effort == "max"):
+                try:
+                    from profile_config import codex_models
+                    catalog = codex_models()
+                except Exception:
+                    catalog = None
+                supported = catalog.get(decision.target.model) if catalog else None
+                if supported is not None and decision.target.effort not in supported:
+                    if resolve_escalated:
+                        stage_signals["escalation_acceptance"] = "unsupported"
+                        signals["escalation_acceptance"] = "unsupported"
+                    fallback = stage_fallback(decision, self.profiles)
+                    if (fallback is None or fallback.executor not in eligible
+                            or not self.availability.get(
+                                fallback.executor, Availability.UNKNOWN).dispatchable):
+                        decision = replace(
+                            decision, target=None, blocked=True,
+                            reasons=decision.reasons +
+                            (f"Codex does not support effort {decision.target.effort}; "
+                             "the configured fallback is unavailable",),
+                        )
+                    else:
+                        fallback_decision = replace(
+                            decision, target=fallback, used_fallback=True,
+                            reasons=decision.reasons +
+                            ("Codex model cache confirms the requested effort is unsupported; using the configured fallback",),
+                        )
+                        decision = fallback_decision
             if (publishes and writes
                     and not decision.blocked and decision.target.executor == "codex"
                     and dispatch_kwargs.get("writable_dirs")):
@@ -612,7 +687,46 @@ class CycleRecorder:
                 raise
             if tool_activity:
                 result = replace(result, start_state="started")
+            if role == "resolve" and resolve_escalated:
+                if (result.outcome is DispatchOutcome.SUCCEEDED
+                        and result.requested.effort == "max"
+                        and signals.get("escalation_acceptance") == "unknown"):
+                    stage_signals["escalation_acceptance"] = "accepted"
+                    signals["escalation_acceptance"] = "accepted"
+                elif (result.failure_code != "unsupported_effort"
+                      and result.outcome is not DispatchOutcome.SUCCEEDED):
+                    stage_signals["escalation_acceptance"] = "unknown"
+                    signals["escalation_acceptance"] = "unknown"
             retry = False
+            if result.failure_code == "unsupported_effort" and role == "resolve":
+                if resolve_escalated:
+                    stage_signals["escalation_acceptance"] = "rejected"
+                    signals["escalation_acceptance"] = "rejected"
+                if attempt == 0:
+                    fallback = stage_fallback(decision, self.profiles)
+                    fallback_available = (
+                        fallback is not None and fallback != decision.target
+                        and fallback.executor in eligible
+                        and self.availability.get(
+                            fallback.executor, Availability.UNKNOWN).dispatchable
+                    )
+                    if fallback_available:
+                        retry = True
+                        fallback_decision = replace(
+                            decision, target=fallback, used_fallback=True,
+                            reasons=decision.reasons +
+                            ("the CLI rejected the pinned resolve effort; using the configured fallback",),
+                        )
+                        parent_failure = {
+                            "reroute_error_code": "unsupported_effort",
+                            "reroute_start_state": result.start_state,
+                            "reroute_action": "reroute", "reroute_reason": "unsupported_effort",
+                        }
+                    if not retry:
+                        result = replace(
+                            result,
+                            detail=f"{result.detail}; no available configured fallback for unsupported effort",
+                        )
             if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)

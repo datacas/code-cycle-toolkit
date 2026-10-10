@@ -200,6 +200,16 @@ rewriting existing attempts or their update logs; the recovered attempt keeps
 its failed outcome. The later verifier has its own normal dispatch and verdict
 records, so recovery never masquerades as a successful stage verdict.
 
+### Resolve effort escalation (schema 17)
+
+`escalated` applies to any role whose runtime policy escalates, including
+`resolve`. Resolve rows also carry `escalation_finding_ids`, a unique list of at
+most 16 validated `REV-xxx` identifiers, and `escalation_acceptance` with one
+of `accepted`, `rejected`, `unsupported`, `unknown`, or `not_applicable`. The
+existing dispatch `effort` remains the effort requested for that attempt; a
+fallback after a rejection is a separate dispatch row with its configured
+effort. Older rows read as `escalated=false` and an empty finding-ID list.
+
 ### Work-item outcomes (schema 14)
 
 Work-item disposition events are stored in a separate append-only table. Each

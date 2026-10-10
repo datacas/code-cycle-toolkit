@@ -641,10 +641,15 @@ at zero, which can stop later than a whole run would, never earlier.
 - **Second survival** of the same ID: stop with `HUMAN_INTERVENTION` before
   dispatching another `cc-resolve-comments`, naming the IDs in the stop reason.
 
-The ladder never changes a model, profile, or provider, and never changes a
-disposition: a survival is status history. It complements the no-progress
-guard, which a resolver that pushes a commit without fixing the finding never
-trips, because the head changes.
+The ladder never changes a disposition: a survival is status history. Resolve
+effort belongs to the runtime: profile selection stays `cheap_coder` or
+`deep_coder`, the primary effort is `code_cycle.resolve.effort` or `high`, and
+fallbacks keep their configured effort. After a first survival that remains
+open, the runtime escalates the next resolve to `max` on the target the
+previous resolve actually used. A second survival stops before another resolve;
+a resumed run has no in-memory survival history, which #179 covers. This policy
+complements the no-progress guard, which a resolver that pushes a commit
+without fixing the finding never trips, because the head changes.
 
 ## Stage statuses
 

@@ -76,7 +76,9 @@ from pathlib import Path
 #: attempts and usage remain unknown rather than being filled with zero.
 #: 15: start evidence and classified attempt errors; migrate only the projection.
 #: 16: append-only recovery references; attempts retain their failed outcome.
-SCHEMA_VERSION = 16
+#: 17: resolve escalation is role-agnostic and carries bounded finding IDs and
+#: acceptance state. Old rows read with no escalation and an empty ID list.
+SCHEMA_VERSION = 17
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -218,9 +220,9 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "retry_exhausted", "calibration", "exit_unproven", "human_action",
         "no_fallback", "fallback_unavailable", "not_started", "no_effects",
         "evidence_unavailable", "dirty_workspace", "workspace_changed",
-        "remote_changed", "publication_changed",
+        "remote_changed", "publication_changed", "unsupported_effort",
     })),
-    "reroute_error_code": ("token", frozenset({"capacity", "transport", "timeout", "quota"})),
+    "reroute_error_code": ("token", frozenset({"capacity", "transport", "timeout", "quota", "unsupported_effort"})),
     "reroute_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "routing_reason_count": ("count", None),
     "routing_rate_observations": ("count", None),
@@ -323,8 +325,12 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "stop_reason": ("token", STOP_REASONS),
     # the cycle continued an interrupted implementation (schema 12)
     "continued": ("flag", None),
-    # the optional issue review (schema 11)
+    # role-agnostic runtime escalation; issue review first used this flag in 11
     "escalated": ("flag", None),
+    "escalation_finding_ids": ("rev_id_list", None),
+    "escalation_acceptance": ("token", frozenset({
+        "accepted", "rejected", "unsupported", "unknown", "not_applicable",
+    })),
     "issue_review": ("token", ISSUE_REVIEW_DECISIONS),
     "readiness_result_valid": ("flag", None),
     "readiness_confidence": ("token", READINESS_CONFIDENCES),
@@ -357,7 +363,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "attempt_error_code": ("token", frozenset({
         "capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
         "unavailable", "contract_violation", "interrupted", "precondition",
-        "executor_error", "no_error_report",
+        "executor_error", "no_error_report", "unsupported_effort",
     })),
     "attempt_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "external_dispatch_id": ("identifier", None),
@@ -429,7 +435,8 @@ PRE_ROUTING_SIGNALS: dict[str, frozenset[str]] = {
         "prior_findings_critical", "prior_findings_high",
         "prior_findings_medium", "prior_findings_low",
         "verification_available", "previous_failed_attempts", "resolution_round",
-        "repeated_findings", "escalated",
+        "repeated_findings", "escalated", "escalation_finding_ids",
+        "escalation_acceptance",
     }),
     "estimated": frozenset({"changed_lines_estimate", "test_count_estimate"}),
 }
@@ -894,6 +901,15 @@ def _checked(key: str, value, *, model_names: frozenset | None = None):
     kind, vocabulary = FIELD_SPECS[key]
     if value is None:
         return None
+    if kind == "rev_id_list":
+        if (not isinstance(value, list) or len(value) > 16
+                or any(not isinstance(item, str)
+                       or re.fullmatch(r"REV-[0-9]{3,}", item) is None
+                       for item in value)
+                or len(value) != len(set(value))):
+            raise TelemetryError(
+                "escalation_finding_ids must be a unique list of at most 16 REV IDs")
+        return list(value)
     if isinstance(value, (dict, list, tuple, set, bytes)):
         raise TelemetryError(
             f"{key!r} may not hold a {type(value).__name__}: a container moves "
@@ -1900,6 +1916,12 @@ class Telemetry:
             for row in connection.execute(query, params):
                 record = dict(row)
                 record["payload"] = json.loads(record["payload"] or "{}")
+                if (record["role"] == "resolve"
+                        and record["payload"].get("record_kind", "dispatch") == "dispatch"):
+                    record["payload"].setdefault("escalated", False)
+                    record["payload"].setdefault("escalation_finding_ids", [])
+                    record["payload"].setdefault(
+                        "escalation_acceptance", "not_applicable")
                 out.append(record)
             return out
 

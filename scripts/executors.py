@@ -296,12 +296,18 @@ def _error_class(code: str | None, message: str) -> str:
     code = str(code) if code is not None else None
     mapping = {"server_overloaded": "capacity", "usage_limit_exceeded": "quota",
                "unauthorized": "auth", "authentication_error": "auth",
-               "stream_disconnected": "transport", "connection_failed": "transport"}
+               "stream_disconnected": "transport", "connection_failed": "transport",
+               "unsupported_effort": "unsupported_effort"}
     if code in mapping:
         return mapping[code]
     if code not in {None, "other"}:
         return "executor_error"
     lowered = message.lower()
+    if (re.search(r"\bunsupported\s+(?:reasoning\s+)?effort\b", lowered)
+            or re.search(r"\b(?:reasoning\s+)?effort\b.{0,50}\b(?:unsupported|not supported|invalid)\b", lowered)
+            or re.search(r"--effort\b.{0,50}\b(?:unsupported|not supported|invalid|unknown)\b", lowered)
+            or re.search(r"\binvalid\s+(?:choice|value)\b.{0,50}\b(?:effort|low|medium|high|max)\b", lowered)):
+        return "unsupported_effort"
     for token, markers in (
         ("auth", ("401", "unauthorized", "invalid api key", "missing credentials")),
         ("transport", ("connection refused", "connection reset", "stream disconnect", "network error")),

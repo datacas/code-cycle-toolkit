@@ -104,6 +104,8 @@ One escalation is the runtime's, not a selector's: an issue review whose `READY`
 
 There are no finer rules. The calibration campaigns so far produced one usable finding: an inexpensive implementer never passed review on the first attempt across five real work items. That isn't evidence enough for more rules. A selector can only return a name from the role's candidates. Availability, workspace policy, fallback, and dispatch stay outside it.
 
+Resolve keeps the `cheap_coder` / `deep_coder` profile choice, then the runtime pins its primary target to `code_cycle.resolve.effort`, defaulting to `high`. A configured fallback keeps its declared effort. After a finding survives one claimed fix and remains open, the next resolve uses `max` on the target the previous resolve actually used. If the local Codex model catalog confirms the requested effort is unsupported, the runtime uses the fallback without attempting that effort; an unlisted model or missing catalog is unknown and is dispatched. A CLI rejection is classified as `unsupported_effort`; the fallback keeps its own effort. The escalation does not change profile selection, and a second survival still stops before another resolution.
+
 ## Availability and fallback
 
 - **Probe once per run.** An executor that is only *installed* isn't dispatchable. Codex and Claude can only prove `authenticated`: remaining quota and session validity are invisible until something is spent. Production uses the `attempt` readiness policy to dispatch from `authenticated`, and records that it did (`dispatched_from`).
