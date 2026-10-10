@@ -2070,8 +2070,7 @@ def run_cycle(
                              and history[-1].kind == REVIEW_RUN else {})
             escalation_ids = tuple(sorted(
                 finding for finding, count in survivals.items()
-                if (resolve_effort is None and count >= 1
-                    and open_findings.get(finding) == "open")
+                if (count >= 1 and open_findings.get(finding) == "open")
             )[:16])
             _, stopped = advance(
                 "resolve", instruction, change_request_id=change_request_id,

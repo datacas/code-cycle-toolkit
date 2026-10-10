@@ -675,7 +675,12 @@ class MalformedResultTests(RunCycleTestCase):
 
 
 class ResolveEffortPolicyTests(RunCycleTestCase):
-    def test_first_survival_escalates_at_max_on_the_previous_resolve_target(self) -> None:
+    def test_an_explicit_resolve_effort_still_escalates_after_a_survival(self) -> None:
+        self.test_first_survival_escalates_at_max_on_the_previous_resolve_target(
+            resolve_effort="high")
+
+    def test_first_survival_escalates_at_max_on_the_previous_resolve_target(
+            self, resolve_effort=None) -> None:
         finding = {"id": "REV-001", "status": "open", "severity": "high",
                    "blocks_approval": True}
         bodies = {
@@ -726,7 +731,7 @@ class ResolveEffortPolicyTests(RunCycleTestCase):
             profiles=profiles, registry=ex.Registry([coder, reviewer]),
             availability={"codex": ex.Availability.READY,
                           "claude": ex.Availability.READY},
-            issue_review="off", max_iterations=3,
+            issue_review="off", max_iterations=3, resolve_effort=resolve_effort,
         )
 
         resolve_targets = [target for skill, target in coder.targets if skill == "resolve"]

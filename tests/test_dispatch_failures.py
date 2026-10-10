@@ -65,6 +65,14 @@ class ExecutorFailureTests(unittest.TestCase):
             ("unsupported_effort", "The requested option is not accepted", "unsupported_effort"),
             ("other", "The request failed for an unknown reason", "executor_error"),
             ("future_code", "Unsupported effort: max", "executor_error"),
+            (None, "Effort max is not supported", "unsupported_effort"),
+            (None, "error: --effort high: unknown", "unsupported_effort"),
+            (None, "invalid value for reasoning effort", "unsupported_effort"),
+            (None, "effort level high -- 401 unauthorized: invalid api key", "auth"),
+            (None, "unauthorized: effort max not supported on this plan", "auth"),
+            (None, "network error: connection reset while resolving reasoning effort, "
+                   "not supported region", "transport"),
+            (None, "Error: invalid value for --model (effort high)", "executor_error"),
         )
         for raw, message, expected in cases:
             with self.subTest(raw=raw, message=message):

@@ -694,9 +694,26 @@ class CycleRecorder:
                     stage_signals["escalation_acceptance"] = "accepted"
                     signals["escalation_acceptance"] = "accepted"
                 elif (result.failure_code != "unsupported_effort"
-                      and result.outcome is not DispatchOutcome.SUCCEEDED):
+                      and result.outcome is not DispatchOutcome.SUCCEEDED
+                      and result.requested.effort == "max" and not decision.used_fallback):
+                    # Only the escalated dispatch can leave the acceptance
+                    # unknown; a failed fallback keeps the signal already set.
                     stage_signals["escalation_acceptance"] = "unknown"
                     signals["escalation_acceptance"] = "unknown"
+
+            def reroute_gate():
+                # The #205 invariant: a stage that may have started is rerouted
+                # only once its workspace effects are reconciled.
+                if result.asynchronous or not result.process_exited:
+                    return "stop", "exit_unproven"
+                if result.needs_human_action:
+                    return "stop", "human_action"
+                if result.start_state == "not_started":
+                    return "reroute", "not_started"
+                if not writes and not publishes:
+                    return "reroute", "no_effects"
+                return reconcile(before, snapshot())
+
             retry = False
             if result.failure_code == "unsupported_effort" and role == "resolve":
                 if resolve_escalated:
@@ -710,8 +727,21 @@ class CycleRecorder:
                         and self.availability.get(
                             fallback.executor, Availability.UNKNOWN).dispatchable
                     )
+                    stopped_reason = "no available configured fallback"
                     if fallback_available:
-                        retry = True
+                        if self.mode is RoutingMode.CALIBRATION:
+                            action, reason = "stop", "calibration"
+                        elif attempt_id is None:
+                            action, reason = "stop", "exit_unproven"
+                        else:
+                            action, reason = reroute_gate()
+                        signals.update(reroute_action=action, reroute_reason=reason,
+                                       process_exited=result.process_exited,
+                                       reroute_error_code="unsupported_effort",
+                                       reroute_start_state=result.start_state)
+                        retry = action == "reroute"
+                        stopped_reason = f"reroute stopped: {reason}"
+                    if retry:
                         fallback_decision = replace(
                             decision, target=fallback, used_fallback=True,
                             reasons=decision.reasons +
@@ -720,12 +750,12 @@ class CycleRecorder:
                         parent_failure = {
                             "reroute_error_code": "unsupported_effort",
                             "reroute_start_state": result.start_state,
-                            "reroute_action": "reroute", "reroute_reason": "unsupported_effort",
+                            "reroute_action": "reroute", "reroute_reason": reason,
                         }
-                    if not retry:
+                    else:
                         result = replace(
                             result,
-                            detail=f"{result.detail}; no available configured fallback for unsupported effort",
+                            detail=f"{result.detail}; {stopped_reason} for unsupported effort",
                         )
             if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
                 action, reason = "stop", "retry_exhausted"
@@ -733,16 +763,7 @@ class CycleRecorder:
                 if self.mode is RoutingMode.CALIBRATION:
                     reason = "calibration"
                 elif attempt == 0 and attempt_id is not None:
-                    if result.asynchronous or not result.process_exited:
-                        reason = "exit_unproven"
-                    elif result.needs_human_action:
-                        reason = "human_action"
-                    elif result.start_state == "not_started":
-                        action, reason = "reroute", "not_started"
-                    elif not writes and not publishes:
-                        action, reason = "reroute", "no_effects"
-                    else:
-                        action, reason = reconcile(before, snapshot())
+                    action, reason = reroute_gate()
                     if action == "reroute":
                         if fallback is None or fallback == decision.target:
                             action, reason = "stop", "no_fallback"
