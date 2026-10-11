@@ -110,11 +110,39 @@ Resolve keeps the `cheap_coder` / `deep_coder` profile choice. With `code_cycle.
 
 - **Probe once per run.** An executor that is only *installed* isn't dispatchable. Codex and Claude can only prove `authenticated`: remaining quota and session validity are invisible until something is spent. Production uses the `attempt` readiness policy to dispatch from `authenticated`, and records that it did (`dispatched_from`).
 - **Fallback (production only).** If the primary is unavailable or not eligible for the role's workspace policy, the profile's `fallback` is used, and the decision says so.
+- **Sandbox recovery.** An explicit, complete agent-reported restriction can use the same reroute machinery. See [Recovering sandbox restrictions](#recovering-sandbox-restrictions) for its additional conditions.
 - **One reroute per stage.** A `capacity`, `transport`, `timeout`, or `quota` failure can use that profile's distinct, available fallback once, sharing the quota retry budget. The previous process group must have exited; asynchronous launches and missing exit proof stop. A `not_started` attempt can reroute directly. A `started` or `unknown` attempt that could write or publish first reconciles the workspace, local HEAD, remote refs, PR state, comments and reviews, and issue comments. Dirty or changed state, a publication, or unavailable evidence stops with a closed reason token. A review's read-only workspace does not exempt its publication boundary. Other error classes and human friction never reroute. Both attempts and the parent's `error_code` and `start_state` are recorded. The fallback applies only to this stage; later stages keep the original executor availability. Recovery from published evidence remains a separate operation.
 
 Native POSIX dispatches run in their own process group and stop remaining children before returning exit proof, including on timeout. Windows currently lacks group exit proof and therefore stops rather than automatically rerouting. Reconciliation reads GitHub through `gh`; unsupported publication boundaries fail closed. Snapshots are transient and never enter telemetry.
+
 - **Model mismatch.** If the executor reports running a different model than requested, that is a `contract_violation`, and the cycle doesn't advance on it.
 - **Calibration never falls back.** Substituting an arm would answer a different question with the same sample, so it blocks and waits instead.
+
+### Recovering sandbox restrictions
+
+Every runtime stage receives environment recovery guidance. The agent first
+diagnoses the failing command and tries recovery through already-authorized
+capabilities, including approved command escalation when the host offers it.
+It then reruns the original check. A sandbox connection failure is not proof
+that the host service is unavailable, and verification is never waived.
+
+If the executor's restriction persists, the stage can return `BLOCKED` with
+an `environment_blocker`: `kind` (`sandbox_local_access`,
+`sandbox_network_access`, or `sandbox_filesystem_access`), the failing
+`command`, observed `error`, a nonempty `attempted` list, and
+`requires_human: false`. The delegated verifier's diagnosis is forwarded into
+the stage result. Ordinary blockers, missing credentials, approval denials,
+and reports containing human questions do not qualify.
+
+The runtime records the attempt as `environment_restricted` and can use the
+profile's configured fallback on a different executor. It passes the diagnosis
+to that executor and retains the same workspace and publication contracts.
+This shares the existing one-reroute budget and requires process exit proof
+and unchanged, clean effect snapshots for stages that can write or publish.
+It never rewrites project configuration, grants additional permissions,
+disables the sandbox, substitutes an unconfigured model, or repeats the same
+sandbox with a different model. Missing fallback, unknown or changed effects,
+calibration mode, or a second failure still stops with a recorded reason.
 
 ## Workspace policy
 

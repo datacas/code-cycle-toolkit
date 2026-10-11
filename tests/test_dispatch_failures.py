@@ -344,7 +344,7 @@ class StoreFailureTests(unittest.TestCase):
     def test_every_error_token_is_accepted_and_old_tokens_rejected(self):
         expected = {"capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
                     "unavailable", "contract_violation", "interrupted", "precondition",
-                    "executor_error", "no_error_report", "unsupported_effort"}
+                    "executor_error", "no_error_report", "unsupported_effort", "environment_restricted"}
         self.assertEqual(expected, tm.FIELD_SPECS["attempt_error_code"][1])
         for code in expected:
             attempt = self.attempt()

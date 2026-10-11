@@ -103,9 +103,53 @@ cites as evidence, such as a test failure, a check state, or a command result.
 - When a check fails, report the exact failure and its likely relation to the
   changes.
 
+## Recover environment access before stopping
+
+A failed connection inside an agent sandbox does not establish that the host
+service is down. Diagnose the command, endpoint, and active execution policy
+before treating it as a blocker. A managed network proxy may isolate host
+loopback; allowing a hostname does not route a database client's raw TCP through
+an HTTP proxy. A Docker socket may be visible but unusable because of sandbox
+restrictions, even when the host user has permission.
+
+Use the project's documented setup and existing configuration to recover within
+the task's authorization. When the host offers approved command escalation or
+an execution capability with access to the required service, use it for the
+original check. Recover a transient connection once, or start the documented
+development services when already authorized, then rerun the check. A denied
+approval is a blocker; never work around it through another tool. Do not disable
+the sandbox, invent credentials, change ports silently, kill unknown processes,
+or apply unapproved migrations. Do not repeat an unchanged failing probe.
+
+When recovery succeeds, continue verification and report the executed evidence.
+When an executor restriction persists in an orchestrated stage, return the
+diagnosis to the caller before asking the user. Include `environment_blocker`
+in `VERIFICATION_RESULT`, and have the caller forward it unchanged into its
+`ORCHESTRATION_RESULT` with status `BLOCKED`:
+
+```json
+{
+  "kind": "sandbox_local_access",
+  "command": "the command that failed",
+  "error": "the observed error",
+  "attempted": ["the authorized recovery actually tried"],
+  "requires_human": false
+}
+```
+
+The other restriction kinds are `sandbox_network_access` and
+`sandbox_filesystem_access`. Use them only for observed executor restrictions,
+not a genuinely unavailable service or missing configuration. Connection
+refused alone does not prove sandbox isolation. Free-text values follow the
+selected output language. The runtime may use a configured alternative executor
+after proving process exit and reconciling effects; this report is not a
+permission grant and never marks the check passed. A caller without automatic
+recovery reports the blocker normally.
+
 ## Stop conditions
 
-Stop and ask the user before continuing when:
+After attempting authorized environment recovery, stop and ask the user before
+continuing when:
 
 - the application needs runtime configuration that is not present, such as an
   environment file that exists only as a template;

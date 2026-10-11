@@ -481,8 +481,11 @@ Before invoking `cc-verify`, preflight required configuration, database and
 services, known port ownership, migration state, and command permissions
 without changing state.
 
-- If preflight fails, do not invoke `cc-verify` and record the concrete
-  reason.
+- If preflight fails, diagnose and attempt the already-authorized environment
+  recovery described by `cc-verify` before declaring the environment unavailable.
+  If access remains restricted, forward its `environment_blocker` unchanged in
+  the stage's `ORCHESTRATION_RESULT` with status `BLOCKED`, so an orchestrated
+  run can recover. Do not record the fix as verified.
 - If verification reaches a stop condition, stop that subflow and obey its
   instructions.
 - Do not call a fix verified from code inspection alone.

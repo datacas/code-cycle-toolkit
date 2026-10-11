@@ -46,6 +46,9 @@ from executors import (
     dispatch,
 )
 from harness import build_harness_snapshot
+from environment_recovery import (
+    ENVIRONMENT_RECOVERY_GUIDANCE, recovery_context, sandbox_blocker,
+)
 from reroute import effect_snapshot, reconcile
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
@@ -404,7 +407,8 @@ class CycleRecorder:
                 f"{publication_permissions!r}, not {requested_publication_permissions!r}"
             )
         dispatch_kwargs["publication_permissions"] = publication_permissions
-        task = f"{task}\n\n{publication_policy(role, publication_permissions)}"
+        task = (f"{task}\n\n{publication_policy(role, publication_permissions)}"
+                f"\n\n{ENVIRONMENT_RECOVERY_GUIDANCE}")
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)
@@ -443,6 +447,7 @@ class CycleRecorder:
         parent_executor = None
         fallback_decision = None
         parent_failure = {}
+        environment_context = ""
         for attempt in range(2):
             signals = {**self._pre_routing(role, change), **stage_signals, **parent_failure}
             if escalated:
@@ -647,7 +652,7 @@ class CycleRecorder:
                     self.on_progress(**activity)
 
             try:
-                result = dispatch(decision, f"{task}\n\n{routing_context(decision)}",
+                result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{routing_context(decision)}",
                                   self.registry,
                                   policy=self.policy, probes=self.probes,
                                   on_progress=observe_progress,
@@ -757,7 +762,19 @@ class CycleRecorder:
                             result,
                             detail=f"{result.detail}; {stopped_reason} for unsupported effort",
                         )
-            if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
+            blocker = (sandbox_blocker(result.agent_output)
+                       if result.outcome is DispatchOutcome.SUCCEEDED
+                       and not result.asynchronous else None)
+            if blocker is not None:
+                # A completed CLI call is not a completed functional stage.
+                # This claim enables reconciliation, never grants permissions.
+                result = replace(
+                    result, outcome=DispatchOutcome.FAILED,
+                    error_code="environment_restricted", lifecycle_state="failed",
+                    detail=f"agent reported {blocker['kind']}: {blocker['error']}",
+                )
+            if result.failure_code in {"capacity", "transport", "timeout", "quota",
+                                       "environment_restricted"}:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)
                 if self.mode is RoutingMode.CALIBRATION:
@@ -767,6 +784,9 @@ class CycleRecorder:
                     if action == "reroute":
                         if fallback is None or fallback == decision.target:
                             action, reason = "stop", "no_fallback"
+                        elif (result.failure_code == "environment_restricted"
+                              and fallback.executor == decision.target.executor):
+                            action, reason = "stop", "same_sandbox"
                         elif (fallback.executor not in eligible or not self.availability.get(
                                 fallback.executor, Availability.UNKNOWN).dispatchable):
                             action, reason = "stop", "fallback_unavailable"
@@ -776,6 +796,8 @@ class CycleRecorder:
                                reroute_start_state=result.start_state)
                 retry = action == "reroute"
                 if retry:
+                    if blocker is not None:
+                        environment_context = recovery_context(blocker)
                     fallback_decision = replace(
                         decision, target=fallback, used_fallback=True,
                         reasons=decision.reasons + (f"stage fallback after {result.failure_code}",),

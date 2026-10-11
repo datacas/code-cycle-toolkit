@@ -271,6 +271,11 @@ for this run only.
    or externally verified. When `cc-verify`'s *Boundary verification* requires
    a run at the real boundary, perform it or say why it did not run. Do not
    call an unchecked implementation complete.
+   Before declaring an environment blocker, use `cc-verify`'s authorized
+   environment recovery. If an executor restriction persists, forward its
+   `environment_blocker` unchanged into the stage's `ORCHESTRATION_RESULT`
+   with status `BLOCKED` so the runtime can recover through a configured
+   alternative. Keep the original verification requirements.
 8. Review the accumulated diff for scope, accidental files, secrets, debug
    output, generated artifacts, and missing tests.
 9. Commit each unit separately when the repository's workflow allows multiple

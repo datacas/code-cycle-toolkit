@@ -477,7 +477,11 @@ intermediate reviews.
    ```
 
 8. Preflight execution without changing state. Invoke the project's
-   verification workflow only when its prerequisites are available. If it
+   verification workflow only when its prerequisites are available. Before
+   declaring an environment blocker, attempt `cc-verify`'s already-authorized
+   environment recovery. Forward a persistent executor restriction as its
+   `environment_blocker` in the stage's `ORCHESTRATION_RESULT` with status
+   `BLOCKED`. If verification
    reaches a stop condition, stop that verification subflow and obey it.
 9. Reproduce each previously reported finding that is claimed as fixed. Do not
    mark it verified from the diff alone.
