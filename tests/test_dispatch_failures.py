@@ -58,6 +58,26 @@ class ExecutorFailureTests(unittest.TestCase):
                 self.assertIn(message, result.detail)
         self.assertIn("codex_error_info=future_code", result.failure_summary())
 
+    def test_unsupported_effort_is_classified_only_with_explicit_effort_evidence(self):
+        cases = (
+            ("other", "Unsupported reasoning effort: max", "unsupported_effort"),
+            (None, "Invalid value for --effort: max", "unsupported_effort"),
+            ("unsupported_effort", "The requested option is not accepted", "unsupported_effort"),
+            ("other", "The request failed for an unknown reason", "executor_error"),
+            ("future_code", "Unsupported effort: max", "executor_error"),
+            (None, "Effort max is not supported", "unsupported_effort"),
+            (None, "error: --effort high: unknown", "unsupported_effort"),
+            (None, "invalid value for reasoning effort", "unsupported_effort"),
+            (None, "effort level high -- 401 unauthorized: invalid api key", "auth"),
+            (None, "unauthorized: effort max not supported on this plan", "auth"),
+            (None, "network error: connection reset while resolving reasoning effort, "
+                   "not supported region", "transport"),
+            (None, "Error: invalid value for --model (effort high)", "executor_error"),
+        )
+        for raw, message, expected in cases:
+            with self.subTest(raw=raw, message=message):
+                self.assertEqual(expected, ex._error_class(raw, message))
+
     def test_start_evidence_and_positive_no_activity(self):
         cases = (
             ([failed("server_overloaded", started=False)], "not_started"),
@@ -324,7 +344,7 @@ class StoreFailureTests(unittest.TestCase):
     def test_every_error_token_is_accepted_and_old_tokens_rejected(self):
         expected = {"capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
                     "unavailable", "contract_violation", "interrupted", "precondition",
-                    "executor_error", "no_error_report"}
+                    "executor_error", "no_error_report", "unsupported_effort"}
         self.assertEqual(expected, tm.FIELD_SPECS["attempt_error_code"][1])
         for code in expected:
             attempt = self.attempt()

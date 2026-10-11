@@ -126,6 +126,141 @@ class FullCycleTests(CycleTestCase):
         self.assertIn("sandbox profile rejected", cy.routing_context(outcome.decision))
         self.assertEqual(roots, codex.probe_arguments[2])
 
+    def test_resolve_primary_effort_is_pinned_but_fallback_effort_is_preserved(self) -> None:
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna max",
+                "fallback": "claude:anthropic/claude-sonnet-5 low",
+            },
+        }}})
+        codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
+        primary = self.recorder([codex, claude], profiles=profiles, resolve_effort="high")
+        primary_result = primary.stage("resolve", "resolve findings")
+
+        self.assertEqual("high", primary_result.decision.target.effort)
+        self.assertEqual("high", primary_result.result.requested.effort)
+
+        fallback = self.recorder(
+            [codex, claude], profiles=profiles,
+            availability={"codex": ex.Availability.UNKNOWN,
+                          "claude": ex.Availability.READY},
+            resolve_effort="high",
+        )
+        fallback_result = fallback.stage("resolve", "resolve findings")
+
+        self.assertTrue(fallback_result.decision.used_fallback)
+        self.assertEqual("low", fallback_result.decision.target.effort)
+
+    def test_known_unsupported_max_uses_fallback_without_dispatch(self) -> None:
+        import profile_config
+
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna high",
+                "fallback": "claude:anthropic/claude-sonnet-5 low",
+            },
+        }}})
+        codex, claude = ScriptedAdapter("codex"), ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude], profiles=profiles)
+
+        with patch.object(profile_config, "codex_models",
+                          return_value={"gpt-6-luna": frozenset({"high"})}):
+            outcome = recorder.stage(
+                "resolve", "resolve findings", effort_override="max",
+                resolve_escalated=True, escalation_finding_ids=("REV-001",))
+
+        self.assertEqual([], codex.dispatched)
+        self.assertEqual(1, len(claude.dispatched))
+        self.assertEqual("low", outcome.decision.target.effort)
+        payload = self.store.rows("owner/repo")[0]["payload"]
+        self.assertEqual("unsupported", payload["escalation_acceptance"])
+        self.assertTrue(payload["escalated"])
+
+    def test_cli_effort_rejection_uses_fallback_at_its_declared_effort(self) -> None:
+        class RejectingCodex(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                self.dispatched.append(task)
+                self.dispatch_kwargs.append(kw)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    detail="Unsupported reasoning effort: max",
+                    error_code="unsupported_effort", start_state="not_started",
+                    process_exited=True,
+                )
+
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna high",
+                "fallback": "claude:anthropic/claude-sonnet-5 low",
+            },
+        }}})
+        codex, claude = RejectingCodex("codex"), ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude], profiles=profiles)
+        outcome = recorder.stage("resolve", "resolve findings", effort_override="max")
+
+        self.assertEqual("low", outcome.decision.target.effort)
+        rows = self.store.rows("owner/repo")
+        failed_attempt_id = outcome.attempts[0][1].artifacts["dispatch_attempt_id"]
+        self.assertEqual("unsupported_effort", self.store.attempt(failed_attempt_id)["error_code"])
+        self.assertEqual("low", rows[-1]["effort"])
+
+    def test_cli_effort_rejection_after_the_stage_started_is_not_rerouted_blindly(self) -> None:
+        class StartedRejectingCodex(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                self.dispatched.append(task)
+                self.dispatch_kwargs.append(kw)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    detail="Unsupported reasoning effort: max",
+                    error_code="unsupported_effort", start_state="started",
+                    process_exited=True,
+                )
+
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna high",
+                "fallback": "claude:anthropic/claude-sonnet-5 low",
+            },
+        }}})
+        codex, claude = StartedRejectingCodex("codex"), ScriptedAdapter("claude")
+        recorder = self.recorder([codex, claude], profiles=profiles)
+        outcome = recorder.stage("resolve", "resolve findings", effort_override="max")
+
+        self.assertEqual([], claude.dispatched)
+        self.assertEqual(1, len(codex.dispatched))
+        self.assertIn("reroute stopped", outcome.result.detail)
+
+    def test_failed_fallback_keeps_the_definite_escalation_signal(self) -> None:
+        import profile_config
+
+        class CapacityClaude(ScriptedAdapter):
+            def dispatch(self, target, task, **kw):
+                self.dispatched.append(task)
+                self.dispatch_kwargs.append(kw)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    detail="at capacity", error_code="capacity",
+                    start_state="not_started", process_exited=True,
+                )
+
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {
+                "primary": "codex:openai/gpt-6-luna high",
+                "fallback": "claude:anthropic/claude-sonnet-5 low",
+            },
+        }}})
+        codex, claude = ScriptedAdapter("codex"), CapacityClaude("claude")
+        recorder = self.recorder([codex, claude], profiles=profiles)
+
+        with patch.object(profile_config, "codex_models",
+                          return_value={"gpt-6-luna": frozenset({"high"})}):
+            recorder.stage(
+                "resolve", "resolve findings", effort_override="max",
+                resolve_escalated=True, escalation_finding_ids=("REV-001",))
+
+        payload = self.store.rows("owner/repo")[0]["payload"]
+        self.assertEqual("unsupported", payload["escalation_acceptance"])
+
     def test_failed_probe_does_not_route_to_an_executor_without_publish_access(self) -> None:
         class ProbeFailingCodex(ScriptedAdapter):
             def probe_git_metadata_write(self, target, cwd, writable_dirs):

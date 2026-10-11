@@ -296,12 +296,15 @@ def _error_class(code: str | None, message: str) -> str:
     code = str(code) if code is not None else None
     mapping = {"server_overloaded": "capacity", "usage_limit_exceeded": "quota",
                "unauthorized": "auth", "authentication_error": "auth",
-               "stream_disconnected": "transport", "connection_failed": "transport"}
+               "stream_disconnected": "transport", "connection_failed": "transport",
+               "unsupported_effort": "unsupported_effort"}
     if code in mapping:
         return mapping[code]
     if code not in {None, "other"}:
         return "executor_error"
     lowered = message.lower()
+    # The established markers win: an auth, transport, capacity or quota error
+    # that merely mentions the effort setting is not an effort rejection.
     for token, markers in (
         ("auth", ("401", "unauthorized", "invalid api key", "missing credentials")),
         ("transport", ("connection refused", "connection reset", "stream disconnect", "network error")),
@@ -310,6 +313,14 @@ def _error_class(code: str | None, message: str) -> str:
     ):
         if any(marker in lowered for marker in markers):
             return token
+    # The effort keyword has to sit right next to the rejection phrase.
+    effort = r"(?:reasoning\s+)?effort(?:\s+(?:level|value))?"
+    rejected = r"(?:is\s+)?(?:unsupported|not\s+supported|invalid)"
+    if (re.search(rf"\bunsupported\s+{effort}\b", lowered)
+            or re.search(rf"\b{effort}(?:\s*[:=]?\s*['\"`]?\w+['\"`]?)?\s+{rejected}\b", lowered)
+            or re.search(rf"--effort(?:[=\s]+\w+)?\s*[:,]?\s+(?:{rejected}|unknown)\b", lowered)
+            or re.search(rf"\binvalid\s+(?:choice|value)\s+for\s+(?:--effort\b|{effort}\b)", lowered)):
+        return "unsupported_effort"
     return "executor_error"
 
 

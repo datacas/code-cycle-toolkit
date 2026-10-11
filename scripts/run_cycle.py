@@ -112,7 +112,7 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
-                         "worktree_dir"})
+                         "resolve", "worktree_dir"})
 
 #: The keys under `code_cycle` that belong to a skill or another module. They
 #: are legitimate here and deliberately not interpreted: recognising a key is
@@ -279,7 +279,7 @@ def load_config(path: Path) -> dict:
     for key in (
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
-        "code_cycle.issue_review",
+        "code_cycle.issue_review", "code_cycle.resolve",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -312,6 +312,19 @@ def load_config(path: Path) -> dict:
         raise CycleDriverError(
             f"{path}: unknown key under code_cycle.routing: " + ", ".join(unknown)
             + "; known keys are " + ", ".join(sorted(ROUTING_KEYS)))
+
+    resolve = (config.get("code_cycle") or {}).get("resolve") or {}
+    unknown = sorted(str(key) for key in set(resolve) - {"effort"})
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.resolve: " + ", ".join(unknown)
+            + "; known keys are effort")
+    effort = resolve.get("effort")
+    if (effort is not None
+            and (not isinstance(effort, str)
+                 or effort not in {"low", "medium", "high", "max"})):
+        raise CycleDriverError(
+            f"{path}: code_cycle.resolve.effort must be one of low, medium, high, max")
 
     try:
         load_routing_strategy(config)
@@ -1601,6 +1614,7 @@ def run_cycle(
     work_item_repository: str | None = None,
     code_host: str | None = None,
     trusted_authors: tuple[str, ...] = (),
+    resolve_effort: str | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1654,6 +1668,7 @@ def run_cycle(
         shadow=shadow,
         skills_by_role=SKILL_FOR_ROLE,
         change_request_id=change_request_id,
+        resolve_effort=resolve_effort,
     )
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,
@@ -1682,8 +1697,14 @@ def run_cycle(
     if timeout is not None:
         dispatch_kwargs["timeout"] = timeout
 
+    previous_resolve_target = None
+    previous_resolve_used_fallback = False
+
     def run(role: str, instruction: str = "", *,
             change_request_id: str | None = None, escalated: bool = False,
+            resolve_target=None, resolve_escalated: bool = False,
+            resolve_target_used_fallback: bool = False,
+            escalation_finding_ids: tuple[str, ...] = (),
             ) -> tuple[StageOutcome, Reported, str | None, dict]:
         """Dispatch one stage; also say whether the evidence it was given changed."""
         evidence = ""
@@ -1706,7 +1727,15 @@ def run_cycle(
                               local_only=local_only, evidence=evidence,
                               worktree_dir=worktree_dir,
                               workspace=workspace),
-                escalated=escalated, **stage_kwargs)
+                escalated=escalated,
+                effort_override=(resolve_effort or "high") if role == "resolve" else None,
+                target_override=resolve_target if role == "resolve" else None,
+                target_override_used_fallback=(resolve_target_used_fallback
+                                               if role == "resolve" else False),
+                escalation_finding_ids=(escalation_finding_ids
+                                         if resolve_escalated else ()),
+                resolve_escalated=resolve_escalated,
+                **stage_kwargs)
             if artifact is not None:
                 tampered = artifact.changed()
         finally:
@@ -1776,7 +1805,15 @@ def run_cycle(
         if tampered is not None:
             return stop(tampered, reported=reported)
         if not outcome.succeeded:
+            blocked_effort = (
+                (outcome.result is not None
+                 and outcome.result.failure_code == "unsupported_effort")
+                or (outcome.decision is not None and outcome.decision.blocked
+                    and any("does not support effort" in reason
+                            for reason in outcome.decision.reasons))
+            )
             return stop(_why(outcome), reported=reported,
+                        status="BLOCKED" if blocked_effort else UNRESOLVED_END,
                         stop_reason="dispatch_failed")
         if _started_elsewhere(outcome):
             return stop(_elsewhere(outcome), reported=reported)
@@ -1822,6 +1859,9 @@ def run_cycle(
 
     def advance(role: str, instruction: str = "", *,
                 change_request_id: str | None = None,
+                resolve_target=None, resolve_escalated: bool = False,
+                resolve_target_used_fallback: bool = False,
+                escalation_finding_ids: tuple[str, ...] = (),
                 recover: bool = True) -> tuple[Reported, CycleReport | None]:
         """Run one stage and decide whether the cycle may continue past it.
 
@@ -1829,7 +1869,7 @@ def run_cycle(
         condition that has to be remembered four times is one that will be
         missing from the fourth.
         """
-        nonlocal pending_recovery
+        nonlocal pending_recovery, previous_resolve_target, previous_resolve_used_fallback
         if pending_recovery is not None:
             ids = [item["id"] for item in pending_recovery.get("finding_outcomes", [])
                    if item["status"] in {"resolved", "not_applicable"}]
@@ -1841,7 +1881,14 @@ def run_cycle(
                 "A reopened finding follows the normal resolution loop."
             )
         outcome, reported, tampered, findings = run(
-            role, instruction, change_request_id=change_request_id)
+            role, instruction, change_request_id=change_request_id,
+            resolve_target=resolve_target,
+            resolve_target_used_fallback=resolve_target_used_fallback,
+            resolve_escalated=resolve_escalated,
+            escalation_finding_ids=escalation_finding_ids)
+        if role == "resolve" and outcome.decision is not None:
+            previous_resolve_target = outcome.decision.target
+            previous_resolve_used_fallback = outcome.decision.used_fallback
         result = outcome.result
         if (recover and pending_recovery is None and tampered is None and reported.status is None
                 and result is not None and not result.asynchronous
@@ -2019,8 +2066,20 @@ def run_cycle(
             if contested:
                 instruction = (f"{instruction} "
                                f"{CONTESTED_DIRECTIVE.format(ids=', '.join(contested))}")
-            _, stopped = advance("resolve", instruction,
-                                 change_request_id=change_request_id)
+            open_findings = (history[-1].statuses if history
+                             and history[-1].kind == REVIEW_RUN else {})
+            escalation_ids = tuple(sorted(
+                finding for finding, count in survivals.items()
+                if (resolve_effort is None and count >= 1
+                    and open_findings.get(finding) == "open")
+            )[:16])
+            _, stopped = advance(
+                "resolve", instruction, change_request_id=change_request_id,
+                resolve_target=previous_resolve_target if escalation_ids else None,
+                resolve_target_used_fallback=(previous_resolve_used_fallback
+                                              if escalation_ids else False),
+                resolve_escalated=bool(escalation_ids),
+                escalation_finding_ids=escalation_ids)
             if stopped is not None:
                 return stopped
 
@@ -2763,6 +2822,7 @@ def main(argv: list[str] | None = None) -> int:
                 code_host=code_host,
                 trusted_authors=tuple(((config.get("code_cycle") or {}).get("review") or {}).get(
                     "trusted_authors", [])),
+                resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
             )
     except CycleDriverError as error:
         parser.error(str(error))
