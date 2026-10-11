@@ -675,7 +675,7 @@ class MalformedResultTests(RunCycleTestCase):
 
 
 class ResolveEffortPolicyTests(RunCycleTestCase):
-    def test_an_explicit_resolve_effort_still_escalates_after_a_survival(self) -> None:
+    def test_an_explicit_resolve_effort_disables_automatic_escalation(self) -> None:
         self.test_first_survival_escalates_at_max_on_the_previous_resolve_target(
             resolve_effort="high")
 
@@ -735,16 +735,22 @@ class ResolveEffortPolicyTests(RunCycleTestCase):
         )
 
         resolve_targets = [target for skill, target in coder.targets if skill == "resolve"]
-        self.assertEqual(["high", "max"], [target.effort for target in resolve_targets])
+        expected_efforts = ["high", "max"] if resolve_effort is None else ["high", "high"]
+        self.assertEqual(expected_efforts, [target.effort for target in resolve_targets])
         self.assertEqual((resolve_targets[0].executor, resolve_targets[0].model),
                          (resolve_targets[1].executor, resolve_targets[1].model))
         self.assertTrue(report.approved)
         resolve_rows = [row for row in self.rows()
                         if row["role"] == "resolve"
                         and row["payload"]["record_kind"] == "dispatch"]
-        self.assertEqual({"escalated": True,
-                          "escalation_finding_ids": ["REV-001"],
-                          "escalation_acceptance": "accepted"},
+        expected_escalation = ({"escalated": True,
+                                "escalation_finding_ids": ["REV-001"],
+                                "escalation_acceptance": "accepted"}
+                               if resolve_effort is None else
+                               {"escalated": False,
+                                "escalation_finding_ids": [],
+                                "escalation_acceptance": "not_applicable"})
+        self.assertEqual(expected_escalation,
                          {key: resolve_rows[-1]["payload"][key]
                           for key in ("escalated", "escalation_finding_ids",
                                       "escalation_acceptance")})
