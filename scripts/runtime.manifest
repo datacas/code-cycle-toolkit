@@ -11,6 +11,7 @@
 
 cycle.py
 reroute.py
+environment_recovery.py
 run_cycle.py
 executors.py
 usage.py

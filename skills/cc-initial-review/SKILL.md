@@ -550,7 +550,11 @@ Collect findings before composing the final comment. Preflight the environment
 without changing state: required configuration, database and service
 availability, known port ownership, migration state, and command permissions.
 
-- If preflight fails, do not invoke the project's verification workflow.
+- If preflight fails, first attempt the already-authorized environment recovery
+  described by `cc-verify`. Forward a persistent executor restriction as its
+  `environment_blocker` in the stage's `ORCHESTRATION_RESULT` with status
+  `BLOCKED`. If prerequisites remain unavailable, do not invoke the project's
+  verification workflow.
   Record, in the selected language, that execution-backed verification was not
   performed, followed by the concrete reason.
 - If the verification workflow reaches one of its own stop conditions, stop

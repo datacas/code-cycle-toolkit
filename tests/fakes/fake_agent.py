@@ -15,6 +15,7 @@ an exhausted window, and a review that changes its mind on the second round:
     FAKE_SILENT=claude     that agent emits no structured block at all
     FAKE_SILENT_REVIEW=codex that agent omits only an initial-review result
     FAKE_BLOCKED=codex     that agent exits 0 reporting BLOCKED, as one did
+    FAKE_SANDBOX=codex     implementation reports an observed sandbox restriction
     FAKE_READINESS=<status> the issue review's status (default READY); the
                            other variables leave the issue review alone
     FAKE_HANG=codex        that agent never finishes an implementation, as a
@@ -331,6 +332,19 @@ def main(argv: list[str]) -> int:
     ) if skill in prompt), ("fake", None))
     _, role = selected
     payload = result_for_role(role or "unknown", status)
+    if os.environ.get("FAKE_SANDBOX") == NAME and role == "implement":
+        payload = result_for_role(role, "BLOCKED")
+        payload["environment_blocker"] = {
+            "kind": "sandbox_local_access", "command": "docker info",
+            "error": "sandbox denied Docker socket access",
+            "attempted": ["no authorized host execution capability available"],
+            "requires_human": False,
+        }
+    elif os.environ.get("FAKE_SANDBOX") and role == "implement":
+        # Exercise context transfer at the installed process boundary.
+        if '"command": "docker info"' not in prompt:
+            print("recovery diagnostic missing", file=sys.stderr)
+            return 2
     said += [BEGIN, json.dumps(payload), END]
     speak(model, "\n".join(said))
     return 0

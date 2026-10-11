@@ -220,9 +220,12 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "retry_exhausted", "calibration", "exit_unproven", "human_action",
         "no_fallback", "fallback_unavailable", "not_started", "no_effects",
         "evidence_unavailable", "dirty_workspace", "workspace_changed",
-        "remote_changed", "publication_changed", "unsupported_effort",
+        "remote_changed", "publication_changed", "unsupported_effort", "same_sandbox",
     })),
-    "reroute_error_code": ("token", frozenset({"capacity", "transport", "timeout", "quota", "unsupported_effort"})),
+    "reroute_error_code": ("token", frozenset({
+        "capacity", "transport", "timeout", "quota", "unsupported_effort",
+        "environment_restricted",
+    })),
     "reroute_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "routing_reason_count": ("count", None),
     "routing_rate_observations": ("count", None),
@@ -363,7 +366,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "attempt_error_code": ("token", frozenset({
         "capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
         "unavailable", "contract_violation", "interrupted", "precondition",
-        "executor_error", "no_error_report", "unsupported_effort",
+        "executor_error", "no_error_report", "unsupported_effort", "environment_restricted",
     })),
     "attempt_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "external_dispatch_id": ("identifier", None),
