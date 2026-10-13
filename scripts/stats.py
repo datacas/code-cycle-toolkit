@@ -19,11 +19,21 @@ from telemetry import (
     VERIFICATION_CONCLUSIONS,
     VERIFICATION_CONCLUSION_ORDER,
     TelemetryError,
+    WorkItemIdentity,
     default_database_path,
     started_at_implement,
     validate_reference,
 )
 
+
+#: Grouping identity rule for metrics (Issue #185):
+#: Every new metric added to Code Cycle Toolkit MUST declare its grouping identity first:
+#:   - Per cycle: metrics measuring a single cycle's wall time, tokens, or routing decisions.
+#:   - Per work item: metrics measuring external issue/task outcomes, dispositions, or escapes,
+#:     keyed explicitly by WorkItemIdentity(provider, repository, work_item_id).
+#:   - Per stage: metrics measuring stage-specific iterations (e.g. implement, initial_review).
+#:   - Per attempt: metrics measuring execution attempts and retry counts.
+#:   - Per dispatch: metrics measuring executor invocations.
 
 CONFIDENCE_BUCKETS = (
     ("low", 0.0, 0.5),
@@ -323,8 +333,9 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
         provider = payload.get("work_item_provider")
         repository = payload.get("work_item_repository")
         if provider and repository:
+            item_identity = WorkItemIdentity(str(provider), str(repository), task_id)
             cycle_identity_candidates[cycle_key].add(
-                (repo_id, str(provider), str(repository), task_id)
+                item_identity.as_scoped_tuple(repo_id)
             )
 
     if not task_cycles:
@@ -340,8 +351,12 @@ def _work_item_outcomes(rows: list[dict], events: list[dict]) -> dict:
 
     latest: dict[tuple[str, str, str, str], dict] = {}
     for event in events:
-        identity = (str(event["repo_id"]), str(event["provider"]),
-                    str(event["repository"]), str(event["work_item_id"]))
+        item_identity = WorkItemIdentity(
+            str(event["provider"]),
+            str(event["repository"]),
+            str(event["work_item_id"]),
+        )
+        identity = item_identity.as_scoped_tuple(str(event["repo_id"]))
         previous = latest.get(identity)
         ordering = (str(event.get("observed_at", "")), str(event.get("recorded_at", "")),
                     int(event.get("event_id", 0) or 0))

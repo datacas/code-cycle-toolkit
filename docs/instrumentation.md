@@ -527,6 +527,17 @@ adapters just proven correct against the live CLIs, beats recording later from a
 larger unexamined pile. Only fields already queried have columns, a short allowlist of counts and flags
 travels in `payload`, and `schema_version` is on every row from the first.
 
+### Grouping identity rule for metrics
+
+Every metric added to Code Cycle Toolkit MUST declare its grouping identity first,
+rather than implicitly aggregating or conflating cycles with work items:
+
+- **Per cycle**: Duration, token consumption, or routing decisions of a single execution cycle.
+- **Per work item**: Dispositions (`resolved`, `reopened`), defect escapes, or resolution rates keyed explicitly by `WorkItemIdentity(provider, repository, work_item_id)`.
+- **Per stage**: Stage-specific iterations (`implement`, `initial_review`, `rereview`).
+- **Per attempt**: Retries and transient runtime failures.
+- **Per dispatch**: Executor-specific backend calls.
+
 ### Pre-routing signals
 
 Schema version 2 adds the signals a stage's router could have known before it
