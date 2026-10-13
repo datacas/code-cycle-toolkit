@@ -706,8 +706,11 @@ def comment_run_history(
     - A comment without author metadata raises, whoever wrote it.
     - A comment from another author, or without any review-contract heading,
       is ordinary discussion and is ignored.
+    - A comment from a trusted author with finding headers but no run line
+      is legacy: it is skipped, so an older change request never blocks a
+      resume for its header format.
     - A comment from a trusted author that carries contract headings but
-      cannot be parsed, or cannot be placed in a run, raises.
+      cannot be parsed, or whose run lines cannot be placed in a run, raises.
     - No contract comment at all is an empty history.
 
     Every error names the comment, by its provider id when there is one.
@@ -731,6 +734,10 @@ def comment_run_history(
             raise ContractError(
                 f"{label} from trusted author {comment.author!r} cannot be parsed: {error}"
             ) from error
+        if not record.runs:
+            # Legacy: findings published before run lines existed, or a
+            # resolver's reply. It names no run, so it cannot move a claim.
+            continue
         if not _place_record(record, runs, seen):
             raise ContractError(
                 f"{label} from trusted author {comment.author!r} cannot be placed "

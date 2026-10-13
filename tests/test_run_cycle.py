@@ -2526,11 +2526,14 @@ class ResumedHistoryTests(RunCycleTestCase):
             report, "BLOCKED", "comment 555", "cannot be parsed")
 
     def test_a_trusted_contract_comment_that_cannot_be_placed_blocks(self) -> None:
-        orphan = contract.ProviderComment(
+        both = contract.ProviderComment(
             author="reviewer", id="777",
-            body="#### [REV-001] · high · resolved · valid · blocks:yes — Leak")
+            body="\n".join([
+                "#### [CCR-20260921-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:2",
+                "#### [CCT-20260921-002] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:2",
+                "#### [REV-001] · high · resolved · valid · blocks:yes — Leak"]))
 
-        report = self.resume(CLAIMED + [orphan])
+        report = self.resume(CLAIMED + [both])
 
         self.assert_stopped_before_dispatch(
             report, "BLOCKED", "comment 777", "cannot be placed")

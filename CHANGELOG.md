@@ -16,8 +16,9 @@ All notable changes to this project are documented here. This project follows
   the seeded history. An unreadable history never reads as empty: an empty
   `trusted_authors` stops with `HUMAN_INTERVENTION`; a failed comment fetch, a
   comment without author metadata, or a trusted contract comment that cannot be
-  parsed or placed stops with `BLOCKED`, before any dispatch, as
-  `stage_not_completed`. No contract comment is an empty history.
+  parsed or whose run lines cannot be placed stops with `BLOCKED`, before any
+  dispatch, as `stage_not_completed`. No contract comment is an empty history,
+  and a trusted legacy comment with finding headers but no run line is skipped.
 - Missing structured stage results can recover as pending verification from
   schema-2, attempt-attributed trusted PR comments. Schema 16 stores recovery
   references separately from failed dispatch attempts. Comment-only fixes

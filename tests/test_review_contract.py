@@ -863,6 +863,19 @@ class CommentRunHistoryTests(unittest.TestCase):
         self.assertEqual([("resolution", "resolved")],
                          [(run.kind, run.statuses["REV-001"]) for run in runs])
 
+    def test_a_legacy_comment_without_a_run_line_is_skipped(self) -> None:
+        legacy = self.comment("#### [REV-001] · high · resolved · blocks:yes — Leak",
+                              identifier="45")
+        later = [self.comment("\n".join([_review(1),
+                                         "#### [REV-001] · high · open · - · blocks:yes"]),
+                              identifier="46")]
+
+        self.assertEqual([], self.history(legacy))
+        runs = self.history(legacy, *later)
+
+        self.assertEqual([("review", "open")],
+                         [(run.kind, run.statuses["REV-001"]) for run in runs])
+
     def test_every_unreadable_case_names_the_comment(self) -> None:
         orphan = "#### [REV-001] · high · resolved · valid · blocks:yes"
         both = "\n".join([_review(1), _triage(1), orphan])
@@ -874,11 +887,9 @@ class CommentRunHistoryTests(unittest.TestCase):
                              ("reviewer",), "comment 43 carries no author metadata"),
             "malformed": ((self.comment("#### [CCR-1] · only", identifier="44"),),
                           ("reviewer",), "comment 44 from trusted author"),
-            "no run line": ((self.comment(orphan, identifier="45"),),
-                            ("reviewer",), "comment 45 from trusted author 'reviewer' cannot be placed"),
             "both kinds": ((self.comment(both, identifier="46"),),
                            ("reviewer",), "comment 46 from trusted author 'reviewer' cannot be placed"),
-            "no id": ((self.comment(orphan, identifier=None),),
+            "no id": ((self.comment(both, identifier=None),),
                       ("reviewer",), "comment #1 from trusted author"),
         }
         for name, (comments, trusted, message) in cases.items():
