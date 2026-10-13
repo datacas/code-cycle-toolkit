@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
+import cycle as cy  # noqa: E402
 import executors as ex  # noqa: E402
 import issue_review  # noqa: E402
 import run_cycle as rc  # noqa: E402
@@ -58,7 +59,10 @@ class ReconstructionTests(CycleTestCase):
             "final_review_status": "APPROVED", "final_approved": True,
             "tests_passed": False, "tests_basis": "claimed",
             "fallback_stages": 0, "contract_violations": 0,
+            # Schema 19: every cycle row names its CI policy, strict by default.
+            "ci_policy": "strict",
         }, cycle["outcome"])
+        self.assertEqual([], cycle["ci"])
         review = cycle["verdicts"][1]
         self.assertEqual({"stage_seq": 2, "role": "review", "status": "CHANGES_REQUESTED",
                           "findings_total": 3, "findings_blocking": 1, **SEVERITIES}, review)
@@ -193,6 +197,118 @@ class DispatchObservationTests(CycleTestCase):
 
         self.assertEqual(1, outcome["fallback_stages"])
         self.assertEqual(1, outcome["contract_violations"])
+
+
+SHA = "a" * 40
+
+
+def gate_result(status: str, head: str = SHA, **fields):
+    import ci_gate
+    fields.setdefault("polls", 2)
+    fields.setdefault("waited_seconds", 30.0)
+    return ci_gate.GateResult(status=status, head_sha=head, required_source="declared",
+                              **fields)
+
+
+class CiPolicyOutcomeTests(CycleTestCase):
+    """#228: review outcome and CI outcome stay apart; approval needs both."""
+
+    def awaiting_cycle(self, gate: str | None, *, mode: str = "wait",
+                       review: str = tm.AWAITING_CI_STATUS, gate_head: str = SHA):
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")],
+                                 ci_policy="parallel")
+        recorder.stage("implement", "work")
+        recorder.record_verdict("implement", "IMPLEMENTED")
+        recorder.stage("review", "review")
+        recorder.record_verdict("review", review, findings_total=0, reviewed_head_sha=SHA)
+        if gate is not None:
+            recorder.record_ci(gate_result(gate, gate_head, passed=("build (github-actions)",)),
+                               mode=mode, role="review")
+        recorder.close("HUMAN_INTERVENTION")
+        return self.store.cycle_outcome("owner/repo", recorder.cycle_id)
+
+    def test_a_clean_review_is_an_approval_only_with_a_ci_pass_of_its_sha(self) -> None:
+        for gate, expected in ((tm.CI_PASSED, True), (tm.CI_FAILED, False),
+                               (tm.CI_SKIPPED, False), (tm.NO_CI_CHECKS_FOUND, False),
+                               (tm.CI_TIMEOUT, None), (tm.CI_UNREADABLE, None),
+                               (tm.CI_HEAD_MOVED, None), (None, None)):
+            for review in (tm.AWAITING_CI_STATUS, "APPROVED"):
+                with self.subTest(gate=gate, review=review):
+                    outcome = self.awaiting_cycle(gate, review=review)["outcome"]
+
+                    self.assertEqual("parallel", outcome["ci_policy"])
+                    self.assertEqual(review, outcome["first_review_status"])
+                    self.assertFalse(outcome["resolution_needed"])
+                    for field in ("first_pass_approved", "final_approved"):
+                        if expected is None:
+                            self.assertNotIn(field, outcome)
+                        else:
+                            self.assertEqual(expected, outcome[field])
+
+    def test_a_ci_pass_of_another_sha_approves_nothing(self) -> None:
+        outcome = self.awaiting_cycle(tm.CI_PASSED, gate_head="b" * 40)["outcome"]
+
+        self.assertNotIn("first_pass_approved", outcome)
+        self.assertEqual(tm.CI_PASSED, outcome["final_ci_status"])
+
+    def test_a_single_read_informs_but_never_decides(self) -> None:
+        cycle = self.awaiting_cycle(tm.CI_PASSED, mode="once")
+        outcome = cycle["outcome"]
+
+        self.assertNotIn("first_pass_approved", outcome)
+        self.assertNotIn("final_ci_status", outcome)
+        self.assertEqual(2, outcome["ci_polls"])
+        self.assertEqual(0, outcome["ci_wait_ms"])
+        self.assertEqual("once", cycle["ci"][0]["ci_mode"])
+
+    def test_the_ci_row_names_its_sha_and_points_at_the_review(self) -> None:
+        cycle = self.awaiting_cycle(tm.CI_FAILED)
+
+        self.assertEqual([{
+            "stage_seq": 2, "ci_status": tm.CI_FAILED, "ci_mode": "wait",
+            "ci_head_sha": SHA, "ci_required_source": "declared",
+            "checks_passed": 1, "checks_failed": 0, "checks_pending": 0,
+            "checks_skipped": 0, "checks_missing": 0, "checks_late": 0,
+            "ci_polls": 2, "ci_wait_ms": 30000,
+        }], cycle["ci"])
+        self.assertEqual(SHA, cycle["verdicts"][1]["reviewed_head_sha"])
+        outcome = cycle["outcome"]
+        self.assertEqual((2, 30000, tm.CI_FAILED, 0),
+                         (outcome["ci_polls"], outcome["ci_wait_ms"],
+                          outcome["final_ci_status"], outcome["redundant_reviews"]))
+
+    def test_strict_never_settles_on_an_awaiting_review(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")])
+        recorder.stage("implement", "work")
+        recorder.stage("review", "review")
+        recorder.record_verdict("review", tm.AWAITING_CI_STATUS, reviewed_head_sha=SHA)
+        recorder.close("HUMAN_INTERVENTION")
+
+        outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
+
+        self.assertEqual("strict", outcome["ci_policy"])
+        for field in ("first_review_status", "first_pass_approved", "final_approved",
+                      "ci_polls", "final_ci_status"):
+            self.assertNotIn(field, outcome)
+
+    def test_a_second_review_of_a_clean_head_is_counted_as_redundant(self) -> None:
+        recorder = self.recorder([ScriptedAdapter("codex"), ScriptedAdapter("claude")],
+                                 ci_policy="parallel")
+        recorder.stage("review", "review")
+        recorder.record_verdict("review", tm.AWAITING_CI_STATUS, reviewed_head_sha=SHA)
+        recorder.stage("rereview", "rereview")
+        recorder.record_verdict("rereview", "CHANGES_REQUESTED", reviewed_head_sha=SHA)
+        recorder.stage("rereview", "rereview")
+        recorder.record_verdict("rereview", tm.AWAITING_CI_STATUS, reviewed_head_sha="b" * 40)
+        recorder.close("HUMAN_INTERVENTION")
+
+        outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
+
+        self.assertEqual(1, outcome["redundant_reviews"])
+
+    def test_an_unknown_ci_policy_is_refused(self) -> None:
+        with self.assertRaises(cy.CycleError):
+            self.recorder([ScriptedAdapter("codex")], ci_policy="eager")
 
 
 class SeparationTests(CycleTestCase):
@@ -338,8 +454,10 @@ class DriverTests(RunCycleTestCase):
         """REV-001: a documented outcome nothing writes is a promise, not data."""
         payload = {
             "status": "CHANGES_REQUESTED",
+            "head_sha": "a" * 40,
+            "reviewed_head_sha": "a" * 40,
             "tests": {"passed": False, "conclusion": "failed", "boundary": "required"},
-            "checks": {"passed": 4, "failed": 1, "pending": 0},
+            "checks": {"passed": 4, "failed": 1, "pending": 0, "head_sha": "a" * 40},
             "unresolved_findings": [{"severity": "high", "blocks_approval": True}],
             "forecast": {
                 "changed_files_count": 4, "changed_lines_estimate": 180,
@@ -357,6 +475,7 @@ class DriverTests(RunCycleTestCase):
 
         emitted = {"status", *rc._findings(payload, "resolve"), *rc._tests(payload),
                    *rc._checks(payload), *rc._forecast(payload),
+                   *rc._reviewed_head(payload, "rereview"),
                    *readiness.telemetry_fields()}
 
         self.assertEqual(tm.OUTCOME_FIELDS["verdict"], emitted)
@@ -665,9 +784,22 @@ class ReportedChecks(unittest.TestCase):
         ):
             with self.subTest(payload=payload):
                 counts = payload["checks"]
-                self.assertEqual(
-                    {f"checks_{state}": counts[state] for state in ("passed", "failed", "pending")},
-                    rc._checks(payload))
+                expected = {f"checks_{state}": counts[state]
+                            for state in ("passed", "failed", "pending")}
+                # Schema 19: counts that name their SHA keep it (#228).
+                if "head_sha" in counts:
+                    expected["checks_head_sha"] = counts["head_sha"]
+                self.assertEqual(expected, rc._checks(payload))
+
+    def test_a_shortened_checks_sha_is_not_recorded_as_one(self) -> None:
+        payload = {"checks": {"head_sha": self.HEAD[:12], "passed": 1, "failed": 0,
+                              "pending": 0}}
+
+        self.assertNotIn("checks_head_sha", rc._checks(payload))
+        self.assertEqual({}, rc._reviewed_head({"reviewed_head_sha": self.HEAD[:12]}, "review"))
+        self.assertEqual({}, rc._reviewed_head({"reviewed_head_sha": self.HEAD}, "implement"))
+        self.assertEqual({"reviewed_head_sha": self.HEAD},
+                         rc._reviewed_head({"reviewed_head_sha": self.HEAD}, "rereview"))
 
     def test_checks_that_describe_nothing_readable_record_nothing(self) -> None:
         for checks in (

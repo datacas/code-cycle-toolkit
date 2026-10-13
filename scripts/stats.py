@@ -13,13 +13,16 @@ from pathlib import Path
 
 from run_cycle import CycleDriverError, load_config, repository_of
 from telemetry import (
+    COMPLETED_REVIEW_STATUSES,
     MINIMUM_SAMPLE,
     TEST_BASES,
     TEST_BASE_ORDER,
     VERIFICATION_CONCLUSIONS,
     VERIFICATION_CONCLUSION_ORDER,
     TelemetryError,
+    ci_gate_outcomes,
     default_database_path,
+    review_passed,
     started_at_implement,
     validate_reference,
 )
@@ -31,12 +34,10 @@ CONFIDENCE_BUCKETS = (
     ("high", 0.75, 1.0000001),
 )
 FINDING_FIELDS = ("findings_critical", "findings_high", "findings_medium", "findings_low")
-PASSING_REVIEW_STATUSES = frozenset({"APPROVED"})
 #: Columns only a dispatch writes. Before schema 3 no row carried a
 #: `record_kind`, and verdicts and the closing row were already separate rows,
 #: so these are what tell a historical dispatch from its verdict or close.
 DISPATCH_EVIDENCE = ("outcome", "executor", "profile")
-TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 
 
 class StatsError(ValueError):
@@ -136,6 +137,9 @@ def _first_pass(rows: list[dict], start: datetime | None = None,
         # A resumed cycle reviews an earlier run's work: not a first pass.
         if row["payload"].get("record_kind") != "shadow" and started_at_implement(row):
             by_task[row["task_id"]].append(row)
+    # A clean review under the parallel CI policy passes on the CI gate of its
+    # own SHA (`telemetry.review_passed`); undecided, it is not counted.
+    ci_outcomes = ci_gate_outcomes(rows)
     passed = total = 0
     for task_rows in by_task.values():
         if not any(row["role"] == "implement" for row in task_rows):
@@ -143,7 +147,7 @@ def _first_pass(rows: list[dict], start: datetime | None = None,
         first_review = next(
             (row for row in task_rows
              if row["role"] == "review"
-             and str(row.get("status") or "").upper() in TERMINAL_REVIEW_STATUSES),
+             and str(row.get("status") or "").upper() in COMPLETED_REVIEW_STATUSES),
             None,
         )
         if first_review is None:
@@ -151,8 +155,11 @@ def _first_pass(rows: list[dict], start: datetime | None = None,
         stamp = _timestamp(first_review)
         if stamp is None or (start is not None and stamp < start) or (end is not None and stamp >= end):
             continue
+        outcome = review_passed(first_review, ci_outcomes)
+        if outcome is None:
+            continue
         total += 1
-        passed += str(first_review.get("status") or "").upper() in PASSING_REVIEW_STATUSES
+        passed += outcome
     return _rate(passed, total)
 
 

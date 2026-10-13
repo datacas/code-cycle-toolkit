@@ -61,6 +61,31 @@ class StatsTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-TASK", serialized)
         self.assertNotIn("OTHER-REPO-TASK", serialized)
 
+    def test_a_clean_review_awaiting_ci_counts_by_the_ci_gate_of_its_sha(self) -> None:
+        """#228: the first pass under `parallel` is a clean review plus a CI pass."""
+        head = "a" * 40
+        gates = [tm.CI_PASSED] * 7 + [tm.CI_FAILED] * 3 + [tm.CI_TIMEOUT, None]
+        for index, gate in enumerate(gates):
+            task, cycle = f"task-{index}", f"cycle-{index}"
+            self.store.record_stage("owner/repo", task, "implement", profile="cheap_coder",
+                                    cycle_id=cycle)
+            self.store.record_stage("owner/repo", task, "review", record_kind="verdict",
+                                    cycle_id=cycle, status=tm.AWAITING_CI_STATUS,
+                                    reviewed_head_sha=head)
+            if gate is not None:
+                self.store.record_stage("owner/repo", task, "coordinate", record_kind="ci",
+                                        cycle_id=cycle, ci_mode="wait", ci_status=gate,
+                                        ci_head_sha=head)
+            self.store.record_stage("owner/repo", task, "rereview", record_kind="verdict",
+                                    cycle_id=cycle, status="APPROVED")
+
+        report = stats.aggregate(stats._read_rows(self.database, "owner/repo"),
+                                 repo_id="owner/repo", now=self.as_of())
+
+        # The two undecided gates are neither passes nor failures.
+        self.assertEqual({"passed": 7, "total": 10, "minimum": 10, "value": 0.7},
+                         report["summary"]["first_pass"])
+
     def test_verification_reports_each_basis_and_separate_agent_conclusions(self) -> None:
         cases = (
             ("claimed", True, "verified"),

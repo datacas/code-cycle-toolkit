@@ -96,7 +96,7 @@ ROLE_ICONS = {
 
 _SUCCESS_RESULTS = {
     "APPROVED", "COMPLETED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
-    "RESOLVED", "SUCCEEDED", "SUCCESS",
+    "RESOLVED", "SUCCEEDED", "SUCCESS", "CI_PASSED",
 }
 _WARNING_RESULTS = {"CHANGES_REQUESTED", "NEEDS_REFINEMENT", "PARTIALLY_RESOLVED"}
 _BLOCKED_RESULTS = {"BLOCKED", "HUMAN_INTERVENTION", "INTERRUPTED", "STOPPED"}
@@ -105,6 +105,9 @@ _FAILURE_RESULTS = {"CONTRACT_VIOLATION", "ERROR", "FAILED"}
 
 def _result_icon(value: object) -> str | None:
     normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    # A clean review waiting for its checks, or a gate still reading them.
+    if "AWAITING" in normalized or normalized in {"CI_PENDING", "WAITING"}:
+        return "⏳"
     if normalized in _FAILURE_RESULTS or "ERROR" in normalized or "FAILED" in normalized:
         return "❌"
     if normalized in _BLOCKED_RESULTS or "BLOCKED" in normalized or "STOPPED" in normalized:
@@ -294,6 +297,30 @@ def _stage_line(stage: dict, *, progress: bool = False) -> str:
     return " · ".join(str(part) for part in parts)
 
 
+def _ci_fields(ci: object) -> list[str]:
+    """The CI gate's latest read, apart from any stage's own status (#228)."""
+    if not isinstance(ci, dict):
+        return []
+    head = _clean_activity(str(ci.get("head_sha") or ""))[:12] or "unknown"
+    status = _clean_activity(str(ci.get("status") or "unknown"))
+    counts = [f"{ci[name]} {name}" for name in ("passed", "failed", "pending", "missing")
+              if isinstance(ci.get(name), int) and ci[name]]
+    label = (f"CI waiting on {head}" if ci.get("state") == "waiting"
+             else f"CI {status} on {head}")
+    return [label + (f" ({', '.join(counts)})" if counts else "")]
+
+
+def _ci_line(ci: dict) -> str:
+    timestamp = datetime.now().astimezone().strftime("%H:%M")
+    state = "waiting" if ci.get("state") == "waiting" else "done"
+    icon = _result_icon("WAITING" if state == "waiting" else ci.get("status")) or "🔔"
+    parts = [f"{icon} [{timestamp}] ci · {state}", *_ci_fields(ci)]
+    polls = ci.get("polls")
+    if isinstance(polls, int) and polls:
+        parts.append(f"{polls} read{'s' if polls != 1 else ''}")
+    return " · ".join(parts)
+
+
 def format_progress_line(status: dict) -> str:
     """Format the latest cycle snapshot as one user-facing progress line."""
     updated_at = status.get("updated_at")
@@ -343,6 +370,7 @@ def format_progress_line(status: dict) -> str:
                 parts.append(f"round {final_stage['iteration']}")
         parts.append(total_label)
         parts.extend(_workspace_fields(workspace))
+        parts.extend(_ci_fields(status.get("ci")))
         stop_reason = status.get("stop_reason")
         reason = status.get("reason")
         if stop_reason and state in {"blocked", "failed"}:
@@ -419,6 +447,9 @@ def format_progress_line(status: dict) -> str:
         activity = f"{field(result, 'unknown')}: {activity}" if activity else result
     if activity:
         parts.append(field(activity, ""))
+    if stage.get("finished"):
+        # Between stages only the CI gate can be working.
+        parts.extend(_ci_fields(status.get("ci")))
     return " · ".join(str(part) for part in parts)
 
 
@@ -646,9 +677,30 @@ class CycleStatusWriter:
         if self.verbose and (workspace_changed or delegation_changed):
             self._print(_stage_line(snapshot, progress=True))
 
+    def ci_observed(self, result, *, waiting: bool) -> None:
+        """Show the CI gate's latest read of one SHA, apart from any stage (#228).
+
+        The review's status stays on its stage; this is the CI outcome, tied
+        to the SHA it describes. A verbose run prints a line when it changes.
+        """
+        counts = result.counts()
+        ci = {"head_sha": result.head_sha, "status": result.status,
+              "state": "waiting" if waiting else "done", "polls": result.polls,
+              "waited_seconds": int(result.waited_seconds), **counts,
+              "updated_at": _now()}
+        with self._lock:
+            previous = self._status.get("ci")
+            changed = not isinstance(previous, dict) or any(
+                previous.get(key) != ci[key] for key in ("head_sha", "status", "state"))
+            self._status["ci"] = ci
+        self._write()
+        if self.verbose and changed:
+            self._print(_ci_line(ci))
+
     def stage_finished(self, result, status: str | None, *,
                        findings: str | None = None,
-                       warnings: list[str] | None = None) -> float | None:
+                       warnings: list[str] | None = None,
+                       reviewed_head: str | None = None) -> float | None:
         with self._lock:
             stage = self._status.get("stage")
             if not isinstance(stage, dict):
@@ -658,6 +710,9 @@ class CycleStatusWriter:
             stage["outcome"] = result.outcome.value if result else "blocked"
             stage["status"] = status
             stage["finished"] = True
+            if reviewed_head:
+                # The review outcome, tied to the SHA it judged (#228).
+                stage["reviewed_head_sha"] = reviewed_head
             if result is not None and getattr(result, "failure_code", None) is not None:
                 stage["error_code"] = result.failure_code
                 stage["start_state"] = result.start_state

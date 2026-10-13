@@ -483,6 +483,62 @@ class FirstPassRateTests(TelemetryTestCase):
 
         self.assertEqual(10, self.store.first_pass_rate("repo").observations)
 
+    def parallel_first_pass(self, task: str, gate: str | None, *,
+                            status: str = tm.AWAITING_CI_STATUS, head: str = "a" * 40,
+                            gate_head: str | None = None) -> None:
+        """#228: a clean first review whose CI gate on `gate_head` said `gate`."""
+        cycle = f"cycle-{task}"
+        self.store.record_stage("repo", task, "implement", profile="cheap_coder",
+                                cycle_id=cycle)
+        self.store.record_stage("repo", task, "review", status=status, cycle_id=cycle,
+                                record_kind="verdict", reviewed_head_sha=head)
+        if gate is not None:
+            self.store.record_stage("repo", task, "coordinate", cycle_id=cycle,
+                                    record_kind="ci", ci_mode="wait", ci_status=gate,
+                                    ci_head_sha=gate_head or head)
+        # A later rereview never counts as the first pass, whatever it says.
+        self.store.record_stage("repo", task, "review", iteration=1, status="APPROVED",
+                                cycle_id=cycle, record_kind="verdict")
+
+    def test_a_clean_review_awaiting_ci_passes_on_the_ci_gate_of_its_own_sha(self) -> None:
+        for i in range(6):
+            self.parallel_first_pass(f"p{i}", tm.CI_PASSED)
+        for i in range(4):
+            self.parallel_first_pass(f"f{i}", (tm.CI_FAILED, tm.CI_SKIPPED,
+                                               tm.NO_CI_CHECKS_FOUND)[i % 3])
+
+        rate = self.store.first_pass_rate("repo")
+
+        self.assertEqual(0.6, rate.value)
+        self.assertEqual(10, rate.observations)
+
+    def test_an_undecided_ci_gate_consumes_the_task_without_counting_it(self) -> None:
+        for i, gate in enumerate((None, tm.CI_TIMEOUT, tm.CI_UNREADABLE, tm.CI_HEAD_MOVED)):
+            self.parallel_first_pass(f"u{i}", gate)
+        # A pass of another SHA says nothing about the reviewed one.
+        self.parallel_first_pass("other", tm.CI_PASSED, gate_head="b" * 40)
+
+        self.assertEqual(0, self.store.first_pass_rate("repo").observations)
+
+    def test_an_approval_the_ci_gate_later_ruled_out_is_not_a_first_pass(self) -> None:
+        for i in range(10):
+            self.parallel_first_pass(f"a{i}", tm.CI_FAILED if i < 5 else None,
+                                     status="APPROVED")
+
+        self.assertEqual(0.5, self.store.first_pass_rate("repo").value)
+
+    def test_the_ci_vocabulary_is_closed(self) -> None:
+        for field, value in (("ci_status", "GREEN"), ("ci_mode", "poll"),
+                             ("ci_policy", "eager"), ("ci_required_source", "guessed"),
+                             ("final_ci_status", "OK"), ("record_kind", "checks")):
+            with self.subTest(field=field):
+                with self.assertRaises(tm.TelemetryError):
+                    self.store.record_stage("repo", "t1", "coordinate", **{field: value})
+        self.store.record_stage("repo", "t1", "review", status=tm.AWAITING_CI_STATUS,
+                                reviewed_head_sha="a" * 40, checks_head_sha="a" * 40)
+        with self.assertRaises(tm.TelemetryError):
+            self.store.record_stage("repo", "t1", "review", reviewed_head_sha="a sha")
+
     def test_the_filter_names_the_implementer_not_the_reviewer(self) -> None:
         for i in range(10):
             self.cycle(f"cheap{i}", implementer="cheap_coder", review_status="CHANGES_REQUESTED")

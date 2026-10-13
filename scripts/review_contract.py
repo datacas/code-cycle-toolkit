@@ -827,6 +827,28 @@ def trusted_logins(trusted_authors: Iterable[str]) -> frozenset[str]:
     return frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
 
 
+def trusted_receipts(
+    comments: Iterable[ProviderComment], *, trusted_authors: Iterable[str]
+) -> list[dict]:
+    """Every schema-2 receipt the trusted comments carry, in publication order.
+
+    Comments are oldest first, and receipts keep their order within a
+    comment, so the last one is the latest publication. A comment from
+    another author, or without author metadata, is not a publication of this
+    cycle and is skipped. A trusted comment whose receipt cannot be read
+    raises: a receipt that cannot be read cannot be ruled out as the latest.
+    """
+    trusted = trusted_logins(trusted_authors)
+    if not trusted:
+        raise ContractError("receipts need at least one trusted author")
+    receipts: list[dict] = []
+    for comment in comments:
+        author = comment.author.strip().casefold() if isinstance(comment.author, str) else None
+        if author in trusted:
+            receipts.extend(stage_evidence(comment.body))
+    return receipts
+
+
 def claimed_fix_survivals(
     runs: Iterable[RunStatuses] | Iterable[ReviewRecord],
 ) -> dict[str, int]:
