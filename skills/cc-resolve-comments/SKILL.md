@@ -471,6 +471,19 @@ specific change or decision that resolves it. When a comment is incorrect,
 obsolete, or not applicable, explain why and anchor that decision to the
 triage commit.
 
+Under the `parallel` CI policy the request may say that required checks failed
+on the head a review judged, by SHA and count. That is work for this round
+beside the findings, and possibly the only work when the review itself was
+clean. Read those checks and their logs with the configured code-host tooling,
+diagnose each one, and fix those whose cause is within this change as you would
+a valid finding, with a regression test where one applies. Report a cause
+outside it, such as infrastructure or an unrelated flaky suite, as *Checks of
+the pushed head* describes for a check outside this stage's scope. A failed
+check is not a finding: never publish it as a `REV-xxx`, and never let it
+resolve, replace, or hide one. When nothing in the change can fix it, leave the
+head unchanged and say why: the cycle then stops rather than reviewing the same
+head again.
+
 ## Verify each fix
 
 After applying a valid fix, run the narrowest related test and reproduce the

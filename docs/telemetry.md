@@ -31,13 +31,14 @@ The database is outside every repository and never enters Git. Every row carries
 
 ## What is recorded
 
-References, statuses, counts, and flags. Four kinds of row share a `cycle_id`:
+References, statuses, counts, and flags. Five kinds of row share a `cycle_id`:
 
 | Row | Written | Holds |
 |---|---|---|
 | `dispatch` | after each dispatch decision | role, profile, executor, provider, requested and resolved model, `model_resolution`, effort, outcome (`succeeded`/`blocked`/…), `missing_capability`, fallback used, readiness policy and state, routing strategy and cost inputs, `duration_ms`, `local_only`, `started_from`, and references to an attempt, execution variant and harness snapshot when an attempt was created |
-| `verdict` | when a stage's structured result is read | status (`APPROVED`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, and `checks_passed`/`checks_failed`/`checks_pending` for the head a stage pushed; an `issue_review` verdict holds instead `READY`/`NEEDS_REFINEMENT`/`BLOCKED`, `readiness_result_valid`, and, when valid, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, and `readiness_uncertainties_material` |
-| `cycle` | once, when the run closes | final status, stop reason, iterations, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion, and for a cycle that started at `implement`, `issue_review` (`off`, `skipped`, `dispatched`) |
+| `verdict` | when a stage's structured result is read | status (`APPROVED`, `REVIEW_PASSED_AWAITING_CI`, `CHANGES_REQUESTED`, …), findings total/blocking/by severity, `tests_passed` and its `tests_basis`, the separate agent `verification` conclusion, `boundary_verified` when a boundary run was required, `checks_passed`/`checks_failed`/`checks_pending` for the head a stage reported with that head as `checks_head_sha`, and for a review its `reviewed_head_sha`; an `issue_review` verdict holds instead `READY`/`NEEDS_REFINEMENT`/`BLOCKED`, `readiness_result_valid`, and, when valid, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, and `readiness_uncertainties_material` |
+| `ci` | after each read or wait of the [CI gate](#ci-gate-schema-19) | the gate's result for one SHA, kept apart from the review's verdict |
+| `cycle` | once, when the run closes | final status, stop reason, iterations, `ci_policy`, first-review status, first-pass approved, resolution needed and rounds, final review status, fallback stages, contract violations, latest test outcome with its basis and agent conclusion, and for a cycle that started at `implement`, `issue_review` (`off`, `skipped`, `dispatched`) |
 | `shadow` | after `implement`/`resolve` when Jev is enabled | the rules' profile, Jev's suggestion, agreement, confidence, probabilities, status, model, duration |
 
 **Pre-routing signals** are what the router could have known before it chose a profile. They are kept separate from outcomes so a future selector can be judged fairly:
@@ -268,6 +269,48 @@ history is reconciled and the cycle stops as `BLOCKED` so it can be resumed.
 GitHub has no atomic check-and-publish, so this reduces conflicts between
 machines without excluding them. Each publishing stage costs one freshness
 check and, when something changed, one filtered comment read.
+
+### CI gate (schema 19)
+
+Under the `parallel` [CI policy](review-cycle.md#ci-policy) the review outcome and
+the CI outcome are separate signals, each tied to the SHA it describes. A review
+verdict carries its status, which may be `REVIEW_PASSED_AWAITING_CI`, and its
+`reviewed_head_sha`. Each read or wait of the CI gate writes a `ci` row (role
+`coordinate`, pointing at that review through `stage_seq`):
+
+| Field | Holds |
+|---|---|
+| `ci_status` | `CI_PASSED`, `CI_FAILED`, `CI_SKIPPED`, `CI_TIMEOUT`, `CI_PENDING` (a single read only), `NO_CI_CHECKS_FOUND`, `CI_UNREADABLE`, `CI_HEAD_MOVED` |
+| `ci_mode` | `wait`, the gate's one bounded wait after a clean review, or `once`, the single read before a resolution that follows `CHANGES_REQUESTED` |
+| `ci_head_sha` | the SHA whose checks were read |
+| `ci_required_source` | `declared` by protection or rulesets, or `reported` when none were declared |
+| `checks_passed` … `checks_missing`, `checks_late` | counts per state, and checks first reported while the gate waited |
+| `ci_polls`, `ci_wait_ms` | reads made, and wall time the gate waited with no stage running |
+
+The `cycle` row adds `ci_policy` (always), `ci_polls` and `ci_wait_ms` (totals,
+when the gate ran), `final_ci_status` (the last wait), `redundant_reviews` (reviews
+of a head that already had a clean review in that run, measured whenever a
+review named its SHA), and `review_reused` (a resume that reused a clean review's
+receipt instead of dispatching one). Under `parallel`, `first_pass_approved` and
+`final_approved` mean a clean review **and** a CI pass of its SHA; they are left
+out while the gate has not decided, and `resolution_needed` still describes the
+review alone. `cc-stats` and the measured first-pass rate count a first review
+reporting `REVIEW_PASSED_AWAITING_CI` by the gate's wait on its own SHA, and not
+at all when the gate never decided.
+
+**Comparing the policies.** The values the policy is meant to improve can be
+read from these rows and the [attempt table](#physical-attempts-usage-and-harness-snapshots-schema-13):
+
+| Value | From |
+|---|---|
+| implementation completion to review dispatch | `dispatch_attempts`: the review attempt's `started_at` minus the implement attempt's `finished_at` |
+| actionable findings to resolution dispatch | the resolve attempt's `started_at` minus the `CHANGES_REQUESTED` review attempt's `finished_at` |
+| wall time waiting on CI with no stage running | `ci_wait_ms` (`parallel`); under `strict` the wait is inside each implement and resolve `duration_ms` |
+| model turns spent polling CI | zero under `parallel`, where no stage runs while the gate waits and the stages are told not to poll; under `strict` they are inside the writing stages |
+| redundant reviews caused by CI state changes | `redundant_reviews` |
+
+`tests/test_ci_policy.py` (`BenchmarkTests`) is a repeatable, simulated
+comparison of the two policies on a controlled fake CI.
 
 ### Work-item outcomes (schema 14)
 

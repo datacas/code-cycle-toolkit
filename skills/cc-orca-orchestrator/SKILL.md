@@ -170,6 +170,7 @@ Parse the invocation, for example:
 | `reviewer` | `claude` | Agent that reviews and rereviews. |
 | `max_iterations` | `6` | Maximum resolve+rereview cycles. |
 | `issue_review` | `code_cycle.issue_review.mode`, else `auto` | `auto` or `off`; see *Issue review before implementation*. |
+| `ci_policy` | `code_cycle.ci.policy`, else `strict` | `strict` or `parallel`; see *CI policy*. |
 | `merge` | `manual` | Fixed. Automatic merge is not implemented. |
 | `paired_review` | `false` | Dispatch two reviewers over one commit for calibration. See *Paired review*. |
 | `campaign` | none | Campaign identifier, required when `paired_review=true`. |
@@ -358,6 +359,61 @@ For in-agent work, including `single_agent` stages and Orca coordinator steps,
 emit the same start and end lines yourself. For each worker Task, emit the start
 line immediately before dispatch and the end line as soon as its result arrives.
 
+## CI policy
+
+Resolve the cycle's CI policy from an explicit `ci_policy=strict|parallel`
+invocation value, then `code_cycle.ci.policy` in `.code-cycle.yml`, then
+`strict`. `strict` is the original flow, and nothing below applies to it.
+`parallel` reviews the change while the code host's checks run, and approves
+only after a clean review and a CI pass of the same SHA. `run_cycle.py
+--ci-policy parallel` applies these rules itself; this section is what an
+orchestrator does in its place.
+
+The policy reads GitHub checks through the installed runtime's `ci_gate.py`.
+Look for it at exactly these paths, in order:
+`<repository>/.code-cycle/runtime/ci_gate.py`, then
+`<user home>/.code-cycle/runtime/ci_gate.py`, then, only in the toolkit's own
+repository, `<repository>/scripts/ci_gate.py`. On another code host, or when
+none exists, stop with `BLOCKED` before implementation and say why.
+
+Under `parallel`:
+
+- tell `cc-implement-issue`, `cc-initial-review` and `cc-rereview` that the CI
+  policy is `parallel`. Tell `cc-resolve-comments` nothing: it keeps waiting
+  for the head it pushes;
+- dispatch the review as soon as the implementation returns, without waiting
+  for its checks, and start the next resolution as soon as a review returns
+  `CHANGES_REQUESTED`, whatever the checks' state;
+- a review's `REVIEW_PASSED_AWAITING_CI` is a completed clean review and never
+  an approval, and neither is its `APPROVED` alone. Accept either only with
+  `reviewed_head_sha` equal to `head_sha`, an empty `blocking_findings` list,
+  and that stage's receipt for that head published by a trusted author with
+  nothing published after it; otherwise stop with `BLOCKED`;
+- then run the CI gate once, for that SHA, and dispatch nothing until it
+  returns: `python3 <ci_gate.py> --repo <owner/name> --pr <number> --sha
+  <reviewed_head_sha> --timeout <code_cycle.ci.timeout, else 900>`. Never poll
+  the checks yourself, never let a worker wait for them, never cancel or rerun
+  a check, and never review the same SHA again because a check changed state;
+- act on the `status` of the JSON it prints:
+
+| Gate status | Next step |
+|---|---|
+| `CI_PASSED` | Read the receipt again. Finish as `READY_FOR_MANUAL_MERGE` when it still holds with nothing published after it; otherwise stop with `BLOCKED`. |
+| `CI_FAILED` | Open an iteration with a `cc-resolve-comments` Task told the SHA and the number of failed checks, never their names. When it leaves the head unchanged, stop with `HUMAN_INTERVENTION`. |
+| `CI_HEAD_MOVED` | Do not reuse the clean review: spend one iteration on a fresh `cc-rereview` of the new head. A second move stops with `HUMAN_INTERVENTION`. |
+| `CI_SKIPPED`, `NO_CI_CHECKS_FOUND` | Stop with `HUMAN_INTERVENTION`: the checks cannot pass on that head. |
+| `CI_TIMEOUT` | Stop with `BLOCKED`. The clean review stays valid for that head, and a resume waits again without another review. |
+| `CI_UNREADABLE` | Stop with `BLOCKED`, quoting its `reason`. |
+
+Before a resolution that follows `CHANGES_REQUESTED`, run the gate with
+`--once` for the head the review judged: on `CI_FAILED`, tell the resolution
+that SHA and count beside the findings. A resumed change request reuses a
+clean review only when its latest trusted receipt is a clean `review` or
+`rereview` of its current head and its published findings block nothing; then
+only the gate runs. Anything else, an unreadable receipt included, reviews the
+current head. The gate never writes to the code host, and only the review stage
+writes the receipt of a clean review.
+
 ## Workflow
 
 1. Run `cc-provider-bootstrap` with the explicit inputs. If it returns
@@ -420,9 +476,10 @@ act without asking for context that is already known:
 - implementation: use `cc-implement-issue` for work item `<id>` from
   `<issue_provider>` in `<repo>` on `<code_host>`, link the work item using
   the provider-native convention, and report the change-request ID and branch
-  in the `worker_done` body;
+  in the `worker_done` body; under the `parallel` CI policy, state it;
 - review: use `cc-initial-review` on change request `<change_request_id>` of
-  `<repo>` with the configured code host;
+  `<repo>` with the configured code host; under the `parallel` CI policy, state
+  it, as for every rereview;
 - resolution: use `cc-resolve-comments` on change request
   `<change_request_id>` of `<repo>`;
 - rereview: use `cc-rereview` on change request `<change_request_id>` of
@@ -664,6 +721,12 @@ Apply the table in *Issue review before implementation*: only a confirmed
   `READY_FOR_MANUAL_MERGE`. If `reviewed_head_sha` no longer matches the current
   HEAD, the branch moved during the review; spend one iteration on a fresh
   `cc-rereview` Task, and stop with `HUMAN_INTERVENTION` if it happens again.
+  Under the `parallel` CI policy, run the CI gate first, as *CI policy*
+  describes.
+- `REVIEW_PASSED_AWAITING_CI`: only under the `parallel` CI policy, where it is a
+  completed clean review that is never an approval: run the CI gate and act on
+  its status, as *CI policy* describes. Under `strict` no gate waits for the
+  checks, so the stage did not complete: stop with `HUMAN_INTERVENTION`.
 - `CHANGES_REQUESTED`: open a new iteration with a `cc-resolve-comments` Task
   for the implementer, once the no-progress guard and the repeated-findings
   ladder below allow it.
@@ -798,11 +861,13 @@ HEAD, commits, reviews, threads, and checks. The issue provider stays the source
 of truth for the work item and its status. Before finishing as
 `READY_FOR_MANUAL_MERGE`, confirm all of:
 
-- the last reviewer status is `APPROVED`;
+- the last reviewer status is `APPROVED`, or under the `parallel` CI policy
+  `APPROVED` or `REVIEW_PASSED_AWAITING_CI`;
 - `reviewed_head_sha` equals the current HEAD;
 - `blocking_findings` is empty, and no open finding has
   `blocks_approval: true`;
-- the required checks are in the state the delegated skills require.
+- the required checks are in the state the delegated skills require; under the
+  `parallel` CI policy, the CI gate returned `CI_PASSED` for that SHA.
 
 Use the configured code-host tooling to inspect the change request and checks.
 For GitHub, the equivalent commands are:

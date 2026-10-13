@@ -2,7 +2,7 @@
 
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
-**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
+**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
 
 ## Issue review before implementation
 
@@ -58,6 +58,58 @@ sequenceDiagram
 4. Repeat until approved, or until an orchestrator's iteration limit, no-progress guard, or repeated-findings ladder stops it (see [Exit conditions](#exit-conditions)).
 
 Reviews always cover the **accumulated diff from the merge base to the current head**, never only the latest commit.
+
+## CI policy
+
+A cycle runs under one of two CI policies, set by `ci.policy` in `.code-cycle.yml`, by `--ci-policy` for one `run_cycle.py` run, or by `ci_policy=` for one orchestrator invocation. The override wins.
+
+| Policy | Behaviour |
+|---|---|
+| `strict` (default) | The original serial flow. The implementation and each resolution wait for their pushed head's checks before returning, and a review reports `APPROVED` only once every required check passed. |
+| `parallel` | The review starts as soon as the implementation is published, while its checks run. Approval needs a clean review **and** a CI pass of the same SHA, decided by the runtime's one CI gate. GitHub only; another code host keeps `strict`. |
+
+Parallel mode never disables CI. It moves the wait to where it is useful: after the review, and only when the review found nothing to fix.
+
+```mermaid
+flowchart LR
+    I[implement, no CI wait] --> R[review]
+    R -- CHANGES_REQUESTED --> X[resolve at once]
+    R -- REVIEW_PASSED_AWAITING_CI --> G{CI gate on the reviewed SHA}
+    G -- CI_PASSED --> M[READY_FOR_MANUAL_MERGE]
+    G -- CI_FAILED --> X
+    G -- CI_HEAD_MOVED --> RR[rereview the new head, once]
+    X --> RR
+    RR -- clean --> G
+```
+
+### The awaiting state
+
+`REVIEW_PASSED_AWAITING_CI` means the review completed on the change request's current head, found nothing that blocks approval, and the required checks of that head have not all passed yet. It is **not** an approval. The review reports it instead of waiting, with `reviewed_head_sha` equal to `head_sha` and an empty `blocking_findings` list, and its schema-2 receipt in the PR comment carries the same status for that SHA. That receipt is the record of the awaiting state: the runtime reads it and never edits it, and a retried review reuses its own comment. Local SQLite and telemetry only mirror it. A clean status without those fields, or without its receipt, is a stage that did not complete.
+
+Under `parallel` a review never turns a check's state into a finding; the CI gate does. A review that finds something blocking reports `CHANGES_REQUESTED`, and resolution starts at once, whatever the checks are doing. Under `strict` no gate waits for the checks, so a review that reports `REVIEW_PASSED_AWAITING_CI` stops the cycle as a stage that did not complete.
+
+### The CI gate
+
+`scripts/ci_gate.py` is the cycle's only wait on checks. `run_cycle.py` calls it after a clean review, and both orchestrators run its command line. No stage and no model polls: the implementation and the reviews read the checks once and return.
+
+- **Required checks** are the ones the base branch's classic protection and active rulesets declare. When they declare none, every check reported on the SHA is required, identified by name and source app. Repeated runs count once, as their latest run, so a failed attempt does not block a successful retry.
+- **Only `success` passes.** `failure`, `cancelled`, `timed_out` and every other unsuccessful conclusion fail; `skipped` and `neutral` do not pass either. A declared check that has not reported yet is pending until the deadline, and missing after it.
+- **The SHA must still be the head.** Every read first confirms it. A pass is confirmed by one more read of the head and then of the clean review's receipt, with nothing published after it.
+
+| Gate result | What the cycle does |
+|---|---|
+| `CI_PASSED` | `READY_FOR_MANUAL_MERGE`, once the receipt still holds |
+| `CI_FAILED` | one resolution round, told the SHA and the number of failed checks, never their names, which the change under review writes; a resolution that leaves the head unchanged stops as `no_progress` |
+| `CI_HEAD_MOVED` | the clean review is not reused: one fresh rereview of the new head, as one round; a second move stops as `head_moved` |
+| `CI_SKIPPED`, `NO_CI_CHECKS_FOUND` | `HUMAN_INTERVENTION`, recorded as `ci_not_passing` |
+| `CI_TIMEOUT`, after `ci.timeout` (default 900 s) | `BLOCKED`, recorded as `ci_timeout`; the clean review stays valid for that SHA |
+| `CI_UNREADABLE` | `BLOCKED`, recorded as `ci_unreadable` |
+
+Before a resolution that follows `CHANGES_REQUESTED`, the runtime reads the reviewed head's checks once, without waiting: a failure already reported there reaches that resolution beside the findings. Review findings and CI failures stay separate, and neither resolves, replaces nor hides the other. The resolution keeps its own wait for the head it pushes under both policies.
+
+### Resume while awaiting CI
+
+`run_cycle.py --from rereview --pr <n> --ci-policy parallel` reads the change request's trusted comments first. When the latest receipt is a clean `review` or `rereview` of the PR's current head and the published findings block nothing, no review is dispatched: the cycle only runs the gate. A moved head, a later receipt from another stage, a malformed receipt, or a blocking finding reviews the current head instead, and a change request whose state cannot be read stops as `BLOCKED`. `--from review` always runs a fresh initial review.
 
 ## Anatomy of a review comment
 
@@ -117,7 +169,7 @@ A skill that republishes a comment keeps every run line it didn't write.
 
 **Legacy headers** with four tokens (no disposition) predate this contract and read as `-`. They never block an open PR.
 
-Other tokens that never translate: the functional statuses (`APPROVED`, `CHANGES_REQUESTED`, `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`, `READY_FOR_MANUAL_MERGE`, `HUMAN_INTERVENTION`) and every JSON key.
+Other tokens that never translate: the functional statuses (`APPROVED`, `REVIEW_PASSED_AWAITING_CI`, `CHANGES_REQUESTED`, `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`, `READY_FOR_MANUAL_MERGE`, `HUMAN_INTERVENTION`), the CI gate results (`CI_PASSED`, `CI_FAILED`, …), and every JSON key.
 
 ## Trusted authors
 
@@ -165,7 +217,9 @@ push, advances to rereview. The verifier must execute the verification, report
 the recovered head, and explicitly confirm or reopen every claimed finding ID.
 Reopened findings invalidate those claims and feed the ordinary survivals ladder
 and resolution limit. A recovered review or rereview is dispatched once more
-for a structured verdict; another missing result stops it. Recovery itself
+for a structured verdict; another missing result stops it. Under the `parallel`
+CI policy a receipt reporting `REVIEW_PASSED_AWAITING_CI` is a completed review
+claim too, and the CI gate still decides approval. Recovery itself
 never records `APPROVED` or reaches `READY_FOR_MANUAL_MERGE`. Only the subsequent
 structured verifier result can do that. Other code hosts keep their existing
 missing-result stop until a provider-specific evidence reader is available.
@@ -199,10 +253,10 @@ When it is emitted alongside a published comment, it is collapsed in a `<details
 
 An orchestrator reports `READY_FOR_MANUAL_MERGE` only when **all** of these hold on the code host:
 
-- the last review status is `APPROVED`;
+- the last review status is `APPROVED`, or under the `parallel` [CI policy](#ci-policy) `APPROVED` or `REVIEW_PASSED_AWAITING_CI`;
 - `reviewed_head_sha` equals the current head;
 - no open finding has `blocks:yes`;
-- required checks passed. Pending, skipped, failed, or missing checks are not success.
+- required checks passed. Pending, skipped, failed, or missing checks are not success. Under `parallel` this is the CI gate's `CI_PASSED` for that SHA, never the review's own reading.
 
 A human still owns the merge.
 

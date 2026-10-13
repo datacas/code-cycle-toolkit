@@ -2,7 +2,7 @@
 
 Every setting the toolkit reads, in one place.
 
-**On this page:** [Precedence](#precedence) · [Full example](#full-example) · [`.code-cycle.yml` reference](#code-cycleyml-reference) · [Providers and repository](#providers-and-repository) · [Provider health cache](#provider-health-cache) · [Profiles and routing](#profiles-and-routing) · [Review](#review) · [Security review rule](#security-review-rule) · [Orchestration](#orchestration) · [Calibration](#calibration) · [Invocation parameters](#invocation-parameters) · [Output language](#output-language) · [Environment variables](#environment-variables) · [Command-line flags](#command-line-flags) · [Local files](#local-files)
+**On this page:** [Precedence](#precedence) · [Full example](#full-example) · [`.code-cycle.yml` reference](#code-cycleyml-reference) · [Providers and repository](#providers-and-repository) · [Provider health cache](#provider-health-cache) · [Profiles and routing](#profiles-and-routing) · [CI policy](#ci-policy) · [Review](#review) · [Security review rule](#security-review-rule) · [Orchestration](#orchestration) · [Calibration](#calibration) · [Invocation parameters](#invocation-parameters) · [Output language](#output-language) · [Environment variables](#environment-variables) · [Command-line flags](#command-line-flags) · [Local files](#local-files)
 
 ## Precedence
 
@@ -64,6 +64,9 @@ code_cycle:
     # effort: high                  # low | medium | high | max; explicit value disables automatic escalation
   allowed_commands:
     test: python3 -m unittest discover -s tests  # one exact command for Claude writing stages
+  ci:
+    policy: strict                  # strict | parallel (GitHub only); --ci-policy overrides
+    timeout: 900                    # seconds the parallel CI gate waits for one SHA
 
   # ── Orchestration ─────────────────────────────────────────
   orchestration:
@@ -78,7 +81,7 @@ code_cycle:
 
 ## `.code-cycle.yml` reference
 
-All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, `routing`, and `issue_review` itself. It recognises the other keys and leaves them to the component that owns them.
+All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, `routing`, `issue_review`, and `ci` itself. It recognises the other keys and leaves them to the component that owns them.
 
 | Key | Type / values | Default | Read by |
 |---|---|---|---|
@@ -99,6 +102,8 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
 | `resolve.effort` | `low` · `medium` · `high` · `max` | primary resolve uses `high`; an explicit value disables automatic escalation | `run_cycle.py` |
 | `allowed_commands.test` | one exact command string; wildcards and shell operators are refused | unset | `run_cycle.py`, Claude implementation and resolution stages |
+| `ci.policy` | `strict` · `parallel` | `strict` | `run_cycle.py`, both orchestrators |
+| `ci.timeout` | whole seconds, 1 to 86400 | `900` | `run_cycle.py` and the orchestrators' `ci_gate.py` call, under `parallel` |
 | `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
@@ -144,6 +149,19 @@ Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [
 
 `issue_review.mode: auto` (the default) makes a new `run_cycle.py`, `cc-orchestrator`, or `cc-orca-orchestrator` cycle review its work item with `cc-issue-review` before implementing it, except a task declared trivial and not security-sensitive. `off` keeps the original flow. `--issue-review`, or `issue_review=auto|off` in an orchestrator invocation, overrides it for one run. Only a confirmed `READY` reaches implementation. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
 
+### CI policy
+
+`ci.policy` decides how a cycle treats the code host's checks. `strict`, the default, is the original serial flow: the implementation and each resolution wait for their pushed head's checks, and a review approves only once they passed. `parallel` starts the review while the checks run, sends a review that requests changes to resolution at once, and approves a clean review only after the runtime's one CI gate saw every required check of that same SHA pass. Parallel mode never disables CI; it removes the time spent waiting for it before any useful work can start.
+
+```yaml
+code_cycle:
+  ci:
+    policy: parallel
+    timeout: 1200
+```
+
+`--ci-policy strict|parallel` overrides the file for one `run_cycle.py` run, and `ci_policy=strict|parallel` for one orchestrator invocation; `--ci-timeout` overrides `ci.timeout`. `parallel` reads GitHub checks and rulesets, so it is refused for another `code_host`, which keeps `strict`. See [Review lifecycle → CI policy](review-cycle.md#ci-policy).
+
 ### Review
 
 `review.trusted_authors` controls which comments can create or advance recovered findings. When it is absent, `cc-provider-bootstrap` adds the authenticated code-host login to the configuration it proposes, and writes it only on confirmation. An existing list is never changed. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
@@ -183,6 +201,7 @@ Pass these in the prompt, for example `Use cc-orchestrator for issue 123 with ma
 | `lang` | every skill that publishes | resolved | Output language, e.g. `lang=en` |
 | `orchestration_mode` | `cc-orchestrator` | `auto` | `auto` · `single_agent` · `claude_codex` |
 | `max_iterations` | both orchestrators | `6` | Resolve + rereview rounds, ≥ 1 |
+| `ci_policy` | both orchestrators | `ci.policy`, else `strict` | `strict` · `parallel`; see [CI policy](review-cycle.md#ci-policy) |
 | `implementer` | `cc-orca-orchestrator` | `codex` | Agent that implements and resolves |
 | `reviewer` | `cc-orca-orchestrator` | `claude` | Agent that reviews and rereviews |
 | `paired_review` | `cc-orca-orchestrator` | `false` | Two blind reviewers (calibration) |
@@ -229,7 +248,11 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `run_cycle.py`
 
-`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--cwd` · `--workspace task|current` (default task) · `--local-only` (requires `--workspace current`) · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--ci-policy strict|parallel` (default `ci.policy`, else strict) · `--ci-timeout` (default `ci.timeout`, else 900 seconds) · `--cwd` · `--workspace task|current` (default task) · `--local-only` (requires `--workspace current`) · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+
+### `ci_gate.py` (used by both orchestrators under `parallel`)
+
+`--repo owner/name` · `--pr <number>` · `--sha <full head SHA>` (all required) · `--timeout` (default 900 seconds) · `--poll-interval` (default 30 seconds) · `--once` (read the checks once, never wait). It prints the gate's JSON result and exits `0` only on `CI_PASSED`. It only reads the code host. See [Review lifecycle → CI policy](review-cycle.md#ci-policy).
 
 ### `stats.py` (used by `cc-stats`)
 
