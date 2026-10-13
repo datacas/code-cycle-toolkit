@@ -51,6 +51,8 @@ class StageRecoveryTests(RunCycleTestCase):
             "a=sys.argv[1:]\n"
             "if a[:2]==['pr','list']: print(json.dumps([{'number':4}]))\n"
             "elif a[:2]==['pr','view']: print(json.dumps({'number':4,'state':'OPEN','headRefOid':d['head']}))\n"
+            "elif a[:2]==['api','graphql']: print(json.dumps({'data':{'repository':{'pullRequest':"
+            "{'headRefOid':d['head'],'comments':{'totalCount':len(d['comments']),'nodes':[]}}}}}))\n"
             "elif a[0]=='api': print(json.dumps([d['comments']]))\n"
             "else: sys.exit(2)\n"
         )
@@ -89,7 +91,7 @@ class StageRecoveryTests(RunCycleTestCase):
         attempt = self.receipt['attempt_id']
         self.assertEqual("failed", self.store.attempt(attempt)['outcome'])
         row = self.store.recoveries(attempt)[0]
-        self.assertEqual(17, row['schema_version'])
+        self.assertEqual(tm.SCHEMA_VERSION, row['schema_version'])
         self.assertEqual(self.head, row['head_sha'])
         with self.store._connect() as connection:
             for sql in ("DELETE FROM stage_recoveries", "UPDATE stage_recoveries SET comment_id='9'"):

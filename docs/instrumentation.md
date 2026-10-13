@@ -567,7 +567,8 @@ that survived a claimed fix before this routing, as
 [Exit conditions](review-cycle.md#exit-conditions) defines it. It is recorded
 only by `run_cycle.py`, which reads the structured results and, on a `--from`
 resume, rebuilds the earlier history from the change request's trusted review
-comments (telemetry holds no per-finding statuses), and only once the
+comments, or from their verified local copy (see
+[Telemetry → Cycle history](telemetry.md#cycle-history-schema-18)), and only once the
 ladder has been evaluated, the first time a review asks for changes: before
 that, and in a recorder whose caller does not track it, it is left out rather
 than recorded as zero. It is not `previous_failed_attempts`, which counts

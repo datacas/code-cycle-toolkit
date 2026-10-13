@@ -7,6 +7,21 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- The review history of a change request is kept locally (#223). Schema 18
+  adds `cycle_history_*` and `cycle_publications` tables to the telemetry
+  database, holding only identifiers and closed tokens (comment, run, finding
+  and attempt IDs, severities, statuses, dispositions, SHAs). On a GitHub code
+  host a `--from` resume makes one GraphQL freshness check and uses the stored
+  history when it matches the sync watermark; otherwise it reads only the
+  comments edited since (`?since=`), and rebuilds from every comment after a
+  deletion, a trusted-author change, or with no usable store. A failed check
+  stops as `BLOCKED`. After each `review`, `resolve` and `rereview`, the history
+  is reconciled and the stage's schema-2 receipt confirms its publication; an
+  unobserved one is a stage warning, and the next dispatch of that stage is told
+  to reuse a comment carrying the earlier attempt ID instead of posting again.
+  A per-machine writer lock stops a second cycle on the same change request,
+  and a receipt from an attempt this machine never dispatched stops the cycle
+  as `BLOCKED` after reconciling. The change request remains the durable record.
 - A `--from` resume keeps the claimed-fix history (#179). Before its first
   stage, `run_cycle.py` rebuilds the claim and survival history from the
   change request's `code_cycle.review.trusted_authors` comments through

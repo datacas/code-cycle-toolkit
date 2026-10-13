@@ -10,6 +10,7 @@
 # One file per line. Blank lines and `#` comments are ignored.
 
 cycle.py
+cycle_history.py
 reroute.py
 environment_recovery.py
 run_cycle.py
