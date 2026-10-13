@@ -78,7 +78,11 @@ from pathlib import Path
 #: 16: append-only recovery references; attempts retain their failed outcome.
 #: 17: resolve escalation is role-agnostic and carries bounded finding IDs and
 #: acceptance state. Old rows read with no escalation and an empty ID list.
-SCHEMA_VERSION = 17
+#: 18: additive `cycle_history_*` and `cycle_publications` tables, the local
+#: copy of each change request's review history (`cycle_history.py`). Stage
+#: rows are unchanged; an older store simply has no local history and rebuilds
+#: it from the change request's comments on the next resume.
+SCHEMA_VERSION = 18
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -813,6 +817,96 @@ CREATE INDEX IF NOT EXISTS work_item_reconciliation_failure_latest
     ON work_item_reconciliation_failures
        (repo_id, provider, external_repository, work_item_id,
         observed_at, recorded_at, failure_id);
+-- Additive schema 18: the local copy of a change request's review history
+-- (`cycle_history.py`). Identifiers and closed tokens only: finding titles,
+-- comment bodies and decision prose stay in the change request, which remains
+-- the durable record every row here can be rebuilt from.
+CREATE TABLE IF NOT EXISTS cycle_history_sync (
+    repo_id             TEXT NOT NULL,
+    change_request_id   TEXT NOT NULL,
+    head_sha            TEXT,
+    comment_count       INTEGER NOT NULL CHECK(comment_count >= 0),
+    latest_comment_id   TEXT,
+    latest_updated_at   TEXT,
+    trusted_fingerprint TEXT NOT NULL,
+    version             INTEGER NOT NULL CHECK(version >= 1),
+    synced_at           TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, change_request_id)
+);
+CREATE TABLE IF NOT EXISTS cycle_history_comments (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    comment_id        TEXT NOT NULL,
+    ordinal           INTEGER NOT NULL,
+    updated_at        TEXT,
+    trusted           INTEGER NOT NULL CHECK(trusted IN (0, 1)),
+    PRIMARY KEY (repo_id, change_request_id, comment_id)
+);
+CREATE TABLE IF NOT EXISTS cycle_history_runs (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    comment_id        TEXT NOT NULL,
+    position          INTEGER NOT NULL CHECK(position >= 0),
+    review_run_id     TEXT NOT NULL,
+    kind              TEXT NOT NULL CHECK(kind IN ('review', 'triage')),
+    PRIMARY KEY (repo_id, change_request_id, comment_id, position)
+);
+CREATE TABLE IF NOT EXISTS cycle_history_findings (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    comment_id        TEXT NOT NULL,
+    position          INTEGER NOT NULL CHECK(position >= 0),
+    finding_id        TEXT NOT NULL,
+    severity          TEXT NOT NULL CHECK(severity IN ('critical', 'high', 'medium', 'low')),
+    status            TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'not_applicable')),
+    disposition       TEXT NOT NULL CHECK(disposition IN
+                          ('valid', 'debatable', 'incorrect', 'obsolete',
+                           'needs_clarification', '-')),
+    blocks_approval   INTEGER NOT NULL CHECK(blocks_approval IN (0, 1)),
+    PRIMARY KEY (repo_id, change_request_id, comment_id, position)
+);
+CREATE TABLE IF NOT EXISTS cycle_history_receipts (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    comment_id        TEXT NOT NULL,
+    attempt_id        TEXT NOT NULL,
+    stage             TEXT NOT NULL CHECK(stage IN ('implement', 'review', 'resolve', 'rereview')),
+    status            TEXT NOT NULL,
+    head_sha          TEXT NOT NULL,
+    PRIMARY KEY (repo_id, change_request_id, comment_id, attempt_id)
+);
+CREATE TABLE IF NOT EXISTS cycle_history_finding_state (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    finding_id        TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'not_applicable')),
+    claims            INTEGER NOT NULL CHECK(claims >= 0),
+    survivals         INTEGER NOT NULL CHECK(survivals >= 0),
+    PRIMARY KEY (repo_id, change_request_id, finding_id)
+);
+CREATE TABLE IF NOT EXISTS cycle_publications (
+    attempt_id        TEXT PRIMARY KEY,
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    stage             TEXT NOT NULL CHECK(stage IN ('implement', 'review', 'resolve', 'rereview')),
+    state             TEXT NOT NULL CHECK(state IN ('pending', 'published', 'superseded')),
+    comment_id        TEXT,
+    head_sha          TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    schema_version    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cycle_publications_pending
+    ON cycle_publications (repo_id, change_request_id, stage, state);
+CREATE TABLE IF NOT EXISTS cycle_history_locks (
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    owner             TEXT NOT NULL,
+    pid               INTEGER NOT NULL,
+    acquired_at       TEXT NOT NULL,
+    PRIMARY KEY (repo_id, change_request_id)
+);
 """
 
 

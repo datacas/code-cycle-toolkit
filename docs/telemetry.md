@@ -210,6 +210,65 @@ existing dispatch `effort` remains the effort requested for that attempt; a
 fallback after a rejection is a separate dispatch row with its configured
 effort. Older rows read as `escalated=false` and an empty finding-ID list.
 
+### Cycle history (schema 18)
+
+The same database keeps a local copy of each change request's review history,
+so a `--from` resume on the same machine need not refetch and reparse every
+comment (`scripts/cycle_history.py`). The change request stays the durable
+record: nothing a resume needs exists only here, and a missing, outdated or
+unverifiable copy is rebuilt from the trusted comments, never read as "no
+earlier findings".
+
+| Table | Holds |
+|---|---|
+| `cycle_history_sync` | the sync watermark per change request: head SHA, comment count, newest comment edit time and its comment ID, a hash of the trusted-author list, a version counter, the history schema version |
+| `cycle_history_comments` | one row per comment: its ID, edit time and whether a trusted author wrote it |
+| `cycle_history_runs` | the `CCR-`/`CCT-` run IDs each trusted comment carries, and their kind |
+| `cycle_history_findings` | the `REV-` headers each trusted comment carries: ID, severity, status, disposition, blocking flag |
+| `cycle_history_receipts` | the schema-2 receipts each trusted comment carries: attempt ID, stage, status token, head SHA |
+| `cycle_history_finding_state` | per finding: last status, claims and claimed-fix survivals |
+| `cycle_publications` | the outbox: one row per comment-publishing attempt, `pending`, `published` (with its comment ID and head) or `superseded` |
+| `cycle_history_locks` | the per-machine writer lock: owner token, process ID, acquisition time |
+
+Only identifiers and closed tokens are stored. Finding titles, comment bodies,
+run-line profiles and models, and author logins stay in the change request;
+the closed vocabularies are enforced by `CHECK` constraints, and identifiers by
+the store's own grammar.
+
+**Verified before use.** A resume makes one GraphQL call that returns the
+head, the comment count and the newest comment edit. When they match the
+watermark, the stored history is used and nothing else is fetched. Otherwise
+the comments edited since the watermark are fetched (`?since=`) and folded in
+by comment ID, so reprocessing a comment never duplicates a row. A count that
+still disagrees means a comment was deleted, and the history is rebuilt from
+every comment; so is a watermark from another history schema or another
+trusted-author list. A failed check stops the resume as `BLOCKED` with the
+reason; a database that cannot be opened or written is skipped and the history
+rebuilt from the comments.
+
+**Outbox.** Stages publish their own comments; the runtime never posts. After
+a `review`, `resolve` or `rereview` completes, the history is reconciled and
+the stage's attempt is `published` once a trusted comment carries its receipt.
+An unobserved publication is a warning on the stage, and the next dispatch of
+the same stage on that change request is told to look for a comment carrying
+the earlier attempt ID and reuse it rather than post again. A later confirmed
+publication of the same stage supersedes it.
+
+**Concurrency.** A cycle holds the writer lock of its change request from the
+resume (or the implementation that opened it) until it ends. A lock whose
+process is gone, or older than 24 hours, is stale and taken over; a live one
+stops the cycle as `BLOCKED`. Whether the process is gone is checked with a
+signal-0 probe on POSIX and with `OpenProcess`/`WaitForSingleObject` on
+Windows, so a cycle that was killed (closed window, host timeout, power loss)
+can be resumed at once on either platform. Only when the check cannot answer,
+or the operating system has given the dead process's ID to a new one, does the
+lock wait out the 24 hours. A receipt from an attempt this machine never
+dispatched, appearing while a stage ran, means another writer published: the
+history is reconciled and the cycle stops as `BLOCKED` so it can be resumed.
+GitHub has no atomic check-and-publish, so this reduces conflicts between
+machines without excluding them. Each publishing stage costs one freshness
+check and, when something changed, one filtered comment read.
+
 ### Work-item outcomes (schema 14)
 
 Work-item disposition events are stored in a separate append-only table. Each

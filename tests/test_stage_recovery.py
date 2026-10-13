@@ -51,6 +51,8 @@ class StageRecoveryTests(RunCycleTestCase):
             "a=sys.argv[1:]\n"
             "if a[:2]==['pr','list']: print(json.dumps([{'number':4}]))\n"
             "elif a[:2]==['pr','view']: print(json.dumps({'number':4,'state':'OPEN','headRefOid':d['head']}))\n"
+            "elif a[:2]==['api','graphql']: print(json.dumps({'data':{'repository':{'pullRequest':"
+            "{'headRefOid':d['head'],'comments':{'totalCount':len(d['comments']),'nodes':[]}}}}}))\n"
             "elif a[0]=='api': print(json.dumps([d['comments']]))\n"
             "else: sys.exit(2)\n"
         )
@@ -89,7 +91,7 @@ class StageRecoveryTests(RunCycleTestCase):
         attempt = self.receipt['attempt_id']
         self.assertEqual("failed", self.store.attempt(attempt)['outcome'])
         row = self.store.recoveries(attempt)[0]
-        self.assertEqual(17, row['schema_version'])
+        self.assertEqual(tm.SCHEMA_VERSION, row['schema_version'])
         self.assertEqual(self.head, row['head_sha'])
         with self.store._connect() as connection:
             for sql in ("DELETE FROM stage_recoveries", "UPDATE stage_recoveries SET comment_id='9'"):
@@ -131,6 +133,20 @@ class StageRecoveryTests(RunCycleTestCase):
         self.assertEqual(rc.APPROVED_END, report.status)
         self.assertEqual(2, len(calls))
         self.assertIn("Obtain a structured verdict", calls[1])
+
+    def test_the_verdict_retry_of_a_recovered_review_expects_no_publication(self):
+        calls = []
+        def review(task):
+            calls.append(task)
+            if len(calls) == 1:
+                return self.publish(task, "review", status="APPROVED")
+            return block("APPROVED", head_sha=self.head)
+        self.execute(lambda task: block("IMPLEMENTED"), review)
+        retry = re.search(r"Runtime attempt_id: ([^. ]+)\.", calls[1]).group(1)
+        history = rc.CycleHistoryStore(self.store.path)
+        self.assertIsNone(history.publication(retry))
+        self.assertNotIn(retry, [item["attempt_id"] for item in
+                                 history.pending_publications("owner/api", "4", "review")])
 
     def test_recovered_rereview_is_redispatched_once(self):
         calls = []

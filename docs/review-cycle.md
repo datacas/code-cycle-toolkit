@@ -238,9 +238,13 @@ An unreadable history is never an empty one. The resume stops before dispatching
 |---|---|
 | `review.trusted_authors` is empty | `HUMAN_INTERVENTION` |
 | the comment fetch fails | `BLOCKED` |
+| the freshness check of the change request fails | `BLOCKED` |
+| another cycle on this machine holds the change request's writer lock | `BLOCKED` |
 | a comment has no author metadata | `BLOCKED` |
 | a trusted author's comment carries contract headings but cannot be parsed or placed in a review or triage run | `BLOCKED` |
 | no review-contract comment at all, or only ordinary and other authors' comments | empty history; the resume continues |
+
+On a GitHub code host the history comes from a local copy in the telemetry database when one remote check verifies it is current, and only the comments edited since the last sync are read otherwise; a missing or unverifiable copy is rebuilt from every comment. The comments remain the record. See [Telemetry → Cycle history](telemetry.md#cycle-history-schema-18), which also describes the publication outbox and how a conflicting writer stops the cycle as `BLOCKED`.
 
 Both orchestrator skills describe the same ladder and the seeding, and the package validator checks that they state it.
 

@@ -48,16 +48,26 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import uuid
 from collections.abc import Callable
+from urllib.parse import quote
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
+from cycle_history import (
+    COMMENT_STAGES,
+    CycleHistoryStore,
+    HistoryError,
+    HistoryRemote,
+    LockHeld,
+    RemoteMark,
+)
 from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
 from executors import (
     DispatchResult,
@@ -224,6 +234,16 @@ CONTESTED_DIRECTIVE = (
     "procedure when one is available. Do not publish them as not_applicable "
     "again without evidence the re-review did not have; otherwise report "
     "PARTIALLY_RESOLVED and state that the finding is contested."
+)
+
+#: Appended to a stage whose earlier attempts never showed their publication
+#: (`cycle_history` outbox). The runtime never posts; the owning stage retries,
+#: and reuses a late comment rather than duplicating it.
+RETRY_PUBLICATION = (
+    "Earlier {role} attempts on this change request have no observed "
+    "publication: {ids}. Before publishing, look for a comment carrying one of "
+    "those attempt_id receipts. When one exists, add this attempt's receipt to "
+    "that comment instead of posting a new one; otherwise publish as usual."
 )
 
 #: The stages that judge the accumulated diff, and so receive it as a file.
@@ -1598,17 +1618,20 @@ def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
 
 
 def read_change_request_comments(
-    repo_id: str, change_request_id: str, cwd: str | None
+    repo_id: str, change_request_id: str, cwd: str | None, *, since: str | None = None
 ) -> list[ProviderComment]:
     """Every comment of a GitHub change request, oldest first, with its author.
 
     A comment without author metadata keeps `author=None`, so the history
-    rebuilt from it can refuse to guess who published it.
+    rebuilt from it can refuse to guess who published it. With `since`, only
+    the comments created or edited at or after that time.
     """
+    endpoint = f"repos/{repo_id}/issues/{change_request_id}/comments"
+    if since is not None:
+        endpoint += f"?since={quote(since, safe='')}"
     try:
         result = subprocess.run(
-            ["gh", "api", "--paginate", "--slurp",
-             f"repos/{repo_id}/issues/{change_request_id}/comments"],
+            ["gh", "api", "--paginate", "--slurp", endpoint],
             cwd=cwd, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CycleDriverError(
@@ -1635,11 +1658,86 @@ def read_change_request_comments(
         login = user.get("login") if isinstance(user, dict) else None
         body = comment.get("body")
         identifier = comment.get("id")
+        updated_at = comment.get("updated_at")
         comments.append(ProviderComment(
             author=login if isinstance(login, str) else None,
             body=body if isinstance(body, str) else "",
-            id=str(identifier) if isinstance(identifier, int) else None))
+            id=str(identifier) if isinstance(identifier, int) else None,
+            updated_at=updated_at if isinstance(updated_at, str) else None))
     return comments
+
+
+#: One GraphQL call: the head, the comment count and the newest comment edit.
+#: Ordering by `UPDATED_AT` makes an edit to an old comment as visible as a new
+#: one, and the count makes a deletion visible.
+_FRESHNESS_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    "headRefOid comments(last:1,orderBy:{field:UPDATED_AT,direction:ASC}){"
+    "totalCount nodes{updatedAt}}}}}")
+
+
+def probe_change_request(
+    repo_id: str, change_request_id: str, cwd: str | None
+) -> RemoteMark:
+    """The lightweight freshness check of a GitHub change request."""
+    owner, _, name = repo_id.partition("/")
+    what = f"the freshness check of change request {change_request_id} failed"
+    if not owner or not name or not change_request_id.isdigit():
+        raise CycleDriverError(f"{what}: not a GitHub repository and pull request number")
+    try:
+        result = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={_FRESHNESS_QUERY}",
+             "-f", f"owner={owner}", "-f", f"name={name}",
+             "-F", f"number={change_request_id}"],
+            cwd=cwd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CycleDriverError(f"{what}: GitHub tooling unavailable or timed out") from error
+    if result.returncode:
+        raise CycleDriverError(f"{what}: gh exited {result.returncode}")
+    try:
+        pull = json.loads(result.stdout)["data"]["repository"]["pullRequest"]
+        comments = pull["comments"]
+        count = comments["totalCount"]
+        nodes = comments["nodes"]
+        head = pull["headRefOid"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise CycleDriverError(f"{what}: unexpected response") from error
+    latest = nodes[0].get("updatedAt") if isinstance(nodes, list) and nodes else None
+    if (not isinstance(count, int) or count < 0 or not isinstance(head, str)
+            or not (latest is None or isinstance(latest, str))):
+        raise CycleDriverError(f"{what}: unexpected response")
+    return RemoteMark(head_sha=head, comment_count=count, latest_updated_at=latest)
+
+
+class GitHubHistoryRemote:
+    """The local history's view of a GitHub change request, through `gh`."""
+
+    def __init__(self, cwd: str | None) -> None:
+        self.cwd = cwd
+
+    def probe(self, repo_id: str, change_request_id: str) -> RemoteMark:
+        return probe_change_request(repo_id, change_request_id, self.cwd)
+
+    def comments(self, repo_id: str, change_request_id: str,
+                 since: str | None = None) -> list[ProviderComment]:
+        return read_change_request_comments(repo_id, change_request_id, self.cwd, since=since)
+
+
+class ReaderRemote:
+    """A comment reader without a freshness check: every sync rebuilds."""
+
+    def __init__(self, reader: Callable[[str, str, str | None], list[ProviderComment]],
+                 cwd: str | None) -> None:
+        self.reader = reader
+        self.cwd = cwd
+
+    def probe(self, repo_id: str, change_request_id: str) -> None:
+        return None
+
+    def comments(self, repo_id: str, change_request_id: str,
+                 since: str | None = None) -> list[ProviderComment]:
+        return self.reader(repo_id, change_request_id, self.cwd)
 
 
 def _work_item_scope(
@@ -1700,6 +1798,7 @@ def run_cycle(
     resolve_effort: str | None = None,
     comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
     allowed_test_command: str | None = None,
+    history_remote: HistoryRemote | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1721,6 +1820,11 @@ def run_cycle(
     With `jev` in shadow mode, `implement` and `resolve` stages also record
     Jev's suggestion beside the rules' choice; the rules still route every
     stage. `shadow` injects an already-built observer instead, for tests.
+
+    The change request's review history is kept locally (`cycle_history`).
+    `history_remote` injects how it is read; without one, a GitHub code host
+    is checked through `gh`, and `comment_reader` alone rebuilds the history
+    from the comments on every resume, as before.
     """
     validate_start(start_from, change_request_id, local_only=local_only,
                    continue_work=continue_work)
@@ -1785,13 +1889,118 @@ def run_cycle(
     previous_resolve_target = None
     previous_resolve_used_fallback = False
 
+    # The local history of the change request (#223). With a remote that can
+    # be checked, every comment-publishing stage is expected to publish, and
+    # the history is reconciled right after it. Without one, a resume rebuilds
+    # from the comments every time, which is what a missing store does too.
+    if history_remote is not None:
+        remote, tracking = history_remote, True
+    elif comment_reader is not None:
+        remote, tracking = ReaderRemote(comment_reader, cwd), False
+    elif code_host == "github":
+        remote, tracking = GitHubHistoryRemote(cwd), True
+    else:
+        remote, tracking = ReaderRemote(read_change_request_comments, cwd), False
+    tracking = tracking and not local_only
+    history_store: CycleHistoryStore | None = CycleHistoryStore(telemetry.path)
+    history_lock: tuple[CycleHistoryStore, str, str] | None = None
+
+    def lock_change_request(request: str) -> CycleReport | None:
+        """Hold the per-machine writer lock on `request` until the cycle ends."""
+        nonlocal history_store, history_lock
+        if history_store is None or history_lock is not None:
+            return None
+        try:
+            history_lock = (history_store, request, history_store.acquire(repo_id, request))
+        except LockHeld as error:
+            return stop(f"{error}; another cycle is driving it", "BLOCKED")
+        except (sqlite3.Error, HistoryError):
+            # An unusable store is skipped; the comments remain the record.
+            history_store = None
+        return None
+
+    def release_lock() -> None:
+        # Released through the store that took it, even if the history was
+        # given up on since.
+        if history_lock is not None:
+            store, request, owner = history_lock
+            with contextlib.suppress(sqlite3.Error):
+                store.release(repo_id, request, owner)
+
+    def expect_publication(role: str, request: str | None, attempt_id) -> None:
+        nonlocal history_store
+        if (not tracking or history_store is None or role not in COMMENT_STAGES
+                or not request or not isinstance(attempt_id, str)):
+            return
+        try:
+            history_store.expect_publication(attempt_id, repo_id, request, role)
+        except (sqlite3.Error, HistoryError):
+            history_store = None
+
+    def retry_directive(role: str, request: str | None) -> str:
+        """Name earlier attempts of `role` whose publication was never observed."""
+        nonlocal history_store
+        if history_store is None or role not in COMMENT_STAGES or not request:
+            return ""
+        try:
+            pending = history_store.pending_publications(repo_id, request, role)
+        except sqlite3.Error:
+            history_store = None
+            return ""
+        if not pending:
+            return ""
+        return " " + RETRY_PUBLICATION.format(
+            role=role, ids=", ".join(item["attempt_id"] for item in pending))
+
+    def after_publication(role: str, request: str, attempt_id,
+                          reported: Reported) -> CycleReport | None:
+        """Reconcile the history after a publishing stage and check its outbox.
+
+        A receipt from an attempt nobody here dispatched is another writer:
+        the history is already reconciled, and the cycle stops for whoever
+        owns the change request. An unobserved publication of this stage is
+        flagged, and the next dispatch of the same stage retries it.
+        """
+        nonlocal history_store
+        if not tracking or history_store is None:
+            return None
+        details = report.stage_details[-1]
+        try:
+            synced = history_store.sync(repo_id, request, trusted_authors=trusted_authors,
+                                        remote=remote)
+            published = (history_store.publication(attempt_id)
+                         if isinstance(attempt_id, str) else None)
+        except (CycleDriverError, ContractError, HistoryError) as error:
+            details.warnings.append(f"local history not synced: {error}")
+            return None
+        except sqlite3.Error:
+            history_store = None
+            return None
+        if synced.foreign:
+            return stop(
+                f"change request {request} received a publication from attempt(s) "
+                f"{', '.join(synced.foreign)}, which this machine did not dispatch, "
+                f"while {role} ran; the local history was reconciled, resume once "
+                "the other writer has finished", "BLOCKED", reported=reported)
+        if isinstance(attempt_id, str) and (published is None
+                                            or published["state"] != "published"):
+            details.warnings.append(
+                f"the {role} publication of attempt {attempt_id} was not observed on "
+                f"change request {request}; the next {role} retries it")
+        return None
+
     def run(role: str, instruction: str = "", *,
             change_request_id: str | None = None, escalated: bool = False,
             resolve_target=None, resolve_escalated: bool = False,
             resolve_target_used_fallback: bool = False,
             escalation_finding_ids: tuple[str, ...] = (),
+            publishes: bool = True,
             ) -> tuple[StageOutcome, Reported, str | None, dict]:
-        """Dispatch one stage; also say whether the evidence it was given changed."""
+        """Dispatch one stage; also say whether the evidence it was given changed.
+
+        `publishes` is false for a dispatch that only re-reads a publication
+        already recovered, so the outbox expects nothing from it.
+        """
         evidence = ""
         stage_kwargs = dispatch_kwargs
         artifact = None
@@ -1837,6 +2046,10 @@ def run_cycle(
             if directory is not None:
                 _remove_workspace(str(directory))
         report.stages.append(outcome)
+        if publishes:
+            expect_publication(role, change_request_id, (
+                outcome.result.artifacts.get("dispatch_attempt_id")
+                if outcome.result is not None else None))
         reported = read_structured_result(outcome.result)
         if (outcome.succeeded and outcome.result is not None
                 and not outcome.result.asynchronous and reported.status is None):
@@ -1973,12 +2186,15 @@ def run_cycle(
                 "verified_findings outcomes (resolved, still_open, not_applicable). "
                 "A reopened finding follows the normal resolution loop."
             )
+        if recover:
+            instruction += retry_directive(role, change_request_id)
         outcome, reported, tampered, findings = run(
             role, instruction, change_request_id=change_request_id,
             resolve_target=resolve_target,
             resolve_target_used_fallback=resolve_target_used_fallback,
             resolve_escalated=resolve_escalated,
-            escalation_finding_ids=escalation_finding_ids)
+            escalation_finding_ids=escalation_finding_ids,
+            publishes=recover)
         if role == "resolve" and outcome.decision is not None:
             previous_resolve_target = outcome.decision.target
             previous_resolve_used_fallback = outcome.decision.used_fallback
@@ -2057,6 +2273,13 @@ def run_cycle(
                                        if pull_request_id else {}))
         if not reported.completes(role):
             return reported, stop(reported.explain(role), reported=reported)
+        if recover and role in COMMENT_STAGES and change_request_id:
+            stopped = after_publication(
+                role, change_request_id,
+                result.artifacts.get("dispatch_attempt_id") if result is not None else None,
+                reported)
+            if stopped is not None:
+                return reported, stopped
         # Only a completed stage enters the history the ladder reads. The
         # cycle already stops on anything else, so an unreadable result can
         # neither reset nor advance a count.
@@ -2070,8 +2293,9 @@ def run_cycle(
     # What the ladder and the no-progress guard read: every completed run of
     # the change request, and each review's head and open set. A resumed cycle
     # seeds the runs from the published comments of the trusted authors before
-    # its first stage (`seed_history`); the no-progress guard still starts
-    # empty, so it can stop later than a whole cycle would, never earlier.
+    # its first stage (`seed_history`), through the local history when one
+    # remote check verifies it; the no-progress guard still starts empty, so it
+    # can stop later than a whole cycle would, never earlier.
     # `recorder.repeated_findings` stays unknown until the ladder is first
     # evaluated: a cycle that never reached it was not measured at zero.
     history: list[RunStatuses] = []
@@ -2082,21 +2306,36 @@ def run_cycle(
 
         An unreadable history is never an empty one. Without trusted authors
         nobody can say whose comments count, so a person decides; a failed
-        fetch, a comment without an author, or a trusted contract comment
-        that cannot be parsed or placed blocks. No contract comment at all is
-        an empty history. Nothing is dispatched on a stop.
+        fetch, a failed freshness check, a comment without an author, or a
+        trusted contract comment that cannot be parsed or placed blocks. No
+        contract comment at all is an empty history. A local history is used
+        only when verified; an unusable database is skipped and the history
+        rebuilt from the comments. Nothing is dispatched on a stop.
         """
+        nonlocal history_store
         if not any(author.strip() for author in trusted_authors):
             return stop(
                 "the claimed-fix history of the resumed change request cannot be "
                 "rebuilt: review.trusted_authors is empty",
                 UNRESOLVED_END)
+        stopped = lock_change_request(change_request_id)
+        if stopped is not None:
+            return stopped
         try:
-            comments = (comment_reader or read_change_request_comments)(
-                repo_id, change_request_id, cwd)
+            # A remote that cannot be checked could never verify the store.
+            if history_store is not None and not isinstance(remote, ReaderRemote):
+                try:
+                    history.extend(history_store.sync(
+                        repo_id, change_request_id, trusted_authors=trusted_authors,
+                        remote=remote).runs)
+                    return None
+                except (sqlite3.Error, HistoryError):
+                    # Unusable or unstorable: the comments remain the record.
+                    history_store = None
             history.extend(comment_run_history(
-                comments, trusted_authors=trusted_authors))
-        except (CycleDriverError, ContractError) as error:
+                remote.comments(repo_id, change_request_id),
+                trusted_authors=trusted_authors))
+        except (CycleDriverError, ContractError, HistoryError) as error:
             return stop(
                 f"the claimed-fix history of the resumed change request is "
                 f"unreadable: {error}", "BLOCKED")
@@ -2144,6 +2383,10 @@ def run_cycle(
                     "stopping before review",
                     reported=reported,
                 )
+            if tracking:
+                stopped = lock_change_request(change_request_id)
+                if stopped is not None:
+                    return stopped
 
         if start_from in {"implement", "review"}:
             reported, stopped = advance("review", change_request_id=change_request_id)
@@ -2241,6 +2484,8 @@ def run_cycle(
         return drive()
     except CycleInterrupted as interruption:
         return interrupted(interruption)
+    finally:
+        release_lock()
 
 def _started_elsewhere(outcome: StageOutcome) -> bool:
     """Whether this stage launched work that finishes outside this process."""

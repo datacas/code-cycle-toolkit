@@ -172,11 +172,16 @@ class Finding:
 
 @dataclass(frozen=True)
 class ProviderComment:
-    """One provider comment with identity metadata kept separate from its body."""
+    """One provider comment with identity metadata kept separate from its body.
+
+    `updated_at` is the provider's last-edit time, when the reader has it; the
+    local history store reconciles from it.
+    """
 
     author: str | None
     body: str
     id: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass
@@ -679,19 +684,110 @@ def _place_record(
     record: ReviewRecord, runs: list[RunStatuses], seen: set[str]
 ) -> bool:
     """Fold one comment into `runs`; False when it cannot be placed."""
-    new = [run for run in record.runs if run.id not in seen]
-    seen.update(run.id for run in record.runs)
-    kinds = {run.kind for run in new}
-    statuses = {finding.id: finding.status for finding in record.findings}
+    return _place_runs(
+        [(run.id, run.kind) for run in record.runs],
+        {finding.id: finding.status for finding in record.findings}, runs, seen)
+
+
+def _place_runs(
+    run_kinds: list[tuple[str, str]], statuses: dict[str, str],
+    runs: list[RunStatuses], seen: set[str],
+) -> bool:
+    """Fold one comment's run lines and statuses into `runs`."""
+    new = [kind for run_id, kind in run_kinds if run_id not in seen]
+    seen.update(run_id for run_id, _ in run_kinds)
+    kinds = set(new)
+    statuses = dict(statuses)
     if kinds == {"triage"}:
         runs.append(RunStatuses(RESOLUTION_RUN, statuses))
     elif kinds == {"review"}:
         runs.append(RunStatuses(REVIEW_RUN, statuses))
-    elif not kinds and record.runs and runs:
+    elif not kinds and run_kinds and runs:
         runs[-1].statuses.update(statuses)
     else:
         return False
     return True
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    """One trusted comment reduced to the tokens the run history folds.
+
+    No prose: run IDs and kinds, finding IDs with their closed tokens, and the
+    schema-2 receipts the comment carries as `(attempt_id, stage, status,
+    head_sha, repo, change_request_id)`. `author` names the comment in an error
+    message only; the local history store never keeps it.
+    """
+
+    comment_id: str | None
+    runs: tuple[tuple[str, str], ...] = ()
+    findings: tuple[Finding, ...] = ()
+    receipts: tuple[tuple[str, str, str, str, str, str], ...] = ()
+    author: str | None = None
+    number: int | None = None
+
+    @property
+    def label(self) -> str:
+        return f"comment {self.comment_id}" if self.comment_id else f"comment #{self.number}"
+
+
+def history_entry(
+    comment: ProviderComment, *, trusted: frozenset[str], number: int | None = None
+) -> HistoryEntry | None:
+    """Read one comment for `comment_run_history`, or None when it is not history.
+
+    `trusted` holds casefolded logins. Raises on a comment without author
+    metadata, and on a trusted comment whose contract headings cannot be parsed.
+    A trusted comment without contract headings is history only when it carries
+    a valid receipt; a malformed receipt is ignored here, as recovery does for a
+    comment that does not name its attempt.
+    """
+    label = f"comment {comment.id}" if comment.id else f"comment #{number}"
+    if not isinstance(comment.author, str) or not comment.author.strip():
+        raise ContractError(f"{label} carries no author metadata")
+    if comment.author.strip().casefold() not in trusted:
+        return None
+    try:
+        receipts = tuple(
+            (receipt["attempt_id"], receipt["stage"], receipt["status"],
+             receipt["head_sha"], receipt["repo"], receipt["change_request_id"])
+            for receipt in stage_evidence(comment.body))
+    except ContractError:
+        receipts = ()
+    if not _contains_recovery_contract_header(comment.body):
+        return (HistoryEntry(comment.id, receipts=receipts, author=comment.author,
+                             number=number) if receipts else None)
+    try:
+        record = parse_comment(comment.body)
+    except ContractError as error:
+        raise ContractError(
+            f"{label} from trusted author {comment.author!r} cannot be parsed: {error}"
+        ) from error
+    return HistoryEntry(
+        comment.id,
+        runs=tuple((run.id, run.kind) for run in record.runs),
+        findings=tuple(replace(finding, title="") for finding in record.findings),
+        receipts=receipts, author=comment.author, number=number)
+
+
+def fold_history(entries: Iterable[HistoryEntry]) -> list[RunStatuses]:
+    """Fold history entries, oldest first, into runs; raise when one cannot be placed.
+
+    An entry without run lines is legacy, or a receipt alone: it names no run,
+    so it cannot move a claim.
+    """
+    runs: list[RunStatuses] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not entry.runs:
+            continue
+        statuses = {finding.id: finding.status for finding in entry.findings}
+        if not _place_runs(list(entry.runs), statuses, runs, seen):
+            who = (f"trusted author {entry.author!r}" if entry.author
+                   else "a trusted author")
+            raise ContractError(
+                f"{entry.label} from {who} cannot be placed in a review or triage run")
+    return runs
 
 
 def comment_run_history(
@@ -715,35 +811,20 @@ def comment_run_history(
 
     Every error names the comment, by its provider id when there is one.
     """
-    trusted = frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
+    trusted = trusted_logins(trusted_authors)
     if not trusted:
         raise ContractError("history recovery needs at least one trusted author")
-    runs: list[RunStatuses] = []
-    seen: set[str] = set()
+    entries = []
     for number, comment in enumerate(comments, start=1):
-        label = f"comment {comment.id}" if comment.id else f"comment #{number}"
-        if not isinstance(comment.author, str) or not comment.author.strip():
-            raise ContractError(f"{label} carries no author metadata")
-        if comment.author.strip().casefold() not in trusted:
-            continue
-        if not _contains_recovery_contract_header(comment.body):
-            continue
-        try:
-            record = parse_comment(comment.body)
-        except ContractError as error:
-            raise ContractError(
-                f"{label} from trusted author {comment.author!r} cannot be parsed: {error}"
-            ) from error
-        if not record.runs:
-            # Legacy: findings published before run lines existed, or a
-            # resolver's reply. It names no run, so it cannot move a claim.
-            continue
-        if not _place_record(record, runs, seen):
-            raise ContractError(
-                f"{label} from trusted author {comment.author!r} cannot be placed "
-                "in a review or triage run"
-            )
-    return runs
+        entry = history_entry(comment, trusted=trusted, number=number)
+        if entry is not None:
+            entries.append(entry)
+    return fold_history(entries)
+
+
+def trusted_logins(trusted_authors: Iterable[str]) -> frozenset[str]:
+    """The configured review identities, compared case-insensitively."""
+    return frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
 
 
 def claimed_fix_survivals(
