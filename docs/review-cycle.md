@@ -230,7 +230,19 @@ The ladder has two rungs. After the **first** survival, the next resolution is t
 
 The no-progress guard alone misses this pattern: a resolver that pushes a commit which does not fix the finding changes the head. On PR #74, `REV-001` went `open → resolved → open → not_applicable → open` across three reviews and nothing stopped it.
 
-`review_contract.claimed_fix_survivals` is the single definition. It reads parsed trusted comments for analysis, attributing each comment to the run lines it introduces first (real comments republish earlier run lines, and one run can span several comments), and `run_cycle.py` feeds it the structured results of the current run. A resumed cycle (`--from`) starts at zero survivals, so it can stop later than a whole cycle would, never earlier. Both orchestrator skills apply the same ladder, and the package validator checks that they state it.
+`review_contract.claimed_fix_survivals` is the single definition. It reads parsed trusted comments for analysis, attributing each comment to the run lines it introduces first (real comments republish earlier run lines, and one run can span several comments), and `run_cycle.py` feeds it the structured results of the current run. A resumed cycle (`--from`) does not start at zero: before its first stage, `run_cycle.py` rebuilds the claim and survival history from the change request's published comments, through `review_contract.comment_run_history`, keeping only the comments of `code_cycle.review.trusted_authors`. A finding that survived once before the resume is contested on the next resolution, a second survival across runs stops with `HUMAN_INTERVENTION`, and the [max-effort escalation](#exit-conditions) follows the same history. The no-progress guard still starts empty.
+
+An unreadable history is never an empty one. The resume stops before dispatching any stage, with the existing `stage_not_completed` stop reason and a reason that names the comment and the failure:
+
+| History | Status |
+|---|---|
+| `review.trusted_authors` is empty | `HUMAN_INTERVENTION` |
+| the comment fetch fails | `BLOCKED` |
+| a comment has no author metadata | `BLOCKED` |
+| a trusted author's comment carries contract headings but cannot be parsed or placed in a review or triage run | `BLOCKED` |
+| no review-contract comment at all, or only ordinary and other authors' comments | empty history; the resume continues |
+
+Both orchestrator skills describe the same ladder and the seeding, and the package validator checks that they state it.
 
 ---
 

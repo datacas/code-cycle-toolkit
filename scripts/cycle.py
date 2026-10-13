@@ -504,6 +504,14 @@ class CycleRecorder:
                             reasons=decision.reasons +
                             ("a finding survived a claimed fix; retry at max on the previous target",),
                         )
+                elif resolve_escalated and not decision.used_fallback:
+                    # A resumed run has no previous resolve target; the seeded
+                    # history still escalates, on the routed primary.
+                    decision = replace(
+                        decision, target=replace(decision.target, effort="max"),
+                        reasons=decision.reasons +
+                        ("a finding survived a claimed fix; retry at max on the routed primary",),
+                    )
                 elif not decision.used_fallback:
                     decision = replace(
                         decision, target=replace(decision.target, effort=effort_override),

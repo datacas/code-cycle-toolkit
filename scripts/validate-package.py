@@ -556,6 +556,9 @@ LADDER_PHRASES = (
     "`HUMAN_INTERVENTION` before",
     "`PARTIALLY_RESOLVED`",
     "`review_contract.claimed_fix_survivals`",
+    "resumed with `--from` is seeded first",
+    "`code_cycle.review.trusted_authors`",
+    "never treated as empty",
 )
 
 

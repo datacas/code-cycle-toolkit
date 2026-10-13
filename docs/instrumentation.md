@@ -565,7 +565,9 @@ abandoned for a reroute. `resolution_round` appears only on `resolve` and
 `rereview`. So does `repeated_findings` (schema 7): the number of finding IDs
 that survived a claimed fix before this routing, as
 [Exit conditions](review-cycle.md#exit-conditions) defines it. It is recorded
-only by `run_cycle.py`, which reads the structured results, and only once the
+only by `run_cycle.py`, which reads the structured results and, on a `--from`
+resume, rebuilds the earlier history from the change request's trusted review
+comments (telemetry holds no per-finding statuses), and only once the
 ladder has been evaluated, the first time a review asks for changes: before
 that, and in a recorder whose caller does not track it, it is left out rather
 than recorded as zero. It is not `previous_failed_attempts`, which counts
