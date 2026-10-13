@@ -19,8 +19,10 @@ All notable changes to this project are documented here. This project follows
   is reconciled and the stage's schema-2 receipt confirms its publication; an
   unobserved one is a stage warning, and the next dispatch of that stage is told
   to reuse a comment carrying the earlier attempt ID instead of posting again.
-  A per-machine writer lock stops a second cycle on the same change request,
-  and a receipt from an attempt this machine never dispatched stops the cycle
+  A per-machine writer lock stops a second cycle on the same change request;
+  a lock whose process is gone (checked on POSIX and Windows alike) is taken
+  over at once. The verdict retry of a recovered review expects no publication
+  of its own. A receipt from an attempt this machine never dispatched stops the cycle
   as `BLOCKED` after reconciling. The change request remains the durable record.
 - A `--from` resume keeps the claimed-fix history (#179). Before its first
   stage, `run_cycle.py` rebuilds the claim and survival history from the

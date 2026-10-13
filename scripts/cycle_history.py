@@ -145,12 +145,64 @@ def _match(pattern: re.Pattern, value, what: str) -> str:
     return value
 
 
+#: Windows API values `_windows_process_alive` uses.
+_SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_ERROR_INVALID_PARAMETER = 87
+_WAIT_OBJECT_0 = 0
+_WAIT_TIMEOUT = 0x102
+
+
+def _windows_process_alive(pid: int, kernel32=None, last_error=None) -> bool | None:
+    """Whether `pid` runs on Windows, or None when the API cannot tell.
+
+    `kernel32` and `last_error` are injected by tests on other platforms.
+    """
+    if not 0 < pid <= 0xFFFFFFFF:
+        return None  # not a Windows process ID; the age rule decides
+    if kernel32 is None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        except (ImportError, OSError, AttributeError):
+            return None
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        last_error = ctypes.get_last_error
+    handle = kernel32.OpenProcess(
+        _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        error = last_error()
+        if error == _ERROR_INVALID_PARAMETER:
+            return False  # no process has this ID
+        if error == _ERROR_ACCESS_DENIED:
+            return True  # it exists, owned by someone else
+        return None
+    try:
+        # A process that exited is signalled even while handles to it remain.
+        waited = kernel32.WaitForSingleObject(handle, 0)
+    finally:
+        kernel32.CloseHandle(handle)
+    if waited == _WAIT_OBJECT_0:
+        return False
+    if waited == _WAIT_TIMEOUT:
+        return True
+    return None
+
+
 def _process_alive(pid: int) -> bool | None:
     """True, False, or None when this platform cannot tell."""
     if pid == os.getpid():
         return True
     if os.name == "nt":
-        return None
+        return _windows_process_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

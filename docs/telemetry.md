@@ -257,7 +257,12 @@ publication of the same stage supersedes it.
 **Concurrency.** A cycle holds the writer lock of its change request from the
 resume (or the implementation that opened it) until it ends. A lock whose
 process is gone, or older than 24 hours, is stale and taken over; a live one
-stops the cycle as `BLOCKED`. A receipt from an attempt this machine never
+stops the cycle as `BLOCKED`. Whether the process is gone is checked with a
+signal-0 probe on POSIX and with `OpenProcess`/`WaitForSingleObject` on
+Windows, so a cycle that was killed (closed window, host timeout, power loss)
+can be resumed at once on either platform. Only when the check cannot answer,
+or the operating system has given the dead process's ID to a new one, does the
+lock wait out the 24 hours. A receipt from an attempt this machine never
 dispatched, appearing while a stage ran, means another writer published: the
 history is reconciled and the cycle stops as `BLOCKED` so it can be resumed.
 GitHub has no atomic check-and-publish, so this reduces conflicts between

@@ -394,16 +394,78 @@ class LockTests(StoreTestCase):
 
         self.store.acquire(REPO, REQUEST)
 
-    @unittest.skipIf(os.name == "nt", "a dead process cannot be probed on Windows")
-    def test_a_lock_whose_process_is_gone_is_stale(self) -> None:
-        finished = subprocess.Popen([sys.executable, "-c", ""])
-        finished.wait()
+    def lock_by(self, pid: int) -> None:
         with database(self.path) as connection:
             connection.execute(
                 "INSERT INTO cycle_history_locks VALUES (?, ?, 'lock-old', ?, ?)",
-                (REPO, REQUEST, finished.pid, datetime.now(timezone.utc).isoformat()))
+                (REPO, REQUEST, pid, datetime.now(timezone.utc).isoformat()))
+
+    def test_a_lock_whose_process_is_gone_is_stale(self) -> None:
+        # Runs on Windows too, where liveness goes through the Windows API.
+        finished = subprocess.Popen([sys.executable, "-c", ""])
+        finished.wait()
+        self.lock_by(finished.pid)
 
         self.store.acquire(REPO, REQUEST)
+
+    def test_a_lock_whose_process_still_runs_is_held(self) -> None:
+        running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(running.wait)
+        self.addCleanup(running.kill)
+        self.lock_by(running.pid)
+
+        with self.assertRaisesRegex(ch.LockHeld, "already being driven"):
+            self.store.acquire(REPO, REQUEST)
+
+
+class FakeKernel32:
+    """The three Windows calls `_windows_process_alive` makes."""
+
+    def __init__(self, handle: int, waited: int = ch._WAIT_TIMEOUT) -> None:
+        self.handle, self.waited, self.closed = handle, waited, []
+
+    def OpenProcess(self, access, inherit, pid):  # noqa: N802 - Windows API name
+        return self.handle
+
+    def WaitForSingleObject(self, handle, milliseconds):  # noqa: N802
+        return self.waited
+
+    def CloseHandle(self, handle):  # noqa: N802
+        self.closed.append(handle)
+        return True
+
+
+class WindowsLivenessTests(unittest.TestCase):
+    """A Windows lock is stale once its process is gone, not after 24 hours (REV-001)."""
+
+    def alive(self, kernel32, error: int = 0):
+        return ch._windows_process_alive(1234, kernel32, lambda: error)
+
+    def test_an_exited_or_missing_process_is_dead(self) -> None:
+        exited = FakeKernel32(7, ch._WAIT_OBJECT_0)
+        self.assertIs(False, self.alive(exited))
+        self.assertEqual([7], exited.closed)
+        self.assertIs(False, self.alive(FakeKernel32(0), ch._ERROR_INVALID_PARAMETER))
+
+    def test_a_running_or_foreign_process_is_alive(self) -> None:
+        running = FakeKernel32(7, ch._WAIT_TIMEOUT)
+        self.assertIs(True, self.alive(running))
+        self.assertEqual([7], running.closed)
+        self.assertIs(True, self.alive(FakeKernel32(0), ch._ERROR_ACCESS_DENIED))
+
+    def test_an_unexpected_answer_leaves_only_the_age_rule(self) -> None:
+        self.assertIsNone(self.alive(FakeKernel32(0), 6))
+        self.assertIsNone(self.alive(FakeKernel32(7, 0xFFFFFFFF)))
+        for pid in (-1, 0, 2 ** 32):
+            self.assertIsNone(ch._windows_process_alive(pid, FakeKernel32(7), lambda: 0))
+
+    def test_windows_asks_the_windows_api(self) -> None:
+        with mock.patch.object(ch, "_windows_process_alive", return_value=False) as probe, \
+                mock.patch.object(ch.os, "name", "nt"):
+            alive = ch._process_alive(os.getpid() + 1)
+
+        self.assertIs(False, alive)
+        probe.assert_called_once_with(os.getpid() + 1)
 
 
 class GitHubRemoteTests(unittest.TestCase):

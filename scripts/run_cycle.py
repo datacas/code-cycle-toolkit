@@ -1994,8 +1994,13 @@ def run_cycle(
             resolve_target=None, resolve_escalated: bool = False,
             resolve_target_used_fallback: bool = False,
             escalation_finding_ids: tuple[str, ...] = (),
+            publishes: bool = True,
             ) -> tuple[StageOutcome, Reported, str | None, dict]:
-        """Dispatch one stage; also say whether the evidence it was given changed."""
+        """Dispatch one stage; also say whether the evidence it was given changed.
+
+        `publishes` is false for a dispatch that only re-reads a publication
+        already recovered, so the outbox expects nothing from it.
+        """
         evidence = ""
         stage_kwargs = dispatch_kwargs
         artifact = None
@@ -2041,9 +2046,10 @@ def run_cycle(
             if directory is not None:
                 _remove_workspace(str(directory))
         report.stages.append(outcome)
-        expect_publication(role, change_request_id, (
-            outcome.result.artifacts.get("dispatch_attempt_id")
-            if outcome.result is not None else None))
+        if publishes:
+            expect_publication(role, change_request_id, (
+                outcome.result.artifacts.get("dispatch_attempt_id")
+                if outcome.result is not None else None))
         reported = read_structured_result(outcome.result)
         if (outcome.succeeded and outcome.result is not None
                 and not outcome.result.asynchronous and reported.status is None):
@@ -2187,7 +2193,8 @@ def run_cycle(
             resolve_target=resolve_target,
             resolve_target_used_fallback=resolve_target_used_fallback,
             resolve_escalated=resolve_escalated,
-            escalation_finding_ids=escalation_finding_ids)
+            escalation_finding_ids=escalation_finding_ids,
+            publishes=recover)
         if role == "resolve" and outcome.decision is not None:
             previous_resolve_target = outcome.decision.target
             previous_resolve_used_fallback = outcome.decision.used_fallback

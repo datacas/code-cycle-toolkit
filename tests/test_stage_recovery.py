@@ -134,6 +134,20 @@ class StageRecoveryTests(RunCycleTestCase):
         self.assertEqual(2, len(calls))
         self.assertIn("Obtain a structured verdict", calls[1])
 
+    def test_the_verdict_retry_of_a_recovered_review_expects_no_publication(self):
+        calls = []
+        def review(task):
+            calls.append(task)
+            if len(calls) == 1:
+                return self.publish(task, "review", status="APPROVED")
+            return block("APPROVED", head_sha=self.head)
+        self.execute(lambda task: block("IMPLEMENTED"), review)
+        retry = re.search(r"Runtime attempt_id: ([^. ]+)\.", calls[1]).group(1)
+        history = rc.CycleHistoryStore(self.store.path)
+        self.assertIsNone(history.publication(retry))
+        self.assertNotIn(retry, [item["attempt_id"] for item in
+                                 history.pending_publications("owner/api", "4", "review")])
+
     def test_recovered_rereview_is_redispatched_once(self):
         calls = []
         def review(task):
