@@ -62,6 +62,8 @@ code_cycle:
       timeout_seconds: 3
   resolve:
     # effort: high                  # low | medium | high | max; explicit value disables automatic escalation
+  allowed_commands:
+    test: python3 -m unittest discover -s tests  # one exact command for Claude writing stages
 
   # ── Orchestration ─────────────────────────────────────────
   orchestration:
@@ -96,6 +98,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.model` | `jev-latest` · `jev-x.y.z` (`typesafe-ai/jev` → `jev-latest`) | `jev-latest` | `run_cycle.py` |
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
 | `resolve.effort` | `low` · `medium` · `high` · `max` | primary resolve uses `high`; an explicit value disables automatic escalation | `run_cycle.py` |
+| `allowed_commands.test` | one exact command string; wildcards and shell operators are refused | unset | `run_cycle.py`, Claude implementation and resolution stages |
 | `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |

@@ -115,7 +115,7 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
-                         "resolve", "worktree_dir"})
+                         "resolve", "worktree_dir", "allowed_commands"})
 
 #: The keys under `code_cycle` that belong to a skill or another module. They
 #: are legitimate here and deliberately not interpreted: recognising a key is
@@ -283,6 +283,7 @@ def load_config(path: Path) -> dict:
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
         "code_cycle.issue_review", "code_cycle.resolve",
+        "code_cycle.allowed_commands",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -329,6 +330,27 @@ def load_config(path: Path) -> dict:
         raise CycleDriverError(
             f"{path}: code_cycle.resolve.effort must be one of low, medium, high, max")
 
+    code_cycle = config.get("code_cycle") or {}
+    if "allowed_commands" in code_cycle:
+        allowed_commands = code_cycle["allowed_commands"]
+        if not isinstance(allowed_commands, dict):
+            raise CycleDriverError(
+                f"{path}: code_cycle.allowed_commands must be a mapping")
+        unknown = sorted(str(key) for key in set(allowed_commands) - {"test"})
+        if unknown:
+            raise CycleDriverError(
+                f"{path}: unknown key under code_cycle.allowed_commands: "
+                + ", ".join(unknown) + "; known keys are test")
+        if "test" in allowed_commands:
+            command = allowed_commands["test"]
+            if not isinstance(command, str) or not command.strip():
+                raise CycleDriverError(
+                    f"{path}: code_cycle.allowed_commands.test must be a non-empty string")
+            if re.search(r"\*|;|&&|\|\||\||`|\$\(|[<>]|[&\r\n]", command):
+                raise CycleDriverError(
+                    f"{path}: code_cycle.allowed_commands.test must be one exact command; "
+                    "wildcards and shell operators are not allowed")
+
     try:
         load_routing_strategy(config)
         load_jev_config(config)
@@ -337,6 +359,12 @@ def load_config(path: Path) -> dict:
     except (RouterError, JevConfigError, IssueReviewConfigError) as error:
         raise CycleDriverError(str(error)) from error
     return config
+
+
+def allowed_test_command(config: dict) -> str | None:
+    """The validated exact test command, when the repository declares one."""
+    allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
+    return allowed.get("test")
 
 
 def repository_of(config: dict) -> str | None:
@@ -727,7 +755,8 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             *, change_request_id: str | None = None,
             local_only: bool = False, evidence: str = "",
             worktree_dir: str | Path | None = None,
-            workspace: str = "task") -> str:
+            workspace: str = "task",
+            allowed_test_command: str | None = None) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied."""
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -739,6 +768,12 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
+    if role in {"implement", "resolve"} and allowed_test_command:
+        parts.append(
+            "For Claude writing stages, the repository permits this exact test "
+            f"command: `{allowed_test_command}`. Run it verbatim; do not change "
+            "its arguments or try a command variant."
+        )
     if role in {"implement", "resolve"} and workspace == "current":
         parts.append(
             "This run explicitly opts into the invoking checkout. Use the "
@@ -1664,6 +1699,7 @@ def run_cycle(
     trusted_authors: tuple[str, ...] = (),
     resolve_effort: str | None = None,
     comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
+    allowed_test_command: str | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1770,12 +1806,20 @@ def run_cycle(
                 evidence = artifact.prompt() if artifact is not None else NO_DIFF_FILE
                 if artifact is not None:
                     stage_kwargs = {**dispatch_kwargs, "read_dirs": (str(directory),)}
+            if role in {"implement", "resolve"} and allowed_test_command:
+                stage_kwargs = {
+                    **stage_kwargs,
+                    "claude_allowed_commands": (allowed_test_command,),
+                }
             outcome = recorder.stage(
                 role, compose(role, repo_id, task_id, instruction,
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence,
                               worktree_dir=worktree_dir,
-                              workspace=workspace),
+                              workspace=workspace,
+                              allowed_test_command=(
+                                  allowed_test_command
+                                  if role in {"implement", "resolve"} else None)),
                 escalated=escalated,
                 effort_override=(resolve_effort or "high") if role == "resolve" else None,
                 target_override=resolve_target if role == "resolve" else None,
@@ -2903,6 +2947,7 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_authors=tuple(((config.get("code_cycle") or {}).get("review") or {}).get(
                     "trusted_authors", [])),
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
+                allowed_test_command=allowed_test_command(config),
             )
     except CycleDriverError as error:
         parser.error(str(error))

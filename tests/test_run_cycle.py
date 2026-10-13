@@ -339,6 +339,84 @@ class RoutingStrategyTests(RunCycleTestCase):
         self.assertTrue(all(row["payload"]["routing_strategy"] == "measured"
                             for row in self.rows()))
 
+
+class AllowedCommandsConfigTests(RunCycleTestCase):
+    def load(self, body: str) -> dict:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text(body, encoding="utf-8")
+            return rc.load_config(path)
+
+    def test_exact_test_command_is_loaded(self) -> None:
+        config = self.load(
+            "code_cycle:\n  allowed_commands:\n"
+            "    test: python3 -m unittest discover -s tests\n"
+        )
+
+        self.assertEqual(
+            "python3 -m unittest discover -s tests",
+            rc.allowed_test_command(config),
+        )
+
+    def test_unknown_allowed_command_key_is_rejected(self) -> None:
+        with self.assertRaises(rc.CycleDriverError) as raised:
+            self.load("code_cycle:\n  allowed_commands:\n    shell: echo hello\n")
+
+        self.assertIn("unknown key under code_cycle.allowed_commands: shell",
+                      str(raised.exception))
+
+    def test_malformed_test_commands_are_rejected(self) -> None:
+        for value in (
+            "null", "17", "''", "'   '", "'pytest *'", "'pytest :*'",
+            "'pytest; echo unsafe'", "'pytest && echo unsafe'",
+            "'pytest || echo unsafe'", "'pytest | cat'", "'`pytest`'",
+            "'$(pytest)'", "'pytest > out'", "'pytest < in'",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(rc.CycleDriverError):
+                    self.load(f"code_cycle:\n  allowed_commands:\n    test: {value}\n")
+
+    def test_allowed_commands_must_be_a_mapping(self) -> None:
+        with self.assertRaises(rc.CycleDriverError) as raised:
+            self.load("code_cycle:\n  allowed_commands: pytest\n")
+
+        self.assertIn("code_cycle.allowed_commands must be a mapping",
+                      str(raised.exception))
+
+    def test_configured_command_reaches_a_nonpublishing_claude_implementation(self) -> None:
+        class TrackingTalker(Talker):
+            def __init__(self):
+                super().__init__("claude")
+                self.calls = []
+
+            def dispatch(self, target, task, **kw):
+                self.calls.append((task, kw))
+                return super().dispatch(target, task, **kw)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            worktree = Path(temporary)
+            (worktree / ".git").write_text("gitdir: /tmp/fake-worktree\n", encoding="utf-8")
+            claude = TrackingTalker()
+            profiles = router.load_profiles({"code_cycle": {"profiles": {
+                "cheap_coder": {"primary": "claude:anthropic/claude-sonnet-5 high"},
+                "reviewer": {"primary": "codex:openai/gpt-6-luna high"},
+            }}})
+
+            self.run_cycle(
+                claude, Talker("codex"), profiles=profiles,
+                cwd=str(worktree), local_only=True,
+                allowed_test_command="python3 -m unittest discover -s tests",
+            )
+
+        self.assertEqual(1, len(claude.calls))
+        task, kwargs = claude.calls[0]
+        self.assertIn("`python3 -m unittest discover -s tests`", task)
+        self.assertFalse(kwargs["publishes"])
+        self.assertEqual(
+            ("python3 -m unittest discover -s tests",),
+            kwargs["claude_allowed_commands"],
+        )
+
     def test_fixed_routing_ignores_existing_telemetry_observations(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             populated = tm.Telemetry(Path(temporary) / "populated.sqlite")
@@ -538,6 +616,19 @@ class PromptContractTests(unittest.TestCase):
 
         self.assertIn("change request `4`", prompt)
         self.assertIn("owner/api (work item API-7)", prompt)
+
+    def test_only_implement_and_resolve_prompts_name_the_exact_test_command(self) -> None:
+        command = "python3 -m unittest discover -s tests"
+        for role in ("implement", "resolve"):
+            with self.subTest(role=role):
+                prompt = rc.compose(
+                    role, "owner/api", "API-7", allowed_test_command=command,
+                )
+                self.assertIn(f"`{command}`", prompt)
+                self.assertIn("do not change its arguments", prompt)
+        self.assertNotIn(command, rc.compose(
+            "review", "owner/api", "API-7", allowed_test_command=command,
+        ))
 
     def test_worker_prompt_receives_the_resolved_worktree_base(self) -> None:
         prompt = rc.compose(
