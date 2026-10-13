@@ -945,6 +945,7 @@ class NativeAdapter(Adapter):
                  timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run,
                  writes: bool = False, publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
+                 claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  writable_dirs: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
@@ -964,6 +965,8 @@ class NativeAdapter(Adapter):
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
+        if self.name == "claude" and claude_allowed_commands:
+            argv_options["allowed_commands"] = claude_allowed_commands
         if publishes and publication_permissions:
             argv = self.argv(
                 target, task, cwd, writes, True,
@@ -1979,6 +1982,7 @@ class ClaudeAdapter(NativeAdapter):
                  timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run, writes: bool = False,
                  publishes: bool = False,
                  publication_permissions: tuple[str, ...] = (),
+                 claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
@@ -1986,6 +1990,7 @@ class ClaudeAdapter(NativeAdapter):
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
+            claude_allowed_commands=claude_allowed_commands,
             read_dirs=read_dirs, on_progress=on_progress,
             on_workspace=on_workspace, dispatch_attempt_id=dispatch_attempt_id,
         )
@@ -2001,7 +2006,8 @@ class ClaudeAdapter(NativeAdapter):
 
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
-             publication_permissions: tuple[str, ...] = ()) -> list[str]:
+             publication_permissions: tuple[str, ...] = (),
+             allowed_commands: tuple[str, ...] = ()) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
         #
@@ -2031,8 +2037,11 @@ class ClaudeAdapter(NativeAdapter):
         # A publishing stage keeps its ordinary GitHub tooling. Which of those
         # operations the stage may perform is a behavioural rule stated in its
         # prompt (`cycle.publication_policy`), not a permission narrowed here.
-        if publishes:
-            argv += ["--allowedTools", "Bash(gh:*)", "Bash(git:*)"]
+        allowed_tools = ["Bash(gh:*)", "Bash(git:*)"] if publishes else []
+        if writes:
+            allowed_tools.extend(f"Bash({command})" for command in allowed_commands)
+        if allowed_tools:
+            argv += ["--allowedTools", *allowed_tools]
         return argv
 
     def agent_output(self, stdout: str) -> str:
@@ -2398,6 +2407,9 @@ def dispatch(
         raise ExecutorError(f"no probe for executor {target.executor!r}")
 
     publishes = bool(kw.get("publishes", False))
+    claude_allowed_commands = tuple(kw.pop("claude_allowed_commands", ()) or ())
+    if target.executor == "claude" and claude_allowed_commands:
+        kw["claude_allowed_commands"] = claude_allowed_commands
     if publishes:
         can_publish, detail = adapter.publication_access(
             probe, writes=bool(kw.get("writes", False)),

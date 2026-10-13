@@ -79,6 +79,22 @@ class CycleTestCase(unittest.TestCase):
 class FullCycleTests(CycleTestCase):
     """implement -> review -> resolve -> rereview, every step persisted."""
 
+    def test_exact_test_command_reaches_nonpublishing_resolve_writer(self) -> None:
+        claude = ScriptedAdapter("claude")
+        recorder = self.recorder([claude], local_only=True)
+
+        recorder.stage(
+            "resolve", "resolve finding",
+            claude_allowed_commands=("python3 -m unittest discover -s tests",),
+        )
+
+        self.assertEqual(1, len(claude.dispatch_kwargs))
+        self.assertFalse(claude.dispatch_kwargs[0]["publishes"])
+        self.assertEqual(
+            ("python3 -m unittest discover -s tests",),
+            claude.dispatch_kwargs[0]["claude_allowed_commands"],
+        )
+
     def test_failed_codex_git_metadata_probe_routes_before_implementation_dispatch(self) -> None:
         class ProbeFailingCodex(ScriptedAdapter):
             def probe_git_metadata_write(self, target, cwd, writable_dirs):

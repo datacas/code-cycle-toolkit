@@ -1545,6 +1545,58 @@ for path, token in re.findall(pattern, script):
     def test_claude_non_publishing_stage_gets_no_extra_tools(self) -> None:
         self.assertNotIn("--allowedTools", self.claude(writes=True))
 
+    def test_claude_writing_stage_gets_only_the_configured_exact_test_command(self) -> None:
+        command = "python3 -m unittest discover -s tests"
+        for publishes in (False, True):
+            with self.subTest(publishes=publishes):
+                argv = self.claude(
+                    writes=True, publishes=publishes,
+                    publication_permissions=("comment", "create_pr", "push_branch"),
+                    allowed_commands=(command,),
+                )
+                index = argv.index("--allowedTools")
+                expected = (["Bash(gh:*)", "Bash(git:*)"] if publishes else [])
+                self.assertEqual(
+                    ["--allowedTools", *expected, f"Bash({command})"], argv[index:]
+                )
+                self.assertNotIn("Bash(*)", argv)
+                self.assertNotIn("Bash(python3:*)", argv)
+
+    @unittest.skipIf(os.name == "nt", "the fake shebang executable is POSIX-only")
+    def test_claude_process_receives_exact_test_permission_and_reports_failure(self) -> None:
+        command = "python3 -m unittest discover -s tests"
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "claude"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "if 'force-failure' in sys.argv:\n"
+                "    print('simulated failure', file=sys.stderr)\n"
+                "    raise SystemExit(2)\n"
+                "print(json.dumps({'type': 'result', 'subtype': 'success', "
+                "'is_error': False, 'result': 'complete'}))\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            adapter = ex.ClaudeAdapter()
+            adapter.binary = str(binary)
+            target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+            passed = adapter.dispatch(
+                target, "work", cwd=temporary, writes=True,
+                claude_allowed_commands=(command,),
+            )
+            failed = adapter.dispatch(
+                target, "force-failure", cwd=temporary, writes=True,
+                claude_allowed_commands=(command,),
+            )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, passed.outcome)
+        self.assertIn(f"Bash({command})", passed.artifacts["argv"])
+        self.assertEqual(ex.DispatchOutcome.FAILED, failed.outcome)
+        self.assertEqual(2, failed.artifacts["returncode"])
+        self.assertIn(f"Bash({command})", failed.artifacts["argv"])
+
     def test_claude_claims_no_confinement_it_does_not_have(self) -> None:
         """A live probe wrote the file anyway with the edit tools disallowed,
         and plan mode refuses the edit by turning a review into planning. So a
