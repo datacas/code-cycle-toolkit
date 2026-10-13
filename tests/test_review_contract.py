@@ -820,5 +820,84 @@ class ClaimedFixSurvivalTests(unittest.TestCase):
         ]))
 
 
+class CommentRunHistoryTests(unittest.TestCase):
+    """The history a resume seeds the ladder with, and why it can be unreadable."""
+
+    def comment(self, body, *, author="reviewer", identifier="1"):
+        return contract.ProviderComment(author=author, body=body, id=identifier)
+
+    def history(self, *comments, trusted=("Reviewer",)):
+        return contract.comment_run_history(comments, trusted_authors=trusted)
+
+    def test_published_comments_fold_into_runs_with_untrusted_ones_ignored(self) -> None:
+        runs = self.history(
+            self.comment("\n".join([_review(1), "#### [REV-001] · high · open · - · blocks:yes"])),
+            self.comment("Thanks!", identifier="2"),
+            self.comment("\n".join([_review(9), "#### [REV-001] · high · resolved · - · blocks:yes"]),
+                         author="bot", identifier="3"),
+            self.comment("\n".join([_triage(1),
+                                    "#### [REV-001] · high · resolved · valid · blocks:yes"]),
+                         identifier="4"),
+            self.comment("\n".join([_review(2), "#### [REV-001] · high · open · valid · blocks:yes"]),
+                         identifier="5"),
+        )
+
+        self.assertEqual(
+            [("review", "open"), ("resolution", "resolved"), ("review", "open")],
+            [(run.kind, run.statuses["REV-001"]) for run in runs])
+        self.assertEqual({"REV-001": 1}, contract.claimed_fix_survivals(runs))
+
+    def test_no_contract_comment_is_an_empty_history(self) -> None:
+        self.assertEqual([], self.history())
+        self.assertEqual([], self.history(self.comment("Only prose.", author="bot")))
+
+    def test_a_continuation_comment_updates_its_run(self) -> None:
+        runs = self.history(
+            self.comment("\n".join([_triage(1),
+                                    "#### [REV-001] · high · open · valid · blocks:yes"])),
+            self.comment("\n".join([_triage(1),
+                                    "#### [REV-001] · high · resolved · valid · blocks:yes"]),
+                         identifier="2"),
+        )
+
+        self.assertEqual([("resolution", "resolved")],
+                         [(run.kind, run.statuses["REV-001"]) for run in runs])
+
+    def test_a_legacy_comment_without_a_run_line_is_skipped(self) -> None:
+        legacy = self.comment("#### [REV-001] · high · resolved · blocks:yes — Leak",
+                              identifier="45")
+        later = [self.comment("\n".join([_review(1),
+                                         "#### [REV-001] · high · open · - · blocks:yes"]),
+                              identifier="46")]
+
+        self.assertEqual([], self.history(legacy))
+        runs = self.history(legacy, *later)
+
+        self.assertEqual([("review", "open")],
+                         [(run.kind, run.statuses["REV-001"]) for run in runs])
+
+    def test_every_unreadable_case_names_the_comment(self) -> None:
+        orphan = "#### [REV-001] · high · resolved · valid · blocks:yes"
+        both = "\n".join([_review(1), _triage(1), orphan])
+        cases = {
+            "no trusted author": ((self.comment("x"),), (), "trusted author"),
+            "missing author": ((self.comment("x", author=None, identifier="42"),),
+                               ("reviewer",), "comment 42 carries no author metadata"),
+            "blank author": ((self.comment("x", author=" ", identifier="43"),),
+                             ("reviewer",), "comment 43 carries no author metadata"),
+            "malformed": ((self.comment("#### [CCR-1] · only", identifier="44"),),
+                          ("reviewer",), "comment 44 from trusted author"),
+            "both kinds": ((self.comment(both, identifier="46"),),
+                           ("reviewer",), "comment 46 from trusted author 'reviewer' cannot be placed"),
+            "no id": ((self.comment(both, identifier=None),),
+                      ("reviewer",), "comment #1 from trusted author"),
+        }
+        for name, (comments, trusted, message) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(contract.ContractError) as caught:
+                    contract.comment_run_history(comments, trusted_authors=trusted)
+                self.assertIn(message, str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

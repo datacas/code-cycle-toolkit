@@ -7,6 +7,18 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- A `--from` resume keeps the claimed-fix history (#179). Before its first
+  stage, `run_cycle.py` rebuilds the claim and survival history from the
+  change request's `code_cycle.review.trusted_authors` comments through
+  `review_contract.comment_run_history`, so a finding that already survived a
+  claimed fix is contested on the next resolution, a second survival across
+  runs stops with `HUMAN_INTERVENTION`, and the max-effort escalation follows
+  the seeded history. An unreadable history never reads as empty: an empty
+  `trusted_authors` stops with `HUMAN_INTERVENTION`; a failed comment fetch, a
+  comment without author metadata, or a trusted contract comment that cannot be
+  parsed or whose run lines cannot be placed stops with `BLOCKED`, before any
+  dispatch, as `stage_not_completed`. No contract comment is an empty history,
+  and a trusted legacy comment with finding headers but no run line is skipped.
 - Missing structured stage results can recover as pending verification from
   schema-2, attempt-attributed trusted PR comments. Schema 16 stores recovery
   references separately from failed dispatch attempts. Comment-only fixes

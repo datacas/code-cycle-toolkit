@@ -176,6 +176,7 @@ class ProviderComment:
 
     author: str | None
     body: str
+    id: str | None = None
 
 
 @dataclass
@@ -670,16 +671,78 @@ def comment_runs(records: Iterable[ReviewRecord]) -> list[RunStatuses]:
     runs: list[RunStatuses] = []
     seen: set[str] = set()
     for record in records:
-        new = [run for run in record.runs if run.id not in seen]
-        seen.update(run.id for run in record.runs)
-        kinds = {run.kind for run in new}
-        statuses = {finding.id: finding.status for finding in record.findings}
-        if kinds == {"triage"}:
-            runs.append(RunStatuses(RESOLUTION_RUN, statuses))
-        elif kinds == {"review"}:
-            runs.append(RunStatuses(REVIEW_RUN, statuses))
-        elif not kinds and record.runs and runs:
-            runs[-1].statuses.update(statuses)
+        _place_record(record, runs, seen)
+    return runs
+
+
+def _place_record(
+    record: ReviewRecord, runs: list[RunStatuses], seen: set[str]
+) -> bool:
+    """Fold one comment into `runs`; False when it cannot be placed."""
+    new = [run for run in record.runs if run.id not in seen]
+    seen.update(run.id for run in record.runs)
+    kinds = {run.kind for run in new}
+    statuses = {finding.id: finding.status for finding in record.findings}
+    if kinds == {"triage"}:
+        runs.append(RunStatuses(RESOLUTION_RUN, statuses))
+    elif kinds == {"review"}:
+        runs.append(RunStatuses(REVIEW_RUN, statuses))
+    elif not kinds and record.runs and runs:
+        runs[-1].statuses.update(statuses)
+    else:
+        return False
+    return True
+
+
+def comment_run_history(
+    comments: Iterable[ProviderComment], *, trusted_authors: Iterable[str]
+) -> list[RunStatuses]:
+    """Rebuild the runs a change request's comments published, or say why not.
+
+    This is the history a resumed cycle seeds `claimed_fix_survivals` with.
+    Unlike `comment_runs`, nothing is dropped silently: an unreadable history
+    must never be mistaken for an empty one. Comments are oldest first.
+
+    - A comment without author metadata raises, whoever wrote it.
+    - A comment from another author, or without any review-contract heading,
+      is ordinary discussion and is ignored.
+    - A comment from a trusted author with finding headers but no run line
+      is legacy: it is skipped, so an older change request never blocks a
+      resume for its header format.
+    - A comment from a trusted author that carries contract headings but
+      cannot be parsed, or whose run lines cannot be placed in a run, raises.
+    - No contract comment at all is an empty history.
+
+    Every error names the comment, by its provider id when there is one.
+    """
+    trusted = frozenset(author.strip().casefold() for author in trusted_authors if author.strip())
+    if not trusted:
+        raise ContractError("history recovery needs at least one trusted author")
+    runs: list[RunStatuses] = []
+    seen: set[str] = set()
+    for number, comment in enumerate(comments, start=1):
+        label = f"comment {comment.id}" if comment.id else f"comment #{number}"
+        if not isinstance(comment.author, str) or not comment.author.strip():
+            raise ContractError(f"{label} carries no author metadata")
+        if comment.author.strip().casefold() not in trusted:
+            continue
+        if not _contains_recovery_contract_header(comment.body):
+            continue
+        try:
+            record = parse_comment(comment.body)
+        except ContractError as error:
+            raise ContractError(
+                f"{label} from trusted author {comment.author!r} cannot be parsed: {error}"
+            ) from error
+        if not record.runs:
+            # Legacy: findings published before run lines existed, or a
+            # resolver's reply. It names no run, so it cannot move a claim.
+            continue
+        if not _place_record(record, runs, seen):
+            raise ContractError(
+                f"{label} from trusted author {comment.author!r} cannot be placed "
+                "in a review or triage run"
+            )
     return runs
 
 

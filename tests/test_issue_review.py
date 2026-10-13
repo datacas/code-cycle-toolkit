@@ -342,6 +342,9 @@ class DriverTests(RunCycleTestCase):
         self.claude = Answering("claude")
         self.claude.readiness = self.codex.readiness
         kw.setdefault("issue_review", "auto")
+        if kw.get("start_from", "implement") != "implement":
+            kw.setdefault("trusted_authors", ("reviewer",))
+            kw.setdefault("comment_reader", lambda *_: [])
         return rc.run_cycle(
             "owner/api", "API-7", signals or router.TaskSignals(), self.store,
             registry=ex.Registry([self.codex, self.claude]),

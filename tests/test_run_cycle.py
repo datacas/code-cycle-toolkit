@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
 import cycle  # noqa: E402
+import review_contract as contract  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import stats  # noqa: E402
@@ -178,6 +179,11 @@ class RunCycleTestCase(unittest.TestCase):
         # The original flow, which these tests describe; the issue-review stage
         # has its own tests, which ask for it.
         kw.setdefault("issue_review", "off")
+        if kw.get("start_from", "implement") != "implement":
+            # A resume rebuilds the claimed-fix history from the change
+            # request's comments; these tests describe a request without any.
+            kw.setdefault("trusted_authors", ("reviewer",))
+            kw.setdefault("comment_reader", lambda *_: [])
         profiles = kw.pop("profiles", router.load_profiles({"code_cycle": {
             # These scripted adapters declare an in-memory non-mutation
             # boundary, so tests of the driver can choose their reviewer while
@@ -2435,6 +2441,219 @@ class Scripted(Talker):
         return self.reviews.pop(0) if self.reviews else APPROVED
 
 
+def _run_line(kind: str, number: int) -> str:
+    if kind == "review":
+        return (f"#### [CCR-20260920-{number:03d}] · senior_reviewer · "
+                "anthropic/sonnet-5→sonnet-5 · high · schema:1")
+    return (f"#### [CCT-20260920-{number:03d}] · cheap_coder · "
+            f"openai/luna-high→luna-high · high · triaged:{'0' * 40} · schema:1")
+
+
+def _published(kind: str, number: int, status: str, *, author: str = "reviewer",
+               identifier: int | None = None) -> contract.ProviderComment:
+    """A contract comment publishing REV-001 with `status`."""
+    body = "\n".join([
+        "Summary prose.", _run_line(kind, number),
+        f"#### [REV-001] · high · {status} · valid · blocks:yes — Leak"])
+    return contract.ProviderComment(
+        author=author, body=body, id=str(identifier or number * 10))
+
+
+#: The change request's comments before a resume, in the shapes the tests need.
+CLAIMED = [_published("review", 1, "open"), _published("triage", 1, "resolved")]
+SURVIVED_ONCE = CLAIMED + [_published("review", 2, "open")]
+SURVIVED_TWICE = SURVIVED_ONCE + [_published("triage", 2, "resolved"),
+                                  _published("review", 3, "open")]
+
+
+class ResumedHistoryTests(RunCycleTestCase):
+    """#179: a resume rebuilds the claimed-fix history from the comments."""
+
+    def resume(self, comments, *, start_from="resolve", resolutions=(), reviews=(),
+               trusted_authors=("reviewer",), **kw):
+        class Recording(Scripted):
+            targets: list = []
+
+            def dispatch(self, target, task, **kwargs):
+                if "cc-resolve-comments" in task:
+                    self.targets.append(target)
+                return super().dispatch(target, task, **kwargs)
+
+        self.implementer = Recording("codex", resolutions=list(resolutions))
+        self.implementer.targets = []
+        self.reviewer = Scripted("claude", reviews=list(reviews))
+        reader = comments if callable(comments) else (lambda *_: comments)
+        return self.run_cycle(
+            self.implementer, self.reviewer, start_from=start_from,
+            change_request_id="74", comment_reader=reader,
+            trusted_authors=trusted_authors, **kw)
+
+    def resolve_prompts(self) -> list[str]:
+        return [task for task in self.implementer.dispatched
+                if "cc-resolve-comments" in task]
+
+    def dispatched(self) -> int:
+        return len(self.implementer.dispatched) + len(self.reviewer.dispatched)
+
+    def closing(self) -> dict:
+        return [row for row in self.rows()
+                if row["payload"].get("record_kind") == "cycle"][-1]["payload"]
+
+    def test_a_resume_after_a_claim_counts_the_next_rereview_as_a_survival(self) -> None:
+        report = self.resume(
+            CLAIMED, start_from="rereview", resolutions=[claimed()],
+            reviews=[rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
+                     APPROVED])
+
+        (prompt,) = self.resolve_prompts()
+        self.assertIn("survived a claimed fix", prompt)
+        self.assertIn("REV-001", prompt)
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+    def test_a_resume_after_a_survival_contests_the_first_resolution(self) -> None:
+        report = self.resume(
+            SURVIVED_ONCE, resolutions=[claimed()],
+            reviews=[rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open")])
+
+        (prompt,) = self.resolve_prompts()
+        self.assertIn("survived a claimed fix", prompt)
+        self.assertIn("REV-001", prompt)
+        # The second survival, now across runs, ends the cycle for a person.
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("repeated_findings", report.stop_reason)
+
+    def test_the_max_effort_escalation_follows_the_seeded_history(self) -> None:
+        self.resume(
+            SURVIVED_ONCE, resolutions=[claimed()],
+            reviews=[rereview("APPROVED", "b" * 40, REV_001="resolved")])
+
+        (target,) = self.implementer.targets
+        self.assertEqual("max", target.effort)
+        (row,) = [row for row in self.rows() if row["role"] == "resolve"
+                  and row["payload"]["record_kind"] == "dispatch"]
+        self.assertTrue(row["payload"]["escalated"])
+        self.assertEqual(["REV-001"], row["payload"]["escalation_finding_ids"])
+
+    def test_a_second_survival_across_runs_stops_before_any_dispatch(self) -> None:
+        report = self.resume(SURVIVED_TWICE)
+
+        self.assertEqual(0, self.dispatched())
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("repeated_findings", report.stop_reason)
+        self.assertIn("REV-001", report.stopped_because)
+
+    def test_a_second_survival_found_after_the_resume_stops_the_cycle(self) -> None:
+        report = self.resume(
+            SURVIVED_ONCE[:2] + [_published("review", 2, "open"),
+                                 _published("triage", 2, "resolved")],
+            start_from="rereview", resolutions=[claimed()],
+            reviews=[rereview("CHANGES_REQUESTED", "c" * 40, REV_001="still_open")])
+
+        self.assertEqual(0, len(self.resolve_prompts()))
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("repeated_findings", report.stop_reason)
+
+    def test_no_contract_comment_is_an_empty_history(self) -> None:
+        unrelated = [
+            contract.ProviderComment(author="reviewer", body="Ready for review.", id="1"),
+            contract.ProviderComment(author="someone", body="Looks fine", id="2"),
+            # Another bot's comment is ignored even when it quotes the contract.
+            _published("review", 1, "open", author="ci-bot", identifier=3),
+            _published("triage", 1, "resolved", author="ci-bot", identifier=4),
+            _published("review", 2, "open", author="ci-bot", identifier=5),
+        ]
+        for comments in ([], unrelated):
+            with self.subTest(comments=len(comments)):
+                report = self.resume(comments, resolutions=[claimed()],
+                                     reviews=[rereview("APPROVED", "b" * 40,
+                                                       REV_001="resolved")])
+
+                (prompt,) = self.resolve_prompts()
+                self.assertNotIn("survived a claimed fix", prompt)
+                self.assertEqual(rc.APPROVED_END, report.status)
+
+    def assert_stopped_before_dispatch(self, report, status, *fragments) -> None:
+        self.assertEqual(0, self.dispatched())
+        self.assertEqual(status, report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual("stage_not_completed", self.closing()["stop_reason"])
+        for fragment in fragments:
+            self.assertIn(fragment, report.stopped_because)
+
+    def test_empty_trusted_authors_stop_for_a_person(self) -> None:
+        for authors in ((), ("", "  ")):
+            with self.subTest(authors=authors):
+                report = self.resume(CLAIMED, trusted_authors=authors)
+
+                self.assert_stopped_before_dispatch(
+                    report, "HUMAN_INTERVENTION", "review.trusted_authors is empty")
+
+    def test_a_failed_fetch_blocks_instead_of_reading_as_empty(self) -> None:
+        def fail(*_):
+            raise rc.CycleDriverError("the comments could not be fetched: gh exited 1")
+
+        report = self.resume(fail)
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "unreadable", "gh exited 1")
+
+    def test_a_comment_without_author_metadata_blocks(self) -> None:
+        comments = CLAIMED + [
+            contract.ProviderComment(author=None, body="Ordinary", id="999")]
+
+        report = self.resume(comments)
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "comment 999", "no author metadata")
+
+    def test_a_malformed_trusted_contract_comment_blocks(self) -> None:
+        malformed = contract.ProviderComment(
+            author="Reviewer", id="555",
+            body="#### [CCR-20260920-009] · senior_reviewer · high")
+
+        report = self.resume(CLAIMED + [malformed])
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "comment 555", "cannot be parsed")
+
+    def test_a_trusted_contract_comment_that_cannot_be_placed_blocks(self) -> None:
+        both = contract.ProviderComment(
+            author="reviewer", id="777",
+            body="\n".join([
+                "#### [CCR-20260921-001] · senior_reviewer · anthropic/sonnet-5→sonnet-5 · high · schema:2",
+                "#### [CCT-20260921-002] · cheap_coder · openai/luna-high→luna-high · high · triaged:0123456789abcdef0123456789abcdef01234567 · schema:2",
+                "#### [REV-001] · high · resolved · valid · blocks:yes — Leak"]))
+
+        report = self.resume(CLAIMED + [both])
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "comment 777", "cannot be placed")
+
+    def test_the_default_reader_calls_gh_and_keeps_missing_authors(self) -> None:
+        pages = json.dumps([[
+            {"id": 11, "user": {"login": "reviewer"}, "body": "one"},
+            {"id": 12, "user": None, "body": "two"}], [
+            {"id": 13, "user": {"login": "x"}, "body": None}]])
+        done = subprocess.CompletedProcess([], 0, stdout=pages, stderr="")
+        with mock.patch.object(rc.subprocess, "run", return_value=done) as run:
+            comments = rc.read_change_request_comments("owner/api", "74", "/tmp/x")
+
+        self.assertEqual(
+            [("reviewer", "one", "11"), (None, "two", "12"), ("x", "", "13")],
+            [(c.author, c.body, c.id) for c in comments])
+        self.assertEqual("repos/owner/api/issues/74/comments", run.call_args.args[0][-1])
+        for failure in (subprocess.CompletedProcess([], 1, stdout="", stderr="boom"),
+                        subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
+                        subprocess.CompletedProcess([], 0, stdout='{"a": 1}', stderr="")):
+            with self.subTest(failure=failure.stdout):
+                with mock.patch.object(rc.subprocess, "run", return_value=failure):
+                    with self.assertRaises(rc.CycleDriverError):
+                        rc.read_change_request_comments("owner/api", "74", None)
+        with mock.patch.object(rc.subprocess, "run", side_effect=OSError("no gh")):
+            with self.assertRaises(rc.CycleDriverError):
+                rc.read_change_request_comments("owner/api", "74", None)
+
+
 class RepeatedFindingTests(RunCycleTestCase):
     """#83: a finding that keeps surviving its claimed fix stops the loop."""
 
@@ -2560,7 +2779,7 @@ class RepeatedFindingTests(RunCycleTestCase):
                             for prompt in self.resolve_prompts(implementer)))
         self.assertEqual("iteration_limit", report.stop_reason)
 
-    def test_a_resumed_cycle_starts_with_no_survivals(self) -> None:
+    def test_a_resume_with_no_history_starts_with_no_survivals(self) -> None:
         implementer = Scripted("codex", resolutions=[claimed()] * 3)
         reviewer = Scripted("claude", reviews=[
             rereview("CHANGES_REQUESTED", "b" * 40, REV_001="still_open"),
@@ -2571,7 +2790,9 @@ class RepeatedFindingTests(RunCycleTestCase):
         report = self.run_cycle(implementer, reviewer, start_from="resolve",
                                 change_request_id="74")
 
-        self.assertEqual(2, len(self.resolve_prompts(implementer)))
+        first, second = self.resolve_prompts(implementer)
+        self.assertNotIn("survived a claimed fix", first)
+        self.assertIn("survived a claimed fix", second)
         self.assertEqual("repeated_findings", report.stop_reason)
 
     def test_a_blocked_stage_records_why_it_stopped(self) -> None:

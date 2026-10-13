@@ -52,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
@@ -83,8 +84,10 @@ from review_contract import (
     RESOLUTION_RUN,
     REVIEW_RUN,
     ContractError,
+    ProviderComment,
     RunStatuses,
     claimed_fix_survivals,
+    comment_run_history,
     stage_evidence,
 )
 from router import (
@@ -1594,6 +1597,51 @@ def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
     return candidates[0]
 
 
+def read_change_request_comments(
+    repo_id: str, change_request_id: str, cwd: str | None
+) -> list[ProviderComment]:
+    """Every comment of a GitHub change request, oldest first, with its author.
+
+    A comment without author metadata keeps `author=None`, so the history
+    rebuilt from it can refuse to guess who published it.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", "--paginate", "--slurp",
+             f"repos/{repo_id}/issues/{change_request_id}/comments"],
+            cwd=cwd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CycleDriverError(
+            f"the comments of change request {change_request_id} could not be "
+            f"fetched: GitHub tooling unavailable or timed out") from error
+    if result.returncode:
+        raise CycleDriverError(
+            f"the comments of change request {change_request_id} could not be "
+            f"fetched: gh exited {result.returncode}")
+    try:
+        pages = json.loads(result.stdout)
+    except ValueError as error:
+        raise CycleDriverError(
+            f"the comments of change request {change_request_id} are not valid JSON") from error
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise CycleDriverError(
+            f"the comments of change request {change_request_id} came back in an unknown shape")
+    comments = []
+    for comment in (comment for page in pages for comment in page):
+        if not isinstance(comment, dict):
+            raise CycleDriverError(
+                f"a comment of change request {change_request_id} is not an object")
+        user = comment.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        body = comment.get("body")
+        identifier = comment.get("id")
+        comments.append(ProviderComment(
+            author=login if isinstance(login, str) else None,
+            body=body if isinstance(body, str) else "",
+            id=str(identifier) if isinstance(identifier, int) else None))
+    return comments
+
+
 def _work_item_scope(
     config: dict, repo_id: str, repository_override: str | None = None
 ) -> tuple[str | None, str | None]:
@@ -1650,6 +1698,7 @@ def run_cycle(
     code_host: str | None = None,
     trusted_authors: tuple[str, ...] = (),
     resolve_effort: str | None = None,
+    comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
     allowed_test_command: str | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
@@ -2018,13 +2067,40 @@ def run_cycle(
             progress.append(_progress_key(role, reported.payload))
         return reported, None
 
-    # What the ladder and the no-progress guard read: every completed run in
-    # this cycle, and each review's head and open set. A resumed cycle starts
-    # with neither, so it can stop later than a whole cycle would, never
-    # earlier. `recorder.repeated_findings` stays unknown until the ladder is
-    # first evaluated: a cycle that never reached it was not measured at zero.
+    # What the ladder and the no-progress guard read: every completed run of
+    # the change request, and each review's head and open set. A resumed cycle
+    # seeds the runs from the published comments of the trusted authors before
+    # its first stage (`seed_history`); the no-progress guard still starts
+    # empty, so it can stop later than a whole cycle would, never earlier.
+    # `recorder.repeated_findings` stays unknown until the ladder is first
+    # evaluated: a cycle that never reached it was not measured at zero.
     history: list[RunStatuses] = []
     progress: list[tuple[str, frozenset[str]] | None] = []
+
+    def seed_history() -> CycleReport | None:
+        """Rebuild the claim and survival history of a resumed change request.
+
+        An unreadable history is never an empty one. Without trusted authors
+        nobody can say whose comments count, so a person decides; a failed
+        fetch, a comment without an author, or a trusted contract comment
+        that cannot be parsed or placed blocks. No contract comment at all is
+        an empty history. Nothing is dispatched on a stop.
+        """
+        if not any(author.strip() for author in trusted_authors):
+            return stop(
+                "the claimed-fix history of the resumed change request cannot be "
+                "rebuilt: review.trusted_authors is empty",
+                UNRESOLVED_END)
+        try:
+            comments = (comment_reader or read_change_request_comments)(
+                repo_id, change_request_id, cwd)
+            history.extend(comment_run_history(
+                comments, trusted_authors=trusted_authors))
+        except (CycleDriverError, ContractError) as error:
+            return stop(
+                f"the claimed-fix history of the resumed change request is "
+                f"unreadable: {error}", "BLOCKED")
+        return None
 
     # Recorded on the closing row of every cycle that could have reviewed its
     # work item; a resumed cycle could not, and says nothing about it.
@@ -2040,6 +2116,10 @@ def run_cycle(
         nonlocal change_request_id
         reported = Reported()
         verdict = None
+        if start_from in RESUMES:
+            stopped = seed_history()
+            if stopped is not None:
+                return stopped
         if start_from == "implement":
             if issue_review_fields.get("issue_review") == "dispatched":
                 stopped = review_issue()

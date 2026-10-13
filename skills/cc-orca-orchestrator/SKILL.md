@@ -704,8 +704,15 @@ or agreed no longer applies, a regression with no claim in between, and a claim
 whose rereview returned no readable result. `review_contract.claimed_fix_survivals`
 is the executable definition, and this prose must agree with it.
 
-Count survivals per ID from the results this run recorded. A resumed run starts
-at zero, which can stop later than a whole run would, never earlier.
+Count survivals per ID from the results this run recorded. A run resumed with
+`--from` is seeded first: the runtime rebuilds the claim and survival history
+from the published review comments of `code_cycle.review.trusted_authors`
+before the first resumed stage, so a finding that already survived a claimed
+fix stays contested. An unreadable history stops the run before any dispatch,
+as `BLOCKED` (or `HUMAN_INTERVENTION` when `trusted_authors` is empty), and is
+never treated as empty; a change request with no review-contract comment has an
+empty history. This skill describes that behaviour and does not rebuild the
+history itself.
 
 - **First survival** of an ID: name those IDs in the next `cc-resolve-comments`
   request, and require it to reproduce each one with the reviewer's
