@@ -1562,6 +1562,7 @@ for path, token in re.findall(pattern, script):
                 self.assertNotIn("Bash(*)", argv)
                 self.assertNotIn("Bash(python3:*)", argv)
 
+    @unittest.skipIf(os.name == "nt", "the fake shebang executable is POSIX-only")
     def test_claude_process_receives_exact_test_permission_and_reports_failure(self) -> None:
         command = "python3 -m unittest discover -s tests"
         with tempfile.TemporaryDirectory() as temporary:
