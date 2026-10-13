@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -33,6 +34,15 @@ from test_run_cycle import (  # noqa: E402
 REPO = "owner/api"
 REQUEST = "74"
 HEAD = "a" * 40
+
+
+@contextmanager
+def database(path):
+    """A committed and closed connection: an open one keeps Windows from
+    deleting the temporary database."""
+    with closing(sqlite3.connect(path)) as connection:
+        with connection:
+            yield connection
 
 
 def _time(second: int) -> str:
@@ -112,7 +122,7 @@ class StoreTestCase(unittest.TestCase):
         return self.store.sync(REPO, REQUEST, trusted_authors=trusted, remote=remote)
 
     def count(self, table: str) -> int:
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             return connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
@@ -213,7 +223,7 @@ class RebuildAndVerifyTests(StoreTestCase):
                   "cycle_history_findings", "cycle_history_finding_state")
         before = {table: self.count(table) for table in tables}
         # A reconciliation from the start reprocesses every comment.
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             connection.execute("UPDATE cycle_history_sync SET latest_updated_at=?, head_sha=?",
                                (_time(0), "f" * 40))
 
@@ -269,7 +279,7 @@ class PrivacyTests(StoreTestCase):
         self.sync(remote)
         self.store.acquire(REPO, REQUEST)
 
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             tables = [row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND "
                 "(name LIKE 'cycle_history_%' OR name='cycle_publications')")]
@@ -284,7 +294,7 @@ class PrivacyTests(StoreTestCase):
                 self.assertNotIn(word, value)
 
     def test_the_schema_refuses_tokens_outside_the_closed_vocabulary(self) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "INSERT INTO cycle_history_findings VALUES "
@@ -375,7 +385,7 @@ class LockTests(StoreTestCase):
 
     def age_lock(self, hours: int) -> None:
         old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             connection.execute("UPDATE cycle_history_locks SET acquired_at=?", (old,))
 
     def test_an_old_lock_is_stale_and_taken_over(self) -> None:
@@ -388,7 +398,7 @@ class LockTests(StoreTestCase):
     def test_a_lock_whose_process_is_gone_is_stale(self) -> None:
         finished = subprocess.Popen([sys.executable, "-c", ""])
         finished.wait()
-        with sqlite3.connect(self.path) as connection:
+        with database(self.path) as connection:
             connection.execute(
                 "INSERT INTO cycle_history_locks VALUES (?, ?, 'lock-old', ?, ?)",
                 (REPO, REQUEST, finished.pid, datetime.now(timezone.utc).isoformat()))
@@ -506,7 +516,7 @@ class ResumedCycleTests(RunCycleTestCase):
         self.assertIn("30", [row["comment_id"] for row in self.comment_rows()])
 
     def comment_rows(self):
-        with sqlite3.connect(self.store.path) as connection:
+        with database(self.store.path) as connection:
             connection.row_factory = sqlite3.Row
             return [dict(row) for row in connection.execute(
                 "SELECT * FROM cycle_history_comments")]
