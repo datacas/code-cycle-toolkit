@@ -17,7 +17,8 @@ All notable changes to this project are documented here. This project follows
   lock, when `core.hooksPath` resolves inside a writable Git directory, or when
   it would publish from the main worktree. Packed-ref deletion, `pack-refs`,
   and garbage collection no longer work inside the sandbox, and automatic
-  maintenance is turned off there.
+  maintenance is turned off there. A stopped dispatch's process group now gets
+  `SIGTERM` and a bounded grace period before `SIGKILL`.
 
 ### Added
 

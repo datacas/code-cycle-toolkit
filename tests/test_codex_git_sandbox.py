@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -541,6 +542,62 @@ class PublishingUnderReadOnlyRootTests(LinkedRepository):
         # Documented limitation: packing refs needs the read-only root.
         packed = self.git(self.workspace, "pack-refs", "--all", check=False, env=environment)
         self.assertNotEqual(0, packed.returncode)
+
+
+@unittest.skipUnless(POSIX, "process groups and signals are POSIX-only")
+class StagedTerminationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def assert_gone(self, pid_file: Path) -> None:
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"descendant {pid} outlived its dispatch")
+
+    def test_timeout_lets_the_group_tear_down_before_it_is_killed(self) -> None:
+        marker, pid_file = self.root / "torn-down", self.root / "child.pid"
+        script = (f'trap \'echo done > "{marker}"; exit 0\' TERM; '
+                  f'sleep 30 & echo $! > "{pid_file}"; wait')
+
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            ex._run(["sh", "-c", script], timeout=1)
+
+        self.assertTrue(caught.exception.process_exited)
+        self.assertEqual("done\n", marker.read_text())
+        self.assert_gone(pid_file)
+
+    def test_a_group_that_ignores_sigterm_is_killed_after_the_grace_period(self) -> None:
+        pid_file = self.root / "child.pid"
+        script = f'trap "" TERM; sleep 30 & echo $! > "{pid_file}"; wait'
+        started = time.monotonic()
+
+        with patch.object(ex, "PROCESS_GROUP_GRACE_SECONDS", 0.5):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                ex._run(["sh", "-c", script], timeout=1)
+
+        self.assertTrue(caught.exception.process_exited)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assert_gone(pid_file)
+
+    def test_a_finished_dispatch_leaves_no_descendants(self) -> None:
+        pid_file = self.root / "child.pid"
+        started = time.monotonic()
+
+        completed = ex._run(["sh", "-c", f'sleep 30 & echo $! > "{pid_file}"'], timeout=10)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertTrue(completed.process_exited)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assert_gone(pid_file)
+
 
 if __name__ == "__main__":
     unittest.main()

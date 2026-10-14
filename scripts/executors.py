@@ -51,6 +51,10 @@ from usage import normalize_executor_output
 
 SCHEMA_VERSION = 1
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
+# How long a stopped dispatch's process group may run its own teardown after
+# SIGTERM before SIGKILL, and how long its output pipes may then stay open.
+PROCESS_GROUP_GRACE_SECONDS = 10
+OUTPUT_DRAIN_SECONDS = 5
 
 
 class ReadinessPolicy(str, Enum):
@@ -474,12 +478,18 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
                                      daemon=True)
     stdout_thread.start()
     stderr_thread.start()
+
+    def join_output() -> None:
+        # A descendant that left the process group can hold a pipe open; the
+        # cycle must not wait on it forever.
+        stdout_thread.join(OUTPUT_DRAIN_SECONDS)
+        stderr_thread.join(OUTPUT_DRAIN_SECONDS)
+
     try:
         returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         exited = _reap_process_group(process)
-        stdout_thread.join()
-        stderr_thread.join()
+        join_output()
         error = subprocess.TimeoutExpired(
             argv, timeout, output="".join(stdout_lines), stderr="".join(stderr_lines),
         )
@@ -491,8 +501,7 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
         _reap_process_group(process)
         raise
     exited = _reap_process_group(process)
-    stdout_thread.join()
-    stderr_thread.join()
+    join_output()
     completed = subprocess.CompletedProcess(argv, returncode,
                                             "".join(stdout_lines), "".join(stderr_lines))
     completed.process_exited = exited
@@ -501,13 +510,44 @@ def _run(argv: list[str], timeout: int = 30, cwd: str | None = None,
 
 def _run_sandbox_probe(argv: list[str], *, cwd: str | None = None, timeout: int = 30,
                        env: dict | None = None, **_options) -> subprocess.CompletedProcess:
-    """Run a sandbox probe in its own process group, like a dispatch."""
+    """Run a sandbox probe in its own process group, like a dispatch.
+
+    A timeout or interruption gets the same staged termination, so the
+    sandbox can tear down before it is killed.
+    """
     return _run(argv, timeout=timeout, cwd=cwd, env=env)
 
 
-def _reap_process_group(process: subprocess.Popen) -> bool:
-    """Stop remaining descendants before declaring a POSIX dispatch exited."""
+def _process_group_alive(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap_process_group(process: subprocess.Popen,
+                        grace: float | None = None) -> bool:
+    """Stop remaining descendants before declaring a POSIX dispatch exited.
+
+    The group gets SIGTERM first, so a sandbox can unmount and remove what it
+    created, then SIGKILL after a bounded grace period (#229).
+    """
     if os.name == "posix":
+        grace = PROCESS_GROUP_GRACE_SECONDS if grace is None else grace
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            process.wait()
+            return True
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            # Reap the leader first: a zombie still counts as a group member.
+            if process.poll() is not None and not _process_group_alive(process.pid):
+                break
+            time.sleep(0.05)
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
