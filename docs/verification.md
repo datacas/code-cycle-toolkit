@@ -22,39 +22,86 @@ developer's home directory. This keeps a developer's host selection, credential
 path, and telemetry location from changing unrelated test behavior.
 Herdr is optional when running the suite: with `HERDR_ENV` unset, worktree
 selection uses Git directly; dedicated Herdr tests opt into the flag and mock
-the command. Writing Codex dispatches from linked worktrees grant the worktree's
-Git common directory as an additional writable root; read-only dispatches do
-not receive that access. This grants the writing stage access to shared metadata
-for the repository, including hooks, configuration, and refs for every branch.
-Git stores linked-worktree objects, refs, packed refs, and logs in the common
-directory, while the selected worktree's private Git directory stores its
-index and HEAD. Codex writing publish dispatches grant write access to the
-common directory and selected private directory. Codex's Linux sandbox cannot
-grant the root-level `packed-refs` file as a file path, so the common root must
-be writable. Its `worktrees`, `hooks`, `config`, `config.lock`, `config.worktree`,
-and `config.worktree.lock` paths, the main worktree's `HEAD`, index, pseudorefs,
-rebase, merge, bisect, sequencer and reflog state with their lockfiles, and
-the main worktree's `refs/bisect`, `refs/worktree`, and `refs/rewritten`
-directories and reflogs. The common directory's `commondir`, `gitdir`, and
-`modules` paths are read-only as well: Git follows a `commondir` file in any Git
-directory to find configuration and hooks, so a file created there from the
-sandbox would run attacker-chosen code in the next unsandboxed Git command.
-The private directory's `hooks`,
-`config.worktree`, `config.worktree.lock`, `commondir`, and `gitdir` paths, are
-read-only. The linked workspace's `.git` gitfile is read-only too, so a writing
-stage cannot redirect a later dispatch's metadata grants to another worktree,
-while Git can still open it. The probe also reads the pointer files, because a
-pointer Git cannot open breaks every Git command in the worktree.
-The private pointer files must stay protected: Git follows `commondir` to find
-shared configuration and hooks. For a main worktree, the
-common directory remains writable for its index and HEAD, while its `worktrees`
-directory is read-only so another linked worktree's pointers cannot be changed.
-The probe verifies representative writes and checks that protected paths deny
-writes. A separately configured `core.hooksPath` inside the writable source
-workspace remains outside these Git metadata rules. The common refs remain
-writable for publication across branches; this filesystem boundary does not
-restrict ref names, so stage instructions and GitHub branch protections remain
-part of the publication boundary.
+the command.
+
+### Codex Git metadata sandbox
+
+Writing Codex dispatches from linked worktrees need some of the worktree's Git
+metadata, which lives outside the workspace: Git stores objects, refs, and
+reflogs in the common directory, and the selected worktree's index, HEAD, and
+pseudorefs in its private directory. Read-only dispatches receive none of it.
+
+**No side effects.** Sandbox setup and teardown leave `.git` exactly as it was,
+apart from the Git changes the stage makes on purpose. Codex's Linux sandbox
+mounts each filesystem rule on its destination and creates a missing
+destination as an empty file, which outlives the dispatch: an empty
+`commondir` makes Git treat an ordinary checkout as a broken linked worktree,
+and an empty `MERGE_HEAD` reports a merge in progress (#229). So no rule names
+a path that does not exist when the profile is built, and nothing is cleaned
+up afterwards, because a sweep of `.git` cannot tell a synthetic file from one
+Git or another dispatch created meanwhile.
+
+**Read-only common root.** The common directory is read-only. Write access goes
+only to its `objects`, `refs`, and `logs` directories and to the worktree's
+private directory; those are also the only `--add-dir` roots. The read-only
+root protects, without naming them, `config`, `hooks`, `packed-refs`,
+`commondir`, `gitdir`, `modules`, other worktrees' pointers, and the main
+worktree's HEAD, index, lock files, and merge, rebase, bisect, and sequencer
+state. Rules then make read-only only what exists: the private `commondir` and
+`gitdir`, `config.worktree` and its lock, the workspace's `.git` gitfile, and
+the main worktree's `logs/HEAD`, `refs/bisect`, `refs/worktree`, and
+`refs/rewritten` with their reflogs, which sit below the writable `refs` and
+`logs`. Git follows `commondir` and `gitdir` to find configuration and hooks,
+and the gitfile keeps a later dispatch's grants on this worktree, so all three
+must also stay readable; the probe reads them. Lock files stay creatable inside
+the writable directories, which is how Git updates refs.
+
+**What works and what does not.** `commit`, `fetch`, `push`, and loose ref
+updates work. Anything that must rewrite a root-level file fails inside the
+sandbox: deleting a packed ref, `pack-refs`, garbage collection, and fetching
+into a shallow clone, which updates `shallow`. Writing Codex publish dispatches
+set `GIT_CONFIG_PARAMETERS` with `gc.auto=0` and `maintenance.auto=false` so
+automatic maintenance does not try. The common refs remain writable for
+publication across branches; this filesystem boundary does not restrict ref
+names, so stage instructions and GitHub branch protections remain part of the
+publication boundary.
+
+**Routing away.** A dangerous absent path cannot be protected without creating
+it, so before dispatch the runtime routes the stage to another eligible
+publisher, or stops that publishing operation with the reason when none is
+available, when:
+
+- `extensions.worktreeConfig` is on and the worktree's `config.worktree` or
+  `config.worktree.lock` is absent;
+- the effective `core.hooksPath`, read from local and worktree-specific
+  configuration and resolved from the worktree's top level when relative, lies
+  inside a writable Git directory. The worktree's private `hooks` is not a
+  trigger, because Git never reads it, and the default common `hooks` sits in
+  the read-only root. A hooks path inside the writable source workspace stays
+  outside these rules;
+- the stage would publish from the main worktree, whose index and HEAD live in
+  the read-only common root. The cycle only grants Git metadata to linked
+  worktrees, so this case arises only through a direct call.
+
+Absent main-worktree `refs/bisect`, `refs/worktree`, `refs/rewritten`, and
+their reflogs are accepted and left out.
+
+**Codex's own carve-outs.** Codex itself protects `.git`, `.codex`, `.agents`,
+and `.aws` below every writable root, and has been observed creating them as
+empty directories in `objects`, `refs`, and `logs`. They come from the CLI
+rather than from these rules, and Git ignores those dot-prefixed names in all
+three directories.
+
+**Testing it.** `tests/test_codex_git_sandbox.py` runs the real profile through
+a fake `codex` that creates every missing rule destination, as the Linux
+sandbox does, and compares `.git` before, during, and after the probe and the
+dispatch. It also runs `commit`, `fetch`, `push`, and a loose ref update with
+the common root made read-only by directory permissions. A live Codex CLI is
+not available in CI. To check a supported CLI by hand on Linux, run a writing
+publish stage from a linked worktree, then check that
+`find "$(git rev-parse --git-common-dir)" -newer <marker>` lists nothing outside
+`objects`, `refs`, `logs`, and the worktree's private directory, where `<marker>`
+is a file touched just before the dispatch.
 
 Before granting linked-worktree metadata, the runtime ignores Git directory,
 worktree, index, and object-directory environment overrides. It also checks
@@ -64,8 +111,12 @@ the selected common directory's `worktrees` directory.
 
 Before dispatching any writing publish stage to Codex, the runtime runs a
 deterministic local command with `codex sandbox` and the same filesystem rules.
-It writes and verifies temporary markers in each granted root, without a model
-turn or network access. A failed probe routes the stage to another eligible
+It writes and verifies temporary markers in each granted root, checks that a
+uniquely named marker cannot be created in the common root, `worktrees`, or
+`hooks`, and that each existing protected file refuses writes, without a model
+turn or network access. It never opens an absent protected name, and it removes
+only markers that still carry its own token, after success, failure, timeout,
+or interruption. A failed probe routes the stage to another eligible
 publisher before dispatch and records the specific failure in the route reason.
 Land issue #203 before issue #190, whose executor refactor reorganizes the
 dispatch path this fix covers.

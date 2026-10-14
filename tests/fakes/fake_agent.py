@@ -198,54 +198,29 @@ def main(argv: list[str]) -> int:
         }
         if not entries:
             return 2
+        # Codex's Linux sandbox would create a missing destination as an empty
+        # file on the host (#229), so every rule must name an existing path.
+        if any(not os.path.exists(path) for path in entries):
+            return 2
         common = next(iter(entries))
+        if entries[common] != "read":
+            return 2
         worktree = next((
             path for path, access in entries.items()
             if access == "write"
             and path.startswith(os.path.join(common, "worktrees") + os.sep)
         ), None)
-        required_readonly = [
-            os.path.join(common, name)
-            for name in ("config", "config.lock", "config.worktree",
-                         "config.worktree.lock", "hooks", "worktrees",
-                         "commondir", "gitdir", "modules")
-        ]
-        required_denied = []
+        required_readonly = []
         if worktree is not None:
             workspace = flag(argv, "--cd")
             git_pointer = os.path.join(workspace, ".git") if workspace else None
             if git_pointer and git_pointer != common:
                 # Read-only, not denied: Git must still open the gitfile.
                 required_readonly.append(git_pointer)
-            main_state = (
-                "HEAD", "index", "ORIG_HEAD", "FETCH_HEAD", "COMMIT_EDITMSG",
-                "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                "REBASE_HEAD", "AUTO_MERGE", "BISECT_START", "BISECT_LOG",
-                "BISECT_NAMES", "BISECT_EXPECTED_REV", "MERGE_AUTOSTASH",
-                "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "SQUASH_MSG", "logs/HEAD",
+            required_readonly.extend(
+                os.path.join(worktree, name) for name in ("commondir", "gitdir")
             )
-            required_denied.extend(
-                os.path.join(common, name) for name in main_state
-            )
-            required_denied.extend(
-                os.path.join(common, name + ".lock") for name in main_state
-            )
-            required_denied.extend(os.path.join(common, name) for name in (
-                "sequencer", "rebase-apply", "rebase-merge", "bisect",
-                "refs/bisect", "refs/worktree", "refs/rewritten",
-                "logs/refs/bisect", "logs/refs/worktree", "logs/refs/rewritten",
-            ))
-            required_readonly.extend(os.path.join(worktree, name) for name in (
-                "commondir", "gitdir", "config.worktree",
-                "config.worktree.lock",
-            ))
-            if entries.get(common) != "write":
-                return 2
-        else:
-            required_readonly.append(os.path.join(common, "worktrees"))
         if any(entries.get(path) != "read" for path in required_readonly):
-            return 2
-        if any(entries.get(path) != "deny" for path in required_denied):
             return 2
 
         def writable(path: Path) -> bool:
@@ -256,19 +231,19 @@ def main(argv: list[str]) -> int:
             ]
             return bool(matches) and max(matches)[1] == "write"
 
-        required_writes = [
-            Path(common) / name
-            for name in ("objects", "refs", "logs", "packed-refs", "packed-refs.lock")
-        ]
+        required_writes = [Path(common) / name for name in ("objects", "refs", "logs")]
         if worktree is not None:
             required_writes.append(Path(worktree))
         if any(not writable(path) for path in required_writes):
             return 2
+        # The common root, and so `packed-refs` and `config`, stays read-only.
+        if any(writable(Path(common) / name) for name in ("packed-refs", "config", "commondir")):
+            return 2
 
         script = command[-1]
         marker_pairs = re.findall(
-            r'Path\(("(?:\\.|[^"])*\.code-cycle-write-probe-[^"]*")\)'
-            r'\.write_text\(("(?:\\.|[^"])*")\)',
+            r'create_exclusive\(("(?:\\.|[^"])*\.code-cycle-write-probe-[^"]*"), '
+            r'("(?:\\.|[^"])*")\)',
             script,
         )
         if not marker_pairs:
