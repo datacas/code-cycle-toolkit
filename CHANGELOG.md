@@ -5,6 +5,21 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex writing publish dispatches no longer leave empty files such as
+  `commondir`, `MERGE_HEAD`, or `logs/refs/bisect` in `.git` (#229). Codex's
+  Linux sandbox created every missing rule destination as a mount point, so the
+  profile now keeps the common Git directory read-only, grants writes only to
+  `objects`, `refs`, `logs`, and the worktree's private directory, and names
+  only paths that already exist. A stage routes away from Codex before dispatch
+  when `extensions.worktreeConfig` lacks the worktree's `config.worktree` or its
+  lock, when `core.hooksPath` resolves inside a writable Git directory, or when
+  it would publish from the main worktree. Packed-ref deletion, `pack-refs`,
+  and garbage collection no longer work inside the sandbox, and automatic
+  maintenance is turned off there. A stopped dispatch's process group now gets
+  `SIGTERM` and a bounded grace period before `SIGKILL`.
+
 ### Added
 
 - An opt-in `parallel` CI policy overlaps the review with the code host's
