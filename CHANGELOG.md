@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
 ### Fixed
 
 - Codex writing publish dispatches no longer leave empty files such as
