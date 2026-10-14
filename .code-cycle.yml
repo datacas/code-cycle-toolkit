@@ -5,6 +5,9 @@ code_cycle:
   repository:
     selector: datacas/code-cycle-toolkit
     default_branch: main
+  ci:
+    policy: parallel
+    timeout: 2700
   review:
     # The provider identities whose comments may advance recovered findings.
     # Provider logins are compared case-insensitively. An absent or empty list
