@@ -82,7 +82,11 @@ from pathlib import Path
 #: copy of each change request's review history (`cycle_history.py`). Stage
 #: rows are unchanged; an older store simply has no local history and rebuilds
 #: it from the change request's comments on the next resume.
-SCHEMA_VERSION = 18
+#: 19: the CI policy (#228). A review may report `REVIEW_PASSED_AWAITING_CI`,
+#: review verdicts carry `reviewed_head_sha` and the SHA their checks describe,
+#: `ci` rows record each read or wait of the CI gate with its SHA, and the
+#: cycle row carries the policy and the gate's totals. All payload-only.
+SCHEMA_VERSION = 19
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -120,7 +124,35 @@ STOP_REASONS = frozenset({
     "approved", "iteration_limit", "no_progress", "repeated_findings",
     "stage_not_completed", "dispatch_failed", "local_only",
     "needs_refinement", "readiness_unconfirmed", "interrupted",
+    # The CI gate of the parallel policy (schema 19).
+    "ci_timeout", "ci_unreadable", "ci_not_passing", "head_moved",
 })
+
+#: How a cycle treats the code host's checks (schema 19). `strict` is the
+#: original serial flow; `parallel` reviews while checks run and gates
+#: approval on a CI pass of the reviewed SHA.
+CI_POLICIES = ("strict", "parallel")
+
+#: A completed review that found nothing blocking while the checks of its head
+#: had not all passed. It is not an approval (schema 19).
+AWAITING_CI_STATUS = "REVIEW_PASSED_AWAITING_CI"
+
+#: What one read or wait of the CI gate can establish (`ci_gate.py`), stored
+#: as `ci_status` (schema 19). Only `CI_PASSED` can lead to approval.
+CI_PASSED = "CI_PASSED"
+CI_FAILED = "CI_FAILED"
+CI_SKIPPED = "CI_SKIPPED"
+CI_TIMEOUT = "CI_TIMEOUT"
+CI_PENDING = "CI_PENDING"
+NO_CI_CHECKS_FOUND = "NO_CI_CHECKS_FOUND"
+CI_UNREADABLE = "CI_UNREADABLE"
+CI_HEAD_MOVED = "CI_HEAD_MOVED"
+CI_STATUSES = frozenset({
+    CI_PASSED, CI_FAILED, CI_SKIPPED, CI_TIMEOUT, CI_PENDING,
+    NO_CI_CHECKS_FOUND, CI_UNREADABLE, CI_HEAD_MOVED,
+})
+#: Results that already rule approval out for their SHA, whatever happens next.
+DEFINITIVE_FAILURES = frozenset({CI_FAILED, CI_SKIPPED, NO_CI_CHECKS_FOUND})
 
 #: What a new cycle did about the optional issue review (schema 11).
 ISSUE_REVIEW_DECISIONS = frozenset({"off", "skipped", "dispatched"})
@@ -194,6 +226,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",
         "PARTIALLY_RESOLVED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
         "HUMAN_INTERVENTION", "IN_PROGRESS", "READY", "NEEDS_REFINEMENT",
+        AWAITING_CI_STATUS,
     })),
     "missing_capability": ("token", frozenset({
         "operating_quota", "operating_availability", "proven_readiness",
@@ -242,6 +275,22 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "checks_passed": ("count", None),
     "checks_failed": ("count", None),
     "checks_pending": ("count", None),
+    # the CI gate of the parallel policy, and the SHAs it is tied to (schema 19)
+    "checks_head_sha": ("identifier", None),
+    "checks_skipped": ("count", None),
+    "checks_missing": ("count", None),
+    "checks_late": ("count", None),
+    "reviewed_head_sha": ("identifier", None),
+    "ci_policy": ("token", frozenset(CI_POLICIES)),
+    "ci_status": ("token", CI_STATUSES),
+    "ci_mode": ("token", frozenset({"wait", "once"})),
+    "ci_head_sha": ("identifier", None),
+    "ci_required_source": ("token", frozenset({"declared", "reported"})),
+    "ci_polls": ("count", None),
+    "ci_wait_ms": ("count", None),
+    "final_ci_status": ("token", CI_STATUSES),
+    "redundant_reviews": ("count", None),
+    "review_reused": ("flag", None),
     "exit_code": ("count", None),
     "tokens_in": ("count", None),
     "tokens_out": ("count", None),
@@ -310,7 +359,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     # numeric pull-request reference emitted by an implementation verdict
     "pull_request_id": ("identifier", None),
     "stage_seq": ("count", None),
-    "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle", "shadow"})),
+    "record_kind": ("token", frozenset({"dispatch", "verdict", "cycle", "shadow", "ci"})),
     # where the cycle began (schema 5)
     "started_from": ("token", frozenset(CYCLE_STARTS)),
     # observed outcomes, written only once they are known (schema 3)
@@ -320,8 +369,10 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "verification": ("token", VERIFICATION_CONCLUSIONS),
     # whether a required boundary run has evidence; absent when not required (schema 9)
     "boundary_verified": ("flag", None),
-    "first_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
-    "final_review_status": ("token", frozenset({"APPROVED", "CHANGES_REQUESTED"})),
+    "first_review_status": ("token", frozenset({
+        "APPROVED", "CHANGES_REQUESTED", AWAITING_CI_STATUS})),
+    "final_review_status": ("token", frozenset({
+        "APPROVED", "CHANGES_REQUESTED", AWAITING_CI_STATUS})),
     "first_pass_approved": ("flag", None),
     "resolution_needed": ("flag", None),
     "resolution_rounds": ("count", None),
@@ -482,17 +533,26 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "forecast_has_tests", "forecast_touches_dependencies",
         "forecast_touches_database", "forecast_touches_auth", "forecast_touches_api",
         "forecast_touches_migrations", "forecast_touches_ci",
-        "checks_passed", "checks_failed", "checks_pending",
+        "checks_passed", "checks_failed", "checks_pending", "checks_head_sha",
+        "reviewed_head_sha",
         "readiness_result_valid", "readiness_confidence",
         "readiness_findings_total", "readiness_findings_blocking",
         "readiness_uncertainties_material",
+    }),
+    # One read or wait of the CI gate, for the SHA it names (schema 19). The
+    # review outcome stays on the review's verdict; this is the CI outcome.
+    "ci": frozenset({
+        "ci_status", "ci_mode", "ci_head_sha", "ci_required_source",
+        "checks_passed", "checks_failed", "checks_pending", "checks_skipped",
+        "checks_missing", "checks_late", "ci_polls", "ci_wait_ms",
     }),
     "cycle": frozenset({
         "status", "iterations", "first_review_status", "final_review_status",
         "first_pass_approved", "resolution_needed", "resolution_rounds",
         "final_approved", "tests_passed", "tests_basis", "verification",
         "boundary_verified", "fallback_stages", "contract_violations", "stop_reason",
-        "issue_review", "continued",
+        "issue_review", "continued", "ci_policy", "ci_wait_ms", "ci_polls",
+        "final_ci_status", "redundant_reviews", "review_reused",
     }),
 }
 
@@ -604,6 +664,50 @@ MAX_PAYLOAD_VALUE_LENGTH = 120
 #: as a failure would invent an outcome.
 TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 PASSING_REVIEW_STATUSES = frozenset({"APPROVED"})
+#: Every status of a review that completed, including the parallel policy's
+#: clean review awaiting its checks. Its pass is read off the CI gate.
+COMPLETED_REVIEW_STATUSES = TERMINAL_REVIEW_STATUSES | {AWAITING_CI_STATUS}
+
+
+def ci_gate_outcomes(rows: Iterable[dict]) -> dict[tuple[str, str], str]:
+    """The last CI gate wait recorded for each `(cycle_id, head SHA)` (schema 19).
+
+    A single read (`ci_mode: once`) decides nothing about approval, so only
+    waits are kept.
+    """
+    outcomes: dict[tuple[str, str], str] = {}
+    for row in rows:
+        payload = row.get("payload") or {}
+        if payload.get("record_kind") != "ci" or payload.get("ci_mode") != "wait":
+            continue
+        cycle_id, head, status = (payload.get("cycle_id"), payload.get("ci_head_sha"),
+                                  payload.get("ci_status"))
+        if isinstance(cycle_id, str) and isinstance(head, str) and isinstance(status, str):
+            outcomes[(cycle_id, head)] = status
+    return outcomes
+
+
+def review_passed(row: dict, ci_outcomes: dict[tuple[str, str], str]) -> bool | None:
+    """Whether a completed review passed, counting the CI gate on its SHA.
+
+    `CHANGES_REQUESTED` did not. `APPROVED` did, unless a CI gate on the same
+    SHA later ruled it out. `REVIEW_PASSED_AWAITING_CI` did only once the gate
+    passed that SHA, and did not when it definitively failed; otherwise, or
+    for any other status, the outcome is unknown.
+    """
+    status = str(row.get("status") or "").upper()
+    payload = row.get("payload") or {}
+    gate = ci_outcomes.get((payload.get("cycle_id"), payload.get("reviewed_head_sha")))
+    if status == "CHANGES_REQUESTED":
+        return False
+    if status == "APPROVED":
+        return gate not in DEFINITIVE_FAILURES
+    if status == AWAITING_CI_STATUS:
+        if gate == CI_PASSED:
+            return True
+        if gate in DEFINITIVE_FAILURES:
+            return False
+    return None
 
 
 def started_at_implement(row: dict) -> bool:
@@ -2234,18 +2338,25 @@ class Telemetry:
 
         A review from a cycle that resumed a change request is not counted: it
         judged an implementation some earlier run produced, perhaps after fixes.
+
+        Under the parallel CI policy a first review that completed clean while
+        its checks ran passes only when the CI gate passed that same SHA
+        (`review_passed`). When the gate never decided, the task is consumed
+        without being counted: its later reviews were not its first pass.
         """
+        rows = self.rows(repo_id)
         implementers = {}
-        for row in self.rows(repo_id):
+        for row in rows:
             # A shadow row is a suggestion, not the implementation that ran.
             if row["payload"].get("record_kind") == "shadow":
                 continue
             if row["role"] == "implement" and row["task_id"] not in implementers:
                 implementers[row["task_id"]] = row["profile"]
 
+        ci_outcomes = ci_gate_outcomes(rows)
         passed = total = 0
         seen_reviews = set()
-        for row in self.rows(repo_id):
+        for row in rows:
             if row["role"] != "review" or row["task_id"] in seen_reviews:
                 continue
             if not started_at_implement(row):
@@ -2255,15 +2366,18 @@ class Telemetry:
             if profile is not None and implementers[row["task_id"]] != profile:
                 continue
             status = (row["status"] or "").upper()
-            if status not in TERMINAL_REVIEW_STATUSES:
+            if status not in COMPLETED_REVIEW_STATUSES:
                 # Not yet an outcome. The task stays unconsumed so a later
                 # terminal review still counts: a row recorded before its
                 # verdict arrived — which an append-only API makes ordinary —
                 # must not be read as a failed first pass.
                 continue
             seen_reviews.add(row["task_id"])
+            outcome = review_passed(row, ci_outcomes)
+            if outcome is None:
+                continue
             total += 1
-            if status in PASSING_REVIEW_STATUSES:
+            if outcome:
                 passed += 1
 
         if total < minimum:
@@ -2354,6 +2468,11 @@ class Telemetry:
                 {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],
                  **fields(row, OUTCOME_FIELDS["verdict"])}
                 for row in rows if row["payload"].get("record_kind") == "verdict"
+            ],
+            "ci": [
+                {"stage_seq": row["payload"].get("stage_seq"),
+                 **fields(row, OUTCOME_FIELDS["ci"])}
+                for row in rows if row["payload"].get("record_kind") == "ci"
             ],
             "shadows": [
                 {"stage_seq": row["payload"].get("stage_seq"), "role": row["role"],

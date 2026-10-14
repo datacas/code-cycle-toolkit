@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import issue_review  # noqa: E402
 import review_contract  # noqa: E402
 import stop_questions  # noqa: E402
+import telemetry  # noqa: E402
 
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -618,6 +619,67 @@ FIXED_MODE_ISSUE_REVIEW_PHRASES = (
 )
 
 
+CI_POLICY_SECTION = "## CI policy"
+#: What the CI-policy section both orchestrators share must state (#228): the
+#: policy and its override, the one gate and every result a wait can return,
+#: and what keeps a clean review from being an approval on its own. The
+#: section is also compared byte for byte, so the two cannot drift apart.
+CI_POLICY_PHRASES = (
+    "`ci_policy=strict|parallel`",
+    "`code_cycle.ci.policy`",
+    f"`{telemetry.AWAITING_CI_STATUS}`",
+    "never an approval",
+    "`ci_gate.py`",
+    "`--once`",
+    "Never poll the checks yourself",
+    "never review the same SHA again",
+    "Tell `cc-resolve-comments` nothing",
+    "nothing published after it",
+) + tuple(f"`{status}`" for status in sorted(telemetry.CI_STATUSES - {telemetry.CI_PENDING}))
+#: The review skills define the status, and the implementation does not wait.
+CI_REVIEW_SKILLS = ("cc-initial-review", "cc-rereview")
+CI_IMPLEMENT_PHRASES = ("`parallel`", "`gh pr checks --watch`", "`IMPLEMENTED`")
+
+
+def check_ci_policy(root: Path, errors: list[str]) -> None:
+    """The skills must state the CI policy the runtime applies (#228).
+
+    `run_cycle.py` and `ci_gate.py` define it; both orchestrators apply it in
+    one shared section, which must name every gate result the runtime can
+    return after a wait. Each review skill must define the awaiting status,
+    and the implementation must say it does not wait for checks.
+    """
+    check_shared_sections(root, ORCHESTRATOR_SKILLS, (CI_POLICY_SECTION,), errors)
+    for skill in ORCHESTRATOR_SKILLS:
+        path = root / "skills" / skill / "SKILL.md"
+        section = (extract_section(path.read_text(encoding="utf-8"), CI_POLICY_SECTION)
+                   if path.is_file() else None)
+        flattened = " ".join((section or "").split())
+        for phrase in CI_POLICY_PHRASES if section is not None else ():
+            if phrase not in flattened:
+                errors.append(f"skills/{skill}/SKILL.md: {CI_POLICY_SECTION!r} "
+                              f"does not state {phrase!r}")
+    for skill in CI_REVIEW_SKILLS:
+        path = root / "skills" / skill / "SKILL.md"
+        if not path.is_file():
+            continue
+        workflow = extract_section(path.read_text(encoding="utf-8"), "## Workflow") or ""
+        if f"\n- `{telemetry.AWAITING_CI_STATUS}`:" not in workflow:
+            errors.append(f"skills/{skill}/SKILL.md: '## Workflow' does not define "
+                          f"`{telemetry.AWAITING_CI_STATUS}`")
+    path = root / "skills" / IMPLEMENT_SKILL / "SKILL.md"
+    if path.is_file():
+        section = extract_section(path.read_text(encoding="utf-8"), CI_POLICY_SECTION)
+        if section is None:
+            errors.append(f"skills/{IMPLEMENT_SKILL}/SKILL.md: missing section "
+                          f"{CI_POLICY_SECTION!r}")
+        else:
+            flattened = " ".join(section.split())
+            errors.extend(f"skills/{IMPLEMENT_SKILL}/SKILL.md: {CI_POLICY_SECTION!r} "
+                          f"does not state {phrase!r}"
+                          for phrase in CI_IMPLEMENT_PHRASES if phrase not in flattened)
+
+
 #: What `cc-orchestrator` must tell an agent about launching the runtime. A
 #: cycle held in a host task outlives the task's time limit and dies with it.
 RUNTIME_LAUNCH_SECTION = "## Routing"
@@ -813,6 +875,7 @@ def validate_package(root: Path) -> list[str]:
         check_asking_contract(root, errors)
         check_repeated_findings_ladder(root, errors)
         check_issue_review_gate(root, errors)
+        check_ci_policy(root, errors)
         check_runtime_launch(root, errors)
 
         adapter_reference = root / CLAUDE_CODEX_REFERENCE

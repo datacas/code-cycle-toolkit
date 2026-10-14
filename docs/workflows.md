@@ -277,6 +277,8 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--pr` | — | Existing change request a resumed cycle works on; required by `--from review\|resolve\|rereview` |
 | `--continue` | off | Continue an interrupted implementation from the partial work in `--cwd` instead of starting it again; skips the issue review |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
+| `--ci-policy` | `ci.policy`, else `strict` | `strict` waits for checks inside each writing stage; `parallel` reviews while they run and approves only after a CI pass of the reviewed SHA. GitHub only. See [CI policy](review-cycle.md#ci-policy) |
+| `--ci-timeout` | `ci.timeout`, else `900` seconds | How long the `parallel` CI gate waits for one SHA |
 | `--cwd` | current directory | Where the executor runs and `.code-cycle.yml` is read |
 | `code_cycle.worktree_dir` | `.worktree` | Repository-relative base for persistent worker worktrees; review clones remain temporary and outside it |
 | `--local-only` | off | Rehearsal: implement only, no publishing; requires `--workspace current` and a linked worktree in `--cwd` |
@@ -310,6 +312,12 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 72 --pr 74 --from rereview  # 
 The stages before `--from` are skipped. The rest run with the same routing, recording, and `--max-iterations` as a full cycle. `resolve` and `rereview` rely on the pull request's comments carrying the previous review; the stage recovers those findings through `review.trusted_authors`. Before anything is dispatched, the driver refuses `--from` without `--pr`, `--pr` without a resuming `--from`, and `--local-only` with a resume. It then reads the pull request with `gh` and stops with the reason unless it is open, its head branch still exists, and `--cwd` has that branch checked out at the pull request's head commit, so a stale or unpushed checkout is never reviewed or fixed in its place. Only GitHub pull requests can be resumed. A resumed run is a **new cycle** with its own `cycle_id`, and every row carries `started_from`, so its review never counts as a first pass.
 
 **Issue review:** in the default `auto` mode, a new cycle first runs `cc-issue-review` read-only and implements only on a confirmed `READY`. `NEEDS_REFINEMENT` stops before any code work and prints one `decisions` line, the first question, and the path of a decisions record holding the other questions and the findings, evidence, and proposed issue edits; nothing is posted to the work item. `--issue-review off` or `issue_review.mode: off` restores the original flow. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
+
+**CI policy:** by default (`strict`) the implementation and each resolution wait for their pushed head's checks before returning, and a review approves only once they passed. With `--ci-policy parallel` (or `ci.policy: parallel`) the review starts as soon as the implementation is published, a review that requests changes goes to resolution at once, and a clean review reports `REVIEW_PASSED_AWAITING_CI`, which is not an approval: the runtime then waits once, deterministically and for at most `--ci-timeout` seconds, for every required check of that SHA, and approves only when they all passed while that SHA was still the head. CI is never disabled. A timeout stops as `BLOCKED` and keeps the clean review; resume it with `--from rereview --pr <n> --ci-policy parallel`, which waits again without another review. See [Review lifecycle → CI policy](review-cycle.md#ci-policy).
+
+```bash
+python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --ci-policy parallel --detach
+```
 
 **Launching from an agent:** an agent host runs shell commands as tasks with a time limit, and a cycle routinely outlasts it. Claude Code, for example, stops a background command after 30 minutes unless it is given a longer limit, and stopping it also stops the executor the cycle started. Launch with `--detach` so the cycle has its own session and nothing of it belongs to the host's task:
 

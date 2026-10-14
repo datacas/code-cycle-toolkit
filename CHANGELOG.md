@@ -5,6 +5,30 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- An opt-in `parallel` CI policy overlaps the review with the code host's
+  checks and gates approval by SHA (#228). `strict`, the default, keeps the
+  serial flow unchanged. Set it with `code_cycle.ci.policy`, `--ci-policy` for
+  one `run_cycle.py` run, or `ci_policy=` for one orchestrator invocation;
+  `ci.timeout` / `--ci-timeout` bound the wait (default 900 seconds). Under
+  `parallel` the implementation reads its checks once and returns, the review
+  starts at once, `CHANGES_REQUESTED` goes to resolution at once, and a clean
+  review reports the new non-approval status `REVIEW_PASSED_AWAITING_CI`, whose
+  schema-2 receipt in the PR comment is the record of that state. Approval then
+  needs a CI pass of the reviewed SHA from the runtime's one deterministic wait,
+  `scripts/ci_gate.py`, which both orchestrators run too: required checks come
+  from branch protection and rulesets (or every reported check when none is
+  declared), only `success` passes, a missing, skipped, neutral, failed,
+  unreadable or moved-head result never approves, a failure goes to one
+  resolution told the SHA and count, a moved head gets one fresh rereview, and a
+  timeout stops as `BLOCKED` keeping the clean review, which `--from rereview`
+  reuses without another review. Telemetry schema 19 records the review's
+  `reviewed_head_sha`, a `ci` row per gate read or wait with its SHA, and the
+  cycle's `ci_policy`, CI wait time, polls and redundant reviews. GitHub only;
+  another code host keeps `strict`. The resolution keeps its own wait under both
+  policies until #182.
+
 ### Changed
 
 - The review history of a change request is kept locally (#223). Schema 18

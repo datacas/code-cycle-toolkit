@@ -291,7 +291,8 @@ for this run only.
     automatic closure; for Plane and Jira, use the provider-native link and do
     not claim that the work item was closed unless its state was observed.
 11. Wait for the checks of the pushed head and let them decide the status, as
-    *Checks of the pushed head* describes.
+    *Checks of the pushed head* describes, unless the cycle's CI policy is
+    `parallel`; then read them once and return, as *CI policy* describes.
 12. Report the issue provider, work-item ID, code host, repository, branch,
     commit, change-request ID and URL, work units, verification, the checks of
     the final head, and any residual risk. Do not describe the change request
@@ -398,6 +399,28 @@ Use this table shape, replacing the example values with the actual unit details:
 | Unit | Behaviour | Files | Tests | Verification | Rollback |
 |---|---|---|---|---|---|
 | `WU-1` | `<behaviour>` | `<paths>` | `<tests>` | `<commands and results>` | `<independent, dependent, or irreversible boundary>` |
+
+## CI policy
+
+A cycle runs under one of two CI policies, stated in the request by the runtime
+or the orchestrator: `strict`, the default when none is stated, or `parallel`.
+Under `strict`, wait for the checks of the pushed head as *Checks of the pushed
+head* describes.
+
+Under `parallel`, the cycle reviews the change while its checks run, and its
+own CI gate waits for them once, after the review, before any approval. This
+stage does not wait:
+
+- after local verification and publication, read the checks of the pushed head
+  once, with the configured code-host tooling, and return;
+- report them in `checks` with that head's SHA, as *Checks of the pushed head*
+  describes in its last step; a pending check stays pending and is never
+  described as passed;
+- do not run `gh pr checks --watch`, poll, or start fix-and-push rounds for a
+  check: a failure is diagnosed by a later resolution, which the cycle's CI
+  gate routes;
+- report `IMPLEMENTED` once the publication succeeded, whatever the checks'
+  state; the gate, not this stage, decides whether they pass.
 
 ## Checks of the pushed head
 
@@ -535,10 +558,11 @@ END_ORCHESTRATION_RESULT
 ```
 
 Use `IMPLEMENTED` only when the requested commit and change-request work
-completed and no check of the pushed head failed for a cause outside this
-stage's scope. `pr_number` is a compatibility alias for a numeric GitHub or
-Bitbucket pull request; new consumers must use `change_request_id` and
-`change_request_url`.
+completed and, under the `strict` CI policy, no check of the pushed head failed
+for a cause outside this stage's scope; under `parallel` the checks are left to
+the cycle's CI gate, as *CI policy* describes. `pr_number` is a compatibility
+alias for a numeric GitHub or Bitbucket pull request; new consumers must use
+`change_request_id` and `change_request_url`.
 Use `BLOCKED` when access, required information, or an external condition
 prevents completion. Use `FAILED` for an unexpected technical failure. Set
 `pr_number` to `null` when no PR was created.

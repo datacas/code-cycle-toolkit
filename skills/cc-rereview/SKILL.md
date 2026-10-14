@@ -210,7 +210,8 @@ When orchestrated:
 - if this skill is the complete dispatch task, send exactly one `worker_done`
   after constructing the final result, with both IDs and a short summary;
 - use worker outcome `failed` only for functional status `FAILED`; use
-  `succeeded` for `APPROVED`, `CHANGES_REQUESTED`, and `BLOCKED`.
+  `succeeded` for `APPROVED`, `REVIEW_PASSED_AWAITING_CI`,
+  `CHANGES_REQUESTED`, and `BLOCKED`.
 
 Never put host-specific orchestration commands on the manual path, and do not
 dispatch follow-up work.
@@ -495,6 +496,11 @@ Use these functional statuses:
 - `APPROVED`: the current HEAD was completely rereviewed, every required check
   passed, every previous finding was classified, and no open finding has
   `blocks_approval: true`;
+- `REVIEW_PASSED_AWAITING_CI`: only under the `parallel` CI policy (see
+  *Verification and CI*): the current HEAD was completely rereviewed, every
+  previous finding was classified, and no open finding has
+  `blocks_approval: true`, but its required checks have not all passed yet.
+  The rereview is complete for that head; it is not an approval;
 - `CHANGES_REQUESTED`: the rereview completed and at least one previous or new
   open finding has `blocks_approval: true`;
 - `BLOCKED`: the rereview executed correctly but cannot reach a verdict without
@@ -502,7 +508,7 @@ Use these functional statuses:
 - `FAILED`: an unexpected technical failure prevented completing the skill.
 
 Set top-level `blocking` to `true` only for `BLOCKED` or `FAILED`.
-`CHANGES_REQUESTED` has `blocking: false`.
+`CHANGES_REQUESTED` and `REVIEW_PASSED_AWAITING_CI` have `blocking: false`.
 
 ## Classify previous findings
 
@@ -543,6 +549,20 @@ pending, failed, cancelled, skipped, and missing expected gates. When a
 repository policy skips a suite, such as end-to-end tests on draft pull
 requests, state that explicitly. Never present absent execution or skipped CI
 as success.
+
+The request may state the cycle's CI policy: `strict`, the default when none is
+stated, or `parallel`. Under `parallel` the rereview runs while the checks do,
+and the cycle's own CI gate waits for them afterwards; so read them once and do
+not wait, poll, or run `gh pr checks --watch`. Report every check's state in the
+comment's CI section and never as a finding, a missing one included: the gate,
+not the rereview, turns a failed, missing, or skipped check into work for the
+next resolution or into a stop. When the rereview completes with no open
+finding that blocks approval, report `APPROVED` only if every required check of
+the head already passed, and `REVIEW_PASSED_AWAITING_CI` otherwise. Its receipt
+carries the same status for the reviewed head, and a retried rereview reuses
+its own comment rather than posting another. When the request says the head
+moved after an earlier clean review, that review is not reused: rereview the
+current head in full.
 
 ## Change-request comment
 
@@ -666,7 +686,12 @@ the prior reviewed SHA cannot be recovered factually, use
 `previous_reviewed_head_sha: null`, state the limitation, and still perform the
 complete current review. Before returning `APPROVED`, confirm
 `reviewed_head_sha == head_sha`, all required checks passed, and no open finding
-blocks approval.
+blocks approval. `REVIEW_PASSED_AWAITING_CI` carries the same
+`reviewed_head_sha == head_sha`, its `verified_findings` and `new_findings`
+lists, and an empty `blocking_findings` list: a clean status without them is not
+a completed rereview, and the runtime refuses it. Add the checks you read as a
+`checks` object with that `head_sha` and the `passed`, `failed`, and `pending`
+counts.
 
 `review_run_id` is new on every rereview, because one change request accumulates
 an initial review and several rereviews and each produced its own findings. It

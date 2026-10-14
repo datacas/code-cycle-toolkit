@@ -515,6 +515,47 @@ class ValidatePackageTests(unittest.TestCase):
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
         return VALIDATOR.validate_package(package)
 
+    def test_rejects_ci_policy_sections_that_disagree(self) -> None:
+        """#228: both orchestrators apply one CI policy, the runtime's."""
+        errors = self.edit_orchestrator(
+            "cc-orca-orchestrator", "| `CI_TIMEOUT` | Stop with `BLOCKED`.",
+            "| `CI_TIMEOUT` | Review the head again.")
+
+        self.assert_error_contains(errors, "'## CI policy' has drifted between skills")
+
+    def test_rejects_a_ci_policy_section_that_lost_a_gate_status(self) -> None:
+        package = self.copy_package()
+        for skill in VALIDATOR.ORCHESTRATOR_SKILLS:
+            path = package / "skills" / skill / "SKILL.md"
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("| `CI_HEAD_MOVED` |", "| moved |", 1),
+                            encoding="utf-8")
+
+        errors = VALIDATOR.validate_package(package)
+
+        self.assert_error_contains(errors, "'## CI policy' does not state '`CI_HEAD_MOVED`'")
+
+    def test_rejects_an_orchestrator_without_the_ci_policy(self) -> None:
+        errors = self.edit_orchestrator("cc-orchestrator", "## CI policy", "## Checks")
+
+        self.assert_error_contains(
+            errors, "skills/cc-orchestrator/SKILL.md: missing shared section '## CI policy'")
+
+    def test_rejects_a_review_skill_without_the_awaiting_status(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-rereview", "- `REVIEW_PASSED_AWAITING_CI`:", "- awaiting:")
+
+        self.assert_error_contains(
+            errors, "skills/cc-rereview/SKILL.md: '## Workflow' does not define "
+                    "`REVIEW_PASSED_AWAITING_CI`")
+
+    def test_rejects_an_implementation_that_still_waits_under_parallel(self) -> None:
+        errors = self.edit_orchestrator(
+            "cc-implement-issue", "do not run `gh pr checks --watch`", "keep watching")
+
+        self.assert_error_contains(
+            errors, "'## CI policy' does not state '`gh pr checks --watch`'")
+
     def test_rejects_an_orchestrator_without_the_issue_review_gate(self) -> None:
         errors = self.edit_orchestrator(
             "cc-orchestrator", "## Issue review before implementation", "## Readiness")

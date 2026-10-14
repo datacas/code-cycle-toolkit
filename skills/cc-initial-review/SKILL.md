@@ -211,7 +211,8 @@ When orchestrated:
 - if this skill is the complete dispatch task, send exactly one `worker_done`
   after constructing the final result, with both IDs and a short summary;
 - use worker outcome `failed` only for functional status `FAILED`; use
-  `succeeded` for `APPROVED`, `CHANGES_REQUESTED`, and `BLOCKED`.
+  `succeeded` for `APPROVED`, `REVIEW_PASSED_AWAITING_CI`,
+  `CHANGES_REQUESTED`, and `BLOCKED`.
 
 Never put host-specific orchestration commands on the manual path, and do not
 dispatch follow-up work.
@@ -476,6 +477,10 @@ Use these functional statuses:
 
 - `APPROVED`: the current HEAD was fully reviewed, every required check passed,
   and no open finding has `blocks_approval: true`;
+- `REVIEW_PASSED_AWAITING_CI`: only under the `parallel` CI policy (see *CI*):
+  the current HEAD was fully reviewed and no open finding has
+  `blocks_approval: true`, but its required checks have not all passed yet. The
+  review is complete for that head; it is not an approval;
 - `CHANGES_REQUESTED`: the review completed and at least one open finding has
   `blocks_approval: true`;
 - `BLOCKED`: the review executed correctly but cannot reach a review verdict
@@ -484,7 +489,8 @@ Use these functional statuses:
 
 Set top-level `blocking` to `true` only for `BLOCKED` or `FAILED`. In
 particular, `CHANGES_REQUESTED` has `blocking: false` so an orchestrator may
-continue to a resolution task.
+continue to a resolution task, and `REVIEW_PASSED_AWAITING_CI` has
+`blocking: false` so it may wait for the checks.
 
 ## Sensitivity triage
 
@@ -587,6 +593,19 @@ so — a gate that did not run is a finding, not a pass. When a repository polic
 skips a suite, such as end-to-end tests on draft pull requests, state that
 explicitly rather than leaving the gap unexplained. Never report `skipped` as
 `passed`.
+
+The request may state the cycle's CI policy: `strict`, the default when none is
+stated, or `parallel`. Under `parallel` the review runs while the checks do,
+and the cycle's own CI gate waits for them afterwards; so read them once and do
+not wait, poll, or run `gh pr checks --watch`. Report every check's state in the
+comment's CI section and never as a finding, a missing one included: the gate,
+not the review, turns a failed, missing, or skipped check into work for the
+next resolution or into a stop. When the
+review completes with no open finding that blocks approval, report `APPROVED`
+only if every required check of the head already passed, and
+`REVIEW_PASSED_AWAITING_CI` otherwise. Its receipt carries the same status for
+the reviewed head, and a retried review reuses its own comment rather than
+posting another.
 
 ## Change-request comment
 
@@ -700,7 +719,11 @@ END_ORCHESTRATION_RESULT
 Use `issue_number: null` when no numeric issue alias exists. Use `issue_id:
 null` when no work item is linked. Before returning `APPROVED`,
 confirm `reviewed_head_sha == head_sha`; absent, skipped, pending, or failed
-required checks are not success.
+required checks are not success. `REVIEW_PASSED_AWAITING_CI` carries the same
+`reviewed_head_sha == head_sha`, a `findings` list, and an empty
+`blocking_findings` list: a clean status without them is not a completed
+review, and the runtime refuses it. Add the checks you read as a `checks`
+object with that `head_sha` and the `passed`, `failed`, and `pending` counts.
 
 `review_run_id` and `reviewer` mirror the run line already published in the
 comment; the comment remains the record when the block is not emitted. Use

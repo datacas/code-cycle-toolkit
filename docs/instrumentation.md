@@ -602,7 +602,7 @@ Three payload keys tie a run together, listed in `telemetry.CORRELATION_FIELDS`:
 |---|---|
 | `cycle_id` | minted once per `CycleRecorder`, so two runs of one work item stay apart; validated before anything is dispatched |
 | `stage_seq` | the number of the `stage()` call; physical retries and fallbacks share it, and a verdict carries the number of the latest dispatch of its role |
-| `record_kind` | `dispatch`, `verdict` or `cycle` |
+| `record_kind` | `dispatch`, `verdict`, `ci` (schema 19) or `cycle` |
 | `started_from` | the stage the cycle began at: `implement`, or `review`/`resolve`/`rereview` for a run that resumed an existing change request (`run_cycle.py --from`); on every row of the cycle, and a row without it reads as `implement` |
 | `dispatch_attempt_id` | a unique ID for one physical executor invocation; absent when routing was blocked before an attempt existed (schema 13) |
 | `execution_variant_id` | a reference to executor, provider, requested/resolved model, and effort (schema 13) |
@@ -619,16 +619,20 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `verdict` | `verification` | the agent supplied a conclusion token (schema 8) |
 | `verdict` | `boundary_verified` | a boundary run was required, by the agent's `boundary: required` or by the path rule on the observed change, and the stage either reported a test outcome or conclusion or completed code work (`IMPLEMENTED`, `RESOLVED`, `PARTIALLY_RESOLVED`) without one, which records `false`; a stage without a test report that did no code work, such as a review, a blocked stage, or a `no_code_change` resolution, records nothing (schema 9) |
 | `verdict` | `checks_passed`, `checks_failed`, `checks_pending` | the stage reported all three counts in `checks`, for its own `head_sha` (schema 6) |
+| `verdict` | `checks_head_sha`, `reviewed_head_sha` | the `checks` named the full SHA they ran on, or a review named the full SHA it completed on (schema 19) |
+| `ci` | `ci_status`, `ci_mode`, `ci_head_sha`, `ci_required_source`, `checks_*`, `ci_polls`, `ci_wait_ms` | each read or wait of the `parallel` CI policy's gate, for the SHA it names (schema 19) |
 | `verdict` | `readiness_result_valid`, `readiness_confidence`, `readiness_findings_total`, `readiness_findings_blocking`, `readiness_uncertainties_material` | an `issue_review` reported a status; the last four only when its result passed `issue_review.result_errors` (schema 11) |
-| `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED` |
-| `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work |
-| `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those |
+| `cycle` | `first_review_status`, `resolution_needed`, `resolution_rounds` | a first `review` reported `APPROVED` or `CHANGES_REQUESTED`, or under the `parallel` CI policy `REVIEW_PASSED_AWAITING_CI` |
+| `cycle` | `first_pass_approved` | the same, in a cycle that started at `implement`; a resumed cycle's review judged an earlier run's work. Under `parallel` a clean review counts only once the CI gate decided its SHA |
+| `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those; under `parallel`, `final_approved` waits for the CI gate in the same way |
+| `cycle` | `ci_policy` | always (schema 19) |
+| `cycle` | `ci_polls`, `ci_wait_ms`, `final_ci_status`, `redundant_reviews`, `review_reused` | the CI gate ran, a review named its SHA, or a resume could reuse a clean review (schema 19) |
 | `cycle` | `tests_passed`, `tests_basis` | a verdict recorded a test result; the latest result and its evidence level win (schema 8) |
 | `cycle` | `verification` | a verdict supplied a conclusion token; the latest one wins (schema 8) |
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12 |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19 |
 | `cycle` | `issue_review` | the cycle started at `implement` and was not continued: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `continued` | the cycle continued an interrupted implementation with `--continue`; always `true` when present (schema 12) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |

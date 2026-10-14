@@ -59,6 +59,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
+import ci_gate
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
 from cycle_history import (
     COMMENT_STAGES,
@@ -98,7 +99,10 @@ from review_contract import (
     RunStatuses,
     claimed_fix_survivals,
     comment_run_history,
+    recover_comment_history,
     stage_evidence,
+    trusted_logins,
+    trusted_receipts,
 )
 from router import (
     ESCALATION_PROFILES,
@@ -111,6 +115,8 @@ from router import (
 )
 from stage_signals import boundary_rule_fired, collect_change_signals
 from telemetry import (
+    AWAITING_CI_STATUS,
+    CI_POLICIES,
     CYCLE_STARTS,
     VERIFICATION_CONCLUSIONS,
     Telemetry,
@@ -125,7 +131,11 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
-                         "resolve", "worktree_dir", "allowed_commands"})
+                         "resolve", "worktree_dir", "allowed_commands", "ci"})
+
+#: The keys under `code_cycle.ci` (#228), all read by this driver.
+CI_KEYS = frozenset({"policy", "timeout"})
+DEFAULT_CI_POLICY = "strict"
 
 #: The keys under `code_cycle` that belong to a skill or another module. They
 #: are legitimate here and deliberately not interpreted: recognising a key is
@@ -209,6 +219,61 @@ COMPLETES = {
     ISSUE_REVIEW_ROLE: frozenset({"READY"}),
 }
 
+#: A review that completed with nothing blocking. Under the parallel CI policy
+#: neither is an approval until the CI gate passes the reviewed SHA (#228).
+CLEAN_REVIEW_STATUSES = frozenset({"APPROVED", AWAITING_CI_STATUS})
+
+
+def completes(role: str, status: str | None, ci_policy: str = DEFAULT_CI_POLICY) -> bool:
+    """Whether a role's reported status lets the cycle continue past it.
+
+    `REVIEW_PASSED_AWAITING_CI` is a completed review only under the parallel
+    CI policy, which has a gate to wait for the checks; under `strict` nothing
+    would, so it is a stage that did not finish its job.
+    """
+    if status == AWAITING_CI_STATUS:
+        return ci_policy == "parallel" and role in {"review", "rereview"}
+    return status in COMPLETES.get(role, frozenset())
+
+
+#: What the implementation and the reviews are told under the parallel CI
+#: policy (#228). The runtime's CI gate is the one wait; no stage polls.
+PARALLEL_IMPLEMENT = (
+    "CI policy for this cycle: parallel. Do not wait for the code host's checks: "
+    "after local verification and publication, read the checks of the pushed head "
+    "once, report them in `checks` with that head's SHA, and return. A pending check "
+    "stays pending; the cycle's own CI gate waits for it."
+)
+PARALLEL_REVIEW = (
+    "CI policy for this cycle: parallel. Do not wait for pending checks, and report "
+    "a check's state in the comment's CI section, never as a finding. When the "
+    "review completes on the change request's current head with no open finding "
+    "that blocks approval, report APPROVED only if every required check of that "
+    "head already passed; otherwise report REVIEW_PASSED_AWAITING_CI, with "
+    "reviewed_head_sha equal to head_sha and an empty blocking_findings list. It "
+    "means the review is complete for that head and is not an approval: the "
+    "cycle's CI gate waits for the checks and decides. Your receipt carries the "
+    "same status."
+)
+
+#: What a resolution is told when required checks failed on the head a review
+#: judged. Only the SHA and a count reach the prompt: check names are written
+#: by the change under review, so they stay out of instructions.
+CI_FAILURE_DIRECTIVE = (
+    "Required checks failed on head {head}, the head the review judged: {count} "
+    "failed. Read them with the code host's tooling, diagnose each one, fix those "
+    "whose cause is within this change as you would a valid finding, and report a "
+    "cause outside it, such as infrastructure, as your check rules describe. These "
+    "failures are separate from the review findings: neither resolves, replaces "
+    "nor hides the other."
+)
+
+#: What the re-review is told when the head moved after a clean review.
+HEAD_MOVED_REREVIEW = (
+    "The change request's head moved from {old} to {new} after the clean review "
+    "of {old}; that review is not reused. Re-review the current head."
+)
+
 #: The stages that resume a change request instead of creating one.
 RESUMES = frozenset(CYCLE_STARTS) - {"implement"}
 
@@ -262,6 +327,7 @@ NO_DIFF_FILE = (
 #: A finding ID that may be put into a later stage's prompt.
 FINDING_ID = re.compile(r"REV-[A-Za-z0-9-]{1,40}")
 HEAD_SHA = re.compile(r"[0-9a-f]{7,40}")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class CycleDriverError(RuntimeError):
@@ -303,7 +369,7 @@ def load_config(path: Path) -> dict:
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
         "code_cycle.issue_review", "code_cycle.resolve",
-        "code_cycle.allowed_commands",
+        "code_cycle.allowed_commands", "code_cycle.ci",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -350,6 +416,18 @@ def load_config(path: Path) -> dict:
         raise CycleDriverError(
             f"{path}: code_cycle.resolve.effort must be one of low, medium, high, max")
 
+    ci = (config.get("code_cycle") or {}).get("ci") or {}
+    unknown = sorted(str(key) for key in set(ci) - CI_KEYS)
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.ci: " + ", ".join(unknown)
+            + "; known keys are " + ", ".join(sorted(CI_KEYS)))
+    try:
+        ci_policy_of(config)
+        ci_timeout_of(config)
+    except CycleDriverError as error:
+        raise CycleDriverError(f"{path}: {error}") from error
+
     code_cycle = config.get("code_cycle") or {}
     if "allowed_commands" in code_cycle:
         allowed_commands = code_cycle["allowed_commands"]
@@ -385,6 +463,55 @@ def allowed_test_command(config: dict) -> str | None:
     """The validated exact test command, when the repository declares one."""
     allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
     return allowed.get("test")
+
+
+def _ci_section(config: dict) -> dict:
+    section = config.get("code_cycle")
+    ci = section.get("ci") if isinstance(section, dict) else None
+    return ci if isinstance(ci, dict) else {}
+
+
+def ci_policy_of(config: dict, override: str | None = None) -> str:
+    """The CI policy in force: the command line's, else `code_cycle.ci.policy`.
+
+    `strict`, the default, keeps the original serial flow: each writing stage
+    waits for its checks and a review approves only on passed checks.
+    `parallel` lets the review run while the checks do and gates approval on
+    a CI pass of the reviewed SHA in the runtime (#228).
+    """
+    value = override if override is not None else _ci_section(config).get(
+        "policy", DEFAULT_CI_POLICY)
+    if value not in CI_POLICIES:
+        raise CycleDriverError(
+            f"code_cycle.ci.policy must be one of {', '.join(CI_POLICIES)}, not {value!r}")
+    return value
+
+
+def ci_timeout_of(config: dict, override: int | None = None) -> int:
+    """Seconds the parallel policy's CI gate waits at most for one SHA."""
+    value = override if override is not None else _ci_section(config).get(
+        "timeout", ci_gate.DEFAULT_TIMEOUT)
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= ci_gate.MAX_TIMEOUT):
+        raise CycleDriverError(
+            "code_cycle.ci.timeout must be a whole number of seconds between 1 "
+            f"and {ci_gate.MAX_TIMEOUT}")
+    return value
+
+
+def check_ci_policy(ci_policy: str, code_host: str | None) -> None:
+    """Refuse a policy the code host cannot honour, before anything runs.
+
+    The parallel policy reads GitHub's checks and rulesets; no other code host
+    has a reader, so it keeps `strict` until one exists.
+    """
+    if ci_policy not in CI_POLICIES:
+        raise CycleDriverError(
+            f"the CI policy must be one of {', '.join(CI_POLICIES)}, not {ci_policy!r}")
+    if ci_policy == "parallel" and code_host not in (None, "github"):
+        raise CycleDriverError(
+            f"the parallel CI policy reads GitHub checks; code_host {code_host} "
+            "uses the strict policy")
 
 
 def repository_of(config: dict) -> str | None:
@@ -547,16 +674,19 @@ class Reported:
                 return readable(value)
         return None
 
-    def completes(self, role: str) -> bool:
-        return self.status in COMPLETES.get(role, frozenset())
+    def completes(self, role: str, ci_policy: str = DEFAULT_CI_POLICY) -> bool:
+        return completes(role, self.status, ci_policy)
 
-    def explain(self, role: str) -> str:
+    def explain(self, role: str, ci_policy: str = DEFAULT_CI_POLICY) -> str:
         if not self.present:
             return f"the {role} reported no structured result"
         if not self.readable:
             return f"the {role} reported a structured result that could not be read"
         if self.status is None:
             return f"the {role} reported a structured result with no status"
+        if self.status == AWAITING_CI_STATUS and ci_policy != "parallel":
+            return (f"the {role} reported {self.status}, which only the parallel "
+                    "CI policy accepts")
         return f"the {role} reported {self.status}"
 
 
@@ -594,13 +724,22 @@ class CycleReport:
     readiness: Readiness | None = None
     #: Where the full decisions record was saved, when it was.
     decisions_path: Path | None = None
+    #: What happened between stages, such as each read or wait of the CI gate,
+    #: as `(stages before it, line)`. Already safe to print.
+    notes: list[tuple[int, str]] = field(default_factory=list)
 
     @property
     def approved(self) -> bool:
-        return self.verdict == "APPROVED"
+        # Under the parallel CI policy a clean review is no approval by itself;
+        # the cycle's own ending is the only one that says it was.
+        return self.status == APPROVED_END
+
+    def note(self, line: str) -> None:
+        self.notes.append((len(self.stages), line))
 
     def explain(self) -> str:
         lines = [f"{self.repo_id} {self.task_id}: {self.status}"]
+        lines.extend(text for position, text in self.notes if position == 0)
         for index, stage in enumerate(self.stages):
             details = (self.stage_details[index]
                        if index < len(self.stage_details) else StageReportDetails(0, None))
@@ -626,6 +765,7 @@ class CycleReport:
                          for warning in details.warnings)
             if result is not None and result.failure_code is not None:
                 lines.append("           " + result.failure_summary())
+            lines.extend(text for position, text in self.notes if position == index + 1)
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
         if self.reason:
@@ -776,8 +916,14 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             local_only: bool = False, evidence: str = "",
             worktree_dir: str | Path | None = None,
             workspace: str = "task",
-            allowed_test_command: str | None = None) -> str:
-    """The prompt for one stage. Named skill, named work item, nothing implied."""
+            allowed_test_command: str | None = None,
+            ci_policy: str = DEFAULT_CI_POLICY) -> str:
+    """The prompt for one stage. Named skill, named work item, nothing implied.
+
+    Under the parallel CI policy the implementation and the reviews are told
+    not to wait for checks. The resolution is not: its own wait for the head it
+    pushes is unchanged by this policy. A strict prompt is the original one.
+    """
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
         raise CycleDriverError(f"no skill is defined for the role {role!r}")
@@ -814,6 +960,11 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             "worker worktrees; keep isolated disposable review clones outside "
             "this directory."
         )
+    if ci_policy == "parallel" and not local_only:
+        if role == "implement":
+            parts.append(PARALLEL_IMPLEMENT)
+        elif role in {"review", "rereview"}:
+            parts.append(PARALLEL_REVIEW)
     if evidence:
         parts.append(evidence)
     if local_only:
@@ -1539,8 +1690,14 @@ def _status_of(payload: dict) -> str | None:
 
 def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
                       change_request_id: str | None, cwd: str | None,
-                      trusted_authors: tuple[str, ...]) -> dict:
-    """Read authoritative GitHub evidence, with no prose-based inference."""
+                      trusted_authors: tuple[str, ...],
+                      awaiting_ci: bool = False) -> dict:
+    """Read authoritative GitHub evidence, with no prose-based inference.
+
+    With `awaiting_ci`, the parallel CI policy's clean review awaiting its
+    checks is a completed review claim too; recovery still only re-dispatches
+    the review for a structured verdict.
+    """
     if not trusted_authors:
         raise CycleDriverError("recovery requires review.trusted_authors")
 
@@ -1607,6 +1764,8 @@ def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
             expected = {"implement": {"IMPLEMENTED"}, "resolve": {"RESOLVED", "PARTIALLY_RESOLVED"},
                         "review": {"APPROVED", "CHANGES_REQUESTED"},
                         "rereview": {"APPROVED", "CHANGES_REQUESTED"}}[role]
+            if awaiting_ci and role in {"review", "rereview"}:
+                expected = expected | {AWAITING_CI_STATUS}
             if receipt["status"] not in expected:
                 raise CycleDriverError("recovery evidence has no completed-stage claim")
             if not isinstance(comment.get("id"), int):
@@ -1799,6 +1958,12 @@ def run_cycle(
     comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
     allowed_test_command: str | None = None,
     history_remote: HistoryRemote | None = None,
+    ci_policy: str = DEFAULT_CI_POLICY,
+    ci_timeout: int = ci_gate.DEFAULT_TIMEOUT,
+    ci_checks: ci_gate.CheckProvider | None = None,
+    ci_poll_interval: float = ci_gate.DEFAULT_POLL_INTERVAL,
+    ci_clock: Callable[[], float] | None = None,
+    ci_sleep: Callable[[float], None] | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -1825,9 +1990,18 @@ def run_cycle(
     `history_remote` injects how it is read; without one, a GitHub code host
     is checked through `gh`, and `comment_reader` alone rebuilds the history
     from the comments on every resume, as before.
+
+    `ci_policy` is `strict` by default: the original flow, unchanged. Under
+    `parallel` (#228) the implementation and the reviews do not wait for the
+    code host's checks, a review requesting changes goes to resolution at
+    once, and a clean review is approved only after `ci_gate` waited, once
+    and for at most `ci_timeout` seconds, for every required check of the
+    reviewed SHA to pass while that SHA is still the change request's head.
+    `ci_checks`, `ci_clock` and `ci_sleep` inject the code host and time.
     """
     validate_start(start_from, change_request_id, local_only=local_only,
                    continue_work=continue_work)
+    check_ci_policy(ci_policy, code_host)
     issue_review = IssueReviewMode(issue_review)
     if shadow is None and jev is not None and jev.enabled:
         shadow = JevShadow(jev)
@@ -1858,6 +2032,7 @@ def run_cycle(
         skills_by_role=SKILL_FOR_ROLE,
         change_request_id=change_request_id,
         resolve_effort=resolve_effort,
+        ci_policy=ci_policy,
     )
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,
@@ -2028,7 +2203,8 @@ def run_cycle(
                               workspace=workspace,
                               allowed_test_command=(
                                   allowed_test_command
-                                  if role in {"implement", "resolve"} else None)),
+                                  if role in {"implement", "resolve"} else None),
+                              ci_policy=ci_policy),
                 escalated=escalated,
                 effort_override=(resolve_effort or "high") if role == "resolve" else None,
                 target_override=resolve_target if role == "resolve" else None,
@@ -2075,6 +2251,7 @@ def run_cycle(
         duration = status_writer.stage_finished(
             outcome.result, reported_status,
             findings=_findings_line(role, findings), warnings=warnings,
+            reviewed_head=_reviewed_head(reported.payload, role).get("reviewed_head_sha"),
         )
         report.stage_details.append(StageReportDetails(
             round=recorder.iteration,
@@ -2162,6 +2339,10 @@ def run_cycle(
             escalated = True
 
     pending_recovery: dict | None = None
+    # The attempts whose receipt may carry the latest review's verdict: its
+    # dispatch, and the recovered attempt when its result had to be recovered.
+    review_attempts: set[str] = set()
+    parallel = ci_policy == "parallel" and not local_only
 
     def advance(role: str, instruction: str = "", *,
                 change_request_id: str | None = None,
@@ -2176,6 +2357,7 @@ def run_cycle(
         missing from the fourth.
         """
         nonlocal pending_recovery, previous_resolve_target, previous_resolve_used_fallback
+        nonlocal review_attempts
         if pending_recovery is not None:
             ids = [item["id"] for item in pending_recovery.get("finding_outcomes", [])
                    if item["status"] in {"resolved", "not_applicable"}]
@@ -2199,6 +2381,12 @@ def run_cycle(
             previous_resolve_target = outcome.decision.target
             previous_resolve_used_fallback = outcome.decision.used_fallback
         result = outcome.result
+        if role in {"review", "rereview"}:
+            dispatched = (result.artifacts.get("dispatch_attempt_id")
+                          if result is not None else None)
+            # A re-dispatch for a recovered verdict keeps the recovered attempt.
+            review_attempts = (set(review_attempts) if not recover else set()) | (
+                {dispatched} if isinstance(dispatched, str) else set())
         if (recover and pending_recovery is None and tampered is None and reported.status is None
                 and result is not None and not result.asynchronous
                 and result.error_code in {"unreadable_result", "no_error_report"}
@@ -2209,7 +2397,7 @@ def run_cycle(
                     raise CycleDriverError("recovery requires a recorded dispatch attempt")
                 receipt = recovery_evidence(
                     repo_id, role, attempt_id, change_request_id=change_request_id,
-                    cwd=cwd, trusted_authors=trusted_authors)
+                    cwd=cwd, trusted_authors=trusted_authors, awaiting_ci=parallel)
                 telemetry.record_recovery(
                     attempt_id, change_request_id=receipt["change_request_id"],
                     head_sha=receipt["head_sha"], comment_id=receipt["comment_id"])
@@ -2218,6 +2406,7 @@ def run_cycle(
             pending_recovery = receipt
             report.stage_details[-1].status = "recovered_pending_verification"
             if role in {"review", "rereview"}:
+                review_attempts = {receipt["attempt_id"]}
                 return advance(role, "Obtain a structured verdict for the recovered review.",
                                change_request_id=receipt["change_request_id"], recover=False)
             if role == "resolve":
@@ -2234,7 +2423,7 @@ def run_cycle(
                 current_receipt = recovery_evidence(
                     repo_id, pending_recovery["stage"], pending_recovery["attempt_id"],
                     change_request_id=pending_recovery["change_request_id"],
-                    cwd=cwd, trusted_authors=trusted_authors)
+                    cwd=cwd, trusted_authors=trusted_authors, awaiting_ci=parallel)
             except CycleDriverError as error:
                 return reported, stop(f"recovered stage not completed: {error}", reported=reported)
             claims = {item["id"] for item in pending_recovery.get("finding_outcomes", [])
@@ -2244,13 +2433,13 @@ def run_cycle(
             verified_statuses = _finding_statuses({"verified_findings": verified}, "rereview")
             verified_ids = {item["id"] for item in verified
                             if isinstance(item, dict) and isinstance(item.get("id"), str)} if isinstance(verified, list) else set()
-            if (not reported.completes(role)
+            if (not reported.completes(role, ci_policy)
                     or current_receipt != pending_recovery
                     or payload.get("head_sha") != pending_recovery["head_sha"]
                     or payload.get("reviewed_head_sha", payload.get("head_sha")) != pending_recovery["head_sha"]
                     or _git_line(cwd, ["rev-parse", "HEAD"], 30) != pending_recovery["head_sha"]
                     or (claims and (verified_statuses is None or not claims.issubset(verified_ids)))
-                    or (reported.status == "APPROVED" and verified_statuses
+                    or (reported.status in CLEAN_REVIEW_STATUSES and verified_statuses
                         and any(verified_statuses.get(finding_id) == "open" for finding_id in claims))):
                 return reported, stop("recovered stage not completed: verifier did not confirm "
                                       "the recovered head and every claimed finding", reported=reported)
@@ -2269,10 +2458,11 @@ def run_cycle(
                                     **_tests(reported.payload, boundary_rule=(
                                         boundary_rule_fired(recorder.latest_change))),
                                     **_checks(reported.payload),
+                                    **_reviewed_head(reported.payload, role),
                                     **({"pull_request_id": pull_request_id}
                                        if pull_request_id else {}))
-        if not reported.completes(role):
-            return reported, stop(reported.explain(role), reported=reported)
+        if not reported.completes(role, ci_policy):
+            return reported, stop(reported.explain(role, ci_policy), reported=reported)
         if recover and role in COMMENT_STAGES and change_request_id:
             stopped = after_publication(
                 role, change_request_id,
@@ -2351,6 +2541,195 @@ def run_cycle(
         issue_review_fields["issue_review"] = issue_review_decision(
             issue_review, signals)
 
+    # The parallel CI policy's gate (#228): the code host it reads, and the
+    # cycle's only wait on checks. Nothing here writes to the code host.
+    checks_provider = ci_checks if ci_checks is not None else ci_gate.GitHubChecks(cwd)
+
+    def pull_number() -> str | None:
+        return _pull_number(change_request_id)
+
+    def read_ci(head: str, role: str | None, *, once: bool) -> ci_gate.GateResult:
+        """One read, or the one bounded wait, of the CI gate: recorded and shown.
+
+        No stage runs while it waits and nothing else polls: under the parallel
+        policy this is the cycle's only wait on the code host's checks.
+        """
+        number = pull_number()
+        if number is None:
+            result = ci_gate.GateResult(
+                status=ci_gate.CI_UNREADABLE, head_sha=head,
+                reason="the change request names no GitHub pull request number")
+        else:
+            timing = {}
+            if ci_clock is not None:
+                timing["clock"] = ci_clock
+            if ci_sleep is not None:
+                timing["sleep"] = ci_sleep
+            result = ci_gate.wait_for_checks(
+                checks_provider, repo_id, number, head, timeout=ci_timeout,
+                poll_interval=ci_poll_interval, once=once,
+                on_poll=lambda observed: status_writer.ci_observed(
+                    observed, waiting=not once and observed.status == ci_gate.CI_PENDING),
+                **timing)
+        recorder.record_ci(result, mode="once" if once else "wait", role=role)
+        status_writer.ci_observed(result, waiting=False)
+        report.note(_ci_line(result, once=once))
+        return result
+
+    def receipt_problem(role: str, head: str, attempts: set[str]) -> str | None:
+        """Why no trusted receipt on the change request vouches for a clean review.
+
+        The PR comment is the record of a clean review awaiting its checks, so
+        approval never rests on the structured result alone. A trusted receipt
+        of one of `attempts` must name this stage, this head and a clean
+        status; none of their receipts may say otherwise; and nothing may have
+        been published after them.
+        """
+        number = pull_number()
+        trusted = trusted_logins(trusted_authors)
+        if not trusted:
+            return "review.trusted_authors is empty, so no receipt can be authenticated"
+        if number is None or not attempts:
+            return "the review has no pull request number or recorded attempt to look for"
+        try:
+            comments = remote.comments(repo_id, number)
+        except CycleDriverError as error:
+            return f"the comments of change request {number} could not be read: {error}"
+        receipts = []
+        for comment in comments:
+            author = (comment.author.strip().casefold()
+                      if isinstance(comment.author, str) else None)
+            if author not in trusted:
+                continue
+            try:
+                found = stage_evidence(comment.body)
+            except ContractError:
+                if any(attempt in comment.body for attempt in attempts):
+                    return "its receipt cannot be read"
+                continue
+            receipts.extend(receipt for receipt in found
+                            if receipt["repo"] == repo_id
+                            and receipt["change_request_id"] == number)
+        mine = [receipt for receipt in receipts if receipt["attempt_id"] in attempts]
+        if not mine:
+            return "no trusted comment carries its receipt"
+        if any(receipt["stage"] != role or receipt["head_sha"] != head
+               or receipt["status"] not in CLEAN_REVIEW_STATUSES for receipt in mine):
+            return "its receipt names another stage, head or status"
+        if receipts[-1]["attempt_id"] not in attempts:
+            return "another stage published after it"
+        return None
+
+    def clean_head(role: str, reported: Reported) -> tuple[str | None, CycleReport | None]:
+        """The head a clean review completed on, once its result and receipt hold."""
+        problem = clean_review_problem(reported.payload, role)
+        if problem is not None:
+            return None, stop(
+                f"the {role} reported {reported.status} without a valid completed "
+                f"clean review: {problem}", reported=reported)
+        head = reported.payload["reviewed_head_sha"]
+        problem = receipt_problem(role, head, review_attempts)
+        if problem is not None:
+            return None, stop(
+                f"the {role} reported {reported.status} for {head[:12]}, but {problem}; "
+                "the receipt on the change request is the record of a clean review",
+                "BLOCKED", reported=reported)
+        return head, None
+
+    def gate(role: str, head: str, attempts: set[str], reported: Reported):
+        """Wait for the checks of a clean review's head; approve only on a pass.
+
+        Returns `("approved" | "moved" | "failed", result)`, or the report of a
+        stop. The final barrier is all of: every required check of `head`
+        passed while it was still the change request's head, and the clean
+        review's receipt still holds with nothing published after it.
+        """
+        result = read_ci(head, role, once=False)
+        number = pull_number() or change_request_id
+        if result.status == ci_gate.CI_PASSED:
+            problem = receipt_problem(role, head, attempts)
+            if problem is not None:
+                return stop(
+                    f"the checks of {head[:12]} passed, but the clean {role}'s receipt "
+                    f"no longer holds: {problem}", "BLOCKED", reported=reported)
+            return "approved", result
+        if result.status == ci_gate.CI_HEAD_MOVED:
+            return "moved", result
+        if result.status == ci_gate.CI_FAILED:
+            return "failed", result
+        detail = _ci_detail(result)
+        if result.status == ci_gate.CI_TIMEOUT:
+            return stop(
+                f"the {role} of {head[:12]} is clean and stays valid for that head, but "
+                f"its checks had not all passed after {_duration(ci_timeout)}: {detail}; "
+                f"resume with --from rereview --pr {number} --ci-policy parallel to keep "
+                "waiting without another review",
+                "BLOCKED", reported=reported, stop_reason="ci_timeout")
+        if result.status in {ci_gate.CI_SKIPPED, ci_gate.NO_CI_CHECKS_FOUND}:
+            return stop(
+                f"the {role} of {head[:12]} is clean, but its checks cannot pass "
+                f"({result.status}): {detail}; approval needs every required check "
+                "to succeed on that head",
+                UNRESOLVED_END, reported=reported, stop_reason="ci_not_passing")
+        return stop(f"the checks of {head[:12]} could not be read: {detail}",
+                    "BLOCKED", reported=reported, stop_reason="ci_unreadable")
+
+    def reusable_review():
+        """The clean review a resumed change request already has, when it holds.
+
+        The receipt on the change request is the record: when the latest
+        trusted receipt is a clean review or re-review of the current head and
+        the published findings block nothing, the review is not run again and
+        the cycle only waits for its checks. Anything else reviews the head.
+        Returns `((role, status, head, attempts) | None, stop | None)`.
+        """
+        number = pull_number()
+        if number is None:
+            return None, stop(
+                f"the parallel CI policy needs a GitHub pull request number, not "
+                f"{change_request_id}", "BLOCKED", stop_reason="ci_unreadable")
+        try:
+            comments = remote.comments(repo_id, number)
+            pull = checks_provider.pull(repo_id, number)
+        except (CycleDriverError, ci_gate.CheckReadError) as error:
+            return None, stop(
+                f"whether change request {number} already has a clean review could "
+                f"not be read: {error}", "BLOCKED", stop_reason="ci_unreadable")
+        if pull.state != "OPEN":
+            return None, stop(
+                f"change request {number} is {pull.state.lower()}, not open", "BLOCKED")
+        recorder.review_reused = False
+        try:
+            receipts = [receipt for receipt in trusted_receipts(
+                            comments, trusted_authors=trusted_authors)
+                        if receipt["repo"] == repo_id
+                        and receipt["change_request_id"] == number]
+            published = recover_comment_history(comments, trusted_authors=trusted_authors)
+        except ContractError as error:
+            report.note(f"  resume   no clean review reused: {readable(str(error), 200)}")
+            return None, None
+        latest = receipts[-1] if receipts else None
+        if (latest is None or latest["stage"] not in {"review", "rereview"}
+                or latest["status"] not in CLEAN_REVIEW_STATUSES):
+            return None, None
+        if latest["head_sha"] != pull.head_sha:
+            report.note(
+                f"  resume   the clean {latest['stage']} of {latest['head_sha'][:12]} "
+                f"does not hold for the current head {readable(pull.head_sha, 12)}; "
+                "reviewing the current head")
+            return None, None
+        if any(finding.status == "open" and finding.blocks_approval
+               for finding in published.findings):
+            report.note("  resume   the published findings still block approval; "
+                        "reviewing again")
+            return None, None
+        recorder.review_reused = True
+        report.note(
+            f"  resume   reused the clean {latest['stage']} of {latest['head_sha'][:12]} "
+            "from its receipt; no review dispatched")
+        return (latest["stage"], latest["status"], latest["head_sha"],
+                {latest["attempt_id"]}), None
+
     def drive() -> CycleReport:
         nonlocal change_request_id
         reported = Reported()
@@ -2388,13 +2767,26 @@ def run_cycle(
                 if stopped is not None:
                     return stopped
 
-        if start_from in {"implement", "review"}:
+        # Under the parallel policy, the clean review the cycle gates on:
+        # `(role, status, head, attempts whose receipt vouches for it)`.
+        clean = None
+        role = None
+        if parallel and start_from == "rereview":
+            clean, stopped = reusable_review()
+            if stopped is not None:
+                return stopped
+        if clean is not None:
+            role, verdict = clean[0], clean[1]
+            report.verdict = verdict
+        elif start_from in {"implement", "review"}:
+            role = "review"
             reported, stopped = advance("review", change_request_id=change_request_id)
             if stopped is not None:
                 return stopped
             verdict = reported.status
             report.verdict = verdict
         elif start_from == "rereview":
+            role = "rereview"
             reported, stopped = advance("rereview", "Re-review the change after the fixes.",
                                         change_request_id=change_request_id)
             if stopped is not None:
@@ -2408,7 +2800,57 @@ def run_cycle(
             # report's verdict stays unset until a re-review gives one.
             verdict = "CHANGES_REQUESTED"
 
-        while verdict == "CHANGES_REQUESTED":
+        moved = False
+        ci_failure: ci_gate.GateResult | None = None
+        while True:
+            if parallel and verdict in CLEAN_REVIEW_STATUSES:
+                # A clean review is no approval yet: the gate waits for its checks.
+                if clean is None:
+                    head, stopped = clean_head(role, reported)
+                    if stopped is not None:
+                        return stopped
+                    clean = (role, verdict, head, set(review_attempts))
+                head = clean[2]
+                outcome = gate(clean[0], head, clean[3], reported)
+                clean = None
+                if isinstance(outcome, CycleReport):
+                    return outcome
+                kind, result = outcome
+                if kind == "approved":
+                    return stop("", APPROVED_END, reported=reported, stop_reason="approved")
+                if kind == "moved":
+                    new = result.pr_head_sha
+                    if moved or not isinstance(new, str) or FULL_SHA.fullmatch(new) is None:
+                        return stop(
+                            f"the change request's head moved {'again ' if moved else ''}"
+                            f"after the clean review of {head[:12]}; a person decides "
+                            "what to review", UNRESOLVED_END, reported=reported,
+                            stop_reason="head_moved")
+                    moved = True
+                    if recorder.iteration >= max_iterations:
+                        return stop(
+                            f"the change request's head moved after the clean review of "
+                            f"{head[:12]} and the resolution budget is spent",
+                            reported=reported, stop_reason="iteration_limit")
+                    # The review of the old head is not reused: the new head
+                    # gets its own, once, as one round.
+                    recorder.next_iteration()
+                    role = "rereview"
+                    reported, stopped = advance(
+                        "rereview", HEAD_MOVED_REREVIEW.format(old=head, new=new),
+                        change_request_id=change_request_id)
+                    if stopped is not None:
+                        return stopped
+                    verdict = reported.status
+                    report.verdict = verdict
+                    continue
+                # The checks failed: their diagnosis is the next resolution's.
+                ci_failure = result
+            elif verdict != "CHANGES_REQUESTED":
+                break
+
+            # One resolution round: for the review's blocking findings, for the
+            # failed checks of a clean review's head, or for both.
             survivals = claimed_fix_survivals(history)
             recorder.repeated_findings = len(survivals)
             repeated = sorted(finding for finding, count in survivals.items()
@@ -2427,12 +2869,26 @@ def run_cycle(
                 break
             recorder.next_iteration()
 
-            instruction = "Resolve the findings from the review."
+            instruction = ("Resolve the failed checks of the reviewed head."
+                           if ci_failure is not None
+                           else "Resolve the findings from the review.")
             contested = sorted(finding for finding, count in survivals.items()
                                if count >= SURVIVALS_BEFORE_DIRECTIVE)
             if contested:
                 instruction = (f"{instruction} "
                                f"{CONTESTED_DIRECTIVE.format(ids=', '.join(contested))}")
+            failed_checks = ci_failure
+            if parallel and failed_checks is None and role is not None:
+                # Changes requested while the checks run: one read, never a
+                # wait, so a failure already known reaches this resolution too.
+                reviewed = _reviewed_head(reported.payload, role).get("reviewed_head_sha")
+                if reviewed:
+                    snapshot = read_ci(reviewed, role, once=True)
+                    if snapshot.status == ci_gate.CI_FAILED:
+                        failed_checks = snapshot
+            if failed_checks is not None:
+                instruction += " " + CI_FAILURE_DIRECTIVE.format(
+                    head=failed_checks.head_sha, count=len(failed_checks.failed))
             open_findings = (history[-1].statuses if history
                              and history[-1].kind == REVIEW_RUN else {})
             escalation_ids = tuple(sorted(
@@ -2440,7 +2896,7 @@ def run_cycle(
                 if (resolve_effort is None and count >= 1
                     and open_findings.get(finding) == "open")
             )[:16])
-            _, stopped = advance(
+            resolved, stopped = advance(
                 "resolve", instruction, change_request_id=change_request_id,
                 resolve_target=previous_resolve_target if escalation_ids else None,
                 resolve_target_used_fallback=(previous_resolve_used_fallback
@@ -2449,7 +2905,18 @@ def run_cycle(
                 escalation_finding_ids=escalation_ids)
             if stopped is not None:
                 return stopped
+            if ci_failure is not None:
+                after = (resolved.payload or {}).get("head_sha")
+                if after == ci_failure.head_sha:
+                    # Re-reviewing an unchanged head would repeat a review the
+                    # CI state did not change; the failed checks still stand.
+                    return stop(
+                        f"the resolution of the failed checks of {after[:12]} left the "
+                        "head unchanged, so the failures stand",
+                        reported=resolved, stop_reason="no_progress")
+            ci_failure = None
 
+            role = "rereview"
             reported, stopped = advance("rereview", "Re-review the change after the fixes.",
                                         change_request_id=change_request_id)
             if stopped is not None:
@@ -2458,9 +2925,15 @@ def run_cycle(
             report.verdict = verdict
 
         # The last stage's own account travels with every ending, not only the bad
-        # ones: a run that finished still said something about how.
-        if verdict == "APPROVED":
+        # ones: a run that finished still said something about how. Under the
+        # parallel policy only the CI gate above approves.
+        if not parallel and verdict == "APPROVED":
             return stop("", APPROVED_END, reported=reported, stop_reason="approved")
+        if ci_failure is not None:
+            return stop(
+                f"the checks of {ci_failure.head_sha[:12]} failed after its clean review "
+                f"and the budget of {max_iterations} round(s) is spent",
+                reported=reported, stop_reason="iteration_limit")
         return stop(f"still {verdict} after {recorder.iteration} round(s)",
                     reported=reported, stop_reason="iteration_limit")
 
@@ -2872,7 +3345,96 @@ def _checks(payload: dict | None) -> dict:
     ran_on, head = checks.get("head_sha"), payload.get("head_sha")
     if isinstance(ran_on, str) and isinstance(head, str) and ran_on != head:
         return {}
-    return {f"checks_{state}": value for state, value in counts.items()}
+    recorded = {f"checks_{state}": value for state, value in counts.items()}
+    # Counts without the SHA they describe cannot be tied to a review (#228).
+    if isinstance(ran_on, str) and FULL_SHA.fullmatch(ran_on):
+        recorded["checks_head_sha"] = ran_on
+    return recorded
+
+
+def _reviewed_head(payload: dict | None, role: str) -> dict:
+    """The full SHA a review reports it completed on, when it reports one.
+
+    It ties the review outcome to the CI outcome of the same SHA (#228). A
+    shortened or malformed SHA is left out rather than recorded as a guess.
+    """
+    head = payload.get("reviewed_head_sha") if payload and role in {"review", "rereview"} else None
+    if isinstance(head, str) and FULL_SHA.fullmatch(head):
+        return {"reviewed_head_sha": head}
+    return {}
+
+
+def _pull_number(reference: str | None) -> str | None:
+    """The GitHub pull request number a change-request reference names, or None."""
+    if not isinstance(reference, str):
+        return None
+    value = reference.strip()
+    for marker in ("/pull/", "#"):
+        if marker in value:
+            value = value.rsplit(marker, 1)[-1]
+    return value if re.fullmatch(r"[1-9][0-9]{0,9}", value) else None
+
+
+def clean_review_problem(payload: dict | None, role: str) -> str | None:
+    """Why a clean review status is not a valid completed clean review (#228).
+
+    A clean status alone is not a successful review, and an empty finding list
+    alone is not one either. The result must name the full SHA it reviewed,
+    which must be the head it reports, list its blocking findings explicitly
+    as none, and carry a finding list that can be read with no open finding
+    that blocks approval in it. Returns None when it is all of that.
+    """
+    if not isinstance(payload, dict):
+        return "its result cannot be read"
+    reviewed = payload.get("reviewed_head_sha")
+    if not isinstance(reviewed, str) or FULL_SHA.fullmatch(reviewed) is None:
+        return "it names no full reviewed_head_sha"
+    if payload.get("head_sha") != reviewed:
+        return "its reviewed_head_sha is not its head_sha"
+    blocking = payload.get("blocking_findings")
+    if not isinstance(blocking, list):
+        return "it carries no blocking_findings list"
+    if blocking:
+        return "it lists blocking findings"
+    if _finding_statuses(payload, role) is None:
+        return "its findings cannot be read"
+    keys = ("findings",) if role == "review" else ("verified_findings", "new_findings")
+    entries = [item for key in keys if isinstance(payload.get(key), list)
+               for item in payload[key]]
+    if any(item.get("status") in {"open", "still_open"} and item.get("blocks_approval") is True
+           for item in entries):
+        return "an open finding blocks approval"
+    return None
+
+
+def _ci_names(labels: tuple[str, ...], limit: int = 4) -> str:
+    """Check names for a person's screen: written by the change, so made safe."""
+    shown = ", ".join(readable(label, 80) for label in labels[:limit])
+    more = len(labels) - limit
+    return f"{shown}, and {more} more" if more > 0 else shown
+
+
+def _ci_detail(result: ci_gate.GateResult) -> str:
+    parts = []
+    for state in ("failed", "skipped", "pending", "missing", "passed"):
+        labels = getattr(result, state)
+        if labels:
+            names = f" ({_ci_names(labels)})" if state != "passed" else ""
+            parts.append(f"{len(labels)} {state}{names}")
+    if result.late:
+        parts.append(f"{len(result.late)} reported late ({_ci_names(result.late)})")
+    if result.reason:
+        parts.append(readable(result.reason, 200))
+    return "; ".join(parts) or "no checks"
+
+
+def _ci_line(result: ci_gate.GateResult, *, once: bool) -> str:
+    """One report line for one read or wait of the CI gate."""
+    how = ("one read" if once else
+           f"{result.polls} read{'s' if result.polls != 1 else ''} in "
+           f"{_duration(result.waited_seconds)}")
+    return (f"  ci       {result.status} on {result.head_sha[:12]} after {how}: "
+            f"{_ci_detail(result)}")
 
 
 def _why(outcome: StageOutcome) -> str:
@@ -3073,6 +3635,16 @@ def main(argv: list[str] | None = None) -> int:
                               "work in --cwd instead of starting it again; skips the "
                               "issue review"))
     parser.add_argument("--max-iterations", type=int, default=3)
+    parser.add_argument("--ci-policy", choices=CI_POLICIES, default=None,
+                        help=("how the cycle treats the code host's checks: strict waits "
+                              "for them in each writing stage; parallel reviews while "
+                              "they run and approves only after every required check "
+                              "of the reviewed SHA passed (default: "
+                              f"code_cycle.ci.policy in {CONFIG_NAME}, else strict)"))
+    parser.add_argument("--ci-timeout", type=int, default=None,
+                        help=("seconds the parallel policy's CI gate waits at most for "
+                              f"one SHA (default: code_cycle.ci.timeout, else "
+                              f"{ci_gate.DEFAULT_TIMEOUT})"))
     parser.add_argument("--cwd", default=None,
                         help="working directory the executor runs in")
     parser.add_argument("--workspace", choices=WORKSPACE_MODES, default="task",
@@ -3117,6 +3689,9 @@ def main(argv: list[str] | None = None) -> int:
             raise CycleDriverError(
                 "--continue needs --cwd: the checkout the interrupted run used"
             )
+        ci_policy = ci_policy_of(config, args.ci_policy)
+        ci_timeout = ci_timeout_of(config, args.ci_timeout)
+        check_ci_policy(ci_policy, (config.get("code_cycle") or {}).get("code_host"))
         if args.start_from in RESUMES:
             host = (config.get("code_cycle") or {}).get("code_host")
             if host not in (None, "github"):
@@ -3193,6 +3768,8 @@ def main(argv: list[str] | None = None) -> int:
                     "trusted_authors", [])),
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
                 allowed_test_command=allowed_test_command(config),
+                ci_policy=ci_policy,
+                ci_timeout=ci_timeout,
             )
     except CycleDriverError as error:
         parser.error(str(error))

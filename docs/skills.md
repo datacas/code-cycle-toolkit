@@ -85,6 +85,7 @@ Implements one work item and takes it to a tested pull request.
 - **Diagnosis decisions:** `implement` and `implement_root_fix` proceed; the second lists in the PR every other open item the root fix also addresses, without closing them. `do_not_implement_in_isolation` (a shared cause whose root fix exceeds the item), `stop_duplicate` (duplicate, superseded, or already resolved), `needs_scope_decision` (the real cause lies outside the item), and `needs_evidence` (a defect that could not be reproduced) stop as `BLOCKED` before any branch exists and comment on the work item with the evidence.
 - **Work units:** one behaviour is a unit, with its files, tests, verification, and applicable documentation. Each unit leaves the tree passing. The PR's *Work units* table records behaviour, files, tests, verification, and rollback (`independent`, `dependent`, or `irreversible`). A `dependent` row names the units it must be reverted with; an `irreversible` row names the effect and manual recovery step.
 - **Statuses:** `IMPLEMENTED`, `BLOCKED`, `FAILED`.
+- **CI policy:** under `strict` (default) it waits for the pushed head's checks; under `parallel` it reads them once and returns, leaving the wait to the cycle's CI gate. See [CI policy](review-cycle.md#ci-policy).
 - **Result:** the structured result carries an additive `diagnosis` object with closed values only: `classification` (`isolated_defect`, `shared_cause`, `duplicate`, `superseded`, `already_resolved`, `feature_request`, `cause_mismatch`, `not_reproduced`), `decision`, `related_search` (`basic` or `widened`), `reproduced` and `cause_matches_issue` (`true`, `false`, or `null` when not applicable or not established), and `related_items` (identifiers only). It also carries `work_units` as a non-empty list of `{id, commit_sha, rollback}` tokens whenever at least one unit was planned, even if a later step stops as `BLOCKED`; omit it if the run stops before planning. `commit_sha` is null when no per-unit commit exists, including local-only work that stops before committing or a repository that requires one combined commit; `pr_number` is null when no PR was created, distinguishing local-only work from a combined-commit PR. Consumers that ignore unknown keys are unaffected.
 - **Never:** merges, describes the PR as reviewed, or closes or labels unrelated issues, including the related items its diagnosis found.
 
@@ -104,7 +105,7 @@ The first complete review of a change request.
   2. runs `cc-pr-review`, [security triage](review-cycle.md#security-triage) (and `cc-security-review` when triggered), and `cc-verify` on actionable findings;
   3. inspects CI;
   4. publishes **one** consolidated comment.
-- **Statuses:** `APPROVED` (full head reviewed, required checks passed, nothing blocking), `CHANGES_REQUESTED`, `BLOCKED`, `FAILED`.
+- **Statuses:** `APPROVED` (full head reviewed, required checks passed, nothing blocking), `CHANGES_REQUESTED`, `BLOCKED`, `FAILED`, and under the `parallel` [CI policy](review-cycle.md#ci-policy) `REVIEW_PASSED_AWAITING_CI` (full head reviewed, nothing blocking, checks not all passed yet), which is not an approval.
 - **Never:** modifies code.
 
 ```text
@@ -123,6 +124,7 @@ Acts on review feedback.
   3. then runs `cc-code-review` on the new diff, security triage again, and `cc-verify`;
   4. commits, pushes, replies in threads, and publishes a summary.
 - **Statuses:** `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`.
+- **CI failures:** under the `parallel` CI policy it may be told, by SHA and count, that required checks failed on the reviewed head; it diagnoses them beside the findings, never as findings.
 - **Never:** declares approval, or changes code just to silence a review.
 
 ```text

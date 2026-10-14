@@ -64,8 +64,9 @@ from router import (
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
 from telemetry import (
-    CYCLE_STARTS, Telemetry, TelemetryError, WORK_ITEM_PROVIDERS,
-    routing_decision_fields, validate_reference,
+    AWAITING_CI_STATUS, CI_PASSED, CI_POLICIES, CYCLE_STARTS, DEFINITIVE_FAILURES,
+    Telemetry, TelemetryError, WORK_ITEM_PROVIDERS, routing_decision_fields,
+    validate_reference,
 )
 
 SCHEMA_VERSION = 1
@@ -82,6 +83,10 @@ FINDING_FIELDS = (
 #: Review statuses that settle a round. Anything else leaves the review outcome
 #: unknown rather than failed.
 TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
+
+#: A review that completed with nothing blocking. Under the parallel CI policy
+#: it becomes an approval only once the CI gate passes the same SHA.
+CLEAN_REVIEW_STATUSES = frozenset({"APPROVED", AWAITING_CI_STATUS})
 
 @dataclass(frozen=True)
 class RoleContract:
@@ -261,6 +266,7 @@ class CycleRecorder:
         skills_by_role: dict[str, str] | None = None,
         change_request_id: str | None = None,
         resolve_effort: str | None = None,
+        ci_policy: str = "strict",
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -303,6 +309,9 @@ class CycleRecorder:
         self.resolve_effort = resolve_effort or "high"
         if self.resolve_effort not in {"low", "medium", "high", "max"}:
             raise CycleError("resolve effort must be one of low, medium, high, max")
+        if ci_policy not in CI_POLICIES:
+            raise CycleError(f"the CI policy must be one of {', '.join(CI_POLICIES)}")
+        self.ci_policy = ci_policy
         # Already resolved by whoever loaded the repository's configuration.
         # The recorder does not go looking for a file: a component that reads
         # configuration on its own is one that can disagree with the caller
@@ -346,6 +355,24 @@ class CycleRecorder:
         self._latest_seq: dict[str, int] = {}
         self.first_review_status: str | None = None
         self.final_review_status: str | None = None
+        # The SHA each of those reviews completed on, and what the CI gate made
+        # of each SHA it waited for (#228). Under the parallel policy a clean
+        # review is an approval only with a CI pass of its own SHA.
+        self.first_review_head: str | None = None
+        self.final_review_head: str | None = None
+        self.ci_outcomes: dict[str, str] = {}
+        self.final_ci_status: str | None = None
+        self.ci_polls = 0
+        self.ci_wait_ms = 0
+        self.ci_recorded = False
+        # A review of a head that already had a clean review in this run. The
+        # CI gate exists so that this stays zero; it is measured to show it.
+        self.clean_review_heads: set[str] = set()
+        self.redundant_reviews = 0
+        self.reviews_measured = False
+        # Set by the driver when a resume reused a clean review's receipt
+        # instead of dispatching one; `None` is a cycle that could not have.
+        self.review_reused: bool | None = None
         self.tests_passed: bool | None = None
         self.tests_basis: str | None = None
         self.verification: str | None = None
@@ -923,10 +950,19 @@ class CycleRecorder:
         )
         # Tracked only after the row was accepted, so a refused verdict cannot
         # reach the closing row either.
-        if role in REVIEW_ROLES and status in TERMINAL_REVIEW_STATUSES:
+        if role in REVIEW_ROLES and self._completed_review(status):
+            head = fields.get("reviewed_head_sha")
             if role == "review" and self.first_review_status is None:
                 self.first_review_status = status
+                self.first_review_head = head
             self.final_review_status = status
+            self.final_review_head = head
+            if isinstance(head, str):
+                self.reviews_measured = True
+                if head in self.clean_review_heads:
+                    self.redundant_reviews += 1
+                if status in CLEAN_REVIEW_STATUSES:
+                    self.clean_review_heads.add(head)
         if (fields.get("tests_passed") is not None
                 or fields.get("verification") is not None
                 or fields.get("boundary_verified") is not None):
@@ -936,6 +972,65 @@ class CycleRecorder:
             self.tests_basis = fields.get("tests_basis")
             self.verification = fields.get("verification")
             self.boundary_verified = fields.get("boundary_verified")
+        return row
+
+    def _completed_review(self, status: str) -> bool:
+        """A review status that settles its round under this cycle's CI policy."""
+        return (status in TERMINAL_REVIEW_STATUSES
+                or (status == AWAITING_CI_STATUS and self.ci_policy == "parallel"))
+
+    def _approved(self, status: str, head: str | None) -> bool | None:
+        """Whether a review settled as an approval, or None when it is not known.
+
+        Under `strict` the reviewer's `APPROVED` is the approval, as before.
+        Under `parallel` a clean review approves only once the CI gate passed
+        its own SHA, and fails to once the gate definitively ruled it out.
+        """
+        if self.ci_policy != "parallel":
+            return status == "APPROVED"
+        if status not in CLEAN_REVIEW_STATUSES:
+            return False
+        gate = self.ci_outcomes.get(head) if head else None
+        if gate == CI_PASSED:
+            return True
+        if gate in DEFINITIVE_FAILURES:
+            return False
+        return None
+
+    def record_ci(self, result, *, mode: str, role: str | None = None) -> int:
+        """Record one read (`once`) or wait (`wait`) of the CI gate (#228).
+
+        A row of its own beside the review's verdict, because the review
+        outcome and the CI outcome are separate facts about one SHA, and each
+        names that SHA. It points at the review it followed through
+        `stage_seq`. Only a wait decides approval; a read only informs.
+        """
+        counts = result.counts()
+        source = ({"stage_seq": self._latest_seq[role]}
+                  if role in self._latest_seq else {})
+        waited = int(round(result.waited_seconds * 1000))
+        row = self.telemetry.record_stage(
+            self.repo_id, self.task_id, "coordinate",
+            iteration=self.iteration,
+            routing_strategy=self.routing_strategy.value,
+            local_only=self.local_only,
+            started_from=self.started_from,
+            cycle_id=self.cycle_id, record_kind="ci",
+            ci_policy=self.ci_policy,
+            ci_status=result.status, ci_mode=mode, ci_head_sha=result.head_sha,
+            ci_required_source=result.required_source,
+            checks_passed=counts["passed"], checks_failed=counts["failed"],
+            checks_pending=counts["pending"], checks_skipped=counts["skipped"],
+            checks_missing=counts["missing"], checks_late=counts["late"],
+            ci_polls=result.polls, ci_wait_ms=waited,
+            **self.work_item_identity_fields, **source,
+        )
+        self.ci_recorded = True
+        self.ci_polls += result.polls
+        if mode == "wait":
+            self.ci_wait_ms += waited
+            self.ci_outcomes[result.head_sha] = result.status
+            self.final_ci_status = result.status
         return row
 
     def next_iteration(self) -> int:
@@ -952,6 +1047,7 @@ class CycleRecorder:
             local_only=self.local_only,
             started_from=self.started_from,
             cycle_id=self.cycle_id, record_kind="cycle",
+            ci_policy=self.ci_policy,
             **self.work_item_identity_fields,
             **{**self.observed_outcome(), **fields},
         )
@@ -985,13 +1081,22 @@ class CycleRecorder:
             )
             # A first pass is an implementation's first review. A resumed
             # cycle's review judged work from an earlier run.
-            if self.started_from == "implement":
-                outcome["first_pass_approved"] = first == "APPROVED"
+            approved = self._approved(first, self.first_review_head)
+            if self.started_from == "implement" and approved is not None:
+                outcome["first_pass_approved"] = approved
         if self.final_review_status is not None:
-            outcome.update(
-                final_review_status=self.final_review_status,
-                final_approved=self.final_review_status == "APPROVED",
-            )
+            outcome["final_review_status"] = self.final_review_status
+            approved = self._approved(self.final_review_status, self.final_review_head)
+            if approved is not None:
+                outcome["final_approved"] = approved
+        if self.ci_recorded:
+            outcome.update(ci_polls=self.ci_polls, ci_wait_ms=self.ci_wait_ms)
+        if self.final_ci_status is not None:
+            outcome["final_ci_status"] = self.final_ci_status
+        if self.reviews_measured:
+            outcome["redundant_reviews"] = self.redundant_reviews
+        if self.review_reused is not None:
+            outcome["review_reused"] = self.review_reused
         if self.tests_passed is not None:
             outcome.update(
                 tests_passed=self.tests_passed,
