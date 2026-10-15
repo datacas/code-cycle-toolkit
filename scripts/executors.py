@@ -179,8 +179,19 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                 del worker_argv[index:index + 2]
                 options += ["-c", f'default_permissions="{profile}"',
                             "-c", f'permissions.{profile}.extends=":read-only"']
-            options += ["-c", f'permissions.{profile}.filesystem={{'
-                        f'{json.dumps(scratch)}="write"}}',
+            rule = f"permissions.{profile}.filesystem="
+            grants = [f'{json.dumps(scratch)}="write"']
+            # The dispatch may already grant this profile a path, such as the
+            # host Docker socket. A second override of the same key would
+            # replace the first, so both grants go into one table.
+            existing = next((index for index, option in enumerate(worker_argv)
+                             if option.startswith(rule)), None)
+            if existing is not None:
+                granted = worker_argv[existing].removeprefix(rule)[1:-1]
+                if granted:
+                    grants.append(granted)
+                del worker_argv[existing - 1:existing + 1]
+            options += ["-c", rule + "{" + ",".join(grants) + "}",
                         "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
             worker_argv[-1:-1] = options
         yield worker_argv, worker_env

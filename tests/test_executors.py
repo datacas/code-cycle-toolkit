@@ -2595,11 +2595,38 @@ class ReadOnlyVerificationTests(unittest.TestCase):
                 observed.append(env["TMPDIR"])
                 return completed("{}")
 
-            result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
-                                               publishes=publishes, runner=capture)
+            # The host's Docker socket would add a grant; this test is about
+            # the scratch directory alone, on any runner.
+            with patch.object(ex.CodexAdapter, "_docker_socket_path", return_value=None):
+                result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
+                                                   publishes=publishes, runner=capture)
             self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
             self.assertEqual(1, len(observed))
             self.assertFalse(Path(observed[0]).exists())
+
+    def test_publishing_review_keeps_scratch_and_docker_socket_in_one_grant(self) -> None:
+        """Two overrides of one filesystem key leave only the last grant."""
+        socket_path = Path("/run/docker.sock")
+        rule = "permissions.code_cycle_publish_read.filesystem="
+        observed = []
+
+        def capture(argv, timeout=None, cwd=None, env=None):
+            grants = [option for option in argv if option.startswith(rule)]
+            self.assertEqual([
+                f'{rule}{{{json.dumps(env["TMPDIR"])}="write",'
+                f'{json.dumps(str(socket_path))}="write"}}'
+            ], grants)
+            observed.append(env["TMPDIR"])
+            return completed("{}")
+
+        with patch.object(ex.CodexAdapter, "_docker_socket_path",
+                          return_value=socket_path), \
+             patch.object(ex, "_notice_docker_socket_access"):
+            result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
+                                               publishes=True, runner=capture)
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertEqual(1, len(observed))
 
     def test_scratch_never_uses_a_temp_parent_inside_the_checkout(self) -> None:
         subdirectory = self.repo / "nested"
