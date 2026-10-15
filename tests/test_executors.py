@@ -1217,6 +1217,39 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(1, stderr.getvalue().count("Notice: Codex can access"))
         self.assertIn("code_cycle.docker.host_socket_access: false", stderr.getvalue())
 
+    @unittest.skipIf(os.name == "nt", "the fake shebang executable is POSIX-only")
+    def test_disabled_socket_setting_reaches_codex_process_and_keeps_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "if 'force-failure' in sys.argv:\n"
+                "    raise SystemExit(7)\n"
+                "print(json.dumps({'type': 'item.completed', 'item': "
+                "{'type': 'agent_message', 'text': 'complete'}}))\n"
+                "print(json.dumps({'type': 'turn.completed'}))\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            adapter = ex.CodexAdapter()
+            adapter.binary = str(binary)
+            with patch.object(ex.CodexAdapter, "_docker_socket_path") as lookup:
+                passed = adapter.dispatch(
+                    TARGET, "work", cwd=temporary, writes=True,
+                    docker_socket_access=False,
+                )
+                failed = adapter.dispatch(
+                    TARGET, "force-failure", cwd=temporary, writes=True,
+                    docker_socket_access=False,
+                )
+
+        lookup.assert_not_called()
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, passed.outcome)
+        self.assertFalse(any("docker.sock" in arg for arg in passed.artifacts["argv"]))
+        self.assertEqual(ex.DispatchOutcome.FAILED, failed.outcome)
+        self.assertEqual(7, failed.artifacts["returncode"])
+
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""
         argv = self.codex(writes=False)
