@@ -49,6 +49,25 @@ from urllib.parse import urlsplit
 from router import Availability, RoutingDecision, RoutingMode, Target
 from usage import normalize_executor_output
 
+
+_DOCKER_SOCKET_NOTICE_LOCK = threading.Lock()
+_DOCKER_SOCKET_NOTICE_EMITTED = False
+
+
+def _notice_docker_socket_access(socket_path: Path) -> None:
+    """Tell the user once when Codex is granted host Docker access."""
+    global _DOCKER_SOCKET_NOTICE_EMITTED
+    with _DOCKER_SOCKET_NOTICE_LOCK:
+        if _DOCKER_SOCKET_NOTICE_EMITTED:
+            return
+        print(
+            "Notice: Codex can access the host Docker daemon through "
+            f"{socket_path}. Set code_cycle.docker.host_socket_access: false "
+            "in .code-cycle.yml to disable this access.",
+            file=sys.stderr,
+        )
+        _DOCKER_SOCKET_NOTICE_EMITTED = True
+
 SCHEMA_VERSION = 1
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
 # How long a stopped dispatch's process group may run its own teardown after
@@ -1000,6 +1019,7 @@ class NativeAdapter(Adapter):
                  claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  writable_dirs: tuple[str, ...] = (),
+                 docker_socket_access: bool = True,
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
@@ -1017,6 +1037,8 @@ class NativeAdapter(Adapter):
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
+        if self.name == "codex" and not docker_socket_access:
+            argv_options["docker_socket_access"] = False
         if self.name == "claude" and claude_allowed_commands:
             argv_options["allowed_commands"] = claude_allowed_commands
         if publishes and publication_permissions:
@@ -1607,7 +1629,8 @@ class CodexAdapter(NativeAdapter):
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
-             writable_dirs: tuple[str, ...] = ()) -> list[str]:
+             writable_dirs: tuple[str, ...] = (),
+             docker_socket_access: bool = True) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -1616,6 +1639,15 @@ class CodexAdapter(NativeAdapter):
         # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
                 "-c", f"model_reasoning_effort={target.effort}", "--json"]
+        socket_is_granted = (writes and not publishes) or (
+            publishes and (not writes or bool(writable_dirs))
+        )
+        docker_socket = (
+            self._docker_socket_path()
+            if docker_socket_access and socket_is_granted else None
+        )
+        if docker_socket:
+            _notice_docker_socket_access(docker_socket)
         if publishes:
             profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
             parent = ":workspace" if writes else ":read-only"
@@ -1633,7 +1665,6 @@ class CodexAdapter(NativeAdapter):
                 ),
             ]
             if not writes:
-                docker_socket = self._docker_socket_path()
                 if docker_socket:
                     socket_rule = (
                         f"{{{json.dumps(str(docker_socket))}=\"write\"}}"
@@ -1645,7 +1676,6 @@ class CodexAdapter(NativeAdapter):
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
             if writes:
-                docker_socket = self._docker_socket_path()
                 if docker_socket:
                     argv += [
                         "-c",
@@ -1659,7 +1689,6 @@ class CodexAdapter(NativeAdapter):
             for directory in self.git_write_roots(writable_dirs):
                 argv += ["--add-dir", directory]
             if publishes and writable_dirs:
-                docker_socket = self._docker_socket_path()
                 filesystem = self._publish_filesystem_rules(
                     writable_dirs, cwd=cwd,
                     extra_writable_paths=(docker_socket,) if docker_socket else (),
@@ -2535,6 +2564,7 @@ def dispatch(
     on_workspace = kw.pop("on_workspace", None)
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
     on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
+    docker_socket_access = kw.pop("docker_socket_access", True)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -2653,6 +2683,8 @@ def dispatch(
     writable_dirs = tuple(kw.pop("writable_dirs", ()) or ())
     if target.executor == "codex" and kw.get("writes", False) and writable_dirs:
         kw["writable_dirs"] = writable_dirs
+    if target.executor == "codex":
+        kw["docker_socket_access"] = docker_socket_access
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 

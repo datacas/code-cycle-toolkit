@@ -11,8 +11,10 @@ All notable changes to this project are documented here. This project follows
   can use the configured host Docker Unix socket when it exists. The runtime
   grants only the exact socket path from `DOCKER_HOST`, or
   `/var/run/docker.sock` when unset, so container-based project checks no longer
-  fail solely because the socket is outside the worktree. Docker retains the
-  host daemon's privileges.
+  fail solely because the socket is outside the worktree. Access stays enabled
+  by default, with a one-time notice and a project setting,
+  `code_cycle.docker.host_socket_access: false`, to disable it. Docker retains
+  the host daemon's privileges.
 
 ## [0.6.0] - 2026-10-14
 

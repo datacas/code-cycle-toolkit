@@ -175,7 +175,15 @@ No stage may merge, force-push, delete remote refs, modify the base branch, clos
 
 Before a publishing dispatch, the runtime checks readiness: for a GitHub `origin`, `gh` authentication and repository permission, plus a `git push --dry-run` against a temporary ref, which it doesn't create. A publishing Codex stage keeps its filesystem sandbox and gets network access only to GitHub and Bitbucket hosts, through a permission profile (Codex CLI ≥ 0.138.0). A publishing Claude stage is additionally allowed `gh` and `git`. Orca, and any adapter that hasn't declared how it grants publication access, fails closed for publishing stages. Failures are recorded as `missing_capability=publication_access` before the model starts.
 
-Codex also receives access to the host's configured local Docker socket when it exists: `DOCKER_HOST=unix://…`, or `/var/run/docker.sock` when `DOCKER_HOST` is unset. The exact socket path is added to writing publisher profiles (implementation and resolution), publishing review profiles, and disposable verification/run workspaces. Other read-only roles do not receive it. Docker daemon access can mount and modify host paths, so it carries the host's Docker privileges; read-only stages still fingerprint their checkout before and after dispatch.
+Codex receives access to the host's configured local Docker socket by default when it exists: `DOCKER_HOST=unix://…`, or `/var/run/docker.sock` when `DOCKER_HOST` is unset. The exact socket path is added to writing publisher profiles (implementation and resolution), publishing review profiles, and disposable verification/run workspaces. Other read-only roles do not receive it. Docker daemon access can mount and modify host paths, so it carries the host's Docker privileges; read-only stages still fingerprint their checkout before and after dispatch. When a Codex stage is first granted the socket, the runtime prints a one-time notice and names the project setting to disable it:
+
+```yaml
+code_cycle:
+  docker:
+    host_socket_access: false
+```
+
+The default is `true`; the setting applies to every Codex profile that can receive the socket.
 
 When the code host is GitHub and `gh` is authenticated, publishing stages use `gh` for every read and write on the change request. A GitHub connector or MCP tool is used only when `gh` is unavailable. If a GitHub publication attempt returns HTTP 403 or 404 through another tool, the stage retries once with `gh` before reporting `BLOCKED` and names the failed tool. Bitbucket continues to use its configured tooling.
 

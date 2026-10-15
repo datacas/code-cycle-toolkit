@@ -155,7 +155,7 @@ class LinkedRepository(unittest.TestCase):
     def profile(self, roots=None) -> dict[str, str]:
         argv = ex.CodexAdapter().argv(
             TARGET, "implement", cwd=str(self.workspace), writes=True, publishes=True,
-            writable_dirs=roots or self.roots,
+            writable_dirs=roots or self.roots, docker_socket_access=False,
         )
         return filesystem_rules(argv)
 

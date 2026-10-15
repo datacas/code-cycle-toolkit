@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
+import io
 import json
 import os
 import re
@@ -1174,6 +1176,46 @@ class PermissionTests(unittest.TestCase):
         self.assertIn('default_permissions="code_cycle_publish_write"', argv)
         self.assertIn('permissions.code_cycle_publish_write.extends=":workspace"', argv)
         self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
+
+    def test_host_docker_socket_access_can_be_disabled_for_all_codex_profiles(self) -> None:
+        socket_path = Path("/tmp/docker.sock")
+        with patch.object(ex.CodexAdapter, "_docker_socket_path",
+                          return_value=socket_path) as socket_lookup, \
+             patch.object(ex, "_notice_docker_socket_access") as notice:
+            cases = (
+                {"writes": True},
+                {"writes": True, "publishes": True,
+                 "writable_dirs": ("/tmp", "/tmp/worktree")},
+                {"writes": False, "publishes": True,
+                 "writable_dirs": ("/tmp", "/tmp/worktree")},
+            )
+            for options in cases:
+                with self.subTest(options=options):
+                    argv = self.codex(**options, docker_socket_access=False)
+                    self.assertFalse(any(str(socket_path) in arg for arg in argv))
+
+        socket_lookup.assert_not_called()
+        notice.assert_not_called()
+
+    def test_host_docker_socket_notice_is_emitted_once_when_granted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            socket_path = Path(temporary) / "docker.sock"
+            socket_path.touch()
+            stderr = io.StringIO()
+            with patch.object(ex.CodexAdapter, "_docker_socket_path",
+                              return_value=socket_path), \
+                 patch.object(ex, "_DOCKER_SOCKET_NOTICE_EMITTED", False), \
+                 contextlib.redirect_stderr(stderr):
+                writing = self.codex(writes=True)
+                publishing = ex.CodexAdapter().argv(
+                    TARGET, "review", writes=False, publishes=True,
+                    writable_dirs=(temporary, str(socket_path)),
+                )
+
+        self.assertTrue(any(str(socket_path) in arg for arg in writing))
+        self.assertTrue(any(str(socket_path) in arg for arg in publishing))
+        self.assertEqual(1, stderr.getvalue().count("Notice: Codex can access"))
+        self.assertIn("code_cycle.docker.host_socket_access: false", stderr.getvalue())
 
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""

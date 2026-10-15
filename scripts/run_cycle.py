@@ -131,7 +131,8 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
-                         "resolve", "worktree_dir", "allowed_commands", "ci"})
+                         "resolve", "worktree_dir", "allowed_commands", "ci",
+                         "docker"})
 
 #: The keys under `code_cycle.ci` (#228), all read by this driver.
 CI_KEYS = frozenset({"policy", "timeout"})
@@ -369,7 +370,7 @@ def load_config(path: Path) -> dict:
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
         "code_cycle.issue_review", "code_cycle.resolve",
-        "code_cycle.allowed_commands", "code_cycle.ci",
+        "code_cycle.allowed_commands", "code_cycle.ci", "code_cycle.docker",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -428,6 +429,17 @@ def load_config(path: Path) -> dict:
     except CycleDriverError as error:
         raise CycleDriverError(f"{path}: {error}") from error
 
+    docker = (config.get("code_cycle") or {}).get("docker") or {}
+    unknown = sorted(str(key) for key in set(docker) - {"host_socket_access"})
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.docker: " + ", ".join(unknown)
+            + "; known keys are host_socket_access")
+    if ("host_socket_access" in docker
+            and not isinstance(docker["host_socket_access"], bool)):
+        raise CycleDriverError(
+            f"{path}: code_cycle.docker.host_socket_access must be true or false")
+
     code_cycle = config.get("code_cycle") or {}
     if "allowed_commands" in code_cycle:
         allowed_commands = code_cycle["allowed_commands"]
@@ -463,6 +475,12 @@ def allowed_test_command(config: dict) -> str | None:
     """The validated exact test command, when the repository declares one."""
     allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
     return allowed.get("test")
+
+
+def docker_host_socket_access(config: dict) -> bool:
+    """Whether Codex may use the host's configured Docker Unix socket."""
+    docker = (config.get("code_cycle") or {}).get("docker") or {}
+    return docker.get("host_socket_access", True)
 
 
 def _ci_section(config: dict) -> dict:
@@ -1960,6 +1978,7 @@ def run_cycle(
     history_remote: HistoryRemote | None = None,
     ci_policy: str = DEFAULT_CI_POLICY,
     ci_timeout: int = ci_gate.DEFAULT_TIMEOUT,
+    docker_socket_access: bool = True,
     ci_checks: ci_gate.CheckProvider | None = None,
     ci_poll_interval: float = ci_gate.DEFAULT_POLL_INTERVAL,
     ci_clock: Callable[[], float] | None = None,
@@ -2049,6 +2068,7 @@ def run_cycle(
     status_writer.start()
     report = CycleReport(repo_id=repo_id, task_id=task_id)
     dispatch_kwargs = {}
+    dispatch_kwargs["docker_socket_access"] = docker_socket_access
     if cwd:
         dispatch_kwargs["cwd"] = cwd
         common_directory = _git_common_directory(cwd)
@@ -3770,6 +3790,7 @@ def main(argv: list[str] | None = None) -> int:
                 allowed_test_command=allowed_test_command(config),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
+                docker_socket_access=docker_host_socket_access(config),
             )
     except CycleDriverError as error:
         parser.error(str(error))

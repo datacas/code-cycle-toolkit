@@ -365,6 +365,57 @@ class AllowedCommandsConfigTests(RunCycleTestCase):
         self.assertIn("unknown key under code_cycle.allowed_commands: shell",
                       str(raised.exception))
 
+
+class DockerConfigTests(RunCycleTestCase):
+    def load(self, body: str) -> dict:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".code-cycle.yml"
+            path.write_text(body, encoding="utf-8")
+            return rc.load_config(path)
+
+    def test_host_docker_socket_access_defaults_to_enabled(self) -> None:
+        config = self.load("code_cycle: {}\n")
+
+        self.assertTrue(rc.docker_host_socket_access(config))
+
+    def test_host_docker_socket_access_can_be_disabled(self) -> None:
+        config = self.load(
+            "code_cycle:\n  docker:\n    host_socket_access: false\n"
+        )
+
+        self.assertFalse(rc.docker_host_socket_access(config))
+
+    def test_host_docker_socket_access_rejects_bad_values_and_keys(self) -> None:
+        for body, expected in (
+            ("code_cycle:\n  docker: false\n", "code_cycle.docker must be a mapping"),
+            ("code_cycle:\n  docker:\n    host_socket_access: enabled\n",
+             "host_socket_access must be true or false"),
+            ("code_cycle:\n  docker:\n    socket_access: false\n",
+             "unknown key under code_cycle.docker: socket_access"),
+        ):
+            with self.subTest(body=body):
+                with self.assertRaises(rc.CycleDriverError) as raised:
+                    self.load(body)
+                self.assertIn(expected, str(raised.exception))
+
+    def test_disabled_setting_reaches_codex_dispatch(self) -> None:
+        class CapturingTalker(Talker):
+            def __init__(self, name: str) -> None:
+                super().__init__(name)
+                self.dispatch_kwargs = []
+
+            def dispatch(self, target, task, **kw):
+                self.dispatch_kwargs.append(kw)
+                return super().dispatch(target, task, **kw)
+
+        implementer = CapturingTalker("codex")
+        report = self.run_cycle(
+            implementer, Talker("claude"), docker_socket_access=False,
+        )
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertFalse(implementer.dispatch_kwargs[0]["docker_socket_access"])
+
     def test_malformed_test_commands_are_rejected(self) -> None:
         for value in (
             "null", "17", "''", "'   '", "'pytest *'", "'pytest :*'",
