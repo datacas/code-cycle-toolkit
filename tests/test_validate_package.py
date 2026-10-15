@@ -564,6 +564,20 @@ class ValidatePackageTests(unittest.TestCase):
             errors, "skills/cc-orchestrator/SKILL.md: missing shared section "
                     "'## Issue review before implementation'")
 
+    def test_rejects_resolution_without_the_parallel_ci_policy(self) -> None:
+        errors = self.edit_orchestrator("cc-resolve-comments", "## CI policy", "## Old policy")
+        self.assert_error_contains(errors, "skills/cc-resolve-comments/SKILL.md: missing section '## CI policy'")
+
+    def test_rejects_a_code_review_pass_that_widens_the_resolution_delta(self) -> None:
+        errors = self.edit_orchestrator("cc-code-review", "complete fix delta", "accumulated diff")
+        self.assert_error_contains(errors, "'## Scope' does not accept the parallel resolve delta")
+
+    def test_rejects_resolution_without_delta_fallback_or_single_check_read(self) -> None:
+        for phrase in ("review the accumulated diff instead", "checks once"):
+            with self.subTest(phrase=phrase):
+                errors = self.edit_orchestrator("cc-resolve-comments", phrase, "removed")
+                self.assert_error_contains(errors, f"'## CI policy' does not state '{phrase}'")
+
     def test_rejects_issue_review_gates_that_disagree(self) -> None:
         errors = self.edit_orchestrator(
             "cc-orca-orchestrator", "escalates once:", "escalates twice:")

@@ -125,6 +125,7 @@ Acts on review feedback.
   4. commits, pushes, replies in threads, and publishes a summary.
 - **Statuses:** `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`.
 - **CI failures:** under the `parallel` CI policy it may be told, by SHA and count, that required checks failed on the reviewed head; it diagnoses them beside the findings, never as findings.
+- **Parallel policy:** reviews its fix delta from the latest trusted review receipt (or the accumulated diff when that base is unusable), verifies locally, publishes, and reads checks once without waiting. `strict` keeps the accumulated review and CI wait. See [CI policy](review-cycle.md#ci-policy).
 - **Never:** declares approval, or changes code just to silence a review.
 
 ```text
