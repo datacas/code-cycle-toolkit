@@ -121,6 +121,52 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertEqual("retry", attempts[1]["relationship"])
         self.assertFalse(outcome.succeeded)
 
+    def test_a_fallback_that_hits_the_same_wall_hands_the_question_to_the_primary(self):
+        """The fallback was tried first; the grant still reaches the primary."""
+        for source in ({"answers": {"docker_host": "cycle"}},
+                       {"preauthorized": frozenset({"docker_host"})},
+                       {"prompt": lambda question: "cycle"}):
+            with self.subTest(source=sorted(source)):
+                consent = grants.ConsentBroker("owner/repo", platform="linux", **source)
+                recorder, primary, fallback, outcome = self.execute(
+                    fallback=RestrictedAdapter("claude"), consent=consent)
+
+                self.assertEqual((2, 1), (len(primary.dispatched), len(fallback.dispatched)))
+                self.assertNotIn("sandbox_grants", primary.dispatch_kwargs[0])
+                self.assertNotIn("sandbox_grants", fallback.dispatch_kwargs[0])
+                self.assertEqual(("docker_host",), primary.dispatch_kwargs[1]["sandbox_grants"])
+                self.assertIn("every later codex stage", primary.dispatched[1])
+                self.assertEqual({"docker_host"}, consent.granted_ids)
+                self.assertEqual([], consent.pending)
+                attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
+                self.assertEqual(["codex", "claude", "codex"],
+                                 [attempt["executor"] for attempt in attempts])
+
+    def test_a_fallback_that_hits_the_same_wall_stops_to_ask_when_nobody_answers(self):
+        consent = grants.ConsentBroker("owner/repo", platform="linux")
+        recorder, primary, fallback, outcome = self.execute(
+            fallback=RestrictedAdapter("claude"), consent=consent)
+
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual((1, 1), (len(primary.dispatched), len(fallback.dispatched)))
+        [request] = consent.pending
+        self.assertEqual(("docker_host", "codex"), (request.grant.id, request.scope.executor))
+        self.assertIn("permission required: docker_host", outcome.result.detail)
+        self.assertEqual(set(), consent.granted_ids)
+
+    def test_a_fallback_that_left_effects_is_not_handed_back_to_the_primary(self):
+        consent = grants.ConsentBroker("owner/repo", platform="linux",
+                                       answers={"docker_host": "cycle"})
+        primary, fallback = RestrictedAdapter(), RestrictedAdapter("claude")
+        recorder = self.recorder([primary, fallback], consent=consent)
+        snapshots = iter([CLEAN, CLEAN, CLEAN, {**CLEAN, "dirty": True}])
+        with patch("cycle.effect_snapshot", side_effect=lambda *a, **k: next(snapshots)):
+            outcome = recorder.stage("implement", "implement the work")
+
+        self.assertFalse(outcome.succeeded)
+        self.assertEqual((1, 1), (len(primary.dispatched), len(fallback.dispatched)))
+        self.assertIn("reroute stopped: dirty_workspace", outcome.result.detail)
+
     def test_observed_restrictions_reroute_and_preserve_diagnostic(self):
         for kind in recovery.SANDBOX_BLOCKERS:
             with self.subTest(kind=kind):

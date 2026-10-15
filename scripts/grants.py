@@ -101,11 +101,9 @@ DOCKER_HOST = SensitiveGrant(
             effective=("every local Unix socket the user can reach, not only "
                        "Docker's: also ssh-agent, D-Bus and any other local "
                        "service socket. Codex on Linux cannot allow one socket alone"),
-            risks=("The Docker daemon acts as root on the host: a container can "
-                   "mount and change any host path, outside the checkout. Other "
-                   "sockets expose their own services, for example ssh-agent can "
-                   "sign with your keys. Network domains and the read-only "
-                   "checkout of review stages stay as they are"),
+            risks=("Docker acts as root on the host, and ssh-agent can sign "
+                   "with your keys. Network domains and read-only review "
+                   "checkouts stay as they are"),
             isolated_per_dispatch=True,
         ),
     ),
@@ -213,8 +211,10 @@ def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
         options.append(f"Allow for this cycle ({ALLOW_CYCLE})")
     options += [f"Allow persistently for this repository ({ALLOW_PERSISTENT})",
                 f"Deny ({DENY})"]
+    # The answer is not per stage: say who else receives it.
     prompt = (f"The {role} stage asked for {grant.resource}: {grant.reason}. "
-              f"Granting it opens {scope.effective}. {scope.risks}.")
+              f"Granting it opens {scope.effective}. {scope.risks}. "
+              f"{reach(scope)}")
     return {
         "id": question_id,
         "prompt": prompt[:597] + "..." if len(prompt) > 600 else prompt,
@@ -222,6 +222,13 @@ def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
         "recommended": None,
         "blocks": [f"grant:{grant.id}"],
     }
+
+
+def reach(scope: GrantScope) -> str:
+    """Which dispatches an allow reaches, beyond the stage that asked."""
+    return (f"An allow reaches every later {scope.executor} stage of the cycle "
+            "(of the repository, if persistent), including reviews of untrusted "
+            "pull requests.")
 
 
 def answer_from_option(option: str) -> str | None:
@@ -352,7 +359,8 @@ def denial_context(grant: SensitiveGrant) -> str:
 
 def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
     return (
-        f"The user granted {grant.resource} for this stage. The sandbox now opens "
+        f"The user granted {grant.resource} to this and every later "
+        f"{scope.executor} stage of the cycle. The sandbox now opens "
         f"{scope.effective}. Use it only for the checks that need it."
     )
 

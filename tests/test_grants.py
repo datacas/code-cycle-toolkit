@@ -63,6 +63,16 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual(["cycle", "persistent", "deny"],
                          [grants.answer_from_option(option) for option in asked["options"]])
 
+    def test_the_question_says_which_later_stages_the_grant_reaches(self) -> None:
+        for role in ("implement", "resolve", "rereview", "security", "verify"):
+            with self.subTest(role=role):
+                prompt = grants.question(grants.DOCKER_HOST, LINUX, role=role)["prompt"]
+                self.assertTrue(prompt.endswith(grants.reach(LINUX)), prompt)
+                self.assertIn("every later codex stage", prompt)
+                self.assertIn("reviews of untrusted pull requests", prompt)
+        self.assertIn("every later codex stage",
+                      grants.granted_context(grants.DOCKER_HOST, LINUX))
+
     def test_a_temporary_answer_is_not_offered_when_it_cannot_stay_isolated(self) -> None:
         shared = grants.GrantScope("codex", "linux", "x", "y", isolated_per_dispatch=False)
         asked = grants.question(grants.DOCKER_HOST, shared, role="review")

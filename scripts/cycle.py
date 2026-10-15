@@ -482,7 +482,10 @@ class CycleRecorder:
         fallback_decision = None
         parent_failure = {}
         environment_context = ""
-        for attempt in range(2):
+        primary_decision = None
+        consent_requested = False
+        # A primary, its fallback, and one rerun after a permission answer.
+        for attempt in range(3):
             signals = {**self._pre_routing(role, change), **stage_signals, **parent_failure}
             if escalated:
                 signals["escalated"] = True
@@ -618,6 +621,7 @@ class CycleRecorder:
                         fallback_decision = None
             if attempt == 0:
                 first = (decision, signals)
+                primary_decision = decision
             if decision.blocked:
                 outcome.decision = decision
                 outcome.rows.append(self._record(role, decision, None, signals))
@@ -862,8 +866,19 @@ class CycleRecorder:
                      if blocker is not None and self.consent is not None
                      and self.mode is not RoutingMode.CALIBRATION else None)
             answer = None
-            if grant is not None and not retry and grant.id not in granted and attempt == 0:
-                answer = self.consent.request(grant, decision.target.executor, role=role)
+            # The grant is for the target that has a scope for it: a fallback
+            # that hit the same wall hands the question back to the primary.
+            consent_decision = decision
+            if (grant is not None and grant.scope_for(
+                    decision.target.executor, self.consent.platform) is None
+                    and primary_decision is not None and primary_decision.target is not None
+                    and grant.scope_for(primary_decision.target.executor,
+                                        self.consent.platform) is not None):
+                consent_decision = primary_decision
+            if (grant is not None and not retry and not consent_requested
+                    and grant.id not in self.consent.granted(consent_decision.target.executor)):
+                consent_requested = True
+                answer = self.consent.request(grant, consent_decision.target.executor, role=role)
             if answer == PENDING:
                 # Nobody could answer: the sandbox stays as it is, no other
                 # executor is tried in its place, and the cycle stops to ask.
@@ -877,18 +892,25 @@ class CycleRecorder:
                 # exit nobody proved could overlap a live worker.
                 safe = (not result.asynchronous and result.process_exited
                         and not result.needs_human_action and attempt_id is not None)
+                stop_reason = "exit_unproven"
+                if safe and consent_decision is not decision:
+                    # Back to the primary from its fallback: another executor,
+                    # so the fallback's effects are reconciled first.
+                    action, stop_reason = reroute_gate()
+                    safe = action == "reroute"
                 signals.update(reroute_action="reroute" if safe else "stop",
-                               reroute_reason="permission_answered" if safe else "exit_unproven",
+                               reroute_reason="permission_answered" if safe else stop_reason,
                                process_exited=result.process_exited,
                                reroute_error_code="environment_restricted",
                                reroute_start_state=result.start_state)
                 if safe:
-                    scope = grant.scope_for(decision.target.executor, self.consent.platform)
+                    scope = grant.scope_for(consent_decision.target.executor,
+                                            self.consent.platform)
                     environment_context = recovery_context(blocker) + "\n\n" + (
                         denial_context(grant) if answer == DENY
                         else granted_context(grant, scope))
                     fallback_decision = replace(
-                        decision, reasons=decision.reasons +
+                        consent_decision, reasons=consent_decision.reasons +
                         (f"rerun after the {grant.id} permission answer: {answer}",),
                     )
                     parent_failure = {
@@ -898,7 +920,7 @@ class CycleRecorder:
                     }
                     retry = True
                 else:
-                    result = replace(result, detail=f"{result.detail}; reroute stopped: exit_unproven")
+                    result = replace(result, detail=f"{result.detail}; reroute stopped: {stop_reason}")
             elif grant is not None and not retry:
                 result = replace(result, detail=f"{result.detail}; reroute stopped: "
                                                 f"{signals.get('reroute_reason', 'no_fallback')}")
