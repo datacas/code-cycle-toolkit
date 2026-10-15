@@ -1542,8 +1542,29 @@ class CodexAdapter(NativeAdapter):
         return True, "Codex sandbox wrote and verified each linked-worktree Git metadata root"
 
     @staticmethod
+    def _docker_socket_path() -> Path | None:
+        """Return the host's local Docker socket when one is configured.
+
+        A Unix Docker endpoint is the only endpoint a filesystem permission
+        profile can expose. TCP and SSH contexts stay under the executor's
+        normal network policy.
+        """
+        docker_host = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
+        if not docker_host.startswith("unix://"):
+            return None
+        configured_path = Path(docker_host.removeprefix("unix://")).expanduser()
+        if not configured_path.is_absolute():
+            return None
+        try:
+            socket_path = configured_path.resolve(strict=True)
+            return socket_path if socket_path.is_socket() else None
+        except (OSError, RuntimeError):
+            return None
+
+    @staticmethod
     def _publish_filesystem_rules(
         writable_dirs: tuple[str, ...], *, cwd: str | None = None,
+        extra_writable_paths: tuple[Path, ...] = (),
     ) -> str:
         """Serialize a read-only common root, its narrow write grants, and carve-outs.
 
@@ -1560,6 +1581,7 @@ class CodexAdapter(NativeAdapter):
         entries.extend(
             (Path(root), "write") for root in CodexAdapter.git_write_roots(writable_dirs)
         )
+        entries.extend((path, "write") for path in extra_writable_paths)
         if len(writable_dirs) > 1:
             worktree = Path(writable_dirs[-1])
             entries.extend(
@@ -1610,8 +1632,26 @@ class CodexAdapter(NativeAdapter):
                     '"api.bitbucket.org"="allow"}'
                 ),
             ]
+            if not writes:
+                docker_socket = self._docker_socket_path()
+                if docker_socket:
+                    socket_rule = (
+                        f"{{{json.dumps(str(docker_socket))}=\"write\"}}"
+                    )
+                    argv += [
+                        "-c",
+                        f"permissions.{profile}.filesystem={socket_rule}",
+                    ]
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
+            if writes:
+                docker_socket = self._docker_socket_path()
+                if docker_socket:
+                    argv += [
+                        "-c",
+                        "sandbox_workspace_write.writable_roots="
+                        f"[{json.dumps(str(docker_socket))}]",
+                    ]
         if cwd:
             argv += ["-C", cwd]
         if writes:
@@ -1619,10 +1659,14 @@ class CodexAdapter(NativeAdapter):
             for directory in self.git_write_roots(writable_dirs):
                 argv += ["--add-dir", directory]
             if publishes and writable_dirs:
+                docker_socket = self._docker_socket_path()
+                filesystem = self._publish_filesystem_rules(
+                    writable_dirs, cwd=cwd,
+                    extra_writable_paths=(docker_socket,) if docker_socket else (),
+                )
                 argv += [
                     "-c",
-                    "permissions.code_cycle_publish_write.filesystem="
-                    f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
+                    f"permissions.code_cycle_publish_write.filesystem={filesystem}",
                 ]
         return argv + [task]
 
