@@ -1192,7 +1192,7 @@ class PermissionTests(unittest.TestCase):
             for options in cases:
                 with self.subTest(options=options):
                     argv = self.codex(**options, docker_socket_access=False)
-                    self.assertFalse(any(str(socket_path) in arg for arg in argv))
+                    self.assertFalse(any(json.dumps(str(socket_path)) in arg for arg in argv))
 
         socket_lookup.assert_not_called()
         notice.assert_not_called()
@@ -1212,8 +1212,8 @@ class PermissionTests(unittest.TestCase):
                     writable_dirs=(temporary, str(socket_path)),
                 )
 
-        self.assertTrue(any(str(socket_path) in arg for arg in writing))
-        self.assertTrue(any(str(socket_path) in arg for arg in publishing))
+        self.assertTrue(any(json.dumps(str(socket_path)) in arg for arg in writing))
+        self.assertTrue(any(json.dumps(str(socket_path)) in arg for arg in publishing))
         self.assertEqual(1, stderr.getvalue().count("Notice: Codex can access"))
         self.assertIn("code_cycle.docker.host_socket_access: false", stderr.getvalue())
 
