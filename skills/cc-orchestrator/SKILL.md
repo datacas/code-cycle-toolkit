@@ -328,6 +328,18 @@ resolution with `--from review|resolve|rereview --pr <n>` and an implementation
 with `--continue --cwd <its checkout>`; never start the work item again over
 work that is already there.
 
+A stop with `stop_reason=permission_required` means a stage needs a sensitive
+sandbox grant, such as `docker_host`, that nobody has answered. The runtime has
+not widened anything. Ask its one question as *Asking the user* describes,
+offering exactly the options the record lists, and never recommend one. Say what
+the grant really opens from the record's `effective_scope` and `risks`, not only
+the resource it was requested for. An answer to that question is the user's
+explicit authorization for that grant only. Then rerun `run_cycle.py` from the
+stopped stage, with `--continue` for an interrupted implementation or `--from`
+with `--pr` for a later stage, adding `--grant <id>=cycle`, `persistent`, or
+`deny` as the user chose. Never pass `--grant` that the user did not choose, and
+never set `code_cycle.docker.host_socket_access` on the user's behalf.
+
 It reads `.code-cycle.yml` from the working directory, so `code_cycle.profiles`
 is what routes and `code_cycle.repository.selector` supplies the repository when
 `--repo` is absent. A configuration that cannot be read stops the run rather

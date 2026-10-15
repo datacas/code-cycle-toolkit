@@ -179,15 +179,18 @@ No stage may merge, force-push, delete remote refs, modify the base branch, clos
 
 Before a publishing dispatch, the runtime checks readiness: for a GitHub `origin`, `gh` authentication and repository permission, plus a `git push --dry-run` against a temporary ref, which it doesn't create. A publishing Codex stage keeps its filesystem sandbox and gets network access only to GitHub and Bitbucket hosts, through a permission profile (Codex CLI ≥ 0.138.0). A publishing Claude stage is additionally allowed `gh` and `git`. Orca, and any adapter that hasn't declared how it grants publication access, fails closed for publishing stages. Failures are recorded as `missing_capability=publication_access` before the model starts.
 
-Codex receives access to the host's configured local Docker socket by default when it exists: `DOCKER_HOST=unix://…`, or `/var/run/docker.sock` when `DOCKER_HOST` is unset. The exact socket path is added to writing publisher profiles (implementation and resolution), publishing review profiles, and disposable verification/run workspaces. Other read-only roles do not receive it. Docker daemon access can mount and modify host paths, so it carries the host's Docker privileges; read-only stages still fingerprint their checkout before and after dispatch. When a Codex stage is first granted the socket, the runtime prints a one-time notice and names the project setting to disable it:
+### Sensitive sandbox grants
 
-```yaml
-code_cycle:
-  docker:
-    host_socket_access: false
-```
+Some checks need a resource the sandbox blocks on purpose, such as the host Docker daemon. A stage never widens its own sandbox. It reports the restriction as an `environment_blocker`, with `"resource": "docker_host"` for Docker, and a person decides. The registry in `scripts/grants.py` holds each grant, and new resources reuse the same flow.
 
-The default is `true`; the setting applies to every Codex profile that can receive the socket.
+- **The real scope is what the person is asked about.** Codex on Linux cannot allow the Docker socket alone. Its sandbox blocks every new `AF_UNIX` socket unless all of them are allowed, through the network proxy (`network.dangerously_allow_all_unix_sockets`), so the question says the grant also opens ssh-agent, D-Bus and every other local socket. Docker itself acts as root on the host. A filesystem rule on the socket path would not help: Codex's Linux helper refuses to start with one. Verified with Codex CLI 0.162.1 and `codex sandbox`.
+- **Least privilege.** A configured fallback executor that can recover the stage without a wider sandbox is tried first, as for any sandbox restriction; a person is asked only when none can. The grant goes only to Codex, and only on platforms where its reach was verified: Linux today; macOS and Windows have no scope, so nothing is widened there. Publishing stages keep their GitHub and Bitbucket allowlist and review stages keep their read-only checkout. A non-publishing writer moves to a `:workspace` profile whose proxy allows no domain, so the grant gives it no internet access.
+- **Three answers.**
+  - *This cycle*: the grant lives only in the running process and applies to the cycle's remaining Codex dispatches. It is never written down, so another session never sees it. It is offered only where the executor applies the grant per dispatch.
+  - *Persistent*: kept per user, outside every checkout, in `$XDG_CONFIG_HOME/code-cycle/consents.json` (or `CODE_CYCLE_CONSENT_FILE`), for this repository and this exact scope. When the scope changes, the stored answer no longer applies.
+  - *Deny*: holds for this run only. The stage reruns without the grant, told to finish every check that does not need it and to report the rest as unverified.
+- **Asking.** On a terminal, `run_cycle.py` asks once and continues. A run nobody watches, detached or driven by an orchestrator, never widens without an answer given in advance. It stops with `HUMAN_INTERVENTION` and `stop_reason=permission_required`, and the decisions record carries the question in the `questions` shape plus the full scope and risks. Answer by rerunning the stopped stage with `--grant docker_host=cycle|persistent|deny`.
+- **Authorization in advance.** `code_cycle.docker.host_socket_access: true` in `.code-cycle.yml` authorizes `docker_host` for every run of the project without asking. The default is `false`.
 
 When the code host is GitHub and `gh` is authenticated, publishing stages use `gh` for every read and write on the change request. A GitHub connector or MCP tool is used only when `gh` is unavailable. If a GitHub publication attempt returns HTTP 403 or 404 through another tool, the stage retries once with `gh` before reporting `BLOCKED` and names the failed tool. Bitbucket continues to use its configured tooling.
 

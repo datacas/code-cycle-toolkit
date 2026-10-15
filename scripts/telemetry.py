@@ -86,7 +86,10 @@ from pathlib import Path
 #: review verdicts carry `reviewed_head_sha` and the SHA their checks describe,
 #: `ci` rows record each read or wait of the CI gate with its SHA, and the
 #: cycle row carries the policy and the gate's totals. All payload-only.
-SCHEMA_VERSION = 19
+#: 20: sensitive sandbox grants (#239). A cycle may stop with
+#: `permission_required`, and a stage's reroute reason may be
+#: `permission_required` or `permission_answered`. All payload-only.
+SCHEMA_VERSION = 20
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -126,6 +129,8 @@ STOP_REASONS = frozenset({
     "needs_refinement", "readiness_unconfirmed", "interrupted",
     # The CI gate of the parallel policy (schema 19).
     "ci_timeout", "ci_unreadable", "ci_not_passing", "head_moved",
+    # A stage needs a sensitive sandbox grant nobody has answered (schema 20).
+    "permission_required",
 })
 
 #: How a cycle treats the code host's checks (schema 19). `strict` is the
@@ -258,6 +263,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "no_fallback", "fallback_unavailable", "not_started", "no_effects",
         "evidence_unavailable", "dirty_workspace", "workspace_changed",
         "remote_changed", "publication_changed", "unsupported_effort", "same_sandbox",
+        # A sensitive sandbox grant (schema 20).
+        "permission_required", "permission_answered",
     })),
     "reroute_error_code": ("token", frozenset({
         "capacity", "transport", "timeout", "quota", "unsupported_effort",

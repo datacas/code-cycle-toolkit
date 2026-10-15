@@ -50,24 +50,8 @@ from urllib.parse import urlsplit
 from router import Availability, RoutingDecision, RoutingMode, Target
 from usage import normalize_executor_output
 
-
-_DOCKER_SOCKET_NOTICE_LOCK = threading.Lock()
-_DOCKER_SOCKET_NOTICE_EMITTED = False
-
-
-def _notice_docker_socket_access(socket_path: Path) -> None:
-    """Tell the user once when Codex is granted host Docker access."""
-    global _DOCKER_SOCKET_NOTICE_EMITTED
-    with _DOCKER_SOCKET_NOTICE_LOCK:
-        if _DOCKER_SOCKET_NOTICE_EMITTED:
-            return
-        print(
-            "Notice: Codex can access the host Docker daemon through "
-            f"{socket_path}. Set code_cycle.docker.host_socket_access: false "
-            "in .code-cycle.yml to disable this access.",
-            file=sys.stderr,
-        )
-        _DOCKER_SOCKET_NOTICE_EMITTED = True
+#: The sensitive grants (`grants.py`) Codex knows how to apply, and how.
+CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets"}
 
 SCHEMA_VERSION = 1
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
@@ -179,19 +163,8 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                 del worker_argv[index:index + 2]
                 options += ["-c", f'default_permissions="{profile}"',
                             "-c", f'permissions.{profile}.extends=":read-only"']
-            rule = f"permissions.{profile}.filesystem="
-            grants = [f'{json.dumps(scratch)}="write"']
-            # The dispatch may already grant this profile a path, such as the
-            # host Docker socket. A second override of the same key would
-            # replace the first, so both grants go into one table.
-            existing = next((index for index, option in enumerate(worker_argv)
-                             if option.startswith(rule)), None)
-            if existing is not None:
-                granted = worker_argv[existing].removeprefix(rule)[1:-1]
-                if granted:
-                    grants.append(granted)
-                del worker_argv[existing - 1:existing + 1]
-            options += ["-c", rule + "{" + ",".join(grants) + "}",
+            options += ["-c", f'permissions.{profile}.filesystem={{'
+                        f'{json.dumps(scratch)}="write"}}',
                         "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
             worker_argv[-1:-1] = options
         yield worker_argv, worker_env
@@ -1078,7 +1051,7 @@ class NativeAdapter(Adapter):
                  claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  writable_dirs: tuple[str, ...] = (),
-                 docker_socket_access: bool = True,
+                 sandbox_grants: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
@@ -1096,8 +1069,8 @@ class NativeAdapter(Adapter):
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
-        if self.name == "codex" and not docker_socket_access:
-            argv_options["docker_socket_access"] = False
+        if self.name == "codex" and sandbox_grants:
+            argv_options["sandbox_grants"] = sandbox_grants
         if self.name == "claude" and claude_allowed_commands:
             argv_options["allowed_commands"] = claude_allowed_commands
         if publishes and publication_permissions:
@@ -1628,29 +1601,8 @@ class CodexAdapter(NativeAdapter):
         return True, "Codex sandbox wrote and verified each linked-worktree Git metadata root"
 
     @staticmethod
-    def _docker_socket_path() -> Path | None:
-        """Return the host's local Docker socket when one is configured.
-
-        A Unix Docker endpoint is the only endpoint a filesystem permission
-        profile can expose. TCP and SSH contexts stay under the executor's
-        normal network policy.
-        """
-        docker_host = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")
-        if not docker_host.startswith("unix://"):
-            return None
-        configured_path = Path(docker_host.removeprefix("unix://")).expanduser()
-        if not configured_path.is_absolute():
-            return None
-        try:
-            socket_path = configured_path.resolve(strict=True)
-            return socket_path if socket_path.is_socket() else None
-        except (OSError, RuntimeError):
-            return None
-
-    @staticmethod
     def _publish_filesystem_rules(
         writable_dirs: tuple[str, ...], *, cwd: str | None = None,
-        extra_writable_paths: tuple[Path, ...] = (),
     ) -> str:
         """Serialize a read-only common root, its narrow write grants, and carve-outs.
 
@@ -1667,7 +1619,6 @@ class CodexAdapter(NativeAdapter):
         entries.extend(
             (Path(root), "write") for root in CodexAdapter.git_write_roots(writable_dirs)
         )
-        entries.extend((path, "write") for path in extra_writable_paths)
         if len(writable_dirs) > 1:
             worktree = Path(writable_dirs[-1])
             entries.extend(
@@ -1694,7 +1645,7 @@ class CodexAdapter(NativeAdapter):
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
              writable_dirs: tuple[str, ...] = (),
-             docker_socket_access: bool = True) -> list[str]:
+             sandbox_grants: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -1703,63 +1654,51 @@ class CodexAdapter(NativeAdapter):
         # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
                 "-c", f"model_reasoning_effort={target.effort}", "--json"]
-        socket_is_granted = (writes and not publishes) or (
-            publishes and (not writes or bool(writable_dirs))
-        )
-        docker_socket = (
-            self._docker_socket_path()
-            if docker_socket_access and socket_is_granted else None
-        )
-        if docker_socket:
-            _notice_docker_socket_access(docker_socket)
-        if publishes:
-            profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+        unknown = sorted(set(sandbox_grants) - set(CODEX_GRANT_OPTIONS))
+        if unknown:
+            raise ExecutorError(f"Codex cannot apply sandbox grants: {', '.join(unknown)}")
+        # Only a person grants this (`grants.py`). Codex's Linux sandbox blocks
+        # every new AF_UNIX socket unless all are allowed, through its network
+        # proxy; a filesystem rule on the socket path makes the helper fail to
+        # start (#239). The proxy keeps the domain allowlist, or none at all.
+        unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
+        profile = None
+        if publishes or (writes and unix_sockets):
+            if publishes:
+                profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+            else:
+                profile = "code_cycle_write"
             parent = ":workspace" if writes else ":read-only"
             argv += [
                 "-c", f'default_permissions="{profile}"',
                 "-c", "features.network_proxy=true",
                 "-c", f'permissions.{profile}.extends="{parent}"',
                 "-c", f"permissions.{profile}.network.enabled=true",
-                "-c", (
+            ]
+            if publishes:
+                argv += ["-c", (
                     f'permissions.{profile}.network.domains={{'
                     '"github.com"="allow",'
                     '"api.github.com"="allow",'
                     '"bitbucket.org"="allow",'
                     '"api.bitbucket.org"="allow"}'
-                ),
-            ]
-            if not writes:
-                if docker_socket:
-                    socket_rule = (
-                        f"{{{json.dumps(str(docker_socket))}=\"write\"}}"
-                    )
-                    argv += [
-                        "-c",
-                        f"permissions.{profile}.filesystem={socket_rule}",
-                    ]
+                )]
+            if unix_sockets:
+                argv += ["-c",
+                         f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true"]
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
-            if writes:
-                if docker_socket:
-                    argv += [
-                        "-c",
-                        "sandbox_workspace_write.writable_roots="
-                        f"[{json.dumps(str(docker_socket))}]",
-                    ]
         if cwd:
             argv += ["-C", cwd]
         if writes:
             # The common root itself is never a writable root (#229).
             for directory in self.git_write_roots(writable_dirs):
                 argv += ["--add-dir", directory]
-            if publishes and writable_dirs:
-                filesystem = self._publish_filesystem_rules(
-                    writable_dirs, cwd=cwd,
-                    extra_writable_paths=(docker_socket,) if docker_socket else (),
-                )
+            if profile is not None and writable_dirs:
                 argv += [
                     "-c",
-                    f"permissions.code_cycle_publish_write.filesystem={filesystem}",
+                    f"permissions.{profile}.filesystem="
+                    f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
                 ]
         return argv + [task]
 
@@ -2628,7 +2567,7 @@ def dispatch(
     on_workspace = kw.pop("on_workspace", None)
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
     on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
-    docker_socket_access = kw.pop("docker_socket_access", True)
+    sandbox_grants = tuple(kw.pop("sandbox_grants", ()) or ())
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -2747,8 +2686,8 @@ def dispatch(
     writable_dirs = tuple(kw.pop("writable_dirs", ()) or ())
     if target.executor == "codex" and kw.get("writes", False) and writable_dirs:
         kw["writable_dirs"] = writable_dirs
-    if target.executor == "codex":
-        kw["docker_socket_access"] = docker_socket_access
+    if target.executor == "codex" and sandbox_grants:
+        kw["sandbox_grants"] = sandbox_grants
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 

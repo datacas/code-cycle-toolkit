@@ -68,7 +68,7 @@ code_cycle:
     policy: strict                  # strict | parallel (GitHub only); --ci-policy overrides
     timeout: 900                    # seconds the parallel CI gate waits for one SHA
   docker:
-    host_socket_access: true        # false stops Codex stages from using the host Docker socket
+    host_socket_access: false       # true grants docker_host without asking (see routing.md)
 
   # ── Orchestration ─────────────────────────────────────────
   orchestration:
@@ -106,7 +106,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `allowed_commands.test` | one exact command string; wildcards and shell operators are refused | unset | `run_cycle.py`, Claude implementation and resolution stages |
 | `ci.policy` | `strict` · `parallel` | `strict` | `run_cycle.py`, both orchestrators |
 | `ci.timeout` | whole seconds, 1 to 86400 | `900` | `run_cycle.py` and the orchestrators' `ci_gate.py` call, under `parallel` |
-| `docker.host_socket_access` | boolean | `true`: Codex stages that can receive it get the host's Unix Docker socket, with a one-time notice | `run_cycle.py` (Codex dispatch) |
+| `docker.host_socket_access` | boolean | `false`: a stage that needs Docker asks first. `true` authorizes the `docker_host` grant in advance, which on Linux Codex opens every local Unix socket | `run_cycle.py` (sensitive grants) |
 | `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |

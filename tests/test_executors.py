@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import ast
-import contextlib
 import inspect
-import io
 import json
 import os
 import re
@@ -1177,48 +1175,70 @@ class PermissionTests(unittest.TestCase):
         self.assertIn('permissions.code_cycle_publish_write.extends=":workspace"', argv)
         self.assertIn("permissions.code_cycle_publish_write.network.enabled=true", argv)
 
-    def test_host_docker_socket_access_can_be_disabled_for_all_codex_profiles(self) -> None:
-        socket_path = Path("/tmp/docker.sock")
-        with patch.object(ex.CodexAdapter, "_docker_socket_path",
-                          return_value=socket_path) as socket_lookup, \
-             patch.object(ex, "_notice_docker_socket_access") as notice:
-            cases = (
-                {"writes": True},
-                {"writes": True, "publishes": True,
-                 "writable_dirs": ("/tmp", "/tmp/worktree")},
-                {"writes": False, "publishes": True,
-                 "writable_dirs": ("/tmp", "/tmp/worktree")},
-            )
-            for options in cases:
-                with self.subTest(options=options):
-                    argv = self.codex(**options, docker_socket_access=False)
-                    self.assertFalse(any(json.dumps(str(socket_path)) in arg for arg in argv))
+    def options(self, argv) -> list[str]:
+        return [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"]
 
-        socket_lookup.assert_not_called()
-        notice.assert_not_called()
+    def test_no_codex_profile_opens_unix_sockets_without_a_grant(self) -> None:
+        for options in ({"writes": True}, {"writes": False},
+                        {"writes": True, "publishes": True,
+                         "writable_dirs": ("/tmp", "/tmp/worktree")},
+                        {"writes": False, "publishes": True}):
+            with self.subTest(options=options):
+                argv = self.codex(**options)
+                self.assertFalse(any("unix_sockets" in arg for arg in argv))
+                self.assertFalse(any("docker" in arg for arg in argv))
+        # A writer without a grant keeps the legacy workspace sandbox.
+        self.assertIn("workspace-write", self.codex(writes=True))
 
-    def test_host_docker_socket_notice_is_emitted_once_when_granted(self) -> None:
+    def test_docker_grant_allows_unix_sockets_and_keeps_publication_domains(self) -> None:
+        """A filesystem rule on the socket crashes Codex's Linux helper (#239)."""
+        for writes, profile, parent in ((False, "code_cycle_publish_read", ":read-only"),
+                                        (True, "code_cycle_publish_write", ":workspace")):
+            with self.subTest(writes=writes):
+                argv = self.codex(writes=writes, publishes=True,
+                                  writable_dirs=("/tmp", "/tmp/worktree") if writes else (),
+                                  sandbox_grants=("docker_host",))
+                options = self.options(argv)
+                self.assertIn(f'permissions.{profile}.extends="{parent}"', options)
+                self.assertIn(
+                    f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true",
+                    options)
+                self.assertTrue(any(option.startswith(f"permissions.{profile}.network.domains=")
+                                    and '"api.github.com"="allow"' in option
+                                    for option in options))
+                self.assertFalse(any("docker.sock" in option for option in options))
+
+    def test_docker_grant_gives_a_writer_sockets_but_no_internet(self) -> None:
+        argv = self.codex(writes=True, sandbox_grants=("docker_host",))
+        options = self.options(argv)
+
+        self.assertNotIn("-s", argv)
+        self.assertIn('default_permissions="code_cycle_write"', options)
+        self.assertIn('permissions.code_cycle_write.extends=":workspace"', options)
+        self.assertIn("features.network_proxy=true", options)
+        self.assertIn("permissions.code_cycle_write.network.dangerously_allow_all_unix_sockets=true",
+                      options)
+        # With no domain allowed, the proxy reaches nothing outside.
+        self.assertFalse(any(".network.domains=" in option for option in options))
+
+    def test_docker_grant_on_a_linked_worktree_writer_keeps_its_git_rules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            socket_path = Path(temporary) / "docker.sock"
-            socket_path.touch()
-            stderr = io.StringIO()
-            with patch.object(ex.CodexAdapter, "_docker_socket_path",
-                              return_value=socket_path), \
-                 patch.object(ex, "_DOCKER_SOCKET_NOTICE_EMITTED", False), \
-                 contextlib.redirect_stderr(stderr):
-                writing = self.codex(writes=True)
-                publishing = ex.CodexAdapter().argv(
-                    TARGET, "review", writes=False, publishes=True,
-                    writable_dirs=(temporary, str(socket_path)),
-                )
+            worktree = Path(temporary) / "worktree"
+            worktree.mkdir()
+            argv = self.codex(writes=True, writable_dirs=(temporary, str(worktree)),
+                              sandbox_grants=("docker_host",), cwd=str(worktree))
+        options = self.options(argv)
 
-        self.assertTrue(any(json.dumps(str(socket_path)) in arg for arg in writing))
-        self.assertTrue(any(json.dumps(str(socket_path)) in arg for arg in publishing))
-        self.assertEqual(1, stderr.getvalue().count("Notice: Codex can access"))
-        self.assertIn("code_cycle.docker.host_socket_access: false", stderr.getvalue())
+        self.assertTrue(any(option.startswith("permissions.code_cycle_write.filesystem=")
+                            for option in options))
+        self.assertIn("--add-dir", argv)
+
+    def test_an_unknown_grant_is_refused_rather_than_ignored(self) -> None:
+        with self.assertRaises(ex.ExecutorError):
+            self.codex(writes=True, sandbox_grants=("host_root",))
 
     @unittest.skipIf(os.name == "nt", "the fake shebang executable is POSIX-only")
-    def test_disabled_socket_setting_reaches_codex_process_and_keeps_failures(self) -> None:
+    def test_a_grant_reaches_the_codex_process_and_failures_stay_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "codex"
             binary.write_text(
@@ -1234,21 +1254,40 @@ class PermissionTests(unittest.TestCase):
             binary.chmod(0o755)
             adapter = ex.CodexAdapter()
             adapter.binary = str(binary)
-            with patch.object(ex.CodexAdapter, "_docker_socket_path") as lookup:
-                passed = adapter.dispatch(
-                    TARGET, "work", cwd=temporary, writes=True,
-                    docker_socket_access=False,
-                )
-                failed = adapter.dispatch(
-                    TARGET, "force-failure", cwd=temporary, writes=True,
-                    docker_socket_access=False,
-                )
+            passed = adapter.dispatch(TARGET, "work", cwd=temporary, writes=True,
+                                      sandbox_grants=("docker_host",))
+            plain = adapter.dispatch(TARGET, "work", cwd=temporary, writes=True)
+            failed = adapter.dispatch(TARGET, "force-failure", cwd=temporary, writes=True,
+                                      sandbox_grants=("docker_host",))
 
-        lookup.assert_not_called()
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, passed.outcome)
-        self.assertFalse(any("docker.sock" in arg for arg in passed.artifacts["argv"]))
+        self.assertTrue(any("dangerously_allow_all_unix_sockets=true" in arg
+                            for arg in passed.artifacts["argv"]))
+        self.assertFalse(any("unix_sockets" in arg for arg in plain.artifacts["argv"]))
         self.assertEqual(ex.DispatchOutcome.FAILED, failed.outcome)
         self.assertEqual(7, failed.artifacts["returncode"])
+
+    def test_dispatch_forwards_grants_to_codex_only(self) -> None:
+        seen = {}
+
+        class Recording(FakeAdapter):
+            def __init__(self, name):
+                super().__init__(ex.ProbeResult(name, ex.Availability.AUTHENTICATED, "test",
+                                                provable_ceiling=ex.Availability.AUTHENTICATED))
+                self.name = name
+
+            def dispatch(self, target, task, **kw):
+                seen[self.name] = kw
+                return super().dispatch(target, task, **kw)
+
+        registry = ex.Registry([Recording("codex"), Recording("claude")])
+        for spec in ("codex:openai/gpt-6-sol high", "claude:anthropic/claude-sonnet-5 high"):
+            ex.dispatch(decision(router.parse_target(spec)), "work", registry,
+                        policy=ex.ReadinessPolicy.ATTEMPT, writes=True,
+                        sandbox_grants=("docker_host",))
+
+        self.assertEqual(("docker_host",), seen["codex"].get("sandbox_grants"))
+        self.assertNotIn("sandbox_grants", seen["claude"])
 
     def test_a_reading_stage_says_so_rather_than_relying_on_a_default(self) -> None:
         """A default that changes is a permission nobody chose."""
@@ -2595,35 +2634,29 @@ class ReadOnlyVerificationTests(unittest.TestCase):
                 observed.append(env["TMPDIR"])
                 return completed("{}")
 
-            # The host's Docker socket would add a grant; this test is about
-            # the scratch directory alone, on any runner.
-            with patch.object(ex.CodexAdapter, "_docker_socket_path", return_value=None):
-                result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
-                                                   publishes=publishes, runner=capture)
+            result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
+                                               publishes=publishes, runner=capture)
             self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
             self.assertEqual(1, len(observed))
             self.assertFalse(Path(observed[0]).exists())
 
-    def test_publishing_review_keeps_scratch_and_docker_socket_in_one_grant(self) -> None:
-        """Two overrides of one filesystem key leave only the last grant."""
-        socket_path = Path("/run/docker.sock")
+    def test_a_granted_publishing_review_keeps_its_scratch_grant(self) -> None:
+        """The socket grant is a network option; the scratch rule stays the only
+        filesystem override, so neither replaces the other."""
         rule = "permissions.code_cycle_publish_read.filesystem="
         observed = []
 
         def capture(argv, timeout=None, cwd=None, env=None):
-            grants = [option for option in argv if option.startswith(rule)]
-            self.assertEqual([
-                f'{rule}{{{json.dumps(env["TMPDIR"])}="write",'
-                f'{json.dumps(str(socket_path))}="write"}}'
-            ], grants)
+            self.assertEqual([f'{rule}{{{json.dumps(env["TMPDIR"])}="write"}}'],
+                             [option for option in argv if option.startswith(rule)])
+            self.assertIn("permissions.code_cycle_publish_read.network."
+                          "dangerously_allow_all_unix_sockets=true", argv)
             observed.append(env["TMPDIR"])
             return completed("{}")
 
-        with patch.object(ex.CodexAdapter, "_docker_socket_path",
-                          return_value=socket_path), \
-             patch.object(ex, "_notice_docker_socket_access"):
-            result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
-                                               publishes=True, runner=capture)
+        result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
+                                           publishes=True, runner=capture,
+                                           sandbox_grants=("docker_host",))
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
         self.assertEqual(1, len(observed))

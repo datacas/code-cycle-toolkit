@@ -146,6 +146,12 @@ after proving process exit and reconciling effects; this report is not a
 permission grant and never marks the check passed. A caller without automatic
 recovery reports the blocker normally.
 
+When the restriction is the host Docker daemon, add `"resource": "docker_host"`.
+The runtime then asks the user whether to grant that permission, and says what
+it really opens; the report itself grants nothing. When a rerun says the user
+denied it, do not try to reach the resource again: finish every check that does
+not need it and report each one that does as unverified.
+
 ## Stop conditions
 
 After attempting authorized environment recovery, stop and ask the user before

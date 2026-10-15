@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import environment_recovery as recovery
+import grants
 import executors as ex
 import router
 from test_cycle import CycleTestCase, ScriptedAdapter
@@ -56,6 +57,15 @@ class SandboxReportTests(unittest.TestCase):
             self.assertIsNone(recovery.sandbox_blocker(spoken + "\n" + ending))
         self.assertIsNone(recovery.sandbox_blocker("sandbox denied access to docker.sock"))
 
+    def test_a_named_resource_is_kept_only_as_a_plain_identifier(self):
+        named = {**BLOCKER, "resource": "docker_host"}
+        self.assertEqual(named, recovery.sandbox_blocker(
+            block("BLOCKED", environment_blocker=named)))
+        for resource in ("Docker Host", "x" * 80, 7, "docker_host; rm -rf /"):
+            with self.subTest(resource=resource):
+                self.assertEqual(BLOCKER, recovery.sandbox_blocker(
+                    block("BLOCKED", environment_blocker={**BLOCKER, "resource": resource})))
+
     def test_incomplete_or_human_blockers_are_not_recoverable(self):
         for change in (
             {"kind": "service_unavailable"}, {"kind": "approval_denied"},
@@ -82,6 +92,34 @@ class SandboxRerouteTests(CycleTestCase):
         with patch("cycle.effect_snapshot", return_value=CLEAN):
             outcome = recorder.stage("implement", "implement the work")
         return recorder, primary, fallback, outcome
+
+    def test_a_fallback_that_recovers_without_a_wider_sandbox_is_not_asked_about(self):
+        """Least privilege: a person is asked only when nothing narrower works."""
+        consent = grants.ConsentBroker(
+            "owner/repo", platform="linux",
+            prompt=lambda question: self.fail("asked although a fallback recovered"))
+        recorder, primary, fallback, outcome = self.execute(consent=consent)
+
+        self.assertTrue(outcome.succeeded)
+        self.assertTrue(outcome.rerouted)
+        self.assertEqual((1, 1), (len(primary.dispatched), len(fallback.dispatched)))
+        self.assertEqual([], consent.pending)
+        self.assertNotIn("sandbox_grants", primary.dispatch_kwargs[0])
+
+    def test_without_a_fallback_the_same_executor_reruns_with_the_answer(self):
+        consent = grants.ConsentBroker("owner/repo", platform="linux",
+                                       answers={"docker_host": "cycle"})
+        primary = RestrictedAdapter()
+        recorder = self.recorder([primary], consent=consent)
+        with patch("cycle.effect_snapshot", return_value=CLEAN):
+            outcome = recorder.stage("implement", "implement the work")
+
+        self.assertEqual(2, len(primary.dispatched))
+        self.assertNotIn("sandbox_grants", primary.dispatch_kwargs[0])
+        self.assertEqual(("docker_host",), primary.dispatch_kwargs[1]["sandbox_grants"])
+        attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
+        self.assertEqual("retry", attempts[1]["relationship"])
+        self.assertFalse(outcome.succeeded)
 
     def test_observed_restrictions_reroute_and_preserve_diagnostic(self):
         for kind in recovery.SANDBOX_BLOCKERS:

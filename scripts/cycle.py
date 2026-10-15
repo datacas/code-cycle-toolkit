@@ -46,6 +46,10 @@ from executors import (
     dispatch,
 )
 from harness import build_harness_snapshot
+from grants import (
+    ALLOW_CYCLE, ALLOW_PERSISTENT, DENY, PENDING, ConsentBroker,
+    denial_context, granted_context,
+)
 from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, recovery_context, sandbox_blocker,
 )
@@ -267,6 +271,7 @@ class CycleRecorder:
         change_request_id: str | None = None,
         resolve_effort: str | None = None,
         ci_policy: str = "strict",
+        consent: ConsentBroker | None = None,
     ) -> None:
         self.telemetry = telemetry
         # One per run, so two runs of the same work item stay apart. Checked
@@ -318,6 +323,8 @@ class CycleRecorder:
         # about what the configuration says.
         self.profiles = profiles
         self.routing_strategy = routing_strategy
+        # Sensitive sandbox grants are decided by a person, never by a stage.
+        self.consent = consent
         self.first_pass_rate = (
             telemetry.first_pass_rate(self.repo_id)
             if routing_strategy is RoutingStrategy.MEASURED else None
@@ -686,6 +693,9 @@ class CycleRecorder:
                 if self.on_progress is not None:
                     self.on_progress(**activity)
 
+            granted = (self.consent.granted(decision.target.executor)
+                       if self.consent is not None else ())
+            grant_kwargs = {"sandbox_grants": granted} if granted else {}
             try:
                 result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{routing_context(decision)}",
                                   self.registry,
@@ -693,7 +703,7 @@ class CycleRecorder:
                                   on_progress=observe_progress,
                                   on_workspace=self.on_workspace,
                                   on_dispatch_attempt=begin_dispatch_attempt,
-                                  **dispatch_kwargs)
+                                  **dispatch_kwargs, **grant_kwargs)
             except CycleInterrupted as interruption:
                 # No half-done state, even now: the stage that was running is
                 # the row a later question about this run needs most.
@@ -842,8 +852,56 @@ class CycleRecorder:
                         "reroute_start_state": result.start_state,
                         "reroute_action": action, "reroute_reason": reason,
                     }
-                else:
+                elif not (blocker is not None and self.consent is not None
+                          and self.consent.grant_for(blocker) is not None
+                          and reason != "calibration"):
                     result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}")
+            # Only when no executor could recover without a wider sandbox does
+            # a person get asked: least privilege first.
+            grant = (self.consent.grant_for(blocker)
+                     if blocker is not None and self.consent is not None
+                     and self.mode is not RoutingMode.CALIBRATION else None)
+            answer = None
+            if grant is not None and not retry and grant.id not in granted and attempt == 0:
+                answer = self.consent.request(grant, decision.target.executor, role=role)
+            if answer == PENDING:
+                # Nobody could answer: the sandbox stays as it is, no other
+                # executor is tried in its place, and the cycle stops to ask.
+                result = replace(result, detail=f"{result.detail}; permission required: {grant.id}")
+                signals.update(reroute_action="stop", reroute_reason="permission_required",
+                               process_exited=result.process_exited,
+                               reroute_error_code="environment_restricted",
+                               reroute_start_state=result.start_state)
+            elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
+                # The same target reruns, told the answer. A rerun after an
+                # exit nobody proved could overlap a live worker.
+                safe = (not result.asynchronous and result.process_exited
+                        and not result.needs_human_action and attempt_id is not None)
+                signals.update(reroute_action="reroute" if safe else "stop",
+                               reroute_reason="permission_answered" if safe else "exit_unproven",
+                               process_exited=result.process_exited,
+                               reroute_error_code="environment_restricted",
+                               reroute_start_state=result.start_state)
+                if safe:
+                    scope = grant.scope_for(decision.target.executor, self.consent.platform)
+                    environment_context = recovery_context(blocker) + "\n\n" + (
+                        denial_context(grant) if answer == DENY
+                        else granted_context(grant, scope))
+                    fallback_decision = replace(
+                        decision, reasons=decision.reasons +
+                        (f"rerun after the {grant.id} permission answer: {answer}",),
+                    )
+                    parent_failure = {
+                        "reroute_error_code": "environment_restricted",
+                        "reroute_start_state": result.start_state,
+                        "reroute_action": "reroute", "reroute_reason": "permission_answered",
+                    }
+                    retry = True
+                else:
+                    result = replace(result, detail=f"{result.detail}; reroute stopped: exit_unproven")
+            elif grant is not None and not retry:
+                result = replace(result, detail=f"{result.detail}; reroute stopped: "
+                                                f"{signals.get('reroute_reason', 'no_fallback')}")
             state = result.lifecycle_state or (
                 "launched" if result.asynchronous else
                 "completed" if result.outcome is DispatchOutcome.SUCCEEDED else

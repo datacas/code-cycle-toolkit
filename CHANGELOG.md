@@ -5,16 +5,21 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- Codex stages that implement, resolve, review, or run disposable verification
-  can use the configured host Docker Unix socket when it exists. The runtime
-  grants only the exact socket path from `DOCKER_HOST`, or
-  `/var/run/docker.sock` when unset, so container-based project checks no longer
-  fail solely because the socket is outside the worktree. Access stays enabled
-  by default, with a one-time notice and a project setting,
-  `code_cycle.docker.host_socket_access: false`, to disable it. Docker retains
-  the host daemon's privileges.
+- Sensitive sandbox grants with explicit, informed consent (`scripts/grants.py`).
+  When a stage reports that the sandbox blocks a registered resource, starting
+  with the host Docker daemon (`docker_host`), the runtime asks whether to allow
+  it for this cycle, allow it persistently for the repository, or deny it. The
+  question states what the grant really opens: on Linux Codex that is every
+  local Unix socket, not only Docker's. A one-cycle answer lives only in the
+  running process; a persistent one is stored per user outside the checkout and
+  is asked again when the scope changes; a denial reruns the stage without the
+  grant. A run nobody watches never widens a sandbox without an answer given
+  in advance: it stops with `permission_required`, answered with
+  `--grant docker_host=cycle|persistent|deny`.
+  `code_cycle.docker.host_socket_access: true` authorizes Docker in advance; the
+  default is `false`. Telemetry schema 20.
 
 ## [0.6.0] - 2026-10-14
 

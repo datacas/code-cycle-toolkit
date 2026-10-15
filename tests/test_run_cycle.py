@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
+import grants  # noqa: E402
 import cycle  # noqa: E402
 import review_contract as contract  # noqa: E402
 import router  # noqa: E402
@@ -448,17 +449,17 @@ class DockerConfigTests(RunCycleTestCase):
             path.write_text(body, encoding="utf-8")
             return rc.load_config(path)
 
-    def test_host_docker_socket_access_defaults_to_enabled(self) -> None:
+    def test_host_docker_socket_access_is_not_authorized_by_default(self) -> None:
         config = self.load("code_cycle: {}\n")
 
-        self.assertTrue(rc.docker_host_socket_access(config))
+        self.assertFalse(rc.docker_host_socket_access(config))
 
-    def test_host_docker_socket_access_can_be_disabled(self) -> None:
+    def test_host_docker_socket_access_can_be_authorized_in_advance(self) -> None:
         config = self.load(
-            "code_cycle:\n  docker:\n    host_socket_access: false\n"
+            "code_cycle:\n  docker:\n    host_socket_access: true\n"
         )
 
-        self.assertFalse(rc.docker_host_socket_access(config))
+        self.assertTrue(rc.docker_host_socket_access(config))
 
     def test_host_docker_socket_access_rejects_bad_values_and_keys(self) -> None:
         for body, expected in (
@@ -473,23 +474,152 @@ class DockerConfigTests(RunCycleTestCase):
                     self.load(body)
                 self.assertIn(expected, str(raised.exception))
 
-    def test_disabled_setting_reaches_codex_dispatch(self) -> None:
-        class CapturingTalker(Talker):
-            def __init__(self, name: str) -> None:
-                super().__init__(name)
-                self.dispatch_kwargs = []
 
-            def dispatch(self, target, task, **kw):
-                self.dispatch_kwargs.append(kw)
-                return super().dispatch(target, task, **kw)
+DOCKER_BLOCKER = {
+    "kind": "sandbox_local_access", "command": "docker compose up -d db",
+    "error": "permission denied while trying to connect to the docker API",
+    "attempted": ["checked DOCKER_HOST", "retried docker info"],
+    "requires_human": False,
+}
 
-        implementer = CapturingTalker("codex")
-        report = self.run_cycle(
-            implementer, Talker("claude"), docker_socket_access=False,
-        )
+
+class NeedsDocker(Talker):
+    """A Codex implementer whose first run needs Docker and reports the sandbox."""
+
+    def __init__(self, name: str = "codex") -> None:
+        super().__init__(name)
+        self.calls = []
+
+    def dispatch(self, target, task, **kw):
+        self.calls.append((task, kw))
+        if len(self.calls) == 1 and "cc-implement-issue" in task:
+            self.dispatched.append(task)
+            spoken = block("BLOCKED", environment_blocker=DOCKER_BLOCKER)
+            return ex.DispatchResult(
+                ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                model_resolved=target.model, artifacts={"stdout": spoken},
+                agent_output=spoken, process_exited=True,
+            )
+        return super().dispatch(target, task, **kw)
+
+
+class PermissionConsentTests(RunCycleTestCase):
+    """A sensitive grant is a person's answer, never a stage's claim."""
+
+    def broker(self, **kw) -> grants.ConsentBroker:
+        kw.setdefault("store", grants.ConsentStore(self.home / "consents.json"))
+        return grants.ConsentBroker("owner/api", platform="linux", **kw)
+
+    def test_without_an_answer_the_cycle_stops_and_asks_without_widening(self) -> None:
+        implementer, reviewer = NeedsDocker(), Talker("claude")
+        consent = self.broker()
+
+        report = self.run_cycle(implementer, reviewer, consent=consent)
+
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertEqual("permission_required", report.stop_reason)
+        self.assertEqual(1, len(implementer.calls))
+        self.assertNotIn("sandbox_grants", implementer.calls[0][1])
+        self.assertEqual([], reviewer.dispatched)
+        record = report.decisions_record()
+        self.assertEqual("docker_host", record["permissions"][0]["grant"])
+        asked = record["questions"][0]
+        self.assertIsNone(asked["recommended"])
+        self.assertEqual(["grant:docker_host"], asked["blocks"])
+        # The question says what really opens, not only what was asked for.
+        self.assertIn("every local Unix socket", asked["prompt"])
+        self.assertIn("--grant docker_host=", report.explain())
+        self.assertFalse((self.home / "consents.json").exists())
+
+    def test_an_answer_for_this_cycle_reruns_the_stage_with_the_grant(self) -> None:
+        implementer, reviewer = NeedsDocker(), Talker("claude")
+        consent = self.broker(answers={"docker_host": "cycle"})
+
+        report = self.run_cycle(implementer, reviewer, consent=consent)
 
         self.assertEqual(rc.APPROVED_END, report.status)
-        self.assertFalse(implementer.dispatch_kwargs[0]["docker_socket_access"])
+        self.assertEqual(2, len(implementer.calls))
+        rerun_task, rerun_kw = implementer.calls[1]
+        self.assertEqual(("docker_host",), rerun_kw.get("sandbox_grants"))
+        self.assertIn("The user granted the host Docker daemon", rerun_task)
+        # A Claude reviewer has no such grant to receive.
+        self.assertTrue(reviewer.dispatched)
+        # Nothing about a one-cycle answer is written down.
+        self.assertFalse((self.home / "consents.json").exists())
+
+    def test_a_persistent_answer_is_stored_and_answers_the_next_run(self) -> None:
+        store = grants.ConsentStore(self.home / "consents.json")
+        first = self.run_cycle(NeedsDocker(), Talker("claude"),
+                               consent=self.broker(store=store,
+                                                   answers={"docker_host": "persistent"}))
+        self.assertEqual(rc.APPROVED_END, first.status)
+
+        implementer = NeedsDocker()
+        second = self.run_cycle(implementer, Talker("claude"),
+                                consent=self.broker(store=store))
+
+        self.assertEqual(rc.APPROVED_END, second.status)
+        self.assertEqual(("docker_host",), implementer.calls[1][1].get("sandbox_grants"))
+
+    def test_a_denial_reruns_the_stage_without_the_grant(self) -> None:
+        implementer, reviewer = NeedsDocker(), Talker("claude")
+
+        report = self.run_cycle(implementer, reviewer,
+                                consent=self.broker(answers={"docker_host": "deny"}))
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        rerun_task, rerun_kw = implementer.calls[1]
+        self.assertNotIn("sandbox_grants", rerun_kw)
+        self.assertIn("The user denied the host Docker daemon", rerun_task)
+        self.assertIn("not verified", rerun_task)
+        self.assertFalse((self.home / "consents.json").exists())
+
+    def test_a_terminal_answer_is_asked_once_for_the_whole_cycle(self) -> None:
+        asked = []
+
+        def prompt(question):
+            asked.append(question)
+            return "cycle"
+
+        implementer = NeedsDocker()
+        report = self.run_cycle(implementer, Talker("claude"),
+                                consent=self.broker(prompt=prompt))
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual(1, len(asked))
+        self.assertEqual(("docker_host",), implementer.calls[1][1].get("sandbox_grants"))
+
+    def test_project_authorization_grants_without_asking(self) -> None:
+        implementer = NeedsDocker()
+
+        report = self.run_cycle(
+            implementer, Talker("claude"),
+            consent=self.broker(preauthorized=frozenset({"docker_host"}),
+                                prompt=lambda question: self.fail("asked anyway")))
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual(("docker_host",), implementer.calls[1][1].get("sandbox_grants"))
+        self.assertFalse((self.home / "consents.json").exists())
+
+    def test_a_platform_without_a_scope_never_widens(self) -> None:
+        implementer = NeedsDocker()
+        consent = grants.ConsentBroker("owner/api", platform="macos",
+                                       answers={"docker_host": "cycle"})
+
+        self.run_cycle(implementer, Talker("claude"), consent=consent)
+
+        self.assertTrue(all("sandbox_grants" not in kw for _, kw in implementer.calls))
+        self.assertTrue(any("not available for codex on macos" in note
+                            for note in consent.notes))
+
+    def test_the_cli_refuses_a_malformed_grant_before_dispatching(self) -> None:
+        for value in ("docker_host", "docker_host=always", "root=cycle"):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                    rc.main(["--task", "API-7", "--repo", "owner/api", "--no-config",
+                             "--grant", value])
+                self.assertIn("--grant must be ID=cycle|persistent|deny", stderr.getvalue())
 
 
 class WorktreeDirectoryTests(unittest.TestCase):
