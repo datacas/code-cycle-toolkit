@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `run_cycle.py` run from a linked worktree without its own `.code-cycle.yml`
+  now falls back to the main worktree root's file instead of silently using the
+  built-in defaults, so `code_cycle.profiles` and `review.trusted_authors`
+  apply. Each run states which configuration file it used, or that it found
+  none. A file in the worktree still wins; `--config` and `--no-config` are
+  unchanged.
+
 ### Added
 
 - Sensitive sandbox grants with explicit, informed consent (`scripts/grants.py`).

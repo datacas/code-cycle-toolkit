@@ -16,6 +16,8 @@ safe inference              (an unambiguous github.com / bitbucket.org origin re
 built-in defaults, or BLOCKED when a provider or repository stays ambiguous
 ```
 
+`run_cycle.py` looks for the file in `--cwd`; from a linked worktree that has none, it falls back to the main worktree root's file (found through the Git common directory). A file in the worktree wins. Each run prints which file it used, or that it found none and uses the built-in defaults. `--config <path>` and `--no-config` keep their meaning.
+
 `.code-cycle.yml` is optional and holds **no secrets**. Skills never edit it silently. `cc-provider-bootstrap` and `cc-orchestrator` show the proposed change and ask first.
 
 ## Full example
