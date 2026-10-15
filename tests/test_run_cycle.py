@@ -1731,6 +1731,93 @@ code_cycle:
 
 
 @unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
+class LinkedWorktreeConfigurationTests(unittest.TestCase):
+    """A linked worktree finds the main worktree root's configuration."""
+
+    BODY = """
+code_cycle:
+  review:
+    trusted_authors: [maintainer]
+  profiles:
+    cheap_coder:
+      primary: claude:anthropic/claude-sonnet-5-5 high
+"""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name).resolve()
+        self.main = base / "main"
+        self.linked = base / "linked"
+        self.main.mkdir()
+        self.git(self.main, "init", "-q", "-b", "main")
+        self.git(self.main, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "-q", "--allow-empty", "-m", "base")
+        self.git(self.main, "worktree", "add", "-q", "-b", "task", str(self.linked))
+
+    @staticmethod
+    def git(cwd: Path, *arguments: str) -> None:
+        subprocess.run(["git", *arguments], cwd=cwd, check=True,
+                       capture_output=True, text=True)
+
+    def resolve(self, **fields) -> tuple[dict, list[str]]:
+        lines: list[str] = []
+        config = rc.resolve_config(Args(cwd=str(self.linked), **fields),
+                                   report=lines.append)
+        return config, lines
+
+    def test_the_main_roots_file_applies_and_is_named(self) -> None:
+        (self.main / rc.CONFIG_NAME).write_text(self.BODY, encoding="utf-8")
+
+        config, lines = self.resolve()
+
+        self.assertEqual(["maintainer"], config["code_cycle"]["review"]["trusted_authors"])
+        profiles = rc.plan(Args(cwd=str(self.linked), repo="owner/api"))[1]
+        self.assertEqual("claude-sonnet-5-5", profiles["cheap_coder"].primary.model)
+        self.assertEqual(1, len(lines))
+        self.assertIn(str(self.main / rc.CONFIG_NAME), lines[0])
+        self.assertIn("main worktree", lines[0])
+
+    def test_a_file_in_the_worktree_takes_precedence(self) -> None:
+        (self.main / rc.CONFIG_NAME).write_text(self.BODY, encoding="utf-8")
+        (self.linked / rc.CONFIG_NAME).write_text(
+            "code_cycle:\n  review:\n    trusted_authors: [local]\n", encoding="utf-8")
+
+        config, lines = self.resolve()
+
+        self.assertEqual(["local"], config["code_cycle"]["review"]["trusted_authors"])
+        self.assertIn(str(self.linked / rc.CONFIG_NAME), lines[0])
+        self.assertNotIn("main worktree", lines[0])
+
+    def test_config_and_no_config_keep_their_meaning(self) -> None:
+        (self.main / rc.CONFIG_NAME).write_text(self.BODY, encoding="utf-8")
+        explicit = self.main.parent / "explicit.yml"
+        explicit.write_text("code_cycle:\n  ci:\n    policy: parallel\n", encoding="utf-8")
+
+        config, lines = self.resolve(config=str(explicit))
+        self.assertEqual("parallel", config["code_cycle"]["ci"]["policy"])
+        self.assertIn("--config", lines[0])
+
+        config, lines = self.resolve(no_config=True)
+        self.assertEqual({}, config)
+        self.assertIn("built-in defaults", lines[0])
+
+    def test_no_file_anywhere_says_it_uses_the_defaults(self) -> None:
+        config, lines = self.resolve()
+
+        self.assertEqual({}, config)
+        self.assertEqual(1, len(lines))
+        self.assertIn("built-in defaults", lines[0])
+
+    def test_outside_a_repository_there_is_no_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = Args(cwd=temporary)
+            lines: list[str] = []
+            self.assertEqual({}, rc.resolve_config(args, report=lines.append))
+        self.assertIn("built-in defaults", lines[0])
+
+
+@unittest.skipUnless(HAS_YAML, "reading a configuration needs PyYAML")
 class KnownKeyTests(unittest.TestCase):
     """Every key under `code_cycle` is known, or the run does not start."""
 

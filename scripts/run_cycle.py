@@ -3605,25 +3605,75 @@ def plan_with_strategy(args) -> tuple[str, dict, RoutingStrategy]:
     return repo, profiles, routing_strategy
 
 
-def resolve_config(args) -> dict:
+def _main_worktree_config(cwd: Path, run=subprocess.run) -> Path | None:
+    """The main worktree root's configuration file, seen from a linked worktree.
+
+    A file that only the main worktree holds (kept out of Git through
+    `.git/info/exclude`, say) is invisible from a linked worktree. The Git
+    common directory leads back to it. Any Git failure means "no fallback",
+    never an error: the caller then states that it found nothing.
+    """
+    clean_env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        clean_env.pop(name, None)
+    try:
+        result = run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=cwd,
+            capture_output=True, text=True, check=False, env=clean_env,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = cwd / common
+    common = common.resolve()
+    if common.name != ".git":
+        return None
+    path = common.parent / CONFIG_NAME
+    return path if path.is_file() else None
+
+
+def resolve_config(args, report=None) -> dict:
     """Which configuration this run is under, and none by accident.
 
     An explicit `--config` that is not there is an error, because somebody named
-    it. A file found beside the work is used when it exists. `--no-config` is
-    the only way to run on the built-in defaults while a file sits next to the
-    work, and it has to be asked for.
+    it. A file found beside the work is used when it exists; otherwise, from a
+    linked worktree, the main worktree root's file is. `--no-config` is the only
+    way to run on the built-in defaults while a file sits next to the work, and
+    it has to be asked for.
+
+    `report`, when given, receives one line saying which file decided the run,
+    or that none did.
     """
+    def say(line: str) -> None:
+        if report is not None:
+            report(line)
+
     if args.no_config:
         if args.config:
             raise CycleDriverError("--config and --no-config contradict each other")
+        say("configuration: ignored (--no-config); using the built-in defaults")
         return {}
     if args.config:
         path = Path(args.config)
         if not path.is_file():
             raise CycleDriverError(f"no configuration at {path}")
+        say(f"configuration: {path} (--config)")
         return load_config(path)
-    path = Path(args.cwd or ".") / CONFIG_NAME
-    return load_config(path) if path.is_file() else {}
+    cwd = Path(args.cwd or ".")
+    path = cwd / CONFIG_NAME
+    if path.is_file():
+        say(f"configuration: {path}")
+        return load_config(path)
+    fallback = _main_worktree_config(cwd)
+    if fallback is not None:
+        say(f"configuration: {fallback} (main worktree; {path} does not exist)")
+        return load_config(fallback)
+    say(f"configuration: no {CONFIG_NAME} at {path} or in the main worktree; "
+        "using the built-in defaults")
+    return {}
 
 
 #: The requests to stop that end a cycle early: a host ending its task at a
@@ -3777,7 +3827,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database", default=None,
                         help=f"telemetry database (default: {default_database_path()})")
     parser.add_argument("--config", default=None,
-                        help=f"path to {CONFIG_NAME} (default: alongside the work)")
+                        help=f"path to {CONFIG_NAME} (default: alongside the work, else the main worktree's)")
     parser.add_argument("--no-config", action="store_true",
                         help="run on the built-in defaults, ignoring any configuration")
     parser.add_argument("--grant", action="append", default=[], metavar="ID=ANSWER",
@@ -3791,7 +3841,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_start(args.start_from, args.change_request, local_only=args.local_only,
                        continue_work=args.continue_work)
         repo, profiles, routing_strategy = plan_with_strategy(args)
-        config = resolve_config(args)
+        config = resolve_config(args, report=print)
         grant_answers = parse_grant_options(args.grant)
         if args.local_only:
             validate_local_only_cwd(args.cwd)
