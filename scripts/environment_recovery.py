@@ -6,6 +6,7 @@ still proves process exit, reconciles effects and uses its configured fallback.
 from __future__ import annotations
 
 import json
+import re
 
 
 SANDBOX_BLOCKERS = frozenset({
@@ -30,8 +31,11 @@ return BLOCKED with an environment_blocker in ORCHESTRATION_RESULT:
 {"kind":"sandbox_local_access","command":"the failing command",
  "error":"the observed error","attempted":["the recovery actually tried"],
  "requires_human":false}.
-Other kinds are sandbox_network_access and sandbox_filesystem_access. Report
-only observed restrictions; connection refused alone does not prove isolation.
+Other kinds are sandbox_network_access and sandbox_filesystem_access. When the
+restriction is the host Docker daemon, add "resource":"docker_host": the
+runtime then asks the user whether to grant it, and never grants it on your
+word. Report only observed restrictions; connection refused alone does not
+prove isolation.
 Do not use this report for a genuinely unavailable service, missing credentials,
 login/trust prompts, an approval denial, or an action requiring a human. Those
 remain ordinary blockers. Forward a delegated verifier's environment_blocker
@@ -68,9 +72,14 @@ def sandbox_blocker(spoken: str) -> dict | None:
     if (not isinstance(attempted, list) or not attempted
             or any(not isinstance(item, str) or not item.strip() for item in attempted)):
         return None
-    return {key: blocker[key] for key in (
+    cleaned = {key: blocker[key] for key in (
         "kind", "command", "error", "attempted", "requires_human",
     )}
+    # A name for the resource behind the restriction, never a grant of it.
+    resource = blocker.get("resource")
+    if isinstance(resource, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", resource):
+        cleaned["resource"] = resource
+    return cleaned
 
 
 def recovery_context(blocker: dict) -> str:

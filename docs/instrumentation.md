@@ -692,8 +692,11 @@ never written. Check names stay in the published comment.
 `telemetry.STOP_REASONS`: `approved`, `iteration_limit`, `no_progress`,
 `repeated_findings`, `stage_not_completed` (a stage reported something other
 than a completion, or only started work that finishes elsewhere),
-`dispatch_failed`, or `local_only`. A closing row from an earlier version has
-none, and `cc-stats` reads it as unknown.
+`dispatch_failed`, `local_only`, or `permission_required` (schema 20: a stage
+needs a sensitive sandbox grant nobody answered; see *Sensitive sandbox grants*
+in `routing.md`). A closing row from an earlier version has none, and
+`cc-stats` reads it as unknown. A stage row's `reroute_reason` may then be
+`permission_required` or `permission_answered`.
 
 Each dispatch row that reached an executor carries `duration_ms`, the executor
 call's wall time from a monotonic clock. An attempt refused before an executor

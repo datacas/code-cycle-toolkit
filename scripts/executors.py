@@ -50,6 +50,9 @@ from urllib.parse import urlsplit
 from router import Availability, RoutingDecision, RoutingMode, Target
 from usage import normalize_executor_output
 
+#: The sensitive grants (`grants.py`) Codex knows how to apply, and how.
+CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets"}
+
 SCHEMA_VERSION = 1
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
 # How long a stopped dispatch's process group may run its own teardown after
@@ -1048,6 +1051,7 @@ class NativeAdapter(Adapter):
                  claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  writable_dirs: tuple[str, ...] = (),
+                 sandbox_grants: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
@@ -1065,6 +1069,8 @@ class NativeAdapter(Adapter):
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
+        if self.name == "codex" and sandbox_grants:
+            argv_options["sandbox_grants"] = sandbox_grants
         if self.name == "claude" and claude_allowed_commands:
             argv_options["allowed_commands"] = claude_allowed_commands
         if publishes and publication_permissions:
@@ -1638,7 +1644,8 @@ class CodexAdapter(NativeAdapter):
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
-             writable_dirs: tuple[str, ...] = ()) -> list[str]:
+             writable_dirs: tuple[str, ...] = (),
+             sandbox_grants: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -1647,22 +1654,38 @@ class CodexAdapter(NativeAdapter):
         # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
                 "-c", f"model_reasoning_effort={target.effort}", "--json"]
-        if publishes:
-            profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+        unknown = sorted(set(sandbox_grants) - set(CODEX_GRANT_OPTIONS))
+        if unknown:
+            raise ExecutorError(f"Codex cannot apply sandbox grants: {', '.join(unknown)}")
+        # Only a person grants this (`grants.py`). Codex's Linux sandbox blocks
+        # every new AF_UNIX socket unless all are allowed, through its network
+        # proxy; a filesystem rule on the socket path makes the helper fail to
+        # start (#239). The proxy keeps the domain allowlist, or none at all.
+        unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
+        profile = None
+        if publishes or (writes and unix_sockets):
+            if publishes:
+                profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+            else:
+                profile = "code_cycle_write"
             parent = ":workspace" if writes else ":read-only"
             argv += [
                 "-c", f'default_permissions="{profile}"',
                 "-c", "features.network_proxy=true",
                 "-c", f'permissions.{profile}.extends="{parent}"',
                 "-c", f"permissions.{profile}.network.enabled=true",
-                "-c", (
+            ]
+            if publishes:
+                argv += ["-c", (
                     f'permissions.{profile}.network.domains={{'
                     '"github.com"="allow",'
                     '"api.github.com"="allow",'
                     '"bitbucket.org"="allow",'
                     '"api.bitbucket.org"="allow"}'
-                ),
-            ]
+                )]
+            if unix_sockets:
+                argv += ["-c",
+                         f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true"]
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
         if cwd:
@@ -1671,10 +1694,10 @@ class CodexAdapter(NativeAdapter):
             # The common root itself is never a writable root (#229).
             for directory in self.git_write_roots(writable_dirs):
                 argv += ["--add-dir", directory]
-            if publishes and writable_dirs:
+            if profile is not None and writable_dirs:
                 argv += [
                     "-c",
-                    "permissions.code_cycle_publish_write.filesystem="
+                    f"permissions.{profile}.filesystem="
                     f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
                 ]
         return argv + [task]
@@ -2544,6 +2567,7 @@ def dispatch(
     on_workspace = kw.pop("on_workspace", None)
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
     on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
+    sandbox_grants = tuple(kw.pop("sandbox_grants", ()) or ())
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -2662,6 +2686,8 @@ def dispatch(
     writable_dirs = tuple(kw.pop("writable_dirs", ()) or ())
     if target.executor == "codex" and kw.get("writes", False) and writable_dirs:
         kw["writable_dirs"] = writable_dirs
+    if target.executor == "codex" and sandbox_grants:
+        kw["sandbox_grants"] = sandbox_grants
     if isinstance(adapter, NativeAdapter) and read_dirs and not kw.get("writes", False):
         kw["read_dirs"] = read_dirs
 

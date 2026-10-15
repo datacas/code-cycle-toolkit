@@ -70,6 +70,10 @@ from cycle_history import (
     RemoteMark,
 )
 from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
+from grants import (
+    ConsentBroker, ConsentStore, GrantError, PermissionRequest,
+    parse_grant_options, terminal_prompt,
+)
 from executors import (
     DispatchResult,
     ReadinessPolicy,
@@ -131,7 +135,8 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
-                         "resolve", "worktree_dir", "allowed_commands", "ci"})
+                         "resolve", "worktree_dir", "allowed_commands", "ci",
+                         "docker"})
 
 #: The keys under `code_cycle.ci` (#228), all read by this driver.
 CI_KEYS = frozenset({"policy", "timeout"})
@@ -376,7 +381,7 @@ def load_config(path: Path) -> dict:
         "code_cycle", "code_cycle.repository", "code_cycle.profiles",
         "code_cycle.routing", "code_cycle.calibration",
         "code_cycle.issue_review", "code_cycle.resolve",
-        "code_cycle.allowed_commands", "code_cycle.ci",
+        "code_cycle.allowed_commands", "code_cycle.ci", "code_cycle.docker",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -435,6 +440,17 @@ def load_config(path: Path) -> dict:
     except CycleDriverError as error:
         raise CycleDriverError(f"{path}: {error}") from error
 
+    docker = (config.get("code_cycle") or {}).get("docker") or {}
+    unknown = sorted(str(key) for key in set(docker) - {"host_socket_access"})
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.docker: " + ", ".join(unknown)
+            + "; known keys are host_socket_access")
+    if ("host_socket_access" in docker
+            and not isinstance(docker["host_socket_access"], bool)):
+        raise CycleDriverError(
+            f"{path}: code_cycle.docker.host_socket_access must be true or false")
+
     code_cycle = config.get("code_cycle") or {}
     if "allowed_commands" in code_cycle:
         allowed_commands = code_cycle["allowed_commands"]
@@ -470,6 +486,15 @@ def allowed_test_command(config: dict) -> str | None:
     """The validated exact test command, when the repository declares one."""
     allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
     return allowed.get("test")
+
+
+def docker_host_socket_access(config: dict) -> bool:
+    """Whether the project authorizes the `docker_host` grant in advance.
+
+    False by default: a stage that needs Docker asks for it instead.
+    """
+    docker = (config.get("code_cycle") or {}).get("docker") or {}
+    return docker.get("host_socket_access", False)
 
 
 def _ci_section(config: dict) -> dict:
@@ -734,6 +759,8 @@ class CycleReport:
     #: What happened between stages, such as each read or wait of the CI gate,
     #: as `(stages before it, line)`. Already safe to print.
     notes: list[tuple[int, str]] = field(default_factory=list)
+    #: Sensitive sandbox grants a stage asked for and nobody has answered.
+    permission_requests: list[PermissionRequest] = field(default_factory=list)
 
     @property
     def approved(self) -> bool:
@@ -781,6 +808,8 @@ class CycleReport:
             lines.append(f"  reason:  {self.reason}")
         if self.readiness is not None and self.readiness.gate != READINESS_CONTINUE:
             lines.extend(_readiness_lines(self.readiness, self.decisions_path))
+        if self.permission_requests:
+            lines.extend(_permission_lines(self.permission_requests, self.decisions_path))
         return "\n".join(lines)
 
     def decisions_record(self) -> dict | None:
@@ -791,6 +820,14 @@ class CycleReport:
         them, for whoever asks the next question or shows the details on
         request. It holds the stage's untrusted prose, never instructions.
         """
+        if self.permission_requests:
+            return {
+                "repo": self.repo_id, "task": self.task_id, "status": self.status,
+                "stop_reason": self.stop_reason,
+                "decisions": len(self.permission_requests),
+                "questions": [request.question for request in self.permission_requests],
+                "permissions": [request.record() for request in self.permission_requests],
+            }
         readiness = self.readiness
         if (readiness is None or not readiness.valid
                 or readiness.gate == READINESS_CONTINUE):
@@ -858,6 +895,21 @@ def _readiness_lines(readiness: Readiness, details: Path | None) -> list[str]:
         # The path is the runtime's own, so it is printed as it is.
         lines.append(f"  details: {details}" if details is not None
                      else "  details: not saved")
+    return lines
+
+
+def _permission_lines(requests: list[PermissionRequest], details: Path | None) -> list[str]:
+    """The first pending permission, its real scope, and how to answer it."""
+    request = requests[0]
+    asked = request.question
+    lines = [f"  decisions: {len(requests)} needed",
+             f"  question 1/{len(requests)} {asked['id']}: {readable(asked['prompt'], 600)}",
+             "    options: " + " | ".join(readable(option, 100) for option in asked["options"]),
+             f"  answer:  rerun with --grant {request.grant.id}=<"
+             + "|".join(answer for answer in ("cycle", "persistent", "deny")
+                        if answer != "cycle" or request.scope.isolated_per_dispatch)
+             + "> from the stopped stage"]
+    lines.append(f"  details: {details}" if details is not None else "  details: not saved")
     return lines
 
 
@@ -2001,6 +2053,7 @@ def run_cycle(
     history_remote: HistoryRemote | None = None,
     ci_policy: str = DEFAULT_CI_POLICY,
     ci_timeout: int = ci_gate.DEFAULT_TIMEOUT,
+    consent: ConsentBroker | None = None,
     ci_checks: ci_gate.CheckProvider | None = None,
     ci_poll_interval: float = ci_gate.DEFAULT_POLL_INTERVAL,
     ci_clock: Callable[[], float] | None = None,
@@ -2074,6 +2127,7 @@ def run_cycle(
         change_request_id=change_request_id,
         resolve_effort=resolve_effort,
         ci_policy=ci_policy,
+        consent=consent,
     )
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,
@@ -2337,6 +2391,13 @@ def run_cycle(
         # evidence the runtime no longer vouches for.
         if tampered is not None:
             return stop(tampered, reported=reported)
+        if consent is not None and consent.pending:
+            # The sandbox stayed as it was; a person answers before any rerun.
+            report.permission_requests = list(consent.pending)
+            asked = consent.pending[0]
+            return stop(f"the {asked.role} stage needs permission: {asked.grant.id} "
+                        f"({asked.grant.resource})", reported=reported,
+                        stop_reason="permission_required")
         if not outcome.succeeded:
             blocked_effort = (
                 (outcome.result is not None
@@ -3719,6 +3780,9 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"path to {CONFIG_NAME} (default: alongside the work)")
     parser.add_argument("--no-config", action="store_true",
                         help="run on the built-in defaults, ignoring any configuration")
+    parser.add_argument("--grant", action="append", default=[], metavar="ID=ANSWER",
+                        help="answer a sensitive sandbox permission in advance: "
+                             "docker_host=cycle|persistent|deny (repeatable)")
     args = parser.parse_args(argv)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
@@ -3728,6 +3792,7 @@ def main(argv: list[str] | None = None) -> int:
                        continue_work=args.continue_work)
         repo, profiles, routing_strategy = plan_with_strategy(args)
         config = resolve_config(args)
+        grant_answers = parse_grant_options(args.grant)
         if args.local_only:
             validate_local_only_cwd(args.cwd)
             if args.workspace != "current":
@@ -3764,7 +3829,7 @@ def main(argv: list[str] | None = None) -> int:
             check_continuation(args.cwd, config)
         if args.start_from in RESUMES:
             check_change_request(repo, args.change_request, args.cwd)
-    except CycleDriverError as error:
+    except (CycleDriverError, GrantError) as error:
         parser.error(str(error))
 
     if args.detach:
@@ -3781,6 +3846,13 @@ def main(argv: list[str] | None = None) -> int:
         config, repo, args.work_item_repository
     )
     code_host = (config.get("code_cycle") or {}).get("code_host")
+    # Asked on a terminal only; a run nobody watches never widens a sandbox
+    # without an answer given in advance.
+    consent = ConsentBroker(
+        repo, store=ConsentStore(), answers=grant_answers,
+        preauthorized=frozenset({"docker_host"} if docker_host_socket_access(config) else ()),
+        prompt=(terminal_prompt() if sys.stdin.isatty() and sys.stderr.isatty() else None),
+    )
     telemetry = Telemetry(Path(args.database) if args.database else None)
     try:
         with interruptible():
@@ -3820,8 +3892,9 @@ def main(argv: list[str] | None = None) -> int:
                 allowed_test_command=allowed_test_command(config),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
+                consent=consent,
             )
-    except CycleDriverError as error:
+    except (CycleDriverError, GrantError) as error:
         parser.error(str(error))
     except CycleInterrupted as interruption:
         # Before the recorder existed, or after it closed: nothing is running
@@ -3830,6 +3903,9 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    if consent.notes:
+        report.notes[:0] = [(0, f"  permission {readable(line, 300)}")
+                            for line in consent.notes]
     save_decisions(report, Path(telemetry.path).parent / "decisions")
     print(report.explain())
     print(f"recorded in {telemetry.path}")
