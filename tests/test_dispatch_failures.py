@@ -320,7 +320,7 @@ class ExecutorFailureTests(unittest.TestCase):
                             + ")\nsys.exit(1)\n")
             class FakeBinary(ex.CodexAdapter):
                 def argv(self, *a, **k):
-                    return [sys.executable, str(fake)]
+                    return [sys.executable, str(fake), *super().argv(*a, **k)[1:]]
             result = FakeBinary().dispatch(TARGET, "work", cwd=directory)
             self.assertEqual(("capacity", "not_started"), (result.failure_code, result.start_state))
 

@@ -41,6 +41,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -117,6 +118,53 @@ def _paths_overlap(first: str, second: str) -> bool:
     return (first_path == second_path
             or first_path in second_path.parents
             or second_path in first_path.parents)
+
+
+@contextmanager
+def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
+                           *, writes: bool, publishes: bool, cwd: str):
+    """Give a native read-only dispatch scratch space, never a writable checkout."""
+    if writes:
+        yield argv, environment
+        return
+    try:
+        code, root = _git_read(cwd, "rev-parse", "--show-toplevel")
+        repository = Path(root).resolve() if code == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        repository = Path(cwd).resolve()
+    # TMPDIR may itself point inside the checkout. Do not create even a scratch
+    # directory there: read-only verification includes untracked files.
+    candidates = (tempfile.gettempdir(), os.environ.get("TEMP"),
+                  os.environ.get("TMP"), "/tmp", "/var/tmp")
+    # A parent such as /tmp may contain the checkout; only the newly created
+    # child must be disjoint from it.
+    parent = next((path for path in candidates if path and Path(path).is_dir()
+                   and os.access(path, os.W_OK)
+                   and (repository is None or (repository != Path(path).resolve()
+                        and repository not in Path(path).resolve().parents))), None)
+    if parent is None:
+        raise ExecutorError("no temporary directory outside the review checkout")
+    with tempfile.TemporaryDirectory(prefix="code-cycle-review-tmp-", dir=parent) as scratch:
+        if repository is not None and _paths_overlap(scratch, str(repository)):
+            raise ExecutorError("review temporary directory overlaps the checkout")
+        worker_env = dict(os.environ if environment is None else environment)
+        worker_env["TMPDIR"] = scratch
+        worker_argv = list(argv)
+        if adapter.name == "codex":
+            profile = "code_cycle_publish_read" if publishes else "code_cycle_review_read"
+            options = []
+            if not publishes:
+                # A named profile replaces the legacy read-only selector, while
+                # inheriting its filesystem and network restrictions.
+                index = worker_argv.index("-s")
+                del worker_argv[index:index + 2]
+                options += ["-c", f'default_permissions="{profile}"',
+                            "-c", f'permissions.{profile}.extends=":read-only"']
+            options += ["-c", f'permissions.{profile}.filesystem={{'
+                        f'{json.dumps(scratch)}="write"}}',
+                        "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
+            worker_argv[-1:-1] = options
+        yield worker_argv, worker_env
 
 
 @dataclass(frozen=True)
@@ -1052,18 +1100,23 @@ class NativeAdapter(Adapter):
         environment = self.dispatch_environment(
             writes=writes, publishes=publishes, writable_dirs=writable_dirs,
         )
-        run_options = {"env": environment} if environment is not None else {}
         if on_workspace is not None:
             on_workspace(worker_cwd)
         try:
-            if on_progress is not None and runner is _run:
-                completed = runner(
-                    argv, timeout=timeout, cwd=cwd,
-                    on_output=lambda line: self._stream_activity(line, on_progress),
-                    **run_options,
-                )
-            else:
-                completed = runner(argv, timeout=timeout, cwd=cwd, **run_options)
+            with _native_review_scratch(
+                self, argv, environment, writes=writes, publishes=publishes,
+                cwd=worker_cwd,
+            ) as (worker_argv, worker_env):
+                argv = worker_argv
+                run_options = {"env": worker_env} if worker_env is not None else {}
+                if on_progress is not None and runner is _run:
+                    completed = runner(
+                        worker_argv, timeout=timeout, cwd=cwd,
+                        on_output=lambda line: self._stream_activity(line, on_progress),
+                        **run_options,
+                    )
+                else:
+                    completed = runner(worker_argv, timeout=timeout, cwd=cwd, **run_options)
         except subprocess.TimeoutExpired as timeout_error:
             partial_stdout = timeout_error.stdout or ""
             if isinstance(partial_stdout, bytes):

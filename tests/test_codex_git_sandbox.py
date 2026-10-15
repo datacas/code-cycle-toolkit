@@ -235,7 +235,10 @@ class ProfileTests(LinkedRepository):
             TARGET, "review", cwd=str(self.workspace), runner=runner,
             writes=False, publishes=True, writable_dirs=self.roots,
         )
-        self.assertNotIn("env", seen)
+        self.assertEqual(os.environ.get("GIT_CONFIG_PARAMETERS"),
+                         seen["env"].get("GIT_CONFIG_PARAMETERS"))
+        self.assertIn("TMPDIR", seen["env"])
+        self.assertFalse(Path(seen["env"]["TMPDIR"]).exists())
 
 
 class RouteAwayTests(LinkedRepository):
