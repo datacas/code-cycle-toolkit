@@ -372,7 +372,7 @@ class DispatchGateTests(unittest.TestCase):
             provable_ceiling=ex.Availability.AUTHENTICATED, version=(0, 138, 0),
         )
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed("done")
 
@@ -503,7 +503,7 @@ class InteractiveFrictionTests(unittest.TestCase):
                 self.assertIsNone(ex.ClaudeAdapter().classify_failure(0, "", text))
 
     def test_a_successful_dispatch_survives_those_words_in_its_answer(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed(
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed(
             "Implemented quota handling and rate limit tests"
         )
 
@@ -557,7 +557,7 @@ class NativeDispatchTests(unittest.TestCase):
     def test_codex_runs_non_interactively_with_the_requested_model_and_effort(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed('{"model": "gpt-6-luna"}')
 
@@ -603,7 +603,7 @@ class NativeDispatchTests(unittest.TestCase):
         """A run needing elevated permissions is a run a human should see."""
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed("{}")
 
@@ -615,7 +615,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", seen["argv"])
 
     def test_an_interactive_screen_blocks_instead_of_being_answered(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed(
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed(
             returncode=1, stderr="WARNING: Claude Code running in Bypass Permissions mode"
         )
         target = router.parse_target("claude:anthropic/claude-opus-5-5 high")
@@ -627,7 +627,7 @@ class NativeDispatchTests(unittest.TestCase):
 
     def test_an_exhausted_window_blocks_rather_than_failing(self) -> None:
         """Quota is a missing capability, not a broken run: retrying is useless."""
-        runner = lambda argv, timeout=None, cwd=None: completed(
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed(
             returncode=1, stderr="You have 2 usage limit resets available"
         )
 
@@ -637,7 +637,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual("operating_quota", result.missing_capability)
 
     def test_a_nonzero_exit_is_a_failure_with_its_output(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed("", returncode=2, stderr="boom")
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed("", returncode=2, stderr="boom")
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -646,7 +646,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertEqual(2, result.artifacts["returncode"])
 
     def test_a_timeout_does_not_claim_the_run_is_dead(self) -> None:
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             raise subprocess.TimeoutExpired(argv, timeout or 1)
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", timeout=5, runner=runner)
@@ -655,7 +655,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertIn("may still be alive", result.detail)
 
     def test_silence_about_the_model_stays_silence(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed("done, no json here")
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed("done, no json here")
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -664,7 +664,7 @@ class NativeDispatchTests(unittest.TestCase):
         self.assertIsNone(result.model_matches_request)
 
     def test_a_reported_mismatch_is_visible(self) -> None:
-        runner = lambda argv, timeout=None, cwd=None: completed('{"model": "gpt-6-sol"}')
+        runner = lambda argv, timeout=None, cwd=None, env=None: completed('{"model": "gpt-6-sol"}')
 
         result = ex.CodexAdapter().dispatch(TARGET, "work", runner=runner)
 
@@ -678,7 +678,7 @@ class NativeDispatchTests(unittest.TestCase):
         observed = []
         runner_cwds = []
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             runner_cwds.append(cwd)
             return completed("done")
 
@@ -697,7 +697,7 @@ class WorkingDirectoryTests(unittest.TestCase):
     def test_codex_receives_the_directory_as_a_flag_and_on_the_process(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen.update(argv=argv, cwd=cwd)
             return completed("{}")
 
@@ -710,7 +710,7 @@ class WorkingDirectoryTests(unittest.TestCase):
     def test_claude_has_no_directory_flag_so_the_process_gets_one(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen.update(argv=argv, cwd=cwd)
             return completed("{}")
 
@@ -723,7 +723,7 @@ class WorkingDirectoryTests(unittest.TestCase):
     def test_no_directory_means_no_directory_not_the_current_one(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["cwd"] = cwd
             return completed("{}")
 
@@ -738,7 +738,7 @@ class ReadDirectoryTests(unittest.TestCase):
     def argv(self, adapter, target, **kw) -> list[str]:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed("{}")
 
@@ -762,7 +762,7 @@ class ReadDirectoryTests(unittest.TestCase):
         """Claude's added directories are editable under `acceptEdits` (REV-001)."""
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed("{}")
 
@@ -787,7 +787,7 @@ class ReadDirectoryTests(unittest.TestCase):
                          read_dirs=("/tmp/code-cycle-diff-x",))
 
         self.assertNotIn("--add-dir", argv)
-        self.assertEqual(["-s", "read-only"], argv[argv.index("-s"):argv.index("-s") + 2])
+        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', argv)
         self.assertEqual("review", argv[-1])
 
 
@@ -807,7 +807,7 @@ class OrcaDispatchTests(unittest.TestCase):
     def test_it_dispatches_and_reads_the_model_from_the_receipt(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return self.receipt()
 
@@ -831,7 +831,7 @@ class OrcaDispatchTests(unittest.TestCase):
             isolation="disposable",
         ))
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["cwd"] = cwd
             return self.receipt()
 
@@ -900,7 +900,7 @@ class OrcaDispatchTests(unittest.TestCase):
     def test_a_review_fallback_carries_the_isolation_contract(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["cwd"] = cwd
             return self.receipt()
 
@@ -930,7 +930,7 @@ class OrcaContractTests(unittest.TestCase):
     def argv_for(self, target, **ctx):
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed(json.dumps({"ok": True, "result": {
                 "state": "ready", "launch": {"effective": {"model": target.model}}}}))
@@ -1047,7 +1047,7 @@ class OrcaContractTests(unittest.TestCase):
     def test_a_review_runs_in_the_isolated_workspace(self) -> None:
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             seen["cwd"] = cwd
             return completed(json.dumps({"ok": True, "result": {
@@ -1399,7 +1399,7 @@ class PermissionTests(unittest.TestCase):
         seen = {}
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"], seen["cwd"] = argv, cwd
             self.assertNotEqual(str(repo), cwd)
             self.assertFalse(ex._paths_overlap(cwd, str(repo)))
@@ -1445,7 +1445,7 @@ class PermissionTests(unittest.TestCase):
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
         before = self._git(repo, "rev-parse", "HEAD")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             (repo / "branch-change.txt").write_text("changed", encoding="utf-8")
             self._git(repo, "add", "branch-change.txt")
             self._git(repo, "commit", "-qm", "unexpected branch change")
@@ -1487,7 +1487,7 @@ class PermissionTests(unittest.TestCase):
         self._git(repo, "push", "origin", "HEAD")
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             (Path(cwd) / "reviewer.txt").write_text("review result\\n", encoding="utf-8")
             self._git(cwd, "add", "reviewer.txt")
             self._git(cwd, "config", "user.name", "Reviewer Test")
@@ -1539,7 +1539,7 @@ class PermissionTests(unittest.TestCase):
         target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["cwd"] = cwd
             locked = Path(cwd) / "locked"
             locked.mkdir()
@@ -1569,7 +1569,7 @@ class PermissionTests(unittest.TestCase):
         seen = {}
         real_rmtree = ex.shutil.rmtree
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["cwd"] = cwd
             (Path(cwd) / "reviewer-created.txt").write_text("left", encoding="utf-8")
             return completed("{}")
@@ -1665,7 +1665,7 @@ class PublicationPreflightTests(unittest.TestCase):
         adapter = ex.CodexAdapter()
         seen = {}
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             return completed("{}")
 
@@ -1676,7 +1676,7 @@ class PublicationPreflightTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("enforced", result.artifacts["read_only_mode"])
-        self.assertEqual("read-only", seen["argv"][seen["argv"].index("-s") + 1])
+        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', seen["argv"])
 
     def test_disposable_dispatch_requires_an_isolated_workspace(self) -> None:
         target = router.parse_target("codex:openai/gpt-6-sol high")
@@ -1718,7 +1718,7 @@ class PublicationPreflightTests(unittest.TestCase):
         seen = {}
         workspace = ex.DisposableWorkspace("/tmp/verification-worktree", "/repo/source")
 
-        def runner(argv, timeout=None, cwd=None):
+        def runner(argv, timeout=None, cwd=None, env=None):
             seen["argv"] = argv
             seen["cwd"] = cwd
             return completed("{}")
@@ -1999,7 +1999,7 @@ class AgentOutputTests(unittest.TestCase):
             with patch.object(adapter, "argv", return_value=[sys.executable, str(fake_codex)]):
                 result = adapter.dispatch(
                     TARGET, "exercise delegated JSON output", cwd=temporary,
-                    runner=ex._run, on_progress=writer.activity,
+                    runner=ex._run, on_progress=writer.activity, writes=True,
                 )
 
             self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
@@ -2413,7 +2413,7 @@ class EndToEndTests(unittest.TestCase):
 # A stand-in agent. It prints what every adapter here accepts as a finished
 # run, and, when asked, writes to the reviewed checkout either itself or from a
 # separate process it starts, which is what an MCP server or a hook is.
-FAKE_AGENT = """import os, subprocess, sys
+FAKE_AGENT = """import os, subprocess, sys, tempfile
 target = os.environ.get("CYCLE_TEST_WRITE")
 mode = os.environ.get("CYCLE_TEST_MODE", "none")
 code = "import sys; open(sys.argv[1], 'a').write('mutated\\\\n')"
@@ -2421,9 +2421,16 @@ if target and mode == "agent":
     open(target, "a").write("mutated\\n")
 elif target and mode == "child":
     subprocess.run([sys.executable, "-c", code, target], check=True)
+if mode in ("temporary", "temporary_failure"):
+    with tempfile.NamedTemporaryFile() as scratch:
+        scratch.write(b"review test evidence")
+        with open(os.environ["CYCLE_TEST_TMP_RESULT"], "w") as result:
+            result.write(scratch.name)
 with open(os.environ["CYCLE_TEST_ARGV"], "w") as handle:
     handle.write("\\0".join(sys.argv[1:]))
 print("{}")
+if mode == "temporary_failure":
+    sys.exit(7)
 """
 
 
@@ -2441,16 +2448,18 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.agent = Path(scratch.name) / "fake_agent.py"
         self.agent.write_text(FAKE_AGENT, encoding="utf-8")
         self.argv_file = Path(scratch.name) / "argv"
+        self.tmp_result = Path(scratch.name) / "tmp-result"
 
     def dispatch(self, executor: str, mode: str, **kw):
         """Dispatch a review on `executor` whose agent writes as `mode` says."""
         env = {"CYCLE_TEST_MODE": mode, "CYCLE_TEST_ARGV": str(self.argv_file),
-               "CYCLE_TEST_WRITE": str(self.repo / "tracked.txt")}
+               "CYCLE_TEST_WRITE": str(self.repo / "tracked.txt"),
+               "CYCLE_TEST_TMP_RESULT": str(self.tmp_result)}
         probes = {executor: ex.ProbeResult(executor, ex.Availability.READY, "test")}
         if executor == "orca":
             adapter, target = ex.OrcaAdapter(), self.ORCA
 
-            def runner(argv, timeout=None, cwd=None):
+            def runner(argv, timeout=None, cwd=None, env=None):
                 subprocess.run([sys.executable, str(self.agent)], check=True,
                                capture_output=True)
                 return completed(json.dumps({"ok": True, "result": {
@@ -2488,7 +2497,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertEqual(result.artifacts["workspace_fingerprint_before"],
                          result.artifacts["workspace_fingerprint_after"])
         argv = self.argv_file.read_text(encoding="utf-8").split("\0")
-        self.assertEqual("read-only", argv[argv.index("-s") + 1])
+        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', argv)
         self.assertFalse({"--dangerously-bypass-approvals-and-sandbox", "--yolo",
                           "--full-auto"} & set(argv))
 
@@ -2518,7 +2527,89 @@ class ReadOnlyVerificationTests(unittest.TestCase):
 
                 self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
                 self.assertNotIn("read_only_mode", result.artifacts)
+
                 self.assertIn("read-only contract violation", result.detail)
+
+    def test_native_reviews_can_create_temporary_files_without_changing_checkout(self) -> None:
+        directories = []
+        for executor in ("codex", "claude"):
+            for mode in ("temporary", "temporary_failure"):
+                with self.subTest(executor=executor, mode=mode):
+                    result = self.dispatch(executor, mode)
+                    expected = (ex.DispatchOutcome.SUCCEEDED if mode == "temporary"
+                                else ex.DispatchOutcome.FAILED)
+                    self.assertEqual(expected, result.outcome, result.detail)
+                    scratch = Path(self.tmp_result.read_text(encoding="utf-8")).parent
+                    self.assertNotIn(self.repo, scratch.parents)
+                    self.assertFalse(scratch.exists())
+                    self.assertEqual("verified" if mode == "temporary" else "pending",
+                                     result.artifacts["read_only_verification"])
+                    self.assertEqual("", git(self.repo, "status", "--porcelain"))
+                    directories.append(scratch)
+        self.assertEqual(4, len(set(directories)))
+
+    def test_native_review_scratch_is_removed_on_timeout_and_cancellation(self) -> None:
+        class Cancelled(BaseException):
+            pass
+
+        original = os.environ.get("TMPDIR")
+        for adapter, target in ((ex.CodexAdapter(), self.CODEX),
+                                (ex.ClaudeAdapter(), self.CLAUDE)):
+            for error in (subprocess.TimeoutExpired("review", 1), Cancelled()):
+                observed = []
+
+                def interrupted(argv, timeout=None, cwd=None, env=None):
+                    scratch = Path(env["TMPDIR"])
+                    (scratch / "partial").write_text("evidence", encoding="utf-8")
+                    observed.append(scratch)
+                    raise error
+
+                with self.subTest(adapter=adapter.name, error=type(error).__name__):
+                    if isinstance(error, Cancelled):
+                        with self.assertRaises(Cancelled):
+                            adapter.dispatch(target, "review", cwd=str(self.repo), runner=interrupted)
+                    else:
+                        result = adapter.dispatch(target, "review", cwd=str(self.repo), runner=interrupted)
+                        self.assertEqual("timeout", result.error_code)
+                    self.assertEqual(1, len(observed))
+                    self.assertFalse(observed[0].exists())
+                    self.assertEqual(original, os.environ.get("TMPDIR"))
+
+    def test_codex_grants_only_its_scratch_directory_and_preserves_publication(self) -> None:
+        for publishes in (False, True):
+            observed = []
+
+            def capture(argv, timeout=None, cwd=None, env=None):
+                profile = "code_cycle_publish_read" if publishes else "code_cycle_review_read"
+                fs = next(option for option in argv
+                          if option.startswith(f"permissions.{profile}.filesystem="))
+                self.assertEqual(f'permissions.{profile}.filesystem={{'
+                                 f'{json.dumps(env["TMPDIR"])}="write"}}', fs)
+                self.assertIn(f'permissions.{profile}.extends=":read-only"', argv)
+                self.assertIn(f'shell_environment_policy.set.TMPDIR={json.dumps(env["TMPDIR"])}', argv)
+                self.assertNotIn("--add-dir", argv)
+                self.assertNotIn("-s", argv)
+                self.assertEqual("review", argv[-1])
+                if publishes:
+                    self.assertIn(f"permissions.{profile}.network.enabled=true", argv)
+                observed.append(env["TMPDIR"])
+                return completed("{}")
+
+            result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
+                                               publishes=publishes, runner=capture)
+            self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+            self.assertEqual(1, len(observed))
+            self.assertFalse(Path(observed[0]).exists())
+
+    def test_scratch_never_uses_a_temp_parent_inside_the_checkout(self) -> None:
+        subdirectory = self.repo / "nested"
+        subdirectory.mkdir()
+        with patch.object(ex.tempfile, "gettempdir", return_value=str(self.repo)):
+            result = self.dispatch("codex", "temporary", cwd=str(subdirectory))
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        scratch = Path(self.tmp_result.read_text(encoding="utf-8")).parent
+        self.assertNotIn(self.repo, scratch.parents)
+        self.assertEqual("", git(self.repo, "status", "--porcelain"))
 
     def test_every_adapter_fails_a_stage_that_writes_the_checkout(self) -> None:
         for executor in ("codex", "claude", "orca"):
@@ -2600,7 +2691,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
     def test_a_timed_out_stage_is_pending_not_verified(self) -> None:
         """A timeout says the worker may still be alive; an unchanged tree at
         that moment is no evidence about what it writes next."""
-        def timed_out(argv, timeout=None, cwd=None):
+        def timed_out(argv, timeout=None, cwd=None, env=None):
             raise subprocess.TimeoutExpired(argv, timeout)
 
         for executor, target, adapter, extra in (
@@ -2632,7 +2723,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
                 self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, finished.outcome)
 
     def test_a_failed_stage_that_wrote_is_still_a_violation(self) -> None:
-        def failed_after_writing(argv, timeout=None, cwd=None):
+        def failed_after_writing(argv, timeout=None, cwd=None, env=None):
             (self.repo / "tracked.txt").write_text("partial\n", encoding="utf-8")
             return completed(returncode=1, stderr="boom")
 

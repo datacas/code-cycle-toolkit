@@ -97,7 +97,11 @@ cites as evidence, such as a test failure, a check state, or a command result.
 ## Scope
 
 - Review the complete accumulated diff against the base branch first, not only
-  the last commit.
+  the last commit. When delegated by `cc-resolve-comments` under `parallel`,
+  review the complete fix delta from its explicit trusted review base instead.
+  This scoped post-fix pass keeps the same review criteria; initial review and
+  rereview still cover the accumulated diff. If the caller cannot establish a
+  usable base, review the accumulated diff.
 - Read enough surrounding context to judge the changed code.
 - Check that new code is consistent with the patterns of the file and module
   around it, not only with global project patterns.

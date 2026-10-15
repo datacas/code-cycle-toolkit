@@ -245,6 +245,13 @@ PARALLEL_IMPLEMENT = (
     "once, report them in `checks` with that head's SHA, and return. A pending check "
     "stays pending; the cycle's own CI gate waits for it."
 )
+PARALLEL_RESOLVE = (
+    "CI policy for this cycle: parallel. Run local verification and review the fix "
+    "delta, then publish without waiting for remote CI. Read the pushed head's "
+    "checks once and report them in checks with that head's SHA and pending counts. "
+    "Run no in-stage CI fix rounds; RESOLVED does not require those checks to pass. "
+    "The cycle's CI gate handles CI_FAILED separately from review findings."
+)
 PARALLEL_REVIEW = (
     "CI policy for this cycle: parallel. Do not wait for pending checks, and report "
     "a check's state in the comment's CI section, never as a finding. When the "
@@ -935,12 +942,13 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             worktree_dir: str | Path | None = None,
             workspace: str = "task",
             allowed_test_command: str | None = None,
-            ci_policy: str = DEFAULT_CI_POLICY) -> str:
+            ci_policy: str = DEFAULT_CI_POLICY,
+            resolve_review_base: str | None = None) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied.
 
-    Under the parallel CI policy the implementation and the reviews are told
-    not to wait for checks. The resolution is not: its own wait for the head it
-    pushes is unchanged by this policy. A strict prompt is the original one.
+    Under parallel, writing stages read checks once without waiting; resolution
+    reviews its fix delta from the latest trusted review receipt. Reviews still
+    judge the accumulated diff. A strict prompt is the original one.
     """
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -981,6 +989,15 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
     if ci_policy == "parallel" and not local_only:
         if role == "implement":
             parts.append(PARALLEL_IMPLEMENT)
+        elif role == "resolve":
+            parts.append(PARALLEL_RESOLVE)
+            parts.append(
+                f"Resolve delta base from the latest trusted review or rereview receipt: "
+                f"{resolve_review_base}. Verify it is an ancestor of the new head before "
+                "reviewing the fix delta; otherwise review the accumulated diff."
+                if resolve_review_base else
+                "No usable trusted review delta base was recovered; review the accumulated diff."
+            )
         elif role in {"review", "rereview"}:
             parts.append(PARALLEL_REVIEW)
     if evidence:
@@ -989,6 +1006,30 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts.append(LOCAL_ONLY_REQUEST)
     parts.append(STRUCTURED_REQUEST)
     return " ".join(parts)
+
+
+def resolve_delta_base(comments: list[ProviderComment], repo_id: str,
+                       change_request_id: str, trusted_authors: tuple[str, ...],
+                       cwd: str | None) -> str | None:
+    """Recover a review boundary, never invent one from a result or local HEAD."""
+    try:
+        receipts = [receipt for receipt in trusted_receipts(
+            comments, trusted_authors=trusted_authors)
+            if receipt["repo"] == repo_id
+            and receipt["change_request_id"] == change_request_id
+            and receipt["stage"] in {"review", "rereview"}]
+        if not receipts:
+            return None
+        latest = receipts[-1]
+        if latest["status"] not in COMPLETES[latest["stage"]] | {"REVIEW_PASSED_AWAITING_CI"}:
+            return None
+        head = latest["head_sha"]
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", head, "HEAD"], cwd=cwd,
+            capture_output=True, timeout=30, check=False)
+        return head if ancestry.returncode == 0 else None
+    except (ContractError, OSError, subprocess.SubprocessError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -2204,6 +2245,15 @@ def run_cycle(
         directory = (diff_directory(cwd)
                      if role in DIFF_ROLES and change_bases else None)
         try:
+            review_base = None
+            if role == "resolve" and ci_policy == "parallel" and not local_only and change_request_id:
+                try:
+                    review_base = resolve_delta_base(
+                        remote.comments(repo_id, change_request_id), repo_id,
+                        change_request_id, trusted_authors, cwd)
+                except (CycleDriverError, ContractError, HistoryError):
+                    # Missing review evidence widens the review; it never skips it.
+                    pass
             if role in DIFF_ROLES:
                 artifact = (write_diff_artifact(cwd, change_bases, directory)
                             if directory is not None else None)
@@ -2224,7 +2274,7 @@ def run_cycle(
                               allowed_test_command=(
                                   allowed_test_command
                                   if role in {"implement", "resolve"} else None),
-                              ci_policy=ci_policy),
+                              ci_policy=ci_policy, resolve_review_base=review_base),
                 escalated=escalated,
                 effort_override=(resolve_effort or "high") if role == "resolve" else None,
                 target_override=resolve_target if role == "resolve" else None,
