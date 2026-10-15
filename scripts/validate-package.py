@@ -633,12 +633,20 @@ CI_POLICY_PHRASES = (
     "`--once`",
     "Never poll the checks yourself",
     "never review the same SHA again",
-    "Tell `cc-resolve-comments` nothing",
+    "`RESOLVED` does not require remote checks to pass",
+    "latest trusted `review` or `rereview` receipt",
+    "without waiting or in-stage CI fix rounds",
     "nothing published after it",
 ) + tuple(f"`{status}`" for status in sorted(telemetry.CI_STATUSES - {telemetry.CI_PENDING}))
 #: The review skills define the status, and the implementation does not wait.
 CI_REVIEW_SKILLS = ("cc-initial-review", "cc-rereview")
 CI_IMPLEMENT_PHRASES = ("`parallel`", "`gh pr checks --watch`", "`IMPLEMENTED`")
+CI_RESOLVE_PHRASES = (
+    "`strict`", "`parallel`", "latest trusted `review` or `rereview` receipt",
+    "review the accumulated diff instead", "not an ancestor of the new head",
+    "checks once", "in-stage CI fix rounds", "`RESOLVED`", "`CI_FAILED`",
+    "Do not run `gh pr checks --watch`",
+)
 
 
 def check_ci_policy(root: Path, errors: list[str]) -> None:
@@ -647,9 +655,15 @@ def check_ci_policy(root: Path, errors: list[str]) -> None:
     `run_cycle.py` and `ci_gate.py` define it; both orchestrators apply it in
     one shared section, which must name every gate result the runtime can
     return after a wait. Each review skill must define the awaiting status,
-    and the implementation must say it does not wait for checks.
+    and writing stages must say they do not wait for checks. The delegated
+    code-review pass must accept resolution's explicit parallel delta scope.
     """
     check_shared_sections(root, ORCHESTRATOR_SKILLS, (CI_POLICY_SECTION,), errors)
+    review_path = root / "skills" / "cc-code-review" / "SKILL.md"
+    if review_path.is_file():
+        scope = extract_section(review_path.read_text(encoding="utf-8"), "## Scope") or ""
+        if "complete fix delta" not in scope or "`cc-resolve-comments` under `parallel`" not in scope:
+            errors.append("skills/cc-code-review/SKILL.md: '## Scope' does not accept the parallel resolve delta")
     for skill in ORCHESTRATOR_SKILLS:
         path = root / "skills" / skill / "SKILL.md"
         section = (extract_section(path.read_text(encoding="utf-8"), CI_POLICY_SECTION)
@@ -667,17 +681,20 @@ def check_ci_policy(root: Path, errors: list[str]) -> None:
         if f"\n- `{telemetry.AWAITING_CI_STATUS}`:" not in workflow:
             errors.append(f"skills/{skill}/SKILL.md: '## Workflow' does not define "
                           f"`{telemetry.AWAITING_CI_STATUS}`")
-    path = root / "skills" / IMPLEMENT_SKILL / "SKILL.md"
-    if path.is_file():
+    for skill, phrases in ((IMPLEMENT_SKILL, CI_IMPLEMENT_PHRASES),
+                           ("cc-resolve-comments", CI_RESOLVE_PHRASES)):
+        path = root / "skills" / skill / "SKILL.md"
+        if not path.is_file():
+            continue
         section = extract_section(path.read_text(encoding="utf-8"), CI_POLICY_SECTION)
         if section is None:
-            errors.append(f"skills/{IMPLEMENT_SKILL}/SKILL.md: missing section "
+            errors.append(f"skills/{skill}/SKILL.md: missing section "
                           f"{CI_POLICY_SECTION!r}")
         else:
             flattened = " ".join(section.split())
-            errors.extend(f"skills/{IMPLEMENT_SKILL}/SKILL.md: {CI_POLICY_SECTION!r} "
+            errors.extend(f"skills/{skill}/SKILL.md: {CI_POLICY_SECTION!r} "
                           f"does not state {phrase!r}"
-                          for phrase in CI_IMPLEMENT_PHRASES if phrase not in flattened)
+                          for phrase in phrases if phrase not in flattened)
 
 
 #: What `cc-orchestrator` must tell an agent about launching the runtime. A

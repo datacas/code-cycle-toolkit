@@ -545,9 +545,15 @@ none exists, stop with `BLOCKED` before implementation and say why.
 
 Under `parallel`:
 
-- tell `cc-implement-issue`, `cc-initial-review` and `cc-rereview` that the CI
-  policy is `parallel`. Tell `cc-resolve-comments` nothing: it keeps waiting
-  for the head it pushes;
+- tell `cc-implement-issue`, `cc-resolve-comments`, `cc-initial-review` and
+  `cc-rereview` that the CI policy is `parallel`. Resolution keeps local
+  verification, reviews the fix delta from the `head_sha` of the latest trusted
+  `review` or `rereview` receipt, and falls back to the accumulated diff when
+  that base is unrecoverable or not an ancestor of the new head. Pass that base
+  to resolution, or have it recover the same base from trusted comments.
+  Implementation and resolution read the pushed head's checks once, report
+  their SHA and pending counts, and return without waiting or in-stage CI fix
+  rounds. `RESOLVED` does not require remote checks to pass;
 - dispatch the review as soon as the implementation returns, without waiting
   for its checks, and start the next resolution as soon as a review returns
   `CHANGES_REQUESTED`, whatever the checks' state;

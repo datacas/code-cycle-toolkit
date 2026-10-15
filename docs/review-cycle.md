@@ -57,7 +57,7 @@ sequenceDiagram
 3. **Rereview** reads the whole accumulated diff again and reproduces each claimed fix. It classifies each previous finding and numbers new ones after the highest existing ID.
 4. Repeat until approved, or until an orchestrator's iteration limit, no-progress guard, or repeated-findings ladder stops it (see [Exit conditions](#exit-conditions)).
 
-Reviews always cover the **accumulated diff from the merge base to the current head**, never only the latest commit.
+Initial review and rereview always cover the **accumulated diff from the merge base to the current head**. Under `parallel`, resolution's internal code-review pass covers only its fix delta; this does not narrow the subsequent rereview.
 
 ## CI policy
 
@@ -69,6 +69,21 @@ A cycle runs under one of two CI policies, set by `ci.policy` in `.code-cycle.ym
 | `parallel` | The review starts as soon as the implementation is published, while its checks run. Approval needs a clean review **and** a CI pass of the same SHA, decided by the runtime's one CI gate. GitHub only; another code host keeps `strict`. |
 
 Parallel mode never disables CI. It moves the wait to where it is useful: after the review, and only when the review found nothing to fix.
+
+Under `parallel`, resolution keeps local verification, then reads the pushed
+head's checks once with pending counts and returns without CI fix rounds or a
+remote wait. `RESOLVED` can carry pending or failed checks; the CI gate's
+`CI_FAILED` path handles them. Under `strict`, resolution keeps its existing
+wait and check rules.
+
+Resolution's internal review uses the `head_sha` of the latest completed,
+trusted `review` or `rereview` receipt for this change request as its delta
+base. `run_cycle.py` passes it in the prompt; a manual orchestrator recovers
+the same boundary from provider-authenticated trusted comments. When the base
+cannot be recovered or is not an ancestor of the new head, resolution reviews
+the accumulated diff instead. It records the chosen base or fallback in its
+summary. Rereview always judges the accumulated diff and final approval remains
+scoped to that reviewed head and its required CI checks.
 
 ```mermaid
 flowchart LR
@@ -105,7 +120,7 @@ Under `parallel` a review never turns a check's state into a finding; the CI gat
 | `CI_TIMEOUT`, after `ci.timeout` (default 900 s) | `BLOCKED`, recorded as `ci_timeout`; the clean review stays valid for that SHA |
 | `CI_UNREADABLE` | `BLOCKED`, recorded as `ci_unreadable` |
 
-Before a resolution that follows `CHANGES_REQUESTED`, the runtime reads the reviewed head's checks once, without waiting: a failure already reported there reaches that resolution beside the findings. Review findings and CI failures stay separate, and neither resolves, replaces nor hides the other. The resolution keeps its own wait for the head it pushes under both policies.
+Before a resolution that follows `CHANGES_REQUESTED`, the runtime reads the reviewed head's checks once, without waiting: a failure already reported there reaches that resolution beside the findings. Review findings and CI failures stay separate, and neither resolves, replaces nor hides the other. Under `strict`, resolution keeps its own wait for the head it pushes. Under `parallel`, it reads that head's checks once, reports them, and returns; the CI gate owns the wait.
 
 ### Resume while awaiting CI
 

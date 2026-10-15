@@ -27,6 +27,7 @@ import review_contract as contract  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
 from test_run_cycle import RunCycleTestCase, Talker, block  # noqa: E402
+from test_executors import git, git_repo  # noqa: E402
 
 HEAD = "a" * 40
 FIX = "b" * 40
@@ -289,6 +290,16 @@ class KeyCaseTests(ParallelTestCase):
         self.assertIn(rc.PARALLEL_IMPLEMENT, implement)
         (review,) = self.reviewer.prompts["review"]
         self.assertIn(rc.PARALLEL_REVIEW, review)
+
+    def test_resolution_receives_the_recovered_review_boundary(self) -> None:
+        self.stages(review=[("CHANGES_REQUESTED", {"findings": [FINDING]})])
+        self.github.set_checks(HEAD, PENDING)
+        self.github.set_checks(FIX, PASSED)
+        with mock.patch.object(rc, "resolve_delta_base", return_value=HEAD) as recover:
+            self.parallel()
+        self.assertEqual("4", recover.call_args.args[2])
+        self.assertIn(f"receipt: {HEAD}", self.implementer.prompts["resolve"][0])
+        self.assertIn(rc.PARALLEL_RESOLVE, self.implementer.prompts["resolve"][0])
 
     def test_changes_requested_starts_resolution_before_pending_ci_completes(self) -> None:
         self.stages(review=[("CHANGES_REQUESTED", {"findings": [FINDING]})],
@@ -631,13 +642,17 @@ class StrictPolicyTests(ParallelTestCase):
         self.assertEqual("stage_not_completed", report.stop_reason)
         self.assertIn("only the parallel CI policy accepts", report.stopped_because)
 
-    def test_the_resolution_prompt_is_unchanged_by_the_policy(self) -> None:
+    def test_only_parallel_resolution_gets_the_non_waiting_delta_contract(self) -> None:
         prompts = {}
         for policy in rc.CI_POLICIES:
             prompts[policy] = rc.compose("resolve", "owner/api", "API-7",
                                          "Resolve the findings from the review.",
                                          change_request_id="4", ci_policy=policy)
-        self.assertEqual(prompts["strict"], prompts["parallel"])
+        self.assertNotIn("CI policy", prompts["strict"])
+        self.assertIn(rc.PARALLEL_RESOLVE, prompts["parallel"])
+        self.assertIn("review the accumulated diff", prompts["parallel"])
+        self.assertNotIn(rc.PARALLEL_RESOLVE, rc.compose(
+            "resolve", "owner/api", "API-7", ci_policy="parallel", local_only=True))
         self.assertNotIn("CI policy", rc.compose("implement", "owner/api", "API-7",
                                                  ci_policy="parallel", local_only=True))
 
@@ -648,6 +663,63 @@ class StrictPolicyTests(ParallelTestCase):
         with self.assertRaises(rc.CycleDriverError):
             rc.check_ci_policy("eager", "github")
         rc.check_ci_policy("strict", "bitbucket")
+
+
+class ResolveDeltaTests(unittest.TestCase):
+    def test_delta_boundary_uses_real_git_ancestry_and_rejects_rewritten_history(self):
+        repo = git_repo(self)
+        reviewed = git(repo, "rev-parse", "HEAD")
+        git(repo, "commit", "--allow-empty", "-qm", "fix")
+        comments = [self.comment(head=reviewed)]
+        self.assertEqual(reviewed, rc.resolve_delta_base(
+            comments, "owner/api", "4", ("reviewer",), str(repo)))
+        git(repo, "checkout", "--orphan", "rewritten")
+        git(repo, "commit", "-qm", "different history")
+        self.assertIsNone(rc.resolve_delta_base(
+            comments, "owner/api", "4", ("reviewer",), str(repo)))
+
+    def comment(self, stage="review", head=HEAD, author="reviewer", **kw):
+        return contract.ProviderComment(
+            body=receipt(stage, "attempt-test", "CHANGES_REQUESTED", head, **kw),
+            author=author)
+
+    def base(self, comments):
+        return rc.resolve_delta_base(comments, "owner/api", "4", ("reviewer",), None)
+
+    def test_latest_trusted_review_ignores_resolution_and_other_scopes(self):
+        comments = [self.comment(), self.comment(stage="rereview", head=FIX),
+                    self.comment(stage="resolve", head=OTHER),
+                    self.comment(head=OTHER, author="outsider"),
+                    self.comment(head=OTHER, number="9")]
+        with mock.patch.object(rc.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(FIX, self.base(comments))
+            self.assertEqual(["git", "merge-base", "--is-ancestor", FIX, "HEAD"],
+                             run.call_args.args[0])
+        prompt = rc.compose("resolve", "owner/api", "7", ci_policy="parallel",
+                            resolve_review_base=FIX)
+        self.assertIn(f"receipt: {FIX}", prompt)
+        self.assertIn("ancestor of the new head", prompt)
+
+    def test_missing_malformed_and_untrusted_evidence_widens_review(self):
+        for comments in ([], [self.comment(author="outsider")],
+                         [contract.ProviderComment(body='<!-- code-cycle-stage {bad} -->',
+                                                   author="reviewer")]):
+            with self.subTest(comments=comments):
+                self.assertIsNone(self.base(comments))
+
+    def test_non_ancestor_missing_commit_and_git_failure_widen_review(self):
+        for code in (1, 128):
+            with self.subTest(code=code), mock.patch.object(rc.subprocess, "run") as run:
+                run.return_value.returncode = code
+                self.assertIsNone(self.base([self.comment()]))
+        with mock.patch.object(rc.subprocess, "run", side_effect=OSError("git unavailable")):
+            self.assertIsNone(self.base([self.comment()]))
+
+    def test_blocked_latest_review_does_not_reuse_an_older_boundary(self):
+        blocked = contract.ProviderComment(
+            body=receipt("rereview", "attempt-blocked", "BLOCKED", FIX), author="reviewer")
+        self.assertIsNone(self.base([self.comment(), blocked]))
 
 
 class ResumeTests(ParallelTestCase):

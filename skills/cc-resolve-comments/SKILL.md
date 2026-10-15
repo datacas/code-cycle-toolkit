@@ -528,9 +528,9 @@ it or say why it did not run.
 
 After the fixes are locally coherent:
 
-1. Run `cc-code-review` over the resulting accumulated diff, as a delegated
-   pass that returns its findings here rather than publishing its own
-   comment.
+1. Run `cc-code-review` over the resulting accumulated diff under `strict`, or
+   the fix delta under `parallel` as *CI policy* describes, as a delegated pass
+   that returns its findings here rather than publishing its own comment.
 2. Fix confirmed P0 and P1 findings that remain within the user's authorized
    scope, adding regression tests.
 3. Repeat sensitivity triage against the changed files and PR labels,
@@ -545,19 +545,55 @@ After the fixes are locally coherent:
    marks as sensitive.
 5. Run `cc-verify` over the fixes and related regressions when its
    prerequisites are available.
-6. If the branch was updated, wait for the checks of the pushed head as
-   *Checks of the pushed head* describes, and report pending, failed,
-   cancelled, skipped, and missing expected gates. For GitHub, the equivalent
-   is `gh pr checks <n>`.
+6. If the branch was updated, follow *CI policy*: under `strict`, wait for the
+   checks of the pushed head as *Checks of the pushed head* describes; under
+   `parallel`, read them once and return. Report pending, failed, cancelled,
+   skipped, and missing expected gates with that head's SHA.
 
 When valid fixes change code, follow the trusted repository workflow for
 commit and push. `RESOLVED` with code changes requires a new coherent HEAD, the
 necessary tests, a fix commit, and a successful push when updating the PR
 branch belongs to the active workflow. A permission or external-service
 condition that prevents a required push is `BLOCKED`, not a false success.
-`RESOLVED` also requires that the checks of the pushed head did not fail.
+Under `strict`, `RESOLVED` also requires that the checks of the pushed head did
+not fail. Under `parallel`, their state does not prevent `RESOLVED`; the cycle's
+CI gate handles failures separately from review findings.
 
 Do not redefine the criteria or stop conditions of any delegated skill.
+
+## CI policy
+
+Use the cycle's explicit `ci_policy=strict|parallel`, then
+`code_cycle.ci.policy`, then `strict`. Under `strict`, keep the accumulated
+post-change review, the remote-CI wait, and the existing check rules and fix
+rounds in *Checks of the pushed head* unchanged.
+
+Under `parallel`:
+
+- Keep local verification of each fix and the required post-change passes.
+  Review only the fix delta since the `head_sha` of the latest trusted
+  `review` or `rereview` receipt for this repository and change request. The
+  runtime passes that delta base in the prompt; when running without it,
+  recover the base from the complete comments in publication order, keeping
+  only provider-authenticated `review.trusted_authors`. Do not use a resolution
+  receipt or an untrusted comment as the base.
+- After making the fixes, check `git merge-base --is-ancestor <delta-base>
+  HEAD`. If the base is unrecoverable, malformed, absent locally, or not an
+  ancestor of the new head, review the accumulated diff instead. A blocked or
+  failed review is not a completed review boundary. Record the selected base
+  and any fallback reason in the summary.
+- Supply the delegated `cc-code-review` with the complete diff from that base
+  to the resulting head, including uncommitted fixes when present. The
+  accumulated diff supplied at dispatch remains triage context, not the
+  post-fix delta. Rereview still evaluates the whole accumulated diff.
+- After local verification, commit and publish the coherent fixes, then read
+  the pushed head's checks once. Report them in `checks` with that head's SHA
+  and all pending counts. Do not run `gh pr checks --watch`, poll, wait for
+  remote CI, or run in-stage CI fix rounds. Pending checks stay pending.
+- Return `RESOLVED` when the fixes and publication meet the normal local
+  requirements, even with pending or failed remote checks. The cycle's CI gate
+  routes `CI_FAILED`; this stage never approves. A CI failure supplied as input
+  still gets diagnosed and fixed within scope, as *Triage* describes.
 
 ## Checks of the pushed head
 
