@@ -11,7 +11,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from run_cycle import CycleDriverError, load_config, repository_of
+from run_cycle import (CycleDriverError, config_search_paths, load_config,
+                       repository_of, resolve_config_path)
 from telemetry import (
     COMPLETED_REVIEW_STATUSES,
     MINIMUM_SAMPLE,
@@ -1104,15 +1105,23 @@ def render_markdown(report: dict) -> str:
 
 
 def _report_config(cwd: Path) -> str:
-    config_path = cwd / ".code-cycle.yml"
+    current_path, main_path = config_search_paths(cwd)
     try:
-        config = load_config(config_path) if config_path.exists() else {}
+        config_path = resolve_config_path(cwd)
+        config = load_config(config_path) if config_path else {}
     except CycleDriverError as error:
         raise StatsError("could not read or validate the repository configuration") from error
+    if config_path is None:
+        raise StatsError(
+            "no repository identity: set code_cycle.repository.selector in "
+            f".code-cycle.yml (searched {current_path} and {main_path})"
+        )
+    print(f"configuration: {config_path}", file=sys.stderr)
     repo_id = repository_of(config)
     if not repo_id:
         raise StatsError(
-            "no repository identity: set code_cycle.repository.selector in .code-cycle.yml"
+            "no repository identity: set code_cycle.repository.selector in "
+            f".code-cycle.yml (read {config_path})"
         )
     if repo_id != repo_id.strip():
         raise StatsError("invalid repository identity in repository configuration")

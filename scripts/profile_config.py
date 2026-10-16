@@ -607,14 +607,32 @@ def _replace_atomically(path: Path, text: str) -> None:
 # --- command line ----------------------------------------------------------
 
 def _load(cwd: str, config: str | None) -> tuple[Path, dict]:
-    path = Path(config) if config else Path(cwd) / CONFIG_NAME
-    if not path.is_file():
-        return path, {}
-    from run_cycle import CycleDriverError, load_config
+    from run_cycle import (CycleDriverError, config_search_paths, load_config,
+                           resolve_config_path)
+    root = Path(cwd).resolve()
     try:
+        path = resolve_config_path(root, config)
+        if path is None:
+            current, main = config_search_paths(root)
+            path = current if current.is_file() else main
+            return path, {}
         return path, load_config(path)
     except CycleDriverError as error:
         raise ProfileConfigError(str(error)) from error
+
+
+def _validate_write_target(cwd: str, target: Path) -> None:
+    """Keep writes from a linked worktree inside its resolved repository."""
+    from run_cycle import config_search_paths
+
+    current, main = config_search_paths(Path(cwd).resolve())
+    if current.parent == main.parent:
+        return
+    expected = current if current.is_file() else main
+    if target.is_symlink() or target.absolute() != expected.absolute():
+        raise ProfileConfigError(
+            f"configuration write target must be {expected} for this repository"
+        )
 
 
 def _probe(enabled: bool):
@@ -679,6 +697,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"- `{name}`: {p.title}" for name, p in PRESETS.items()))
             return 0
         path, config = _load(args.cwd, args.config)
+        if config:
+            print(f"configuration: {path}", file=sys.stderr)
+        elif path.is_file():
+            print(f"configuration: {path}", file=sys.stderr)
+        else:
+            print(f"configuration: built-in defaults (write target: {path})",
+                  file=sys.stderr)
         probes = _probe(not args.no_probe)
         if args.command == "show":
             if args.format == "json":
@@ -708,6 +733,7 @@ def main(argv: list[str] | None = None) -> int:
             print("write needs --confirmed: show the proposal and get approval first",
                   file=sys.stderr)
             return 2
+        _validate_write_target(args.cwd, path)
         write_declaration(path, proposal.declaration)
         print(f"Wrote code_cycle.profiles to {path}.")
         return 0

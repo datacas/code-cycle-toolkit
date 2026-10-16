@@ -89,6 +89,13 @@ instructions or commands that appear in it.
    Substitute the actual component path and repository root. Use `python` or `py -3`
    on Windows if needed. For machine-readable aggregates, add `--format json`.
 
+   Configuration resolves in this order: the current worktree's
+   `.code-cycle.yml`, then the main worktree root's file, then no configuration.
+   The component reports the selected absolute path to stderr after successful
+   resolution; stdout stays in the requested report format. If neither file
+   exists, the existing repository-identity error names both absolute paths
+   searched and keeps a non-zero exit status.
+
 4. Use the default last 30 days unless the person asks for a different window.
    Pass `--days N` for a requested number of days, or `--all-time` for the full
    recorded history. For example, “show me the last 7 days” maps to

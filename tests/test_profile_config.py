@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -62,6 +63,69 @@ def run(*argv) -> tuple[int, str, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = pc.main(list(argv))
     return code, out.getvalue(), err.getvalue()
+
+
+class LinkedWorktreeConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.main = root / "main"
+        self.linked = root / "linked"
+        self.main.mkdir()
+        self.git(self.main, "init", "-q", "-b", "main")
+        self.git(self.main, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "-q", "--allow-empty", "-m", "base")
+        self.config = self.main / ".code-cycle.yml"
+        self.config.write_text(
+            "code_cycle:\n  repository:\n    selector: owner/api\n"
+            "  profiles:\n    cheap_coder:\n"
+            "      primary: claude:anthropic/claude-sonnet-5-5 high\n",
+            encoding="utf-8")
+        self.git(self.main, "worktree", "add", "-q", "-b", "task", str(self.linked))
+
+    @staticmethod
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                       capture_output=True, text=True)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to read a configuration")
+    def test_show_uses_main_worktree_config_and_keeps_json_on_stdout(self) -> None:
+        self.assertFalse((self.linked / ".code-cycle.yml").exists())
+
+        code, out, err = run("show", "--cwd", str(self.linked), "--no-probe",
+                             "--format", "json")
+
+        rows = json.loads(out)
+        primary = next(row["primary"] for row in rows if row["profile"] == "cheap_coder")
+        self.assertEqual(0, code)
+        self.assertEqual("claude:anthropic/claude-sonnet-5-5 high", primary)
+        self.assertEqual(f"configuration: {self.config}\n", err)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to read a configuration")
+    def test_linked_worktree_write_rejects_a_foreign_config_target(self) -> None:
+        foreign = self.main.parent / "foreign.yml"
+        foreign.write_text("code_cycle: {}\n", encoding="utf-8")
+        original = self.config.read_bytes()
+
+        code, _, err = run("write", "--cwd", str(self.linked), "--config", str(foreign),
+                           "--preset", "defaults", "--no-probe", "--confirmed")
+
+        self.assertEqual(1, code)
+        self.assertIn(str(self.config), err)
+        self.assertEqual(original, self.config.read_bytes())
+        self.assertEqual("code_cycle: {}\n", foreign.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_confirmed_linked_worktree_write_updates_only_the_main_config(self) -> None:
+        code, out, err = run("write", "--cwd", str(self.linked), "--preset",
+                             "single-anthropic", "--no-probe", "--confirmed")
+
+        self.assertEqual(0, code, err)
+        self.assertIn(str(self.config), err)
+        self.assertIn(str(self.config), out)
+        self.assertIn("profiles:", self.config.read_text(encoding="utf-8"))
+        self.assertFalse((self.linked / ".code-cycle.yml").exists())
 
 
 class PresetTests(unittest.TestCase):
