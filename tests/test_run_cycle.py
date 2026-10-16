@@ -3473,6 +3473,31 @@ class DetachFlagTests(unittest.TestCase):
         for argument in ("--database", "--difficulty", "--d", "detach", "--detached"):
             self.assertFalse(rc._detach_flag(argument), argument)
 
+    def test_detach_seeds_and_prints_a_cursor_file_before_starting_the_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "status"
+            directory.mkdir()
+            (directory / "existing.json").write_text(
+                json.dumps({"cycle_id": "existing", "revision": 12, "finished": True}),
+                encoding="utf-8",
+            )
+
+            def start_worker(command, **kwargs):
+                cursors = list(directory.glob("*.cursor"))
+                self.assertEqual(1, len(cursors))
+                self.assertEqual(12, json.loads(cursors[0].read_text())["revision"])
+                self.assertNotIn("--detach", command)
+                return mock.Mock(pid=4321)
+
+            output = io.StringIO()
+            with mock.patch.object(rc, "status_directory", return_value=directory), \
+                    mock.patch.object(rc.subprocess, "Popen", side_effect=start_worker), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(0, rc.detach(["--task", "247", "--detach"], None))
+
+        self.assertIn("--line", output.getvalue())
+        self.assertIn("--cursor-file", output.getvalue())
+
 
 class ContinueImplementationTests(RunCycleTestCase):
     """An interrupted implementation continues from its work, not from zero."""

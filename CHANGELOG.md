@@ -16,6 +16,10 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- `cycle_status.py --line --cursor-file <path>` resumes status monitoring with
+  an atomic revision cursor. `run_cycle.py --detach` seeds and prints a cursor
+  file so repeated checks do not miss updates when timestamps tie.
+
 - Sensitive sandbox grants with explicit, informed consent (`scripts/grants.py`).
   When a stage reports that the sandbox blocks a registered resource, starting
   with the host Docker daemon (`docker_host`), the runtime asks whether to allow

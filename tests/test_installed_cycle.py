@@ -388,7 +388,8 @@ class InstalledCycleTests(unittest.TestCase):
         cycle_pid = int(lines["detached"].rsplit(" ", 1)[1])
         log = Path(lines["log"])
         self.assertEqual(self.database.parent / "status", log.parent)
-        self.assertIn("cycle_status.py --line --since", lines["progress"])
+        self.assertIn("cycle_status.py --line --cursor-file", lines["progress"])
+        self.assertEqual(1, len(list(log.parent.glob("*.cursor"))))
         self.assertIn("--database", lines["progress"])
 
         self.wait_for(pidfile)

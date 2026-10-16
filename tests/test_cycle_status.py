@@ -422,6 +422,256 @@ class CycleStatusTests(unittest.TestCase):
         self.assertIn("new-stage", lines[0])
         self.assertNotIn("old-stage", result.stdout)
 
+    def _write_cursor_status(self, directory: Path, cycle_id: str, revision: int,
+                             *, finished: bool = False, activity: str = "working") -> None:
+        (directory / f"{cycle_id}.json").write_text(json.dumps({
+            "cycle_id": cycle_id,
+            "revision": revision,
+            "updated_at": "2026-09-30T12:00:00.000000+00:00",
+            "finished": finished,
+            "status": "RUNNING",
+            "stage": {"role": "implement", "executor": "codex", "provider": "openai",
+                      "model": "test-model", "effort": "high", "elapsed_seconds": 1,
+                      "activity": activity, "finished": finished},
+        }), encoding="utf-8")
+
+    def _run_cursor_cli(self, directory: Path, cursor: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "cycle_status.py"), "--line",
+             "--cursor-file", str(cursor), "--status-dir", str(directory)],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+
+    def test_cursor_resumes_across_invocations_and_identical_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "finished", 1, finished=True,
+                                      activity="old-finished")
+            self._write_cursor_status(directory, "active", 2, activity="active-work")
+
+            first = self._run_cursor_cli(directory, cursor)
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertIn("active-work", first.stdout)
+            self.assertNotIn("old-finished", first.stdout)
+            self.assertEqual(2, json.loads(cursor.read_text())["revision"])
+
+            self._write_cursor_status(directory, "active", 3, activity="updated")
+            self._write_cursor_status(directory, "later", 4, activity="later-work")
+            second = self._run_cursor_cli(directory, cursor)
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertIn("updated", second.stdout)
+            self.assertIn("later-work", second.stdout)
+            self.assertEqual(2, len(second.stdout.splitlines()))
+            self.assertEqual(4, json.loads(cursor.read_text())["revision"])
+
+            restarted = self._run_cursor_cli(directory, cursor)
+            self.assertEqual(0, restarted.returncode, restarted.stderr)
+            self.assertEqual("", restarted.stdout)
+
+    def test_missing_cursor_emits_only_current_unfinished_cycles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "old-finished", 6, finished=True)
+            self._write_cursor_status(directory, "running", 7)
+
+            result = self._run_cursor_cli(directory, cursor)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("working", result.stdout)
+            self.assertNotIn("old-finished", result.stdout)
+            self.assertEqual(7, json.loads(cursor.read_text())["revision"])
+
+    def test_corrupt_cursor_is_an_error_and_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            cursor.write_text("{broken", encoding="utf-8")
+            result = self._run_cursor_cli(directory, cursor)
+            self.assertEqual(2, result.returncode)
+            self.assertIn("corrupt cursor file", result.stderr)
+            self.assertEqual("{broken", cursor.read_text(encoding="utf-8"))
+
+    def test_cursor_file_cannot_be_combined_with_since(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "cycle_status.py"), "--line",
+             "--cursor-file", "cursor.json", "--since", "2026-09-30T12:00:00Z"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("cannot be combined with --since", result.stderr)
+
+    def test_cursor_write_failure_leaves_the_previous_cursor_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "active", 2)
+            cursor.write_text('{"version": 1, "revision": 1}\n', encoding="utf-8")
+            previous = cursor.read_text(encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(
+                    cycle_status.os, "replace", side_effect=OSError("interrupted write")):
+                with self.assertRaisesRegex(OSError, "interrupted write"):
+                    cycle_status.main(["--line", "--cursor-file", str(cursor),
+                                       "--status-dir", str(directory)])
+            self.assertEqual(previous, cursor.read_text(encoding="utf-8"))
+
+    def test_concurrent_status_writes_get_unique_monotonic_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "telemetry.sqlite"
+            writers = [cycle_status.CycleStatusWriter(
+                database, f"cycle-{index}", "repo", str(index), workspace=temporary,
+            ) for index in range(8)]
+            threads = [threading.Thread(target=writer._write) for writer in writers]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            statuses = cycle_status.read_statuses(Path(temporary) / "status")
+            revisions = [status["revision"] for status in statuses]
+
+        self.assertEqual(list(range(1, 9)), sorted(revisions))
+
+    def test_status_write_waits_for_revision_lock_held_by_another_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "status"
+            directory.mkdir()
+            database = root / "telemetry.sqlite"
+            worker = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import cycle_status
+
+mode, directory = sys.argv[2], Path(sys.argv[3])
+if mode == "hold":
+    with cycle_status._revision_file_lock(directory):
+        print("locked", flush=True)
+        sys.stdin.readline()
+else:
+    print("started", flush=True)
+    cycle_status.CycleStatusWriter(
+        Path(sys.argv[4]), "child", "repo", "247", workspace=sys.argv[5],
+    )._write()
+"""
+            holder = subprocess.Popen(
+                [sys.executable, "-c", worker, str(ROOT / "scripts"), "hold",
+                 str(directory), str(database), temporary],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8",
+            )
+            writer = None
+            try:
+                self.assertEqual("locked", holder.stdout.readline().strip())
+                writer = subprocess.Popen(
+                    [sys.executable, "-c", worker, str(ROOT / "scripts"), "write",
+                     str(directory), str(database), temporary],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8",
+                )
+                self.assertEqual("started", writer.stdout.readline().strip())
+                time.sleep(0.1)
+                self.assertIsNone(writer.poll(), "writer did not wait for the revision lock")
+                holder.stdin.write("\n")
+                holder.stdin.flush()
+                _, holder_error = holder.communicate(timeout=10)
+                _, writer_error = writer.communicate(timeout=10)
+                self.assertEqual(0, holder.returncode, holder_error)
+                self.assertEqual(0, writer.returncode, writer_error)
+
+                statuses = cycle_status.read_statuses(directory)
+                self.assertEqual(1, len(statuses))
+                self.assertEqual(1, statuses[0]["revision"])
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+                    holder.communicate()
+                if writer is not None and writer.poll() is None:
+                    writer.kill()
+                    writer.communicate()
+
+    def test_invalid_revision_file_recovers_from_visible_status_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "telemetry.sqlite"
+            writer = cycle_status.CycleStatusWriter(
+                database, "cycle", "repo", "247", workspace=temporary,
+            )
+            writer._write()
+            revision_path = root / "status" / ".revision"
+            for invalid in ("garbage", "-1"):
+                revision_path.write_text(invalid, encoding="ascii")
+                writer._write()
+                statuses = cycle_status.read_statuses(root / "status")
+                self.assertEqual(1, len(statuses))
+                self.assertEqual(int(invalid == "-1") + 2, statuses[0]["revision"])
+                self.assertEqual(str(statuses[0]["revision"]), revision_path.read_text().strip())
+
+    def test_cursor_ahead_of_status_revisions_resets_to_current_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "active", 1, activity="current-work")
+            (directory / ".revision").write_text("1\n", encoding="ascii")
+            cursor.write_text('{"version": 1, "revision": 50}\n', encoding="utf-8")
+
+            result = self._run_cursor_cli(directory, cursor)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("current-work", result.stdout)
+            self.assertEqual(1, json.loads(cursor.read_text())["revision"])
+
+    def test_cursor_monitor_falls_back_without_skipping_an_unpublished_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "active", 1, activity="current-work")
+            (directory / ".revision").write_text("2\n", encoding="ascii")
+            cursor.write_text('{"version": 1, "revision": 2}\n', encoding="utf-8")
+
+            first_output = io.StringIO()
+            with patch.object(cycle_status, "_revision_file_lock",
+                              side_effect=PermissionError("read-only status directory")), \
+                    contextlib.redirect_stdout(first_output):
+                result = cycle_status.main([
+                    "--line", "--cursor-file", str(cursor), "--status-dir", str(directory),
+                ])
+
+            self.assertEqual(0, result)
+            self.assertIn("current-work", first_output.getvalue())
+            self.assertEqual(1, json.loads(cursor.read_text())["revision"])
+
+            self._write_cursor_status(directory, "active", 2, activity="published-work")
+            (directory / ".revision").write_text("2\n", encoding="ascii")
+            second_output = io.StringIO()
+            with patch.object(cycle_status, "_revision_file_lock",
+                              side_effect=PermissionError("read-only status directory")), \
+                    contextlib.redirect_stdout(second_output):
+                result = cycle_status.main([
+                    "--line", "--cursor-file", str(cursor), "--status-dir", str(directory),
+                ])
+
+            self.assertEqual(0, result)
+            self.assertIn("published-work", second_output.getvalue())
+            self.assertEqual(2, json.loads(cursor.read_text())["revision"])
+
+    def test_cursor_monitor_does_not_create_a_missing_status_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "missing-status", root / "cursor.json"
+            result = self._run_cursor_cli(directory, cursor)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(directory.exists())
+            self.assertEqual(0, json.loads(cursor.read_text())["revision"])
+
     def test_since_requires_timezone_aware_iso_timestamp(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):

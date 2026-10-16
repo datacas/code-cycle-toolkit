@@ -8,9 +8,11 @@ telemetry database remains the record of what the cycle did.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +24,7 @@ from typing import TextIO
 from telemetry import default_database_path
 
 ACTIVITY_LIMIT = 500
+_REVISION_FILE_THREAD_LOCK = threading.Lock()
 
 
 def _configure_stdout() -> None:
@@ -473,6 +476,134 @@ def _updated_after(status: dict, since: datetime) -> bool:
         return False
 
 
+@contextmanager
+def _revision_file_lock(directory: Path, *, create: bool = True):
+    """Serialize status revisions across writers, including separate processes."""
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    elif not directory.is_dir():
+        # A monitor is read-only; an absent status directory needs no lock.
+        yield
+        return
+    lock_path = directory / ".revision.lock"
+    # msvcrt byte-range locks do not serialize threads in the same process.
+    # Keep those threads out before taking the cross-process file lock.
+    with _REVISION_FILE_THREAD_LOCK:
+        with lock_path.open("a+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+
+                # The lock may extend beyond EOF; never read or write the byte
+                # before acquiring it.
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}.", suffix=".tmp", delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _revision_of(status: dict) -> int:
+    revision = status.get("revision", 0)
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+        return revision
+    return 0
+
+
+def _visible_revision_unlocked(directory: Path) -> int:
+    revisions = []
+    for status in read_statuses(directory):
+        revisions.append(_revision_of(status))
+    return max(revisions, default=0)
+
+
+
+def _revision_ceiling_unlocked(directory: Path) -> int:
+    """Return the greatest revision visible in status files or the shared counter."""
+    visible = _visible_revision_unlocked(directory)
+    try:
+        current = int((directory / ".revision").read_text(encoding="ascii"))
+        if current < 0:
+            current = 0
+    except (FileNotFoundError, OSError, ValueError):
+        current = 0
+    return max(visible, current)
+
+
+def _visible_revision(directory: Path) -> int:
+    """Return the greatest revision in a complete, visible status snapshot."""
+    with _revision_file_lock(directory):
+        return _visible_revision_unlocked(directory)
+
+
+def _next_revision_locked(directory: Path) -> int:
+    revision_path = directory / ".revision"
+    try:
+        content = revision_path.read_text(encoding="ascii")
+    except FileNotFoundError:
+        current = _visible_revision_unlocked(directory)
+    except OSError as exc:
+        raise OSError(f"cannot read status revision file: {revision_path}") from exc
+    else:
+        try:
+            current = int(content)
+        except ValueError:
+            current = _visible_revision_unlocked(directory)
+        if current < 0:
+            current = _visible_revision_unlocked(directory)
+    revision = current + 1
+    _atomic_write(revision_path, f"{revision}\n")
+    return revision
+
+
+def _cursor_revision(path: Path) -> int | None:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"cannot read cursor file: {path}: {exc}") from exc
+    try:
+        value = json.loads(content)
+        revision = value["revision"]
+        if (not isinstance(value, dict) or value.get("version") != 1
+                or isinstance(revision, bool) or not isinstance(revision, int)
+                or revision < 0):
+            raise ValueError
+        return revision
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"corrupt cursor file: {path}") from exc
+
+
+def _write_cursor(path: Path, revision: int) -> None:
+    _atomic_write(path, json.dumps({"version": 1, "revision": revision}) + "\n")
+
+
 def format_status(status: dict) -> str:
     """Format one saved cycle snapshot for a human terminal."""
     line = f"{status.get('cycle_id', 'cycle')}: {format_progress_line(status)}"
@@ -872,29 +1003,19 @@ class CycleStatusWriter:
 
     def _write(self) -> None:
         with self._lock:
-            self._status["updated_at"] = _now()
-            self._status["total_elapsed_seconds"] = self._total_elapsed()
-            stage = self._status.get("stage")
-            if isinstance(stage, dict):
-                stage["total_elapsed_seconds"] = self._status["total_elapsed_seconds"]
-            payload = json.dumps(self._status, ensure_ascii=False, separators=(",", ":"))
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            handle = tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=self.path.parent,
-                prefix=f".{self.path.name}.", suffix=".tmp", delete=False,
-            )
-            temporary = Path(handle.name)
             try:
-                with handle:
-                    handle.write(payload)
-                    handle.write("\n")
-                os.replace(temporary, self.path)
-            finally:
-                temporary.unlink(missing_ok=True)
-        except OSError:
-            # Progress must never turn an otherwise usable cycle into a failure.
-            return
+                with _revision_file_lock(self.path.parent):
+                    self._status["revision"] = _next_revision_locked(self.path.parent)
+                    self._status["updated_at"] = _now()
+                    self._status["total_elapsed_seconds"] = self._total_elapsed()
+                    stage = self._status.get("stage")
+                    if isinstance(stage, dict):
+                        stage["total_elapsed_seconds"] = self._status["total_elapsed_seconds"]
+                    payload = json.dumps(self._status, ensure_ascii=False, separators=(",", ":"))
+                    _atomic_write(self.path, payload + "\n")
+            except OSError:
+                # Progress must never turn an otherwise usable cycle into a failure.
+                return
 
 
 def status_directory(database: str | Path | None = None,
@@ -925,6 +1046,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="print each cycle as one user-facing progress line")
     parser.add_argument("--since", default=None,
                         help="with --line, print snapshots updated after this ISO 8601 timestamp")
+    parser.add_argument("--cursor-file", default=None,
+                        help="with --line, resume from and atomically update this cursor file")
     parser.add_argument("--progress-interval", type=float, default=60,
                         help="initial heartbeat seconds (default: 60; later intervals adapt)")
     parser.add_argument("--database", default=None,
@@ -940,6 +1063,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--progress-interval must be greater than zero")
     if args.since and not args.line:
         parser.error("--since requires --line")
+    if args.cursor_file and not args.line:
+        parser.error("--cursor-file requires --line")
+    if args.cursor_file and args.since:
+        parser.error("--cursor-file cannot be combined with --since")
     try:
         since = _parse_timestamp(args.since) if args.since else None
     except ValueError as exc:
@@ -948,20 +1075,63 @@ def main(argv: list[str] | None = None) -> int:
         import profile_config
         return profile_config.main(["show", "--cwd", args.cwd])
     directory = status_directory(args.database, args.status_dir)
+    cursor_path = Path(args.cursor_file).expanduser() if args.cursor_file else None
+    cursor = None
+    if cursor_path is not None:
+        try:
+            cursor = _cursor_revision(cursor_path)
+        except ValueError as exc:
+            parser.error(str(exc))
     last_lines: dict[str, str] = {}
     try:
         while True:
-            statuses = read_statuses(directory)
+            if cursor_path is not None:
+                try:
+                    with _revision_file_lock(directory, create=False):
+                        statuses = read_statuses(directory)
+                        ceiling = _revision_ceiling_unlocked(directory)
+                except OSError:
+                    # Snapshots are atomically replaced, so they remain safe to read
+                    # without the optional cross-process revision lock. Do not use
+                    # the counter: a writer may increment it before publishing a snapshot.
+                    statuses = read_statuses(directory)
+                    ceiling = max((_revision_of(status) for status in statuses), default=0)
+            else:
+                statuses = read_statuses(directory)
+                ceiling = 0
+
+            next_cursor = cursor
+            if cursor_path is not None:
+                if cursor is None or cursor > ceiling:
+                    # A missing or stale cursor starts from the current state.
+                    next_cursor = ceiling
+                    selected = [status for status in statuses if not status.get("finished")]
+                else:
+                    selected = [status for status in statuses
+                                if _revision_of(status) > cursor]
+                if selected:
+                    next_cursor = max(
+                        next_cursor or 0,
+                        max(_revision_of(status) for status in selected),
+                    )
+            else:
+                selected = statuses
             if statuses:
-                for status in statuses:
+                for status in selected:
                     line = format_progress_line(status) if args.line else format_status(status)
                     cycle_id = str(status.get("cycle_id", "cycle"))
-                    fresh = not args.line or since is None or _updated_after(status, since)
+                    fresh = (cursor_path is not None or not args.line or since is None
+                             or _updated_after(status, since))
                     if fresh and last_lines.get(cycle_id) != line:
                         print(line)
                         last_lines[cycle_id] = line
             else:
                 print(f"No cycle status files in {directory}")
+            if cursor_path is not None:
+                sys.stdout.flush()
+                if next_cursor is not None and next_cursor != cursor:
+                    _write_cursor(cursor_path, next_cursor)
+                    cursor = next_cursor
             if not args.follow:
                 return 0
             active = [status for status in statuses if not status.get("finished")]
