@@ -5,6 +5,12 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-16
+
+v0.6.0 was never published as a GitHub release: the release workflow failed
+on the self-hosted runner. This release includes everything listed under
+0.6.0 below.
+
 ### Fixed
 
 - `run_cycle.py` run from a linked worktree without its own `.code-cycle.yml`
@@ -13,6 +19,19 @@ All notable changes to this project are documented here. This project follows
   apply. Each run states which configuration file it used, or that it found
   none. A file in the worktree still wins; `--config` and `--no-config` are
   unchanged.
+
+- The release workflow publishes through the GitHub REST API instead of the
+  GitHub CLI, which the self-hosted runner does not have. Every release attempt
+  since v0.6.0 had failed with `gh: command not found`.
+
+### Changed
+
+- CI: the Windows test suite runs in four time-balanced shards on separate
+  runners, aggregated under the required `PowerShell installer` check. Time to
+  a result dropped from 21m35s to a 7m00s median over three runs, with the same
+  1462 tests and 68 skips (#241).
+- CI: `Validate package` runs once per pull-request push and cancels stale runs
+  (#254).
 
 ### Added
 
