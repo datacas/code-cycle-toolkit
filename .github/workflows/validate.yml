@@ -190,13 +190,13 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install the configuration parser
-        run: py -3 -m pip install --quiet pyyaml
+      - name: Install the Windows test dependencies
+        run: py -3 -m pip install --quiet pyyaml pytest pytest-xdist
 
       - name: Validate package with Windows Python
         run: |
           py -3 scripts/validate-package.py
-          py -3 -m unittest discover -s tests -v
+          py -3 -m pytest -n 4 -v tests
 
       - name: Test project installation for all hosts
         shell: pwsh
