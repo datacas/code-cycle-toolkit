@@ -526,7 +526,7 @@ class StatsTests(unittest.TestCase):
             stats._report_config(self.directory)
 
         self.assertIn("code_cycle.repository.selector", str(failure.exception))
-        self.assertIn(str(self.directory / ".code-cycle.yml"), str(failure.exception))
+        self.assertIn(str((self.directory / ".code-cycle.yml").resolve()), str(failure.exception))
 
     def test_linked_worktree_uses_main_config_and_reports_it_on_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -548,7 +548,7 @@ class StatsTests(unittest.TestCase):
                                    "--database", str(root / "missing.sqlite")])
 
             self.assertEqual(0, code)
-            self.assertEqual("configuration: " + str(config) + "\n", stderr.getvalue())
+            self.assertEqual("configuration: " + str(config.resolve()) + "\n", stderr.getvalue())
             self.assertEqual("owner/api", json.loads(stdout.getvalue())["repository"])
 
     def test_missing_config_in_linked_worktree_names_both_paths_and_not_defaults(self) -> None:
@@ -565,8 +565,8 @@ class StatsTests(unittest.TestCase):
                 stats._report_config(linked)
 
             message = str(failure.exception)
-            self.assertIn(str(linked / ".code-cycle.yml"), message)
-            self.assertIn(str(main / ".code-cycle.yml"), message)
+            self.assertIn(str((linked / ".code-cycle.yml").resolve()), message)
+            self.assertIn(str((main / ".code-cycle.yml").resolve()), message)
             self.assertNotIn("built-in defaults", message)
 
     @staticmethod

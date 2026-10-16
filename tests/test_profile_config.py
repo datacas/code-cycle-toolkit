@@ -100,7 +100,7 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
         primary = next(row["primary"] for row in rows if row["profile"] == "cheap_coder")
         self.assertEqual(0, code)
         self.assertEqual("claude:anthropic/claude-sonnet-5-5 high", primary)
-        self.assertEqual(f"configuration: {self.config}\n", err)
+        self.assertEqual(f"configuration: {self.config.resolve()}\n", err)
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to read a configuration")
     def test_linked_worktree_write_rejects_a_foreign_config_target(self) -> None:
@@ -112,7 +112,7 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
                            "--preset", "defaults", "--no-probe", "--confirmed")
 
         self.assertEqual(1, code)
-        self.assertIn(str(self.config), err)
+        self.assertIn(str(self.config.resolve()), err)
         self.assertEqual(original, self.config.read_bytes())
         self.assertEqual("code_cycle: {}\n", foreign.read_text(encoding="utf-8"))
 
@@ -122,8 +122,8 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
                              "single-anthropic", "--no-probe", "--confirmed")
 
         self.assertEqual(0, code, err)
-        self.assertIn(str(self.config), err)
-        self.assertIn(str(self.config), out)
+        self.assertIn(str(self.config.resolve()), err)
+        self.assertIn(str(self.config.resolve()), out)
         self.assertIn("profiles:", self.config.read_text(encoding="utf-8"))
         self.assertFalse((self.linked / ".code-cycle.yml").exists())
 
@@ -156,7 +156,7 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
         self.assertEqual(0, code, err)
         self.assertTrue(self.config.is_symlink())
         self.assertIn("profiles:", managed.read_text(encoding="utf-8"))
-        self.assertIn(str(managed), out)
+        self.assertIn(str(managed.resolve()), out)
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
     def test_main_worktree_write_preserves_a_symlinked_config(self) -> None:
@@ -175,7 +175,7 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
         self.assertEqual(0, code, err)
         self.assertTrue(self.config.is_symlink())
         self.assertIn("profiles:", managed.read_text(encoding="utf-8"))
-        self.assertIn(str(managed), out)
+        self.assertIn(str(managed.resolve()), out)
 
     @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
     def test_write_reports_a_symlink_loop_without_a_traceback(self) -> None:
