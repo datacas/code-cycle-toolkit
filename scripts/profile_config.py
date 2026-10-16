@@ -633,9 +633,15 @@ def _validate_write_target(cwd: str, target: Path) -> Path:
     current, main = config_search_paths(Path(cwd).resolve())
     linked_worktree = current.parent != main.parent
     expected = current if current.is_file() else main
+    target_is_symlink = target.is_symlink()
+    expected_is_symlink = expected.is_symlink() if linked_worktree else False
     try:
-        resolved_target = target.resolve()
-        resolved_expected = expected.resolve() if linked_worktree else None
+        # Resolve symlinks strictly so loops and dangling links fail consistently
+        # across platforms instead of being replaced by the atomic write.
+        resolved_target = target.resolve(strict=target_is_symlink)
+        resolved_expected = (
+            expected.resolve(strict=expected_is_symlink) if linked_worktree else None
+        )
     except (OSError, RuntimeError) as error:
         raise ProfileConfigError(
             f"cannot resolve configuration write target {target}: {error}"
@@ -646,7 +652,7 @@ def _validate_write_target(cwd: str, target: Path) -> Path:
         )
     # Atomic replacement of the symlink path would remove the symlink. Write
     # through to its resolved config so linked and main worktrees agree.
-    return resolved_target if target.is_symlink() else target
+    return resolved_target if target_is_symlink else target
 
 
 def _probe(enabled: bool):
