@@ -536,6 +536,65 @@ class CycleStatusTests(unittest.TestCase):
 
         self.assertEqual(list(range(1, 9)), sorted(revisions))
 
+    def test_status_write_waits_for_revision_lock_held_by_another_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "status"
+            directory.mkdir()
+            database = root / "telemetry.sqlite"
+            worker = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import cycle_status
+
+mode, directory = sys.argv[2], Path(sys.argv[3])
+if mode == "hold":
+    with cycle_status._revision_file_lock(directory):
+        print("locked", flush=True)
+        sys.stdin.readline()
+else:
+    print("started", flush=True)
+    cycle_status.CycleStatusWriter(
+        Path(sys.argv[4]), "child", "repo", "247", workspace=sys.argv[5],
+    )._write()
+"""
+            holder = subprocess.Popen(
+                [sys.executable, "-c", worker, str(ROOT / "scripts"), "hold",
+                 str(directory), str(database), temporary],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8",
+            )
+            writer = None
+            try:
+                self.assertEqual("locked", holder.stdout.readline().strip())
+                writer = subprocess.Popen(
+                    [sys.executable, "-c", worker, str(ROOT / "scripts"), "write",
+                     str(directory), str(database), temporary],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8",
+                )
+                self.assertEqual("started", writer.stdout.readline().strip())
+                time.sleep(0.1)
+                self.assertIsNone(writer.poll(), "writer did not wait for the revision lock")
+                holder.stdin.write("\n")
+                holder.stdin.flush()
+                _, holder_error = holder.communicate(timeout=10)
+                _, writer_error = writer.communicate(timeout=10)
+                self.assertEqual(0, holder.returncode, holder_error)
+                self.assertEqual(0, writer.returncode, writer_error)
+
+                statuses = cycle_status.read_statuses(directory)
+                self.assertEqual(1, len(statuses))
+                self.assertEqual(1, statuses[0]["revision"])
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+                    holder.communicate()
+                if writer is not None and writer.poll() is None:
+                    writer.kill()
+                    writer.communicate()
+
     def test_invalid_revision_file_recovers_from_visible_status_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -493,10 +493,8 @@ def _revision_file_lock(directory: Path, *, create: bool = True):
             if os.name == "nt":
                 import msvcrt
 
-                handle.seek(0)
-                if handle.read(1) == b"":
-                    handle.write(b"0")
-                    handle.flush()
+                # The lock may extend beyond EOF; never read or write the byte
+                # before acquiring it.
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:
