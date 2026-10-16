@@ -1090,9 +1090,10 @@ def main(argv: list[str] | None = None) -> int:
                         ceiling = _revision_ceiling_unlocked(directory)
                 except OSError:
                     # Snapshots are atomically replaced, so they remain safe to read
-                    # without the optional cross-process revision lock.
+                    # without the optional cross-process revision lock. Do not use
+                    # the counter: a writer may increment it before publishing a snapshot.
                     statuses = read_statuses(directory)
-                    ceiling = _revision_ceiling_unlocked(directory)
+                    ceiling = max((_revision_of(status) for status in statuses), default=0)
             else:
                 statuses = read_statuses(directory)
                 ceiling = 0

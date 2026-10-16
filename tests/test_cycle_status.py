@@ -568,24 +568,39 @@ class CycleStatusTests(unittest.TestCase):
             self.assertIn("current-work", result.stdout)
             self.assertEqual(1, json.loads(cursor.read_text())["revision"])
 
-    def test_cursor_monitor_falls_back_when_revision_lock_is_unavailable(self) -> None:
+    def test_cursor_monitor_falls_back_without_skipping_an_unpublished_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             directory, cursor = root / "status", root / "cursor.json"
             directory.mkdir()
-            self._write_cursor_status(directory, "active", 2, activity="read-only-work")
-            cursor.write_text('{"version": 1, "revision": 1}\n', encoding="utf-8")
-            output = io.StringIO()
+            self._write_cursor_status(directory, "active", 1, activity="current-work")
+            (directory / ".revision").write_text("2\n", encoding="ascii")
+            cursor.write_text('{"version": 1, "revision": 2}\n', encoding="utf-8")
 
+            first_output = io.StringIO()
             with patch.object(cycle_status, "_revision_file_lock",
                               side_effect=PermissionError("read-only status directory")), \
-                    contextlib.redirect_stdout(output):
+                    contextlib.redirect_stdout(first_output):
                 result = cycle_status.main([
                     "--line", "--cursor-file", str(cursor), "--status-dir", str(directory),
                 ])
 
             self.assertEqual(0, result)
-            self.assertIn("read-only-work", output.getvalue())
+            self.assertIn("current-work", first_output.getvalue())
+            self.assertEqual(1, json.loads(cursor.read_text())["revision"])
+
+            self._write_cursor_status(directory, "active", 2, activity="published-work")
+            (directory / ".revision").write_text("2\n", encoding="ascii")
+            second_output = io.StringIO()
+            with patch.object(cycle_status, "_revision_file_lock",
+                              side_effect=PermissionError("read-only status directory")), \
+                    contextlib.redirect_stdout(second_output):
+                result = cycle_status.main([
+                    "--line", "--cursor-file", str(cursor), "--status-dir", str(directory),
+                ])
+
+            self.assertEqual(0, result)
+            self.assertIn("published-work", second_output.getvalue())
             self.assertEqual(2, json.loads(cursor.read_text())["revision"])
 
     def test_cursor_monitor_does_not_create_a_missing_status_directory(self) -> None:
