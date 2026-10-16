@@ -490,12 +490,12 @@ schedule.
 
 For a detached `run_cycle.py`, keep stage start and end lines immediate in the
 coordinator. Follow the status snapshots through the host's monitoring
-facility. Before each scheduled check, capture the current UTC time as an
-RFC 3339 timestamp with subsecond precision and save it as the cursor for the
-next check. Run `cycle_status.py --line --since <previous-cursor>`; its lines
-include the executor-reported workspace snapshot and can be relayed verbatim.
-Capturing the next cursor before reading ensures updates written during or
-after the check are included on the next wake-up. Prefer a host-side
+facility. Run the printed `cycle_status.py --line --cursor-file <path>` command
+at each check; it stores an opaque revision cursor atomically after emitting
+the snapshots, so re-arming the monitor neither replays earlier lines nor
+misses later updates. Its lines include the executor-reported workspace
+snapshot and can be relayed verbatim. The first use prints only current
+unfinished cycles, not historical finished cycles. Prefer a host-side
 status-change notification to wake the coordinator when available. Otherwise,
 use the adaptive polling schedule; unchanged status lines are suppressed, and
 the extra model turns caused by polling are expected. Lack of host notifications

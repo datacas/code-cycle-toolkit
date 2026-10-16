@@ -56,7 +56,7 @@ import uuid
 from collections.abc import Callable
 from urllib.parse import quote
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
 import ci_gate
@@ -69,7 +69,10 @@ from cycle_history import (
     LockHeld,
     RemoteMark,
 )
-from cycle_status import CycleStatusWriter, _configure_stdout, _duration, status_directory
+from cycle_status import (
+    CycleStatusWriter, _configure_stdout, _duration, _visible_revision,
+    _write_cursor, status_directory,
+)
 from grants import (
     ConsentBroker, ConsentStore, GrantError, PermissionRequest,
     parse_grant_options, terminal_prompt,
@@ -3723,10 +3726,14 @@ def detach(arguments: list[str], database: str | None) -> int:
     and writes its report to a log beside the status files that
     `cycle_status.py` reads.
     """
-    directory = status_directory(database)
+    directory = status_directory(database).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log = directory / f"detached-{stamp}-{os.getpid()}.log"
+    run_id = uuid.uuid4().hex[:8]
+    log = directory / f"detached-{stamp}-{os.getpid()}-{run_id}.log"
+    cursor_file = directory / f"detached-{stamp}-{os.getpid()}-{run_id}.cursor"
+    # Seed before Popen: the new cycle's first snapshot must be newer than it.
+    _write_cursor(cursor_file, _visible_revision(directory))
     options: dict = {}
     if os.name == "nt":
         options["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP
@@ -3740,11 +3747,8 @@ def detach(arguments: list[str], database: str | None) -> int:
             stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
             close_fds=True, **options,
         )
-    cursor = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
-        timespec="microseconds"
-    ).replace("+00:00", "Z")
     progress = [sys.executable, str(Path(__file__).resolve().with_name("cycle_status.py")),
-                "--line", "--since", cursor]
+                "--line", "--cursor-file", str(cursor_file)]
     if database:
         progress += ["--database", database]
     print(f"detached: run_cycle.py is running as process {process.pid}")
