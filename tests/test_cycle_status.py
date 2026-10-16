@@ -536,6 +536,68 @@ class CycleStatusTests(unittest.TestCase):
 
         self.assertEqual(list(range(1, 9)), sorted(revisions))
 
+    def test_invalid_revision_file_recovers_from_visible_status_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "telemetry.sqlite"
+            writer = cycle_status.CycleStatusWriter(
+                database, "cycle", "repo", "247", workspace=temporary,
+            )
+            writer._write()
+            revision_path = root / "status" / ".revision"
+            for invalid in ("garbage", "-1"):
+                revision_path.write_text(invalid, encoding="ascii")
+                writer._write()
+                statuses = cycle_status.read_statuses(root / "status")
+                self.assertEqual(1, len(statuses))
+                self.assertEqual(int(invalid == "-1") + 2, statuses[0]["revision"])
+                self.assertEqual(str(statuses[0]["revision"]), revision_path.read_text().strip())
+
+    def test_cursor_ahead_of_status_revisions_resets_to_current_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "active", 1, activity="current-work")
+            (directory / ".revision").write_text("1\n", encoding="ascii")
+            cursor.write_text('{"version": 1, "revision": 50}\n', encoding="utf-8")
+
+            result = self._run_cursor_cli(directory, cursor)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("current-work", result.stdout)
+            self.assertEqual(1, json.loads(cursor.read_text())["revision"])
+
+    def test_cursor_monitor_falls_back_when_revision_lock_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "status", root / "cursor.json"
+            directory.mkdir()
+            self._write_cursor_status(directory, "active", 2, activity="read-only-work")
+            cursor.write_text('{"version": 1, "revision": 1}\n', encoding="utf-8")
+            output = io.StringIO()
+
+            with patch.object(cycle_status, "_revision_file_lock",
+                              side_effect=PermissionError("read-only status directory")), \
+                    contextlib.redirect_stdout(output):
+                result = cycle_status.main([
+                    "--line", "--cursor-file", str(cursor), "--status-dir", str(directory),
+                ])
+
+            self.assertEqual(0, result)
+            self.assertIn("read-only-work", output.getvalue())
+            self.assertEqual(2, json.loads(cursor.read_text())["revision"])
+
+    def test_cursor_monitor_does_not_create_a_missing_status_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory, cursor = root / "missing-status", root / "cursor.json"
+            result = self._run_cursor_cli(directory, cursor)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(directory.exists())
+            self.assertEqual(0, json.loads(cursor.read_text())["revision"])
+
     def test_since_requires_timezone_aware_iso_timestamp(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):

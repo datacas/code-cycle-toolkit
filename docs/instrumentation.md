@@ -936,9 +936,12 @@ row still says `succeeded`, because it did.
 The runtime also writes one atomic status snapshot per cycle beside the
 telemetry database. `cycle_status.py` reads those snapshots from any terminal;
 the snapshot is updated while a dispatch runs and retained after the cycle
-finishes. `cycle_status.py --line --since <timestamp>` prints only updated
-snapshots, each as one user-facing line, for a host monitoring facility to
-relay. `run_cycle.py --verbose` prints the same routing, workspace, and activity
+finishes. `cycle_status.py --line --cursor-file <path>` prints snapshots newer
+than a persisted revision cursor, each as one user-facing line, for a host
+monitoring facility to relay. The cursor advances only after output is flushed;
+a stale cursor resets to the current unfinished cycles. `--since <timestamp>`
+remains available for timestamp-based queries. `run_cycle.py --verbose` prints
+the same routing, workspace, and activity
 fields to the launching terminal, with periodic updates controlled by
 `--progress-interval`: every two minutes through minute 15, then every five
 minutes. The workspace snapshot reports the dispatched worker's current

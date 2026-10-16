@@ -476,9 +476,14 @@ def _updated_after(status: dict, since: datetime) -> bool:
 
 
 @contextmanager
-def _revision_file_lock(directory: Path):
+def _revision_file_lock(directory: Path, *, create: bool = True):
     """Serialize status revisions across writers, including separate processes."""
-    directory.mkdir(parents=True, exist_ok=True)
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    elif not directory.is_dir():
+        # A monitor is read-only; an absent status directory needs no lock.
+        yield
+        return
     lock_path = directory / ".revision.lock"
     with lock_path.open("a+b") as handle:
         if os.name == "nt":
@@ -535,6 +540,19 @@ def _visible_revision_unlocked(directory: Path) -> int:
     return max(revisions, default=0)
 
 
+
+def _revision_ceiling_unlocked(directory: Path) -> int:
+    """Return the greatest revision visible in status files or the shared counter."""
+    visible = _visible_revision_unlocked(directory)
+    try:
+        current = int((directory / ".revision").read_text(encoding="ascii"))
+        if current < 0:
+            current = 0
+    except (FileNotFoundError, OSError, ValueError):
+        current = 0
+    return max(visible, current)
+
+
 def _visible_revision(directory: Path) -> int:
     """Return the greatest revision in a complete, visible status snapshot."""
     with _revision_file_lock(directory):
@@ -544,13 +562,18 @@ def _visible_revision(directory: Path) -> int:
 def _next_revision_locked(directory: Path) -> int:
     revision_path = directory / ".revision"
     try:
-        current = int(revision_path.read_text(encoding="ascii"))
-        if current < 0:
-            raise ValueError
+        content = revision_path.read_text(encoding="ascii")
     except FileNotFoundError:
         current = _visible_revision_unlocked(directory)
-    except (OSError, ValueError) as exc:
-        raise OSError(f"invalid status revision file: {revision_path}") from exc
+    except OSError as exc:
+        raise OSError(f"cannot read status revision file: {revision_path}") from exc
+    else:
+        try:
+            current = int(content)
+        except ValueError:
+            current = _visible_revision_unlocked(directory)
+        if current < 0:
+            current = _visible_revision_unlocked(directory)
     revision = current + 1
     _atomic_write(revision_path, f"{revision}\n")
     return revision
@@ -1061,16 +1084,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         while True:
             if cursor_path is not None:
-                with _revision_file_lock(directory):
+                try:
+                    with _revision_file_lock(directory, create=False):
+                        statuses = read_statuses(directory)
+                        ceiling = _revision_ceiling_unlocked(directory)
+                except OSError:
+                    # Snapshots are atomically replaced, so they remain safe to read
+                    # without the optional cross-process revision lock.
                     statuses = read_statuses(directory)
+                    ceiling = _revision_ceiling_unlocked(directory)
             else:
                 statuses = read_statuses(directory)
+                ceiling = 0
+
             next_cursor = cursor
             if cursor_path is not None:
-                visible = max((_revision_of(status) for status in statuses), default=0)
-                if cursor is None:
-                    # First use starts at the current state, never at old history.
-                    next_cursor = visible
+                if cursor is None or cursor > ceiling:
+                    # A missing or stale cursor starts from the current state.
+                    next_cursor = ceiling
                     selected = [status for status in statuses if not status.get("finished")]
                 else:
                     selected = [status for status in statuses
