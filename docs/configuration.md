@@ -16,7 +16,7 @@ safe inference              (an unambiguous github.com / bitbucket.org origin re
 built-in defaults, or BLOCKED when a provider or repository stays ambiguous
 ```
 
-`run_cycle.py` looks for the file in `--cwd`; from a linked worktree that has none, it falls back to the main worktree root's file (found through the Git common directory). A file in the worktree wins. Each run prints which file it used, or that it found none and uses the built-in defaults. `--config <path>` and `--no-config` keep their meaning.
+`run_cycle.py`, `profile_config.py`, and `stats.py` look for the file in `--cwd`; from a linked worktree that has none, they fall back to the main worktree root's file (found through the Git common directory). A file in the worktree wins. Each component reports the selected configuration path on stderr; `run_cycle.py` reports when it uses built-in defaults, and the profile and stats commands keep their machine-readable output on stdout. `--config <path>` and `--no-config` keep their meaning for `run_cycle.py`.
 
 `.code-cycle.yml` is optional and holds **no secrets**. Skills never edit it silently. `cc-provider-bootstrap` and `cc-orchestrator` show the proposed change and ask first.
 
@@ -270,7 +270,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `profile_config.py` (used by `cc-profile-config`)
 
-`show | propose | write | presets` · `--cwd <repo root>` · `--config <path>` · `--preset <name>` · `--set <profile>.primary|fallback=<target|none>` (repeatable) · `--allow-cross-split` · `--confirmed` (required by `write`) · `--no-probe` · `--format markdown|json`. See [Routing → Changing profiles](routing.md#changing-profiles).
+`show | propose | write | presets` · `--cwd <repo root>` · `--config <path>` · `--preset <name>` · `--set <profile>.primary|fallback=<target|none>` (repeatable) · `--allow-cross-split` · `--confirmed` (required by `write`) · `--no-probe` · `--format markdown|json`. An explicit `--config` path may name a file that does not exist yet: `show` and `propose` use built-in defaults, while a confirmed `write` creates the file. From a linked worktree, writes target the repository's current or main worktree configuration; symlinked configuration files are followed while validating and writing. See [Routing → Changing profiles](routing.md#changing-profiles).
 
 ### `validate-package.py`
 

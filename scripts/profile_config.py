@@ -611,6 +611,11 @@ def _load(cwd: str, config: str | None) -> tuple[Path, dict]:
                            resolve_config_path)
     root = Path(cwd).resolve()
     try:
+        # An explicit path is also the destination for a new configuration.
+        # Keep the historical empty-config behavior so `write --config` can
+        # create that file and read-only commands can show built-in defaults.
+        if config and not Path(config).is_file():
+            return Path(config), {}
         path = resolve_config_path(root, config)
         if path is None:
             current, main = config_search_paths(root)
@@ -621,18 +626,27 @@ def _load(cwd: str, config: str | None) -> tuple[Path, dict]:
         raise ProfileConfigError(str(error)) from error
 
 
-def _validate_write_target(cwd: str, target: Path) -> None:
+def _validate_write_target(cwd: str, target: Path) -> Path:
     """Keep writes from a linked worktree inside its resolved repository."""
     from run_cycle import config_search_paths
 
     current, main = config_search_paths(Path(cwd).resolve())
-    if current.parent == main.parent:
-        return
+    linked_worktree = current.parent != main.parent
     expected = current if current.is_file() else main
-    if target.is_symlink() or target.absolute() != expected.absolute():
+    try:
+        resolved_target = target.resolve()
+        resolved_expected = expected.resolve() if linked_worktree else None
+    except (OSError, RuntimeError) as error:
+        raise ProfileConfigError(
+            f"cannot resolve configuration write target {target}: {error}"
+        ) from error
+    if linked_worktree and resolved_target != resolved_expected:
         raise ProfileConfigError(
             f"configuration write target must be {expected} for this repository"
         )
+    # Atomic replacement of the symlink path would remove the symlink. Write
+    # through to its resolved config so linked and main worktrees agree.
+    return resolved_target if target.is_symlink() else target
 
 
 def _probe(enabled: bool):
@@ -733,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
             print("write needs --confirmed: show the proposal and get approval first",
                   file=sys.stderr)
             return 2
-        _validate_write_target(args.cwd, path)
+        path = _validate_write_target(args.cwd, path)
         write_declaration(path, proposal.declaration)
         print(f"Wrote code_cycle.profiles to {path}.")
         return 0

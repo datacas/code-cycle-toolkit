@@ -127,6 +127,91 @@ class LinkedWorktreeConfigTests(unittest.TestCase):
         self.assertIn("profiles:", self.config.read_text(encoding="utf-8"))
         self.assertFalse((self.linked / ".code-cycle.yml").exists())
 
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_explicit_new_config_path_can_be_created(self) -> None:
+        target = self.main / "new.yml"
+
+        code, out, err = run("write", "--cwd", str(self.main), "--config",
+                             str(target), "--preset", "single-anthropic",
+                             "--no-probe", "--confirmed")
+
+        self.assertEqual(0, code, err)
+        self.assertTrue(target.is_file())
+        self.assertIn("Wrote code_cycle.profiles", out)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_linked_worktree_write_follows_a_symlinked_main_config(self) -> None:
+        managed = self.main.parent / "managed.yml"
+        managed.write_text("code_cycle:\n  repository:\n    selector: owner/api\n",
+                           encoding="utf-8")
+        self.config.unlink()
+        try:
+            self.config.symlink_to(managed)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+
+        code, out, err = run("write", "--cwd", str(self.linked), "--preset",
+                             "single-anthropic", "--no-probe", "--confirmed")
+
+        self.assertEqual(0, code, err)
+        self.assertTrue(self.config.is_symlink())
+        self.assertIn("profiles:", managed.read_text(encoding="utf-8"))
+        self.assertIn(str(managed), out)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_main_worktree_write_preserves_a_symlinked_config(self) -> None:
+        managed = self.main.parent / "managed.yml"
+        managed.write_text("code_cycle:\n  repository:\n    selector: owner/api\n",
+                           encoding="utf-8")
+        self.config.unlink()
+        try:
+            self.config.symlink_to(managed)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+
+        code, out, err = run("write", "--cwd", str(self.main), "--preset",
+                             "single-anthropic", "--no-probe", "--confirmed")
+
+        self.assertEqual(0, code, err)
+        self.assertTrue(self.config.is_symlink())
+        self.assertIn("profiles:", managed.read_text(encoding="utf-8"))
+        self.assertIn(str(managed), out)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_write_reports_a_symlink_loop_without_a_traceback(self) -> None:
+        self.config.unlink()
+        try:
+            self.config.symlink_to(self.config)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+
+        code, _, err = run("write", "--cwd", str(self.main), "--preset",
+                           "single-anthropic", "--no-probe", "--confirmed")
+
+        self.assertEqual(1, code)
+        self.assertIn("profile_config: cannot resolve configuration write target", err)
+        self.assertNotIn("Traceback", err)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML is needed to verify a write")
+    def test_explicit_write_ignores_an_unrelated_default_config_symlink_loop(self) -> None:
+        self.config.unlink()
+        try:
+            self.config.symlink_to(self.config)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available here")
+        explicit = self.main / "explicit.yml"
+        explicit.write_text("code_cycle:\n  repository:\n    selector: owner/api\n",
+                            encoding="utf-8")
+
+        code, out, err = run("write", "--cwd", str(self.main), "--config",
+                             str(explicit), "--preset", "single-anthropic",
+                             "--no-probe", "--confirmed")
+
+        self.assertEqual(0, code, err)
+        self.assertTrue(self.config.is_symlink())
+        self.assertIn("profiles:", explicit.read_text(encoding="utf-8"))
+        self.assertIn(str(explicit), out)
+
 
 class PresetTests(unittest.TestCase):
     def test_every_preset_is_valid_and_matches_its_declaration(self) -> None:
