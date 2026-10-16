@@ -1,0 +1,103 @@
+{
+  "timing_source": {
+    "description": "Average elapsed time attributed to each test module from consecutive verbose unittest completion timestamps in the Windows PowerShell installer logs for PR #239.",
+    "runs": [
+      "https://github.com/datacas/code-cycle-toolkit/actions/runs/38807156031/job/116670843655",
+      "https://github.com/datacas/code-cycle-toolkit/actions/runs/38807162223/job/116670863191"
+    ],
+    "method": "Average the elapsed time between consecutive verbose unittest completion timestamps for each module across both runs, then assign modules longest-first to the currently lightest shard.",
+    "module_seconds": {
+      "test_behavioral": 1.4,
+      "test_calibration_store": 0.3,
+      "test_ci_gate": 0.0,
+      "test_ci_policy": 139.7,
+      "test_codex_git_sandbox": 20.5,
+      "test_cycle": 117.6,
+      "test_cycle_history": 49.4,
+      "test_cycle_outcomes": 129.0,
+      "test_cycle_progress": 9.0,
+      "test_cycle_status": 1.6,
+      "test_dispatch_failures": 14.4,
+      "test_environment_recovery": 29.6,
+      "test_executors": 60.6,
+      "test_finding_results": 0.0,
+      "test_grants": 0.0,
+      "test_install_codex": 0.0,
+      "test_install_runtime": 0.0,
+      "test_installed_cycle": 0.3,
+      "test_issue_review": 93.9,
+      "test_jev_shadow": 25.1,
+      "test_profile_config": 0.1,
+      "test_reroute": 2.9,
+      "test_review_contract": 0.0,
+      "test_router": 0.0,
+      "test_run_cycle": 416.4,
+      "test_security_gate": 0.0,
+      "test_spike_fixture_runner": 0.0,
+      "test_stage_recovery": 0.0,
+      "test_stage_signals": 51.8,
+      "test_stats": 99.8,
+      "test_stop_questions": 0.0,
+      "test_telemetry": 172.4,
+      "test_validate_package": 67.5,
+      "test_work_item_outcomes": 46.5
+    },
+    "unmeasured_modules": [
+      "test_support",
+      "test_validate_workflow"
+    ],
+    "estimated_shard_seconds": {
+      "windows-1": 416.4,
+      "windows-2": 377.2,
+      "windows-3": 379.7,
+      "windows-4": 376.5
+    },
+    "assignment": "Greedy longest-module-first assignment using the average module durations above; the current suite inventory is validated at runtime."
+  },
+  "shards": {
+    "windows-1": [
+      "test_run_cycle"
+    ],
+    "windows-2": [
+      "test_behavioral",
+      "test_environment_recovery",
+      "test_issue_review",
+      "test_jev_shadow",
+      "test_reroute",
+      "test_stage_signals",
+      "test_telemetry",
+      "test_validate_workflow"
+    ],
+    "windows-3": [
+      "test_ci_policy",
+      "test_cycle_history",
+      "test_cycle_progress",
+      "test_dispatch_failures",
+      "test_stats",
+      "test_support",
+      "test_validate_package"
+    ],
+    "windows-4": [
+      "test_calibration_store",
+      "test_ci_gate",
+      "test_codex_git_sandbox",
+      "test_cycle",
+      "test_cycle_outcomes",
+      "test_cycle_status",
+      "test_executors",
+      "test_finding_results",
+      "test_grants",
+      "test_install_codex",
+      "test_install_runtime",
+      "test_installed_cycle",
+      "test_profile_config",
+      "test_review_contract",
+      "test_router",
+      "test_security_gate",
+      "test_spike_fixture_runner",
+      "test_stage_recovery",
+      "test_stop_questions",
+      "test_work_item_outcomes"
+    ]
+  }
+}

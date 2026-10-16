@@ -178,9 +178,13 @@ jobs:
             exit 1
           fi
 
-  powershell-installer:
-    name: PowerShell installer
+  windows-test-shards:
+    name: Windows test shard (${{ matrix.shard }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [windows-1, windows-2, windows-3, windows-4]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -191,12 +195,34 @@ jobs:
           python-version: '3.x'
 
       - name: Install the Windows test dependencies
-        run: py -3 -m pip install --quiet pyyaml pytest pytest-xdist
+        run: py -3 -m pip install --quiet pyyaml
+
+      - name: Validate shard assignments and run tests
+        run: py -3 scripts/run_windows_test_shard.py ${{ matrix.shard }}
+
+  powershell-installer:
+    name: PowerShell installer
+    runs-on: windows-latest
+    needs: windows-test-shards
+    if: ${{ always() }}
+    steps:
+      - name: Require all Windows test shards to pass
+        if: ${{ always() && needs.windows-test-shards.result != 'success' }}
+        run: exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install the Windows test dependencies
+        run: py -3 -m pip install --quiet pyyaml
 
       - name: Validate package with Windows Python
-        run: |
-          py -3 scripts/validate-package.py
-          py -3 -m pytest -n 4 -v tests
+        run: py -3 scripts/validate-package.py
 
       - name: Test project installation for all hosts
         shell: pwsh
