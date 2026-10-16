@@ -24,6 +24,7 @@ from typing import TextIO
 from telemetry import default_database_path
 
 ACTIVITY_LIMIT = 500
+_REVISION_FILE_THREAD_LOCK = threading.Lock()
 
 
 def _configure_stdout() -> None:
@@ -485,28 +486,31 @@ def _revision_file_lock(directory: Path, *, create: bool = True):
         yield
         return
     lock_path = directory / ".revision.lock"
-    with lock_path.open("a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0)
-            if handle.read(1) == b"":
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
+    # msvcrt byte-range locks do not serialize threads in the same process.
+    # Keep those threads out before taking the cross-process file lock.
+    with _REVISION_FILE_THREAD_LOCK:
+        with lock_path.open("a+b") as handle:
             if os.name == "nt":
+                import msvcrt
+
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                if handle.read(1) == b"":
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_write(path: Path, content: str) -> None:

@@ -439,7 +439,7 @@ class CycleStatusTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "cycle_status.py"), "--line",
              "--cursor-file", str(cursor), "--status-dir", str(directory)],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", check=False,
         )
 
     def test_cursor_resumes_across_invocations_and_identical_timestamps(self) -> None:
