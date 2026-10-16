@@ -29,6 +29,7 @@ MANIFEST = SCRIPTS / "runtime.manifest"
 NOT_RUNTIME = frozenset({
     "validate-package.py",
     "calibration_store.py",
+    "run_windows_test_shard.py",
 })
 
 
