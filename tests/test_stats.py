@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 
 
@@ -519,12 +521,58 @@ class StatsTests(unittest.TestCase):
         self.assertEqual([], stats._read_rows(absent, "owner/repo"))
         self.assertFalse(absent.exists())
 
-    def test_repository_identity_is_required_without_echoing_local_paths(self) -> None:
+    def test_missing_repository_identity_names_the_config_paths_searched(self) -> None:
         with self.assertRaises(stats.StatsError) as failure:
             stats._report_config(self.directory)
 
         self.assertIn("code_cycle.repository.selector", str(failure.exception))
-        self.assertNotIn(str(self.directory), str(failure.exception))
+        self.assertIn(str((self.directory / ".code-cycle.yml").resolve()), str(failure.exception))
+
+    def test_linked_worktree_uses_main_config_and_reports_it_on_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main, linked = root / "main", root / "linked"
+            main.mkdir()
+            self._git(main, "init", "-q", "-b", "main")
+            self._git(main, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                      "commit", "-q", "--allow-empty", "-m", "base")
+            config = main / ".code-cycle.yml"
+            config.write_text(
+                "code_cycle:\n  repository:\n    selector: owner/api\n",
+                encoding="utf-8")
+            self._git(main, "worktree", "add", "-q", "-b", "task", str(linked))
+            stdout, stderr = StringIO(), StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = stats.main(["--cwd", str(linked), "--format", "json",
+                                   "--database", str(root / "missing.sqlite")])
+
+            self.assertEqual(0, code)
+            self.assertEqual("configuration: " + str(config.resolve()) + "\n", stderr.getvalue())
+            self.assertEqual("owner/api", json.loads(stdout.getvalue())["repository"])
+
+    def test_missing_config_in_linked_worktree_names_both_paths_and_not_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main, linked = root / "main", root / "linked"
+            main.mkdir()
+            self._git(main, "init", "-q", "-b", "main")
+            self._git(main, "-c", "user.name=t", "-c", "user.email=t@example.com",
+                      "commit", "-q", "--allow-empty", "-m", "base")
+            self._git(main, "worktree", "add", "-q", "-b", "task", str(linked))
+
+            with self.assertRaises(stats.StatsError) as failure:
+                stats._report_config(linked)
+
+            message = str(failure.exception)
+            self.assertIn(str((linked / ".code-cycle.yml").resolve()), message)
+            self.assertIn(str((main / ".code-cycle.yml").resolve()), message)
+            self.assertNotIn("built-in defaults", message)
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                       capture_output=True, text=True)
 
     def test_repository_identity_rejects_markdown_injection(self) -> None:
         config = self.directory / ".code-cycle.yml"

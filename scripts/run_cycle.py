@@ -3608,8 +3608,8 @@ def plan_with_strategy(args) -> tuple[str, dict, RoutingStrategy]:
     return repo, profiles, routing_strategy
 
 
-def _main_worktree_config(cwd: Path, run=subprocess.run) -> Path | None:
-    """The main worktree root's configuration file, seen from a linked worktree.
+def _main_worktree_root(cwd: Path, run=subprocess.run) -> Path | None:
+    """Return the main worktree root seen from this worktree, when available.
 
     A file that only the main worktree holds (kept out of Git through
     `.git/info/exclude`, say) is invisible from a linked worktree. The Git
@@ -3634,8 +3634,30 @@ def _main_worktree_config(cwd: Path, run=subprocess.run) -> Path | None:
     common = common.resolve()
     if common.name != ".git":
         return None
-    path = common.parent / CONFIG_NAME
-    return path if path.is_file() else None
+    return common.parent
+
+
+def config_search_paths(cwd: Path) -> tuple[Path, Path]:
+    """Return absolute worktree and main-root configuration paths."""
+    current = (cwd.resolve() / CONFIG_NAME)
+    main_root = _main_worktree_root(cwd)
+    main = ((main_root or cwd.resolve()) / CONFIG_NAME)
+    return current, main
+
+
+def resolve_config_path(cwd: Path, explicit: str | Path | None = None) -> Path | None:
+    """Resolve explicit, worktree, then main-worktree configuration paths."""
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise CycleDriverError(f"no configuration at {path}")
+        return path
+    current, main = config_search_paths(cwd)
+    if current.is_file():
+        return current
+    if main != current and main.is_file():
+        return main
+    return None
 
 
 def resolve_config(args, report=None) -> dict:
@@ -3665,16 +3687,16 @@ def resolve_config(args, report=None) -> dict:
             raise CycleDriverError(f"no configuration at {path}")
         say(f"configuration: {path} (--config)")
         return load_config(path)
-    cwd = Path(args.cwd or ".")
-    path = cwd / CONFIG_NAME
-    if path.is_file():
-        say(f"configuration: {path}")
+    cwd = Path(args.cwd or ".").resolve()
+    current, main = config_search_paths(cwd)
+    path = resolve_config_path(cwd)
+    if path is not None:
+        if path == current:
+            say(f"configuration: {path}")
+        else:
+            say(f"configuration: {path} (main worktree; {current} does not exist)")
         return load_config(path)
-    fallback = _main_worktree_config(cwd)
-    if fallback is not None:
-        say(f"configuration: {fallback} (main worktree; {path} does not exist)")
-        return load_config(fallback)
-    say(f"configuration: no {CONFIG_NAME} at {path} or in the main worktree; "
+    say(f"configuration: no {CONFIG_NAME} at {current} or {main}; "
         "using the built-in defaults")
     return {}
 
