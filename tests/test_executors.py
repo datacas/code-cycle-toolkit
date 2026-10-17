@@ -9,7 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -2035,7 +2037,7 @@ class AgentOutputTests(unittest.TestCase):
             )
 
             adapter = ex.CodexAdapter()
-            with patch.object(adapter, "argv", return_value=[sys.executable, str(fake_codex)]):
+            with patch.object(adapter, "argv", return_value=[sys.executable, str(fake_codex), "work"]):
                 result = adapter.dispatch(
                     TARGET, "exercise delegated JSON output", cwd=temporary,
                     runner=ex._run, on_progress=writer.activity, writes=True,
@@ -2396,6 +2398,128 @@ class LiveObservationTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
         self.assertEqual("trusted_directory", result.missing_capability)
+
+
+class NativeScratchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repo = git_repo(self)
+
+    def test_all_native_permission_profiles_write_helpers_and_clean_up(self) -> None:
+        for adapter, target in ((ex.CodexAdapter(), TARGET),
+                                (ex.ClaudeAdapter(), router.parse_target(
+                                    "claude:anthropic/claude-sonnet-5 high"))):
+            for writes, publishes, grants in ((False, False, ()), (False, True, ()),
+                                              (True, False, ()), (True, True, ()),
+                                              (True, False, ("docker_host",)),
+                                              (True, True, ("docker_host",))):
+                for exit_code in (0, 7):
+                    observed = []
+
+                    def runner(argv, timeout=None, cwd=None, env=None):
+                        scratch = Path(env["TMPDIR"])
+                        observed.append(scratch)
+                        self.assertTrue(scratch.name.startswith("code-cycle-tmp-"))
+                        self.assertNotIn(self.repo, scratch.parents)
+                        if adapter.name == "codex":
+                            self.assertIn(f'shell_environment_policy.set.TMPDIR={json.dumps(str(scratch))}', argv)
+                            if writes and not publishes and not grants:
+                                self.assertIn(str(scratch), argv)
+                                self.assertIn("workspace-write", argv)
+                            else:
+                                self.assertTrue(any(f'{json.dumps(str(scratch))}="write"' in arg
+                                                    for arg in argv))
+                        return subprocess.run(
+                            [sys.executable, "-c",
+                             "import os, pathlib, sys; p = pathlib.Path(os.environ['TMPDIR']); "
+                             "[(p / n).write_text('evidence') for n in "
+                             "('pr-comment.md', 'report.md', 'test.log')]; sys.exit(int(sys.argv[1]))",
+                             str(exit_code)], cwd=cwd, env=env, text=True, capture_output=True,
+                            timeout=timeout,
+                        )
+
+                    with self.subTest(adapter=adapter.name, writes=writes, publishes=publishes,
+                                      grants=grants, exit_code=exit_code):
+                        options = {"sandbox_grants": grants} if adapter.name == "codex" else {}
+                        result = adapter.dispatch(target, "work", cwd=str(self.repo), runner=runner,
+                                                  writes=writes, publishes=publishes, **options)
+                        self.assertEqual(ex.DispatchOutcome.SUCCEEDED if exit_code == 0 else
+                                         ex.DispatchOutcome.FAILED, result.outcome, result.detail)
+                        self.assertEqual(1, len(observed))
+                        self.assertFalse(observed[0].exists())
+        self.assertEqual("", git(self.repo, "status", "--porcelain"))
+
+    def test_writing_profiles_preserve_git_rules_and_network_grants(self) -> None:
+        for publishes in (False, True):
+            adapter = ex.CodexAdapter()
+            profile = "code_cycle_publish_write" if publishes else "code_cycle_write"
+            rule = f"permissions.{profile}.filesystem="
+            roots = (str(self.repo / ".git"),)
+            baseline = adapter.argv(TARGET, "work", cwd=str(self.repo), writes=True,
+                                    publishes=publishes, writable_dirs=roots,
+                                    sandbox_grants=("docker_host",))
+            original = next(arg for arg in baseline if arg.startswith(rule))
+
+            def runner(argv, timeout=None, cwd=None, env=None):
+                tables = [arg for arg in argv if arg.startswith(rule)]
+                self.assertEqual([original[:-1] + f',{json.dumps(env["TMPDIR"])}="write"}}'], tables)
+                self.assertIn(f'permissions.{profile}.extends=":workspace"', argv)
+                self.assertIn(f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true", argv)
+                for arg in baseline:
+                    if ".network." in arg:
+                        self.assertIn(arg, argv)
+                return completed()
+
+            result = adapter.dispatch(TARGET, "work", cwd=str(self.repo), writes=True,
+                                      publishes=publishes, writable_dirs=roots,
+                                      sandbox_grants=("docker_host",), runner=runner)
+            self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+
+    def test_concurrent_dispatches_have_distinct_live_directories(self) -> None:
+        barrier = Barrier(2)
+
+        def dispatch_one(_):
+            observed = []
+
+            def runner(argv, timeout=None, cwd=None, env=None):
+                scratch = Path(env["TMPDIR"])
+                (scratch / "report.md").write_text("owned", encoding="utf-8")
+                observed.append(scratch)
+                barrier.wait(timeout=10)
+                self.assertTrue(scratch.exists())
+                return completed()
+
+            result = ex.CodexAdapter().dispatch(TARGET, "work", cwd=str(self.repo),
+                                                writes=True, runner=runner)
+            self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+            return observed[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            paths = list(pool.map(dispatch_one, range(2)))
+        self.assertNotEqual(paths[0], paths[1])
+        self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_writing_dispatch_cleanup_on_timeout_and_cancellation(self) -> None:
+        class Cancelled(BaseException):
+            pass
+
+        for adapter, target in ((ex.CodexAdapter(), TARGET),
+                                (ex.ClaudeAdapter(), router.parse_target(
+                                    "claude:anthropic/claude-sonnet-5 high"))):
+            for error in (subprocess.TimeoutExpired("work", 1), Cancelled()):
+                observed = []
+
+                def runner(argv, timeout=None, cwd=None, env=None):
+                    observed.append(Path(env["TMPDIR"]))
+                    raise error
+
+                if isinstance(error, Cancelled):
+                    with self.assertRaises(Cancelled):
+                        adapter.dispatch(target, "work", cwd=str(self.repo), writes=True, runner=runner)
+                else:
+                    result = adapter.dispatch(target, "work", cwd=str(self.repo), writes=True, runner=runner)
+                    self.assertEqual("timeout", result.error_code)
+                self.assertEqual(1, len(observed))
+                self.assertFalse(observed[0].exists())
 
 
 class ModelVerificationTests(unittest.TestCase):

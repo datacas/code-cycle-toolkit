@@ -37,10 +37,17 @@ do not. A missing instruction file is never a blocker on its own.
 
 **Respect the workflow's authorization boundary.** Do not ask again before
 creating normal artefacts explicitly requested by the user or necessarily
-produced by the documented workflow, such as its branch, commits, pull request,
+produced by this skill's documented workflow, such as its branch, commits, pull request,
 or temporary files. Ask before creating an unrequested persistent repository or
 external artefact, such as a configuration file, migration, durable directory,
 label, or additional branch.
+
+The shared conventions do not grant additional capabilities. Keep the
+skill-specific *Already authorized actions* lists limited to implementation,
+resolution, verification, and the two coordinators, with actions appropriate to
+each role. Preserve the explicit Docker grant requirement. Temporary helper
+instructions use `$TMPDIR/pr-comment.md`, `$TMPDIR/report.md`, and
+`$TMPDIR/<check>.log`; the native runtime owns isolation and cleanup.
 
 **No hardcoded output language.** Published text follows the target repository,
 resolved by the shared *Output language* section. Do not require human-readable

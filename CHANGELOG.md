@@ -5,6 +5,18 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Native Codex and Claude stages, including implementation and resolution, now
+  receive an isolated writable `TMPDIR` for the dispatch lifetime. Temporary
+  helper names are fixed (`pr-comment.md`, `report.md`, `<check>.log`). Permission
+  rules using the v0.6.1 prefix `<parent>/code-cycle-review-tmp-*` must migrate to
+  `<parent>/code-cycle-tmp-*`. Orca worker temporary paths are unchanged.
+- Skills state their own already authorized actions and retain explicit user
+  decisions for scope, persistent artifacts, publication, dependencies, public
+  contracts, data, security, and host Docker access. Shared conventions grant no
+  additional capabilities to read-only stages.
+
 ## [0.6.1] - 2026-10-16
 
 v0.6.0 was never published as a GitHub release: the release workflow failed

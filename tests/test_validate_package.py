@@ -39,6 +39,66 @@ class ValidatePackageTests(unittest.TestCase):
     def test_current_package_is_valid(self) -> None:
         self.assertEqual([], VALIDATOR.validate_package(ROOT))
 
+    def test_authorization_contract_rejects_missing_or_expanded_actions(self) -> None:
+        package = self.copy_package()
+        for name in VALIDATOR.AUTHORIZED_ACTIONS:
+            with self.subTest(name=name):
+                path = package / "skills" / name / "SKILL.md"
+                original = path.read_text(encoding="utf-8")
+                path.write_text(original.replace("## Already authorized actions",
+                                                 "## Actions", 1), encoding="utf-8")
+                errors = []
+                VALIDATOR.check_authorization_contract(package, errors)
+                self.assert_error_contains(errors, "missing Already authorized actions")
+                path.write_text(original, encoding="utf-8")
+        for name in ("cc-verify", "cc-orchestrator", "cc-orca-orchestrator",
+                     "cc-code-review"):
+            with self.subTest(expansion=name):
+                path = package / "skills" / name / "SKILL.md"
+                original = path.read_text(encoding="utf-8")
+                heading = "## Already authorized actions"
+                modified = (original.replace(heading, heading + "\n\n- git commit and push", 1)
+                            if name in VALIDATOR.AUTHORIZED_ACTIONS else
+                            original + "\n" + heading + "\n\n- git push\n")
+                path.write_text(modified, encoding="utf-8")
+                errors = []
+                VALIDATOR.check_authorization_contract(package, errors)
+                self.assert_error_contains(errors, "unauthorized commit/push" if
+                                           name in VALIDATOR.AUTHORIZED_ACTIONS else "unexpected")
+                path.write_text(original, encoding="utf-8")
+
+    def test_authorization_preserves_docker_and_verification_publication_boundaries(self) -> None:
+        package = self.copy_package()
+        path = package / "skills" / "cc-verify" / "SKILL.md"
+        original = path.read_text(encoding="utf-8")
+        for before, after, expected in (
+            ("code_cycle.docker.host_socket_access: true", "docker: true", "host_socket_access"),
+            ("## Already authorized actions", "## Already authorized actions\n\n- Publish PR comments",
+             "unauthorized publication"),
+        ):
+            with self.subTest(expected=expected):
+                path.write_text(original.replace(before, after, 1), encoding="utf-8")
+                errors = []
+                VALIDATOR.check_authorization_contract(package, errors)
+                self.assert_error_contains(errors, expected)
+        path.write_text(original, encoding="utf-8")
+
+    def test_authorization_rejects_shared_omissions_and_unstable_helper_instructions(self) -> None:
+        package = self.copy_package()
+        for path in (package / "skills").glob("*/SKILL.md"):
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("deleting or overwriting", "deleting")
+                            .replace("$TMPDIR/pr-comment.md", "$TMPDIR/pr-comment-ID.md"),
+                            encoding="utf-8")
+        executor = package / "scripts" / "run_cycle.py"
+        executor.write_text(executor.read_text(encoding="utf-8")
+                            .replace("$TMPDIR/report.md", "$TMPDIR/report-ID.md"), encoding="utf-8")
+        errors = []
+        VALIDATOR.check_authorization_contract(package, errors)
+        self.assert_error_contains(errors, "deleting or overwriting")
+        self.assert_error_contains(errors, "$TMPDIR/pr-comment.md")
+        self.assert_error_contains(errors, "native dispatch prompt missing $TMPDIR/report.md")
+
     def test_implementation_workspace_default_and_opt_out_are_documented(self) -> None:
         implementer = (ROOT / "skills" / "cc-implement-issue" / "SKILL.md").read_text(
             encoding="utf-8"
