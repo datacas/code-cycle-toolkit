@@ -27,15 +27,21 @@ An adapter is eligible only when the harness can establish the requested policy.
 
 Claude cannot enforce read-only inside its process, so the harness runs it in an independent detached clone with its own Git object store at the exact reviewed HEAD, outside the implementer's tree, with the clone's remotes removed. A dirty implementer checkout blocks preparation. Before and after the stage, the harness compares the implementer's HEAD, `git status --porcelain`, and every configured remote's advertised refs; a detected change is a `contract_violation`. Edits inside the disposable clone produce a warning and are discarded. If the clone cannot be removed afterwards, the stage fails. Claude records `read_only_mode = detected` only when those checks pass. The prompt prohibits edits, commits, and pushes and explains why. Claude runs with its full tooling and its ordinary `gh` and `git` access, so it can publish its own comment. With Claude, read-only is watched, not enforced. The harness detects a write it can observe, but it cannot prevent or undo a remote write: a push, a merge, or a change to the change request. A push that is later restored before the stage ends also goes unseen. The maintainer has accepted this risk. Anyone who needs a full guarantee should review with Codex or give the reviewer read-only credentials.
 
-Native Codex and Claude read-only dispatches receive a unique writable directory
+All native Codex and Claude dispatches receive a unique writable directory
 outside the checkout as `TMPDIR`. It lasts for that dispatch only and is removed
 after success, failure, timeout, or cancellation. The parent process environment
-is unchanged. Codex uses a named permission profile extending `:read-only` and
-grants write access only to this directory, including when the stage can publish
-a comment; it also forwards `TMPDIR` to shell commands. This uses the same
+is unchanged. Its name starts with `code-cycle-tmp-` under the selected system
+temporary parent; concurrent dispatches never share a directory. Use fixed
+helper names: `$TMPDIR/pr-comment.md`, `$TMPDIR/report.md`, and
+`$TMPDIR/<check>.log`, replacing `<check>` with the check's fixed name.
+Codex read-only stages use a named permission profile extending `:read-only`
+with only this directory writable. Writing stages add the directory to their
+workspace-write roots or existing named profile, preserving Git protections,
+publication access, and any explicitly granted socket access. Codex also
+forwards `TMPDIR` to shell commands. This uses the same
 [permission-profile mechanism](https://developers.openai.com/codex/permissions)
 as scoped publication and requires a compatible Codex CLI. Checkout verification
-still runs and a write there is still a violation. Orca reviews keep their
+still runs for read-only stages and a write there is still a violation. Orca workers keep their
 existing behaviour: worker-start has no per-worker environment setting and
 returns before completion, so the runtime cannot safely own or clean up a
 per-dispatch temporary directory for them.

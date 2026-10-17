@@ -1039,6 +1039,14 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             parts.append(PARALLEL_REVIEW)
     if evidence:
         parts.append(evidence)
+    parts.append(
+        "For native dispatches, use the supplied per-dispatch TMPDIR for temporary helpers: "
+        "$TMPDIR/pr-comment.md for comment bodies, $TMPDIR/report.md for reports, "
+        "and $TMPDIR/<check>.log for check logs, replacing <check> with the check's "
+        "fixed name. Do not add IDs or random suffixes. The runtime isolates "
+        "concurrent dispatches and removes each directory at completion. "
+        "This native temporary-directory policy does not apply to Orca workers."
+    )
     if local_only:
         parts.append(LOCAL_ONLY_REQUEST)
     parts.append(STRUCTURED_REQUEST)

@@ -158,8 +158,9 @@ Codex records `read_only_mode = enforced` only when its sandbox was used *and* t
 
 ## Publication boundary
 
-Native read-only reviews receive and clean up a per-dispatch `TMPDIR` outside
-the checkout; Orca's asynchronous workers keep their existing temporary-directory
+All native stages receive and clean up an isolated, writable per-dispatch
+`TMPDIR` outside the checkout, with the prefix `code-cycle-tmp-` and fixed helper
+names (`pr-comment.md`, `report.md`, and `<check>.log`). Orca's asynchronous workers keep their existing temporary-directory
 behaviour. See [Role workspace policy](role-workspace-policy.md).
 
 What each stage may publish:

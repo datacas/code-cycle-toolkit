@@ -126,10 +126,7 @@ def _paths_overlap(first: str, second: str) -> bool:
 @contextmanager
 def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                            *, writes: bool, publishes: bool, cwd: str):
-    """Give a native read-only dispatch scratch space, never a writable checkout."""
-    if writes:
-        yield argv, environment
-        return
+    """Give every native dispatch isolated scratch space outside its checkout."""
     try:
         code, root = _git_read(cwd, "rev-parse", "--show-toplevel")
         repository = Path(root).resolve() if code == 0 else None
@@ -146,26 +143,43 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                    and (repository is None or (repository != Path(path).resolve()
                         and repository not in Path(path).resolve().parents))), None)
     if parent is None:
-        raise ExecutorError("no temporary directory outside the review checkout")
-    with tempfile.TemporaryDirectory(prefix="code-cycle-review-tmp-", dir=parent) as scratch:
+        raise ExecutorError("no temporary directory outside the dispatch checkout")
+    with tempfile.TemporaryDirectory(prefix="code-cycle-tmp-", dir=parent) as scratch:
         if repository is not None and _paths_overlap(scratch, str(repository)):
-            raise ExecutorError("review temporary directory overlaps the checkout")
+            raise ExecutorError("dispatch temporary directory overlaps the checkout")
         worker_env = dict(os.environ if environment is None else environment)
         worker_env["TMPDIR"] = scratch
         worker_argv = list(argv)
         if adapter.name == "codex":
-            profile = "code_cycle_publish_read" if publishes else "code_cycle_review_read"
+            profile = next((option.split("=", 1)[1].strip('"')
+                            for option in worker_argv
+                            if option.startswith("default_permissions=")), None)
             options = []
-            if not publishes:
+            if not writes and profile is None:
                 # A named profile replaces the legacy read-only selector, while
                 # inheriting its filesystem and network restrictions.
                 index = worker_argv.index("-s")
                 del worker_argv[index:index + 2]
+                profile = "code_cycle_review_read"
                 options += ["-c", f'default_permissions="{profile}"',
                             "-c", f'permissions.{profile}.extends=":read-only"']
-            options += ["-c", f'permissions.{profile}.filesystem={{'
-                        f'{json.dumps(scratch)}="write"}}',
-                        "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
+            if profile is None:
+                # The legacy workspace-write selector accepts explicit roots.
+                options += ["--add-dir", scratch]
+            else:
+                rule = f"permissions.{profile}.filesystem="
+                entry = f'{json.dumps(scratch)}="write"'
+                existing = next((i for i, option in enumerate(worker_argv)
+                                 if option.startswith(rule)), None)
+                if existing is None:
+                    options += ["-c", f"{rule}{{{entry}}}"]
+                else:
+                    # Keep the linked-worktree Git protections in the same
+                    # table; another filesystem override would replace them.
+                    table = worker_argv[existing][len(rule):]
+                    separator = "," if table[1:-1].strip() else ""
+                    worker_argv[existing] = f"{rule}{table[:-1]}{separator}{entry}}}"
+            options += ["-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
             worker_argv[-1:-1] = options
         yield worker_argv, worker_env
 
