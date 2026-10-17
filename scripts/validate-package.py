@@ -101,6 +101,16 @@ WORKSPACE_TOOL_PRODUCT_PATTERNS = tuple(
 
 # Every skill repeats these two sections verbatim, for the same reason.
 SHARED_ALL_SECTIONS = ("## Repository conventions",)
+AUTHORIZED_ACTIONS = {
+    "cc-implement-issue": ("Read repository", "Playwright", "tests", "lint", "build",
+                           "`git add`", "`git commit`", "`git push`", "Open and comment"),
+    "cc-resolve-comments": ("Read repository", "Playwright", "tests", "lint", "build",
+                            "`git add`", "`git commit`", "`git push`", "existing change request"),
+    "cc-verify": ("Read the repository", "Playwright", "tests", "lint", "build"),
+    "cc-orchestrator": ("Coordinate and delegate", "change-request state", "checks"),
+    "cc-orca-orchestrator": ("Orca Run", "Delegate", "change-request state", "checks"),
+}
+TEMPORARY_HELPERS = ("$TMPDIR/pr-comment.md", "$TMPDIR/report.md", "$TMPDIR/<check>.log")
 # cc-run publishes no GitHub artefact, so it states the language rule in its own
 # terms instead of the shared one.
 SHARED_PUBLISHING_SECTIONS = ("## Output language",)
@@ -826,6 +836,55 @@ def check_workspace_tool_sections(root: Path, errors: list[str]) -> None:
                 )
 
 
+def check_authorization_contract(root: Path, errors: list[str]) -> None:
+    """Check scope even when every shared copy drifts in the same way."""
+    for name in sorted(REQUIRED_SKILLS):
+        path = root / "skills" / name / "SKILL.md"
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        shared = extract_section(text, "## Repository conventions") or ""
+        for phrase in (
+            "Do not ask again", "only when this skill's documented workflow",
+            "does not expand a skill's capabilities", "unrequested persistent",
+            "deleting or overwriting", "changing the working structure",
+            "changing scope", "merging or force-pushing", "adding dependencies",
+            "contracts, data, or security", "publishing means releases, tags, package",
+            "comments outside the cycle's change request", "no authority",
+            "each skill's publication boundary still applies",
+            *TEMPORARY_HELPERS,
+        ):
+            if phrase not in shared:
+                errors.append(f"{name}: Repository conventions missing {phrase!r}")
+        actions = extract_section(text, "## Already authorized actions")
+        if name not in AUTHORIZED_ACTIONS:
+            if actions is not None:
+                errors.append(f"{name}: unexpected Already authorized actions section")
+            continue
+        if actions is None:
+            errors.append(f"{name}: missing Already authorized actions section")
+            continue
+        for phrase in (*AUTHORIZED_ACTIONS[name], "--grant docker_host=cycle|persistent",
+                       "code_cycle.docker.host_socket_access: true",
+                       "Without permission, do not work around the restriction"):
+            if phrase not in actions:
+                errors.append(f"{name}: Already authorized actions missing {phrase!r}")
+        # Check the affirmative action list, not the prose stating prohibitions.
+        bullets = "\n".join(line for line in actions.splitlines() if line.startswith("- "))
+        if name not in HEAD_PUSHING_SKILLS:
+            if re.search(r"\b(?:commit|push)\b", bullets, flags=re.IGNORECASE):
+                errors.append(f"{name}: unauthorized commit/push action")
+        if name == "cc-verify" and re.search(r"\b(?:comment|publish)\w*\b", bullets,
+                                             flags=re.IGNORECASE):
+            errors.append(f"{name}: unauthorized publication action")
+    executor = root / "scripts" / "run_cycle.py"
+    if executor.is_file():
+        source = executor.read_text(encoding="utf-8")
+        for helper in TEMPORARY_HELPERS:
+            if helper not in source:
+                errors.append(f"native dispatch prompt missing {helper}")
+
+
 def validate_package(root: Path) -> list[str]:
     root = root.resolve()
     skills_root = root / "skills"
@@ -876,6 +935,7 @@ def validate_package(root: Path) -> list[str]:
             )
 
         check_shared_sections(root, sorted(REQUIRED_SKILLS), SHARED_ALL_SECTIONS, errors)
+        check_authorization_contract(root, errors)
         check_shared_sections(
             root, sorted(REQUIRED_SKILLS - LANGUAGE_EXEMPT), SHARED_PUBLISHING_SECTIONS, errors
         )

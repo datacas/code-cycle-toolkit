@@ -23,13 +23,34 @@ report a missing instruction file as a blocker on its own.
 Do not ask again for actions the user explicitly requested or that this skill's
 documented workflow necessarily performs within that request. Normal workflow
 artefacts such as the working branch, commits, pull request, and temporary files
-are covered by that authorization.
+are covered by that authorization only when this skill's documented workflow
+performs them. This shared rule does not expand a skill's capabilities.
 
 Ask before creating an unrequested persistent repository or external artefact,
 such as a configuration file, migration, durable directory, label, or additional
 branch. State what is missing, why it is needed, and what you would create; wait
 for the answer. Follow any stricter approval rule in the repository instructions.
 Never abandon the task merely because an optional artefact is absent.
+
+Always ask before deleting or overwriting something the cycle did not create;
+changing the working structure (no branch, another branch, or the base branch);
+changing scope, including whether work belongs in another issue or this one;
+merging or force-pushing; publishing; adding dependencies; or changing public
+contracts, data, or security. Here, publishing means releases, tags, package
+publication, or comments outside the cycle's change request. This list grants
+no authority: each skill's publication boundary still applies, and read-only
+stages still cannot publish unless their own workflow explicitly permits it.
+An explicit instruction already authorizing the action settles the question;
+do not ask again.
+
+For native dispatches, write temporary helpers to the supplied per-dispatch
+`TMPDIR`: use `$TMPDIR/pr-comment.md` for comment bodies,
+`$TMPDIR/report.md` for reports, and `$TMPDIR/<check>.log` for check logs
+(replace `<check>` with the check's fixed name). Keep these names stable rather
+than adding IDs or random suffixes. The runtime isolates concurrent dispatches
+and removes their temporary directories at completion. Orca workers retain
+their existing temporary-directory behavior; native TMPDIR handling does not
+apply to them.
 
 ## Output language
 
