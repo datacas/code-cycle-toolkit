@@ -115,6 +115,8 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertIn("Bash(git push:*)", patterns)
         self.assertIn("Bash(gh pr create:*)", patterns)
         self.assertNotIn("--dangerously-skip-permissions", seen["argv"])
+        self.assertEqual(["acceptEdits"], [seen["argv"][i + 1] for i, word in
+                                           enumerate(seen["argv"]) if word == "--permission-mode"])
         self.assertTrue(seen["script"])
         tmpdir = Path(seen["env"]["TMPDIR"])
         self.assertEqual(str(tmpdir), seen["policy"]["tmpdir"])
@@ -236,6 +238,12 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertNotIn("Bash(git push:*)", patterns)
         self.assertNotIn("Bash(git fetch origin:*)", patterns)  # the clone has no remote
         self.assertIn("limited to this stage's table", " ".join(seen["argv"]))
+        # REV-006: the user's `defaultMode` (`auto` on the probe host) must not
+        # approve an edit for a reviewer, and the hook also sees the edit tools.
+        argv = seen["argv"]
+        self.assertEqual("default", argv[argv.index("--permission-mode") + 1])
+        [entry] = settings_of(argv)["hooks"]["PreToolUse"]
+        self.assertIn("Edit", entry["matcher"].split("|"))
 
     def test_a_widening_user_sandbox_setting_stops_a_verifying_review(self) -> None:
         (self.claude_home / "settings.json").write_text(json.dumps(

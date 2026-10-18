@@ -730,6 +730,61 @@ class HookTests(PolicyTestCase):
         self.assertEqual("", self.run_hook(self.policy("review"), {
             "tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}}))
 
+    def decision(self, output: str) -> str:
+        return json.loads(output)["hookSpecificOutput"]["permissionDecision"] if output else ""
+
+    def test_a_non_writing_stage_edits_no_file_with_any_tool(self) -> None:
+        # REV-006: under the user's `auto` mode a reviewer edited .git/config
+        # with the Edit tool, and an allowed `git status` then ran a program.
+        clone = self.directory.name
+        for role in ("review", "rereview", "issue_review"):
+            for tool, key in sp.FILE_EDIT_TOOLS.items():
+                for target in (f"{clone}/.git/config", f"{clone}/notes.md", "notes.md"):
+                    with self.subTest(role=role, tool=tool, target=target):
+                        output = self.run_hook(self.policy(role), {
+                            "tool_name": tool, "tool_input": {key: target}, "cwd": clone})
+                        self.assertEqual("deny", self.decision(output))
+                        self.assertIn(sp.HOOK_DENIAL_MARKER, output)
+
+    def test_no_stage_edits_git_configuration(self) -> None:
+        root = Path(self.directory.name)
+        (root / "clone" / ".git").mkdir(parents=True)
+        home = root / "home"
+        denied = [str(root / "clone" / ".git" / "config"), str(root / "clone" / ".GIT" / "config"),
+                  str(root / "clone" / ".git"), str(root / "clone" / "sub" / ".git"),
+                  str(root / "clone" / "src" / ".." / ".git" / "hooks" / "pre-commit"),
+                  ".git/config", str(home / ".gitconfig"),
+                  str(home / ".config" / "git" / "config")]
+        try:
+            (root / "link").symlink_to(root / "clone" / ".git", target_is_directory=True)
+            denied.append(str(root / "link" / "config"))
+        except OSError:  # Windows without the symlink privilege
+            pass
+        allowed = [str(root / "clone" / "src" / "app.py"), "src/app.py",
+                   str(root / "clone" / ".gitignore"), str(root / "clone" / ".github" / "ci.yml")]
+        with patch.dict(os.environ, {}, clear=False), \
+                patch.object(Path, "home", return_value=home):
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            for role in ("implement", "resolve"):
+                for tool, key in sp.FILE_EDIT_TOOLS.items():
+                    for target in denied + allowed:
+                        with self.subTest(role=role, tool=tool, target=target):
+                            output = self.run_hook(self.policy(role), {
+                                "tool_name": tool, "tool_input": {key: target},
+                                "cwd": str(root / "clone")})
+                            self.assertEqual("deny" if target in denied else "",
+                                             self.decision(output))
+
+    def test_an_edit_without_a_usable_target_is_denied(self) -> None:
+        for event in ({"tool_name": "Edit", "tool_input": {}},
+                      {"tool_name": "Write", "tool_input": {"file_path": 7}},
+                      {"tool_name": "NotebookEdit", "tool_input": {"file_path": "/x.ipynb"}},
+                      {"tool_name": "Edit", "tool_input": {"file_path": "relative.py"}},
+                      {"tool_name": "MultiEdit"}):
+            with self.subTest(event=event):
+                self.assertEqual("deny", self.decision(
+                    self.run_hook(self.policy("implement"), event)))
+
     def test_anything_unreadable_is_denied(self) -> None:
         stdout = io.StringIO()
         sp.hook_main([str(Path(self.directory.name) / "missing.json")],
@@ -843,10 +898,10 @@ class ClaudeConfigurationTests(unittest.TestCase):
                          network["allowedDomains"])
         self.assertEqual({"allowedDomains"}, set(network))
 
-    def test_the_hook_block_matches_bash(self) -> None:
+    def test_the_hook_block_matches_bash_and_the_file_edit_tools(self) -> None:
         block = sp.hook_settings("python3 /x/stage_permissions.py hook /x/policy.json")
         [entry] = block["hooks"]["PreToolUse"]
-        self.assertEqual("Bash", entry["matcher"])
+        self.assertEqual("Bash|Edit|Write|MultiEdit|NotebookEdit", entry["matcher"])
         self.assertEqual("command", entry["hooks"][0]["type"])
 
 

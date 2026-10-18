@@ -2548,7 +2548,12 @@ class ClaudeAdapter(NativeAdapter):
         if command_policy is not None and command_policy.active:
             # A GitHub cycle (#142): the stage's closed table is the first
             # barrier, and the hook `policy_files` adds validates every
-            # argument behind these prefixes. A reviewer gets no write.
+            # argument behind these prefixes. A reviewer gets no write: an
+            # explicit `default` mode keeps the user's `defaultMode` (`auto`,
+            # `acceptEdits`) from approving an edit to `.git/config` that an
+            # allowed `git status` would then run, and the hook refuses one too.
+            if not writes:
+                argv += ["--permission-mode", "default"]
             return argv + ["--allowedTools", *sp.allowed_tool_patterns(command_policy)]
         # Without a command policy (another code host or issue provider) the
         # earlier contract holds. A reading stage keeps its full tooling: it is

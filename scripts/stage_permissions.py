@@ -373,6 +373,50 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
     return Decision(True, "allowed by the stage command table")
 
 
+#: Claude's file-editing tools and the input key that names their target.
+FILE_EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+                   "NotebookEdit": "notebook_path"}
+
+
+def _git_config_paths() -> tuple[Path, ...]:
+    home = Path.home()
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+    return home / ".gitconfig", Path(xdg) / "git"
+
+
+def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
+                    cwd: str | None = None) -> Decision:
+    """Decide whether this stage may edit a file with a non-Bash tool. Never raises.
+
+    A non-writing stage edits nothing. No stage edits Git's configuration, a
+    `.git` directory or a `.git` file: `core.fsmonitor`, `diff.external` and
+    the like would make an allowed `git status` or `git diff` run a program.
+    """
+    try:
+        if policy.role not in WRITING_ROLES:
+            raise PolicyError(f"a {policy.role} stage edits no file")
+        path = (tool_input or {}).get(FILE_EDIT_TOOLS[tool_name])
+        if not isinstance(path, str) or not path.strip():
+            raise PolicyError("the edit names no file")
+        if not os.path.isabs(path):
+            if not cwd:
+                raise PolicyError("a relative path needs the working directory")
+            path = os.path.join(cwd, path)
+        literal = Path(os.path.normpath(path))
+        resolved = Path(path).resolve(strict=False)
+        for candidate in (literal, resolved):
+            if any(part.casefold() == ".git" for part in candidate.parts):
+                raise PolicyError("no stage edits a .git directory or file")
+            for config in _git_config_paths():
+                if candidate == config or config in candidate.parents:
+                    raise PolicyError("no stage edits Git's global configuration")
+    except PolicyError as error:
+        return Decision(False, str(error))
+    except Exception as error:  # fail closed on anything unexpected
+        return Decision(False, f"the edit could not be validated ({type(error).__name__})")
+    return Decision(True, "allowed by the stage edit rule")
+
+
 class _DockerDenied(PolicyError):
     pass
 
@@ -1033,7 +1077,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
 def hook_settings(hook_command: str) -> dict:
     """The `--settings` hook block that makes the hook part of the dispatch."""
     return {"hooks": {"PreToolUse": [{
-        "matcher": "Bash",
+        "matcher": "|".join(["Bash", *FILE_EDIT_TOOLS]),
         "hooks": [{"type": "command", "command": hook_command, "timeout": 60}],
     }]}}
 
@@ -1238,10 +1282,15 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     try:
         policy = StagePolicy.from_json(Path(arguments[0]).read_text(encoding="utf-8"))
         event = json.loads(stdin.read())
-        if event.get("tool_name") != "Bash":
+        tool = event.get("tool_name")
+        if tool in FILE_EDIT_TOOLS:
+            decision = check_file_edit(tool, event.get("tool_input"), policy,
+                                       cwd=event.get("cwd"))
+        elif tool != "Bash":
             return 0
-        command = (event.get("tool_input") or {}).get("command")
-        decision = check(command, policy, cwd=event.get("cwd"))
+        else:
+            command = (event.get("tool_input") or {}).get("command")
+            decision = check(command, policy, cwd=event.get("cwd"))
     except Exception as error:
         print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: the stage policy "
                                    f"could not run ({type(error).__name__}). {DENY_ADVICE}"),

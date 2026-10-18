@@ -98,6 +98,15 @@ request. The exact forms are in `cc-resolve-comments`.
   so the stage names the mod instead of running with it.
 - The user's global configuration otherwise still loads, so hooks such as the
   RTK rewrite keep working.
+- The hook also sees the file-editing tools (`Edit`, `Write`, `MultiEdit`,
+  `NotebookEdit`). A non-writing stage edits no file with them, and no stage
+  edits a `.git` directory or file, `~/.gitconfig` or
+  `$XDG_CONFIG_HOME/git`: a `core.fsmonitor` or `diff.external` setting would
+  make an allowed `git status` or `git diff` run a program. Symlinks and `..`
+  are resolved before the check.
+- A non-writing stage runs with an explicit `--permission-mode default`, so the
+  user's `permissions.defaultMode` (`auto`, `acceptEdits`) cannot approve an
+  edit for it. Writing stages run with `acceptEdits`.
 
 ## Reviewers verify in a confined clone
 
@@ -160,8 +169,10 @@ command its sandbox or execpolicy refused has not been verified.
   `~/.codex/rules` for Codex stages, along with their allows.
 - **Writing stages run with the user's credentials.** Implementation and
   resolution keep using `gh` as the user, within their table.
-- **Non-Bash tools** (Read, Edit, MCP tools) stay governed by `--allowedTools`
-  and the user's configuration, not by the hook.
+- **Other non-Bash tools** (Read, MCP tools) stay governed by `--allowedTools`
+  and the user's configuration, not by the hook. An MCP server the user
+  allows can still write files, `.git/config` included; disable such servers
+  for cycle runs.
 - **Orca, Bitbucket, Plane and Jira** cycles keep the earlier behaviour until
   their own tables exist (#265 for Orca).
 - Not yet verified: whether a Codex execpolicy `allow` rule makes `codex exec`
