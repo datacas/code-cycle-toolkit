@@ -925,6 +925,9 @@ class ClaudeConfigurationTests(unittest.TestCase):
         self.assertEqual(["managed permissions.defaultMode bypassPermissions",
                           "mcp__ctx__ctx_execute", "mcp__docs__query-docs", "mcp__plane",
                           "mcp__shell__run_command"], found(str(clone)))
+        self.write(clone / ".claude" / "settings.local.json",
+                   {"permissions": {"allow": "mcp__shell__run_command"}})
+        self.assertNotIn("m", found(str(clone)))
         # An unreadable layer is skipped: the notice never stops anything.
         (self.config / "settings.json").write_text("{broken", encoding="utf-8")
         self.assertEqual(["managed permissions.defaultMode bypassPermissions"], found())

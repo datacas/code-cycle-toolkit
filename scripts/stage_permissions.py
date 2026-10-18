@@ -1276,7 +1276,8 @@ def preapproved_outside_table(cwd: str | None = None, config_dir: Path | None = 
             continue
         if not isinstance(permissions, dict):
             continue
-        for rule in permissions.get("allow") or []:
+        allow = permissions.get("allow")
+        for rule in allow if isinstance(allow, list) else []:
             tool = rule.split("(", 1)[0].strip() if isinstance(rule, str) else ""
             if tool and tool not in TABLE_COVERED_TOOLS and tool not in found:
                 found.append(tool)
