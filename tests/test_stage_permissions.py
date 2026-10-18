@@ -745,6 +745,7 @@ class HookTests(PolicyTestCase):
                             "tool_name": tool, "tool_input": {key: target}, "cwd": clone})
                         self.assertEqual("deny", self.decision(output))
                         self.assertIn(sp.HOOK_DENIAL_MARKER, output)
+                        self.assertIn("No grant lifts this rule", output)
 
     def test_no_stage_edits_git_configuration(self) -> None:
         root = Path(self.directory.name)
@@ -753,7 +754,8 @@ class HookTests(PolicyTestCase):
         denied = [str(root / "clone" / ".git" / "config"), str(root / "clone" / ".GIT" / "config"),
                   str(root / "clone" / ".git"), str(root / "clone" / "sub" / ".git"),
                   str(root / "clone" / "src" / ".." / ".git" / "hooks" / "pre-commit"),
-                  ".git/config", str(home / ".gitconfig"),
+                  ".git/config", ".git./config", ".git /config", ".git::$INDEX_ALLOCATION/config",
+                  str(home / ".gitconfig"),
                   str(home / ".config" / "git" / "config")]
         try:
             (root / "link").symlink_to(root / "clone" / ".git", target_is_directory=True)

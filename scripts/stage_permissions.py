@@ -92,6 +92,8 @@ HOOK_DENIAL_MARKER = "stage policy denied this command"
 
 DENY_ADVICE = ("If this stage needs that command, do not work around the policy: "
                "stop BLOCKED and name the exact command so a person can grant it once.")
+EDIT_DENY_ADVICE = ("No grant lifts this rule: finish without the edit, or stop BLOCKED "
+                    "and say which file the stage needed to change.")
 
 
 class PolicyError(ValueError):
@@ -405,7 +407,9 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
         literal = Path(os.path.normpath(path))
         resolved = Path(path).resolve(strict=False)
         for candidate in (literal, resolved):
-            if any(part.casefold() == ".git" for part in candidate.parts):
+            # Windows also reaches `.git` as `.git.`, `.git ` and `.git::$INDEX_ALLOCATION`.
+            if any(part.casefold().split(":", 1)[0].rstrip(" .") == ".git"
+                   for part in candidate.parts):
                 raise PolicyError("no stage edits a .git directory or file")
             for config in _git_config_paths():
                 if candidate == config or config in candidate.parents:
@@ -1297,8 +1301,9 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
               file=stdout)
         return 0
     if not decision.allowed:
+        advice = EDIT_DENY_ADVICE if tool in FILE_EDIT_TOOLS else DENY_ADVICE
         print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
-                                   f"{decision.reason}. {DENY_ADVICE}"), file=stdout)
+                                   f"{decision.reason}. {advice}"), file=stdout)
     return 0
 
 
