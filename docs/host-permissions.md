@@ -130,7 +130,10 @@ The stage keeps running; the notice is never a stop or a question. A tool is
 flagged only when its name suggests it runs code or writes files (`execute`,
 `run`, `shell`, `write`, …). That is a hint from the name, not an analysis of
 the tool. A read-only tool, such as a documentation lookup or a symbol search,
-is listed without a flag. A managed `permissions.defaultMode` of `auto` or
+is listed without a flag. A server-wide approval, `mcp__<server>` or
+`mcp__<server>__*`, approves every tool of that server without naming any, so
+it is always flagged, as `mcp__<server> (every tool of that server)`; so is
+any other MCP rule with a `*`. A managed `permissions.defaultMode` of `auto` or
 `bypassPermissions` is named as well. A user or project `defaultMode` is not,
 because the dispatch passes its own `--permission-mode`.
 

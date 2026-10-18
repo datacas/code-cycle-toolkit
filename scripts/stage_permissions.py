@@ -1289,9 +1289,27 @@ def preapproved_outside_table(cwd: str | None = None, config_dir: Path | None = 
     return found
 
 
+def unnamed_tools(tool: str) -> str | None:
+    """What an MCP rule approves beyond one named tool, or None when it names one.
+
+    Claude Code reads `mcp__<server>` and `mcp__<server>__*` as approving every
+    tool of that server, so the rule itself names none of them (REV-008).
+    """
+    if not tool.startswith("mcp__"):
+        return None
+    server, _, name = tool[len("mcp__"):].partition("__")
+    if "*" not in server and name in {"", "*"}:
+        return "every tool of that server"
+    return "every tool that pattern matches" if "*" in tool else None
+
+
 def may_run_code(tool: str) -> bool:
-    """Whether a pre-approved tool's name suggests it runs code or writes files."""
-    if tool.startswith("managed permissions.defaultMode"):
+    """Whether a pre-approved tool's name suggests it runs code or writes files.
+
+    A rule that approves tools it does not name cannot be told apart from one
+    that approves a code-running tool, so it counts as one.
+    """
+    if tool.startswith("managed permissions.defaultMode") or unnamed_tools(tool):
         return True
     words = set(re.split(r"[^a-z]+", tool.rsplit("__", 1)[-1].lower()))
     return bool(words & CODE_RUNNING_WORDS)
@@ -1305,7 +1323,8 @@ def preapproved_notice(tools) -> str | None:
     notice = ("outside the stage table, pre-approved by your configuration: "
               + ", ".join(tools)
               + " (the table governs this cycle's Bash commands and file edits)")
-    running = [tool for tool in tools if may_run_code(tool)]
+    running = [f"{tool} ({unnamed_tools(tool)})" if unnamed_tools(tool) else tool
+               for tool in tools if may_run_code(tool)]
     if running:
         notice += (f"; {', '.join(running)} can run code or write files, worth a thought "
                    "when the cycle runs unattended")

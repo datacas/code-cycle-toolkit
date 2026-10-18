@@ -947,6 +947,24 @@ class ClaudeConfigurationTests(unittest.TestCase):
         for word in ("BLOCKED", "danger", "unsafe"):
             self.assertNotIn(word, flagged)
 
+    def test_a_server_wide_mcp_approval_is_flagged(self) -> None:
+        # REV-008: `mcp__<server>` and `mcp__<server>__*` approve every tool of
+        # the server, including any that runs code, so the name cannot clear them.
+        for tool in ("mcp__plugin_context-mode_context-mode", "mcp__ctx__*", "mcp__ctx__",
+                     "mcp__*", "mcp__ctx__ctx_*"):
+            self.assertTrue(sp.may_run_code(tool), tool)
+        self.assertFalse(sp.may_run_code("mcp__docs__query-docs"))
+        self.assertFalse(sp.may_run_code("mcp__plugin_context-mode_context-mode__ctx_search"))
+        self.assertIsNone(sp.unnamed_tools("mcp__ctx__ctx_execute"))
+        self.assertIsNone(sp.unnamed_tools("managed permissions.defaultMode auto"))
+        notice = sp.preapproved_notice(["mcp__docs__query-docs", "mcp__shell", "mcp__ctx__*",
+                                        "mcp__ctx__ctx_*"])
+        self.assertIn("; mcp__shell (every tool of that server), mcp__ctx__* (every tool of "
+                      "that server), mcp__ctx__ctx_* (every tool that pattern matches) can run "
+                      "code or write files, worth a thought when the cycle runs unattended",
+                      notice)
+        self.assertNotIn("mcp__docs__query-docs (", notice)
+
 
 if __name__ == "__main__":
     unittest.main()
