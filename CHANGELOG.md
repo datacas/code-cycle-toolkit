@@ -39,6 +39,9 @@ All notable changes to this project are documented here. This project follows
 - Reviewers on Codex and Claude verify only inside a disposable clone whose
   sandbox writes only to the clone and the dispatch's `TMPDIR`; when that
   cannot be shown with the installed CLI, the review stops `BLOCKED`.
+  **New requirement on Linux and WSL2:** a Claude review that may verify needs
+  `bubblewrap` and `socat` for Claude Code's sandbox; without them it stops as
+  an environment restriction naming both packages.
 - A Claude dispatch whose configuration could override the stage hook
   (`disableAllHooks`, managed hooks only, or an enabled `tool.check` mod) stops
   `BLOCKED` naming the cause.

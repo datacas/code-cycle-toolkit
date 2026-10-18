@@ -257,6 +257,7 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
         self.assertEqual("environment_restricted", result.error_code)
         self.assertEqual("blocked: sandbox unavailable", result.artifacts["command_policy"])
+        self.assertIn("bubblewrap and socat", result.detail)
 
 
 class CodexPolicyTests(DispatchTestCase):

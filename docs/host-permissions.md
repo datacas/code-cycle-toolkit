@@ -115,6 +115,14 @@ their comment. When they may verify, they do it only in a disposable clone:
   `allowUnsandboxedCommands`, Unix sockets, `enableWeakerNestedSandbox`) stops
   the stage `BLOCKED`, because Claude merges such arrays across sources. A
   sandbox that cannot start fails the stage as an environment restriction.
+  On Linux and WSL2 Claude Code's sandbox needs `bubblewrap` and `socat`
+  (`sudo apt install bubblewrap socat` on Debian and Ubuntu, `sudo dnf install
+  bubblewrap socat` on Fedora); macOS uses its built-in Seatbelt and needs
+  nothing extra. Binaries outside `PATH` are set with the managed settings
+  `sandbox.bwrapPath` and `sandbox.socatPath`. `/sandbox` inside Claude Code
+  shows what is missing. This applies only to a Claude review or rereview that
+  may verify, in a repository with `allowed_commands` configured; other stages
+  do not start the sandbox.
 - **Codex** reviewers now get a disposable clone too, under a profile extending
   `:read-only` whose only writable paths are the clone and `TMPDIR`. Before the
   first such review the runtime proves it with the installed CLI

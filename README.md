@@ -77,7 +77,7 @@ Not sure? Read [Choosing a workflow](docs/workflows.md#choosing-a-workflow).
 > [!NOTE]
 > This is the shortest path. [Getting started](docs/getting-started.md) covers each step in full, including Windows and repository-level installs.
 
-**1. Requirements.** Git, Python 3, an agent host (Claude Code, Codex, or OpenCode), and authenticated tooling for your issue provider and code host. For GitHub, that is [`gh`](https://cli.github.com/):
+**1. Requirements.** Git, Python 3, an agent host (Claude Code, Codex, or OpenCode), and authenticated tooling for your issue provider and code host. On Linux and WSL2, Claude reviews that run verification also need `bubblewrap` and `socat` for Claude Code's sandbox (`sudo apt install bubblewrap socat`); without them those reviews stop rather than run unconfined. For GitHub, that is [`gh`](https://cli.github.com/):
 
 ```bash
 gh auth status

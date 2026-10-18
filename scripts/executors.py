@@ -2502,8 +2502,10 @@ class ClaudeAdapter(NativeAdapter):
         lowered = message.lower()
         if any(marker in lowered for marker in sp.SANDBOX_UNAVAILABLE_MARKERS):
             return ("BLOCKED: Claude's Bash sandbox is unavailable, so this review "
-                    "cannot run its verification confined to the clone and TMPDIR: "
-                    + message)
+                    "cannot run its verification confined to the clone and TMPDIR. "
+                    "On Linux and WSL2 it needs bubblewrap and socat "
+                    "(sudo apt install bubblewrap socat); see "
+                    "docs/host-permissions.md: " + message)
         return None
 
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
