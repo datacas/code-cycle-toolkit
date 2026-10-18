@@ -38,11 +38,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-#: Read-only Git and GitHub queries, and nothing else.
+#: Read-only Git and GitHub queries, and nothing else. A prefix rule allows
+#: every option after it, so `git diff`, `log` and `show` (whose `--output`
+#: writes any file) and `git grep` (whose `-O` runs a program) stay out: no
+#: prefix deny catches every spelling of those options.
 READ_COMMANDS = (
-    ("git", "status"), ("git", "diff"), ("git", "log"), ("git", "show"),
+    ("git", "status"),
     ("git", "rev-parse"), ("git", "branch", "--show-current"), ("git", "merge-base"),
-    ("git", "ls-files"), ("git", "grep"), ("git", "blame"),
+    ("git", "ls-files"), ("git", "blame"),
     ("gh", "issue", "view"), ("gh", "issue", "list"), ("gh", "pr", "view"),
     ("gh", "pr", "list"), ("gh", "pr", "checks"), ("gh", "pr", "diff"),
     ("gh", "auth", "status"), ("gh", "repo", "view"),
@@ -209,6 +212,13 @@ class HostPermissions:
                     current.append(entry)
                     kept_mine.append(entry)
                     report.added.append(f"permissions.{kind} {entry}")
+                    changed = True
+                # An entry an earlier version added and this one no longer
+                # wants is withdrawn, so a re-apply narrows the set too.
+                for entry in [entry for entry in kept_mine if entry not in desired[kind]]:
+                    current.remove(entry)
+                    kept_mine.remove(entry)
+                    report.removed.append(f"permissions.{kind} {entry}")
                     changed = True
                 new_owned[kind] = kept_mine + [entry for entry in missing_mine]
             else:

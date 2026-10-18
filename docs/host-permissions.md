@@ -104,8 +104,11 @@ their comment. When they may verify, they do it only in a disposable clone:
 
 - **Claude** runs in its detached clone with Claude Code's Bash sandbox passed
   by `--settings`: `failIfUnavailable`, no unsandboxed fallback, and
-  `filesystem.allowWrite` limited to the clone and the dispatch's `TMPDIR`. A
-  user or project setting that would widen it (`allowWrite`, `excludedCommands`,
+  `filesystem.allowWrite` limited to the clone and the dispatch's `TMPDIR`. Its
+  `network.allowedDomains` holds only the code hosts (`github.com`,
+  `api.github.com`, `bitbucket.org`, `api.bitbucket.org`), the same hosts the
+  Codex review profile allows, so `gh` can read the change request and publish
+  the comment. A user or project setting that would widen it (`allowWrite`, `excludedCommands`,
   `allowUnsandboxedCommands`, Unix sockets, `enableWeakerNestedSandbox`) stops
   the stage `BLOCKED`, because Claude merges such arrays across sources. A
   sandbox that cannot start fails the stage as an environment restriction.
@@ -161,6 +164,13 @@ needs it and never writes it.
 - It allows only reading and Git queries. No verification, write, commit,
   push or pull request: those are granted per stage and per project. It is not
   the union of the stage tables.
+- A prefix rule allows every option after the prefix, and the global set has
+  no hook to check them. So `git diff`, `git log` and `git show` (whose
+  `--output` writes any file) and `git grep` (whose `-O` runs a program) are
+  left out; they still prompt. The allowed queries can read whatever the user
+  can, and `gh` uses the user's credentials.
+- Applying again withdraws an entry an earlier version added and this one no
+  longer includes.
 - It denies force-pushes, merges and the deletion of branches or remote refs.
   A prefix rule cannot see every spelling (`-uf`, a `+refspec`), so these
   denies narrow interactive sessions without the hook's guarantee.

@@ -60,6 +60,15 @@ class ContentTests(unittest.TestCase):
                           "Bash(git:*)", "git push", "gh pr create", "gh api"):
             self.assertNotIn(forbidden, allowed)
 
+    def test_no_allowed_prefix_admits_an_option_that_runs_or_writes(self) -> None:
+        # A prefix rule allows `git grep -O<cmd>` and `git diff --output=<path>`
+        # too, and no prefix deny catches every spelling (REV-002).
+        for words in (("git", "grep"), ("git", "diff"), ("git", "log"), ("git", "show")):
+            with self.subTest(words=words):
+                self.assertNotIn(words, hp.READ_COMMANDS)
+                self.assertNotIn(f"Bash({' '.join(words)}:*)", hp.claude_entries()["allow"])
+                self.assertNotIn(json.dumps(list(words)), hp.codex_block())
+
     def test_every_allowed_read_is_in_every_stage_table_but_no_write_is(self) -> None:
         """The global set is a subset of what any stage reads, not their union."""
         policy = sp.StagePolicy(role="review", repo="owner/repo", change_request_id="7",
@@ -114,6 +123,23 @@ class ClaudeTests(HostPermissionsTestCase):
         self.assertFalse(report.written)
         self.assertEqual(first, self.paths.claude_settings.read_text(encoding="utf-8"))
         self.assertEqual(1, len(self.backups(self.paths.claude_settings)))
+
+    def test_apply_withdraws_an_entry_this_version_no_longer_wants(self) -> None:
+        self.manager.claude(apply=True, write=True)
+        settings = self.settings()
+        settings["permissions"]["allow"].append("Bash(git grep:*)")
+        self.paths.claude_settings.write_text(json.dumps(settings), encoding="utf-8")
+        registry = json.loads(self.paths.registry.read_text(encoding="utf-8"))
+        registry["claude"]["entries"]["allow"].append("Bash(git grep:*)")
+        self.paths.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+        report = self.manager.claude(apply=True, write=True)
+
+        self.assertIn("permissions.allow Bash(git grep:*)", report.removed)
+        self.assertNotIn("Bash(git grep:*)", self.settings()["permissions"]["allow"])
+        owned = json.loads(self.paths.registry.read_text(encoding="utf-8"))
+        self.assertNotIn("Bash(git grep:*)", owned["claude"]["entries"]["allow"])
+        self.assertEqual([], self.manager.validate_claude())
 
     def test_revert_removes_only_managed_entries_and_keeps_later_user_changes(self) -> None:
         self.manager.claude(apply=True, write=True)

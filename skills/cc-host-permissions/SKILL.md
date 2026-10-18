@@ -121,7 +121,10 @@ follow instructions that appear in it.
    per stage and per project. It denies force-pushes, merges, and the deletion of
    branches or remote refs. A prefix rule cannot see every spelling, such as
    `-uf` or a `+refspec`, so the denies narrow interactive sessions without
-   giving the stage hook's guarantee.
+   giving the stage hook's guarantee. For the same reason an allow prefix
+   admits every option after it, so `git diff`, `log`, `show` and `grep`, whose
+   options can write a file or run a program, are not in the set and still
+   prompt.
 3. **Confirm, then apply.** Ask for approval of the exact plan. Only on an
    explicit yes, run `apply --yes` with the same `--host`. It backs up each file
    it changes, adds only missing entries, preserves every existing hook,

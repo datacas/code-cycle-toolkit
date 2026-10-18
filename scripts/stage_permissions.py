@@ -1180,13 +1180,23 @@ def sandbox_override(path: Path | None = None) -> str | None:
     return None
 
 
+#: The code hosts a sandboxed reviewer's `gh` must reach to read the change
+#: request and publish its comment; the same hosts Codex's review profile allows.
+REVIEW_SANDBOX_DOMAINS = ("github.com", "api.github.com", "bitbucket.org", "api.bitbucket.org")
+
+
 def review_sandbox_settings(writable: tuple[str, ...]) -> dict:
-    """Claude's Bash sandbox for a reviewer that verifies in its clone."""
+    """Claude's Bash sandbox for a reviewer that verifies in its clone.
+
+    A sandboxed command has no network route except the allowed domains, and a
+    `claude -p` reviewer has nobody to answer a prompt for any other host.
+    """
     return {"sandbox": {
         "enabled": True,
         "failIfUnavailable": True,
         "allowUnsandboxedCommands": False,
         "filesystem": {"allowWrite": list(writable)},
+        "network": {"allowedDomains": list(REVIEW_SANDBOX_DOMAINS)},
     }}
 
 

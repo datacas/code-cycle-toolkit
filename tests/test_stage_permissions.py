@@ -178,7 +178,9 @@ class GitTests(PolicyTestCase):
                             "git checkout issue-142", "git switch issue-142", "git rm old.py",
                             "git mv a.py b.py", "git worktree list",
                             "git worktree list --porcelain",
-                            f"git diff main...HEAD --output={self.tmpdir}/d.diff"):
+                            # Quoted, as an agent must: bash would eat a
+                            # Windows path's backslashes otherwise.
+                            f"git diff main...HEAD --output='{self.tmpdir}/d.diff'"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, policy)
 
@@ -233,7 +235,7 @@ class GitTests(PolicyTestCase):
                         "git grep --open-files-in-pager=vim x",
                         "git fetch --upload-pack=/bin/sh origin",
                         "git push --receive-pack=/bin/sh origin x", "git diff --output=/tmp/x",
-                        f"git diff --output={self.sibling}/x", "git diff --output",
+                        f"git diff --output='{self.sibling}/x'", "git diff --output",
                         "git log --output ../x", "git fetch upstream", "git pull other main"):
             with self.subTest(command=command):
                 self.denied(command, policy)
@@ -269,7 +271,7 @@ class GhTests(PolicyTestCase):
         for role in ("review", "rereview"):
             policy = self.policy(role)
             for command in ("gh pr diff 7", "gh pr diff 7 --name-only",
-                            f"gh pr comment 7 --body-file {self.tmpdir}/pr-comment.md",
+                            f"gh pr comment 7 --body-file '{self.tmpdir}/pr-comment.md'",
                             "gh pr comment 7 --body-file $TMPDIR/pr-comment.md",
                             "gh pr review 7 --comment --body-file $TMPDIR/report.md",
                             "gh pr comment https://github.com/owner/repo/pull/7 -F $TMPDIR/r.md"):
@@ -278,7 +280,7 @@ class GhTests(PolicyTestCase):
             for command in ("gh pr comment 8 --body-file $TMPDIR/r.md",
                             "gh pr comment https://github.com/other/repo/pull/7 -b x",
                             "gh pr comment 7 --body-file /tmp/r.md",
-                            f"gh pr comment 7 --body-file {self.sibling}/r.md",
+                            f"gh pr comment 7 --body-file '{self.sibling}/r.md'",
                             "gh pr comment 7 --body-file $TMPDIR/../r.md",
                             "gh pr comment 7 --body-file -",
                             "gh pr review 7 --approve", "gh pr review 7 --request-changes -b x",
@@ -807,6 +809,14 @@ class ClaudeConfigurationTests(unittest.TestCase):
         self.assertFalse(settings["allowUnsandboxedCommands"])
         self.assertEqual(["/clone", "/tmp/code-cycle-tmp-x"],
                          settings["filesystem"]["allowWrite"])
+
+    def test_the_review_sandbox_reaches_only_the_code_hosts(self) -> None:
+        # Without them a sandboxed reviewer's gh can neither read the change
+        # request nor publish its comment (REV-001).
+        network = sp.review_sandbox_settings(("/clone",))["sandbox"]["network"]
+        self.assertEqual(["github.com", "api.github.com", "bitbucket.org", "api.bitbucket.org"],
+                         network["allowedDomains"])
+        self.assertEqual({"allowedDomains"}, set(network))
 
     def test_the_hook_block_matches_bash(self) -> None:
         block = sp.hook_settings("python3 /x/stage_permissions.py hook /x/policy.json")

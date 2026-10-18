@@ -371,6 +371,11 @@ class DockerBlockerTests(unittest.TestCase):
         implemented = 'ORCHESTRATION_RESULT\n{"status": "IMPLEMENTED"}\nEND_ORCHESTRATION_RESULT'
         for spoken, denied in ((implemented, ["docker compose up"]),
                                (self.BLOCKED, ["docker run x", "python3 x"]),
+                               (self.BLOCKED, ["docker compose run --rm app pytest",
+                                               "docker compose exec api sh",
+                                               "rtk docker compose cp a b",
+                                               "docker compose --verbose up",
+                                               "docker compose up > /etc/x"]),
                                (self.BLOCKED, None), (self.BLOCKED, "docker compose up"),
                                ("no block", ["docker compose up"])):
             self.assertIsNone(recovery.denied_docker_blocker(spoken, denied))

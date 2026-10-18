@@ -13,7 +13,8 @@ All notable changes to this project are documented here. This project follows
 - `cc-host-permissions` and `host_permissions.py`: explain stage permissions,
   and plan, apply, validate and revert an opt-in global set for interactive
   Claude and Codex sessions that only reads and denies force-pushes, merges and
-  ref deletions. Entries are recorded or marked, backed up, reverted without
+  ref deletions. It leaves out `git diff`, `log`, `show` and `grep`, whose
+  options can write files or run programs past a prefix rule. Entries are recorded or marked, backed up, reverted without
   touching later edits, and reported as a conflict when edited by hand.
 - The `docker_host` grant has a Claude scope on Linux that opens only
   `docker compose up|down|ps|logs|build`; `docker.host_socket_access: true`

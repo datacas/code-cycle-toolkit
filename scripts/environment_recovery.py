@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import re
 
+from stage_permissions import StagePolicy, check
+
 
 SANDBOX_BLOCKERS = frozenset({
     "sandbox_local_access", "sandbox_network_access", "sandbox_filesystem_access",
@@ -100,15 +102,15 @@ def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
     Claude's stage table holds `docker compose` only under the `docker_host`
     grant (#142). When the hook denied such a command and the stage then
     reported BLOCKED, the denial is the restriction, observed by the runtime
-    itself rather than claimed by the agent, so it enters the grant flow.
+    itself rather than claimed by the agent, so it enters the grant flow. Only
+    a denial the grant would lift counts: `docker compose run`, `exec` and the
+    rest stay denied with it, so asking a person for it would change nothing.
     """
     if not isinstance(denied_commands, (list, tuple)) or _final_status(spoken) != "BLOCKED":
         return None
+    ungranted = StagePolicy(role="implement", rtk=True)
     for command in denied_commands:
-        words = command.split() if isinstance(command, str) else []
-        if words[:1] == ["rtk"]:
-            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
-        if words[:2] == ["docker", "compose"]:
+        if isinstance(command, str) and check(command, ungranted).needs_docker:
             return {
                 "kind": "sandbox_local_access",
                 "command": command,
