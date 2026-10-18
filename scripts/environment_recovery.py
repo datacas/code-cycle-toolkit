@@ -96,6 +96,10 @@ def _final_status(spoken: str) -> str | None:
     return payload.get("status") if isinstance(payload, dict) else None
 
 
+def _never_run(*_args, **_kwargs):
+    raise RuntimeError("no command runs while reading a denial")
+
+
 def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
     """The `docker_host` blocker for a Claude stage the command hook stopped.
 
@@ -110,7 +114,10 @@ def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
         return None
     ungranted = StagePolicy(role="implement", rtk=True)
     for command in denied_commands:
-        if isinstance(command, str) and check(command, ungranted).needs_docker:
+        # Only the docker rule matters here; a git rule that would read the
+        # branch through `run` fails closed instead of running anything.
+        if isinstance(command, str) and check(command, ungranted,
+                                              run=_never_run).needs_docker:
             return {
                 "kind": "sandbox_local_access",
                 "command": command,

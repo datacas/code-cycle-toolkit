@@ -380,6 +380,15 @@ class DockerBlockerTests(unittest.TestCase):
                                ("no block", ["docker compose up"])):
             self.assertIsNone(recovery.denied_docker_blocker(spoken, denied))
 
+    def test_reading_denials_runs_nothing(self) -> None:
+        ran = []
+        with mock.patch.object(recovery, "_never_run",
+                               side_effect=lambda *a, **_: ran.append(a) or 1 / 0):
+            self.assertIsNone(recovery.denied_docker_blocker(
+                self.BLOCKED, ["git push origin HEAD", "git status"]))
+        # The push rule asked for its branch and got the refusing runner.
+        self.assertEqual([(["git", "rev-parse", "--abbrev-ref", "HEAD"],)], ran)
+
 
 class RuntimePolicyTests(unittest.TestCase):
     def config(self, text: str) -> dict:

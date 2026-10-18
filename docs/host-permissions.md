@@ -108,7 +108,10 @@ their comment. When they may verify, they do it only in a disposable clone:
   `network.allowedDomains` holds only the code hosts (`github.com`,
   `api.github.com`, `bitbucket.org`, `api.bitbucket.org`), the same hosts the
   Codex review profile allows, so `gh` can read the change request and publish
-  the comment. A user or project setting that would widen it (`allowWrite`, `excludedCommands`,
+  the comment. That route is open to any sandboxed command, including the code
+  under review that a verification runs, and `gh`'s credentials are readable:
+  "publishes only its comment" holds for the commands the agent types, not for
+  what its test runner executes. A user or project setting that would widen it (`allowWrite`, `excludedCommands`,
   `allowUnsandboxedCommands`, Unix sockets, `enableWeakerNestedSandbox`) stops
   the stage `BLOCKED`, because Claude merges such arrays across sources. A
   sandbox that cannot start fails the stage as an environment restriction.
