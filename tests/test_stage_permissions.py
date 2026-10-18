@@ -906,6 +906,44 @@ class ClaudeConfigurationTests(unittest.TestCase):
         self.assertEqual("Bash|Edit|Write|MultiEdit|NotebookEdit", entry["matcher"])
         self.assertEqual("command", entry["hooks"][0]["type"])
 
+    def test_pre_approved_tools_outside_the_table_are_listed(self) -> None:
+        # REV-007, accepted as a limitation: the cycle names them, never stops.
+        found = lambda cwd=None: sp.preapproved_outside_table(cwd, self.config, (self.managed,))
+        self.assertEqual([], found())
+        self.write(self.config / "settings.json", {"permissions": {
+            "defaultMode": "auto",
+            "allow": ["Bash(git status:*)", "Edit", "Read", "WebFetch(domain:example.com)",
+                      "mcp__ctx__ctx_execute", "mcp__docs__query-docs", "mcp__plane",
+                      "mcp__ctx__ctx_execute", 7]}})
+        # The dispatch's own --permission-mode replaces a user defaultMode.
+        self.assertEqual(["mcp__ctx__ctx_execute", "mcp__docs__query-docs", "mcp__plane"],
+                         found())
+        clone = self.config.parent / "clone"
+        self.write(clone / ".claude" / "settings.local.json",
+                   {"permissions": {"allow": ["mcp__shell__run_command"]}})
+        self.write(self.managed, {"permissions": {"defaultMode": "bypassPermissions"}})
+        self.assertEqual(["managed permissions.defaultMode bypassPermissions",
+                          "mcp__ctx__ctx_execute", "mcp__docs__query-docs", "mcp__plane",
+                          "mcp__shell__run_command"], found(str(clone)))
+        # An unreadable layer is skipped: the notice never stops anything.
+        (self.config / "settings.json").write_text("{broken", encoding="utf-8")
+        self.assertEqual(["managed permissions.defaultMode bypassPermissions"], found())
+
+    def test_the_notice_flags_only_tools_that_can_run_code_or_write(self) -> None:
+        self.assertIsNone(sp.preapproved_notice([]))
+        self.assertIsNone(sp.preapproved_notice(None))
+        quiet = sp.preapproved_notice(["mcp__docs__query-docs", "mcp__serena__find_symbol"])
+        self.assertIn("pre-approved by your configuration: mcp__docs__query-docs, "
+                      "mcp__serena__find_symbol", quiet)
+        self.assertIn("the table governs this cycle's Bash commands and file edits", quiet)
+        self.assertNotIn("worth a thought", quiet)
+        flagged = sp.preapproved_notice(["mcp__docs__query-docs", "mcp__ctx__ctx_execute",
+                                         "mcp__ctx__ctx_batch_execute"])
+        self.assertIn("; mcp__ctx__ctx_execute, mcp__ctx__ctx_batch_execute can run code or "
+                      "write files, worth a thought when the cycle runs unattended", flagged)
+        for word in ("BLOCKED", "danger", "unsafe"):
+            self.assertNotIn(word, flagged)
+
 
 if __name__ == "__main__":
     unittest.main()

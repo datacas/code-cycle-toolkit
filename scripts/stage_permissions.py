@@ -1238,6 +1238,79 @@ def sandbox_override(path: Path | None = None) -> str | None:
     return None
 
 
+#: Claude's own tools the stage table already accounts for: Bash and the edit
+#: tools pass through the hook, a subagent's calls pass through it too, and
+#: the rest only read.
+TABLE_COVERED_TOOLS = frozenset({"Bash", *FILE_EDIT_TOOLS, "Task", "Agent", "Read", "Grep",
+                                 "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch",
+                                 "TodoWrite"})
+
+#: Words in a tool's name that suggest it runs code or writes files. A name is
+#: all a configuration says about a tool, so this is a hint, not a verdict.
+CODE_RUNNING_WORDS = frozenset({"bash", "batch", "command", "create", "delete", "edit", "eval",
+                                "exec", "execute", "merge", "push", "remove", "run", "script",
+                                "shell", "terminal", "update", "upload", "write"})
+
+
+def preapproved_outside_table(cwd: str | None = None, config_dir: Path | None = None,
+                              managed: tuple[Path, ...] | None = None) -> list[str]:
+    """What the loaded configuration pre-approves that the stage table does not govern.
+
+    The table and the hook govern the stage's Bash commands and file edits.
+    Any other tool the user's `permissions.allow` names, such as an MCP tool,
+    runs under the user's configuration. So does a managed `defaultMode` of
+    `auto` or `bypassPermissions`; a user or project one does not apply,
+    because a policy-bound dispatch passes its own `--permission-mode`. This
+    only informs: it never refuses a dispatch (#142).
+    """
+    config_dir = config_dir or claude_config_dir()
+    managed = managed if managed is not None else managed_settings_paths()
+    layers = [*managed, config_dir / "settings.json"]
+    if cwd:
+        layers += [Path(cwd) / ".claude" / name for name in ("settings.json", "settings.local.json")]
+    found: list[str] = []
+    for path in layers:
+        try:
+            permissions = _read_settings(path).get("permissions")
+        except PolicyError:
+            continue
+        if not isinstance(permissions, dict):
+            continue
+        for rule in permissions.get("allow") or []:
+            tool = rule.split("(", 1)[0].strip() if isinstance(rule, str) else ""
+            if tool and tool not in TABLE_COVERED_TOOLS and tool not in found:
+                found.append(tool)
+        mode = permissions.get("defaultMode")
+        if path in managed and mode in {"auto", "bypassPermissions"}:
+            entry = f"managed permissions.defaultMode {mode}"
+            if entry not in found:
+                found.append(entry)
+    return found
+
+
+def may_run_code(tool: str) -> bool:
+    """Whether a pre-approved tool's name suggests it runs code or writes files."""
+    if tool.startswith("managed permissions.defaultMode"):
+        return True
+    words = set(re.split(r"[^a-z]+", tool.rsplit("__", 1)[-1].lower()))
+    return bool(words & CODE_RUNNING_WORDS)
+
+
+def preapproved_notice(tools) -> str | None:
+    """One line for the stage report naming what the table does not govern."""
+    tools = [tool for tool in tools or () if isinstance(tool, str) and tool.strip()]
+    if not tools:
+        return None
+    notice = ("outside the stage table, pre-approved by your configuration: "
+              + ", ".join(tools)
+              + " (the table governs this cycle's Bash commands and file edits)")
+    running = [tool for tool in tools if may_run_code(tool)]
+    if running:
+        notice += (f"; {', '.join(running)} can run code or write files, worth a thought "
+                   "when the cycle runs unattended")
+    return notice
+
+
 #: The code hosts a sandboxed reviewer's `gh` must reach to read the change
 #: request and publish its comment; the same hosts Codex's review profile allows.
 REVIEW_SANDBOX_DOMAINS = ("github.com", "api.github.com", "bitbucket.org", "api.bitbucket.org")

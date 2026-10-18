@@ -846,6 +846,10 @@ class NativeAdapter(Adapter):
         """Why this executor cannot enforce the stage's command policy, or None."""
         return None
 
+    def policy_notice(self, policy: StagePolicy | None, cwd: str | None) -> dict:
+        """What the stage's command policy does not govern, to report; never a stop."""
+        return {}
+
     @contextmanager
     def policy_files(self, argv: list[str], policy: StagePolicy | None, *,
                      scratch: str, cwd: str):
@@ -1150,6 +1154,10 @@ class NativeAdapter(Adapter):
                 lifecycle_state="failed",
                 artifacts={"command_policy": f"blocked: {failure_excerpt(refused, 300)}"},
             )
+        try:
+            policy_note = {**policy_note, **self.policy_notice(policy, cwd)}
+        except Exception:
+            pass
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
@@ -2408,6 +2416,18 @@ class ClaudeAdapter(NativeAdapter):
         except sp.PolicyError as error:
             return f"the Claude configuration could not be checked: {error}"
         return None
+
+    def policy_notice(self, policy: StagePolicy | None, cwd: str | None) -> dict:
+        """The non-Bash tools the user's configuration pre-approves for this stage.
+
+        The table and hook govern the stage's Bash commands and file edits; an
+        MCP tool the user allows runs under the user's own configuration. The
+        cycle names such tools once and keeps running (#142).
+        """
+        if policy is None:
+            return {}
+        tools = sp.preapproved_outside_table(cwd)
+        return {"preapproved_tools": tools} if tools else {}
 
     @contextmanager
     def policy_files(self, argv: list[str], policy: StagePolicy | None, *,

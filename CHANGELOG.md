@@ -45,6 +45,12 @@ All notable changes to this project are documented here. This project follows
 - A Claude dispatch whose configuration could override the stage hook
   (`disableAllHooks`, managed hooks only, or an enabled `tool.check` mod) stops
   `BLOCKED` naming the cause.
+- **Limitation:** the table governs the cycle's Bash commands and file edits,
+  not the MCP, plugin or other non-Bash tools the user's configuration
+  pre-approves. The cycle names them once in the stage report and keeps
+  running. It flags those whose names suggest they run code or write files,
+  since they are worth a thought for unattended runs. The table is not a
+  sandbox against hostile code.
 - `cc-pr-review` runs `git merge-base` on its own instead of inside a command
   substitution, and skips `git fetch origin` in a clone without remotes;
   `cc-resolve-comments` documents the three `gh api graphql` review-thread calls.

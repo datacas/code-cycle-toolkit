@@ -156,6 +156,28 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertEqual("precondition", result.error_code)
         self.assertIn("disableAllHooks", result.detail)
 
+    def test_pre_approved_non_bash_tools_are_reported_and_change_nothing(self) -> None:
+        def dispatch(role="rereview"):
+            return ex.ClaudeAdapter().dispatch(
+                CLAUDE, "review it", cwd=str(self.repo), writes=role == "implement",
+                command_policy=self.policy(role), runner=lambda *a, **k: completed())
+
+        quiet = dispatch()
+        self.assertNotIn("preapproved_tools", quiet.artifacts)
+        (self.claude_home / "settings.json").write_text(json.dumps({"permissions": {"allow": [
+            "Bash(git status:*)", "mcp__ctx__ctx_execute"]}}), encoding="utf-8")
+        for role in ("rereview", "implement"):
+            with self.subTest(role=role):
+                noted = dispatch(role)
+                self.assertEqual(["mcp__ctx__ctx_execute"], noted.artifacts["preapproved_tools"])
+                self.assertEqual((quiet.outcome, quiet.error_code, quiet.lifecycle_state),
+                                 (noted.outcome, noted.error_code, noted.lifecycle_state))
+                self.assertEqual("active", noted.artifacts["command_policy"])
+        inactive = ex.ClaudeAdapter().dispatch(
+            CLAUDE, "review it", cwd=str(self.repo),
+            command_policy=self.policy(code_host="bitbucket"), runner=lambda *a, **k: completed())
+        self.assertNotIn("preapproved_tools", inactive.artifacts)
+
     def test_an_inactive_policy_keeps_the_earlier_tooling_and_says_so(self) -> None:
         seen = {}
 
@@ -512,6 +534,35 @@ class RuntimeStopTests(unittest.TestCase):
         self.assertTrue(policy.active)
         self.assertEqual(("python3 scripts/validate-package.py",), policy.verify_prefixes)
         self.assertIn("closed table", implementer.dispatched[0])
+
+    def test_tools_outside_the_table_are_noticed_once_and_never_stop_the_cycle(self) -> None:
+        from test_run_cycle import Talker
+
+        class Noting(Talker):
+            def dispatch(self, target, task, **kwargs):
+                result = super().dispatch(target, task, **kwargs)
+                return replace(result, artifacts={**result.artifacts, "preapproved_tools": [
+                    "mcp__ctx__ctx_execute", "mcp__docs__query-docs"]})
+
+        def cycle(implementer, reviewer):
+            return rc.run_cycle(
+                "owner/api", "142", router.TaskSignals(), self.store,
+                registry=ex.Registry([implementer, reviewer]),
+                availability={"codex": ex.Availability.READY, "claude": ex.Availability.READY},
+                issue_review="off", code_host="github", base_branch="main")
+
+        plain = cycle(Talker("codex"), Talker("claude"))
+        noted = cycle(Noting("codex"), Noting("claude"))
+        self.assertGreater(len(noted.stage_details), 1)
+        notices = [warning for detail in noted.stage_details for warning in detail.warnings
+                   if "outside the stage table" in warning]
+        self.assertEqual(1, len(notices))
+        self.assertIn("mcp__ctx__ctx_execute, mcp__docs__query-docs", notices[0])
+        self.assertIn("mcp__ctx__ctx_execute can run code or write files", notices[0])
+        self.assertEqual((plain.status, plain.stop_reason, [s.role for s in plain.stages]),
+                         (noted.status, noted.stop_reason, [s.role for s in noted.stages]))
+        self.assertFalse(any("outside the stage table" in warning
+                             for detail in plain.stage_details for warning in detail.warnings))
 
     def test_a_non_github_cycle_receives_an_inactive_policy(self) -> None:
         from test_run_cycle import ScriptedAdapter

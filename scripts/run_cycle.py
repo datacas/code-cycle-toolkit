@@ -120,7 +120,8 @@ from router import (
     load_profiles,
     load_routing_strategy,
 )
-from stage_permissions import PolicyError, StagePolicy, prompt_note, validate_verify_prefix
+from stage_permissions import (PolicyError, StagePolicy, preapproved_notice, prompt_note,
+                               validate_verify_prefix)
 from stage_signals import boundary_rule_fired, collect_change_signals
 from telemetry import (
     AWAITING_CI_STATUS,
@@ -1028,6 +1029,17 @@ def _blocked_commands(outcome: StageOutcome) -> list[str]:
         if text and text not in commands:
             commands.append(text.replace("`", "'"))
     return commands
+
+
+def _preapproved_notice(outcome: StageOutcome) -> str | None:
+    """The tools outside the stage table a Claude dispatch found pre-approved."""
+    result = outcome.result
+    tools = result.artifacts.get("preapproved_tools") if result is not None else None
+    if not isinstance(tools, (list, tuple)):
+        return None
+    notice = preapproved_notice([readable(tool, 120).replace("`", "'")
+                                 for tool in tools if isinstance(tool, str)])
+    return readable(notice, 600) if notice else None
 
 
 def _stage_warnings(outcome: StageOutcome) -> list[str]:
@@ -2248,6 +2260,8 @@ def run_cycle(
     recorder.on_workspace = status_writer.workspace_observed
     status_writer.start()
     report = CycleReport(repo_id=repo_id, task_id=task_id)
+    # Each notice of tools outside the stage table, reported once per run.
+    noticed: set[str] = set()
     dispatch_kwargs = {}
     if cwd:
         dispatch_kwargs["cwd"] = cwd
@@ -2476,6 +2490,10 @@ def run_cycle(
         warnings = _stage_warnings(outcome)
         blocked = _blocked_commands(outcome)
         warnings += [f"blocked command: `{command}`" for command in blocked]
+        notice = _preapproved_notice(outcome)
+        if notice and notice not in noticed:
+            noticed.add(notice)
+            warnings.append(notice)
         reported_status = reported.status if outcome.succeeded else None
         duration = status_writer.stage_finished(
             outcome.result, reported_status,

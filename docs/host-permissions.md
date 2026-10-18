@@ -108,6 +108,39 @@ request. The exact forms are in `cc-resolve-comments`.
   user's `permissions.defaultMode` (`auto`, `acceptEdits`) cannot approve an
   edit for it. Writing stages run with `acceptEdits`.
 
+## What the table covers, and what it does not
+
+The table and the hook protect the cycle's own Bash commands and file edits:
+no force-push, merge, branch or ref deletion, push to the base branch, or
+reviewer write beyond its comment, in any spelling the hook knows.
+
+They do not cover the other tools the user's configuration pre-approves, such
+as MCP tools, plugin tools and other non-Bash tools in `permissions.allow`.
+Those run under the user's own configuration, as they do in an interactive
+session. The cycle cannot know in advance which tools a user installs, so it
+keeps no allow list of them. Before each Claude stage on a GitHub cycle it reads
+the configuration the dispatch loads (managed, user and project settings) and
+names those tools once in the stage report:
+
+```text
+outside the stage table, pre-approved by your configuration: mcp__…__ctx_execute, mcp__…__query-docs (the table governs this cycle's Bash commands and file edits); mcp__…__ctx_execute can run code or write files, worth a thought when the cycle runs unattended
+```
+
+The stage keeps running; the notice is never a stop or a question. A tool is
+flagged only when its name suggests it runs code or writes files (`execute`,
+`run`, `shell`, `write`, …). That is a hint from the name, not an analysis of
+the tool. A read-only tool, such as a documentation lookup or a symbol search,
+is listed without a flag. A managed `permissions.defaultMode` of `auto` or
+`bypassPermissions` is named as well. A user or project `defaultMode` is not,
+because the dispatch passes its own `--permission-mode`.
+
+That is reasonable in supervised use: the tools are the ones the user chose
+for their own sessions, and someone reads the stage report. Reconsider when a
+pre-approved tool can run code or write files and the cycle runs unattended,
+for example by disabling that server or plugin for cycle runs. Any agent that
+runs code from the change under review can be steered by that code. The table
+is not a sandbox against hostile code, and nothing here makes it one.
+
 ## Reviewers verify in a confined clone
 
 Review and rereview never get commit, push or a change-request write beyond
@@ -169,10 +202,11 @@ command its sandbox or execpolicy refused has not been verified.
   `~/.codex/rules` for Codex stages, along with their allows.
 - **Writing stages run with the user's credentials.** Implementation and
   resolution keep using `gh` as the user, within their table.
-- **Other non-Bash tools** (Read, MCP tools) stay governed by `--allowedTools`
-  and the user's configuration, not by the hook. An MCP server the user
-  allows can still write files, `.git/config` included; disable such servers
-  for cycle runs.
+- **Non-Bash tools the user pre-approved** (MCP and plugin tools) stay governed
+  by the user's configuration, not by the table or the hook. One that runs code
+  can do anything the user can, `git push` and `.git/config` included. The
+  stage report names them; see
+  [What the table covers](#what-the-table-covers-and-what-it-does-not).
 - **Orca, Bitbucket, Plane and Jira** cycles keep the earlier behaviour until
   their own tables exist (#265 for Orca).
 - Not yet verified: whether a Codex execpolicy `allow` rule makes `codex exec`
