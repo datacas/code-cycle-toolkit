@@ -82,6 +82,45 @@ def sandbox_blocker(spoken: str) -> dict | None:
     return cleaned
 
 
+def _final_status(spoken: str) -> str | None:
+    end = spoken.rfind("END_ORCHESTRATION_RESULT")
+    begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
+    if begin < 0:
+        return None
+    try:
+        payload = json.loads(spoken[begin + len("ORCHESTRATION_RESULT"):end].strip())
+    except ValueError:
+        return None
+    return payload.get("status") if isinstance(payload, dict) else None
+
+
+def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
+    """The `docker_host` blocker for a Claude stage the command hook stopped.
+
+    Claude's stage table holds `docker compose` only under the `docker_host`
+    grant (#142). When the hook denied such a command and the stage then
+    reported BLOCKED, the denial is the restriction, observed by the runtime
+    itself rather than claimed by the agent, so it enters the grant flow.
+    """
+    if not isinstance(denied_commands, (list, tuple)) or _final_status(spoken) != "BLOCKED":
+        return None
+    for command in denied_commands:
+        words = command.split() if isinstance(command, str) else []
+        if words[:1] == ["rtk"]:
+            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+        if words[:2] == ["docker", "compose"]:
+            return {
+                "kind": "sandbox_local_access",
+                "command": command,
+                "error": "denied by the stage command policy: docker compose needs "
+                         "the docker_host grant",
+                "attempted": ["the stage command hook denied it before it ran"],
+                "requires_human": False,
+                "resource": "docker_host",
+            }
+    return None
+
+
 def recovery_context(blocker: dict) -> str:
     """Carry diagnostic evidence to the next executor without executing it."""
     return (

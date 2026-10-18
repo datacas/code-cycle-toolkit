@@ -702,6 +702,20 @@ Resolve a thread only when the feedback is addressed or explicitly superseded.
 If the code changed but execution is pending, say so; never label it resolved
 and verified when only the first half happened.
 
+On GitHub, `gh pr` cannot read, answer, or resolve review threads, so use these
+three `gh api graphql` calls and no other. Write each query on one line, run
+one call per command, and pass every value as a variable; a runtime that
+validates commands accepts exactly these shapes, on this change request only:
+
+```bash
+gh api graphql --paginate -F owner=<owner> -F name=<repository> -F number=<n> -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path line comments(first: 100) { nodes { id author { login } body url } } } } } } }'
+gh api graphql -F threadId=<thread-id> -F body=@$TMPDIR/reply.md -f query='mutation($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) { comment { url } } }'
+gh api graphql -F threadId=<thread-id> -f query='mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }'
+```
+
+The first reads the change request's threads, the second replies in one, and
+the third resolves one. On another code host, use its configured tooling.
+
 Finish with a change-request summary that groups applied fixes, debated or rejected
 comments, verification results, CI state when available and residual risks —
 plus the `ORCHESTRATION_RESULT` block collapsed inside a `<details>` element,

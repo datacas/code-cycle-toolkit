@@ -184,6 +184,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 | When the security audit always runs | `security_review.always_when.*` | [Configuration → Security](docs/configuration.md#security-review-rule) |
 | Orchestration mode | `orchestration.mode`, `orchestration_mode=` | [Workflows → cc-orchestrator](docs/workflows.md#cc-orchestrator) |
 | Reviewer calibration candidates | `calibration.profiles.*` | [Routing → Calibration](docs/routing.md#calibration) |
+| Commands a stage may run to verify | `allowed_commands.test`, `allowed_commands.verify` | [Host permissions](docs/host-permissions.md) |
 | Output language | `lang=` in the prompt | [Configuration → Language](docs/configuration.md#output-language) |
 | Iterations, agents, paired review | `max_iterations=`, `implementer=`, `reviewer=`, `paired_review=` | [Configuration → Invocation parameters](docs/configuration.md#invocation-parameters) |
 | Telemetry location | `CODE_CYCLE_HOME` | [Configuration → Environment](docs/configuration.md#environment-variables) |
@@ -203,7 +204,7 @@ The skills work better when the host offers semantic code navigation (Serena), p
 - **Treat silence as success.** Skipped, pending, or missing checks are reported as exactly that.
 - **Pick models from statistics.** Routing follows declared rules. Telemetry records outcomes, and nothing adapts automatically. Jev only ever runs in shadow mode.
 - **Bundle external components.** Orca (for `cc-orca-orchestrator`) and `codex-plugin-cc` (for Claude + Codex mode) are installed and authenticated separately. See the [adapter contract](skills/cc-orchestrator/references/codex-plugin-cc.md).
-- **Enforce publication technically.** What each stage may publish is a rule in its prompt, not a sandbox. Use separate credentials when you need a hard guarantee. → [Routing → Publication](docs/routing.md#publication-boundary)
+- **Enforce publication everywhere.** On a GitHub cycle, each native Claude stage runs under its closed command table and a hook that denies anything else; Codex stages are confined by their sandbox profile, which filters files and network, not commands. Elsewhere, and on Orca workers, what a stage may publish is a rule in its prompt. Use separate credentials when you need a hard guarantee. → [Host permissions](docs/host-permissions.md) · [Routing → Publication](docs/routing.md#publication-boundary)
 
 ## Documentation
 

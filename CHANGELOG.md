@@ -5,7 +5,45 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- `code_cycle.allowed_commands.verify`: a list of exact verification prefixes a
+  stage may extend with arguments. Interpreters, shells, inline code and
+  wildcards are refused. A runtime older than this release rejects the key.
+- `cc-host-permissions` and `host_permissions.py`: explain stage permissions,
+  and plan, apply, validate and revert an opt-in global set for interactive
+  Claude and Codex sessions that only reads and denies force-pushes, merges and
+  ref deletions. Entries are recorded or marked, backed up, reverted without
+  touching later edits, and reported as a conflict when edited by hand.
+- The `docker_host` grant has a Claude scope on Linux that opens only
+  `docker compose up|down|ps|logs|build`; `docker.host_socket_access: true`
+  pre-authorizes both scopes.
+
 ### Changed
+
+- **Native stages no longer keep their executor's full `gh` and `git` access on
+  a GitHub cycle (#142).** Each Claude stage receives only its closed command
+  table and a `PreToolUse` hook that validates every Bash command and its
+  arguments, refusing force-pushes in every spelling, pushes to the base
+  branch, `gh api` beyond the documented calls, chaining and substitutions.
+  Reviewers cannot push or write to GitHub beyond their comment. Codex stages
+  run with `--ignore-rules`, so they no longer inherit
+  `~/.codex/rules/default.rules`, including its `forbidden` rules. Other code
+  hosts, issue providers and Orca workers keep the earlier behaviour, and each
+  dispatch reports whether the protection was active.
+- **Verification needs configuration.** Without `allowed_commands.test` or
+  `allowed_commands.verify`, no stage may run a test or verification command;
+  it stops `BLOCKED` and the cycle's stop line names the exact command, so it
+  can be added and the cycle resumed with `--continue`.
+- Reviewers on Codex and Claude verify only inside a disposable clone whose
+  sandbox writes only to the clone and the dispatch's `TMPDIR`; when that
+  cannot be shown with the installed CLI, the review stops `BLOCKED`.
+- A Claude dispatch whose configuration could override the stage hook
+  (`disableAllHooks`, managed hooks only, or an enabled `tool.check` mod) stops
+  `BLOCKED` naming the cause.
+- `cc-pr-review` runs `git merge-base` on its own instead of inside a command
+  substitution, and skips `git fetch origin` in a clone without remotes;
+  `cc-resolve-comments` documents the three `gh api graphql` review-thread calls.
 
 - Native Codex and Claude stages, including implementation and resolution, now
   receive an isolated writable `TMPDIR` for the dispatch lifetime. Temporary

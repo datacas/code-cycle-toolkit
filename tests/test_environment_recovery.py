@@ -26,6 +26,14 @@ BLOCKER = {
     "requires_human": False,
 }
 CLEAN = {"dirty": False, "workspace": {}, "remote": "unchanged", "comments": []}
+#: `docker_host` as it was before Claude had a scope (#142), for the paths a
+#: fallback without a scope takes.
+CODEX_ONLY = replace(grants.DOCKER_HOST, scopes=tuple(
+    scope for scope in grants.DOCKER_HOST.scopes if scope.executor == "codex"))
+
+
+def codex_only_grant():
+    return patch.dict(grants.GRANTS, {"docker_host": CODEX_ONLY})
 
 
 class RestrictedAdapter(ScriptedAdapter):
@@ -126,7 +134,7 @@ class SandboxRerouteTests(CycleTestCase):
         for source in ({"answers": {"docker_host": "cycle"}},
                        {"preauthorized": frozenset({"docker_host"})},
                        {"prompt": lambda question: "cycle"}):
-            with self.subTest(source=sorted(source)):
+            with self.subTest(source=sorted(source)), codex_only_grant():
                 consent = grants.ConsentBroker("owner/repo", platform="linux", **source)
                 recorder, primary, fallback, outcome = self.execute(
                     fallback=RestrictedAdapter("claude"), consent=consent)
@@ -142,6 +150,25 @@ class SandboxRerouteTests(CycleTestCase):
                 self.assertEqual(["codex", "claude", "codex"],
                                  [attempt["executor"] for attempt in attempts])
 
+    def test_a_fallback_with_its_own_scope_receives_the_grant_itself(self):
+        """Claude has a `docker_host` scope (#142): the fallback reruns with it."""
+        consent = grants.ConsentBroker("owner/repo", platform="linux",
+                                       answers={"docker_host": "cycle"})
+        recorder, primary, fallback, outcome = self.execute(
+            fallback=RestrictedAdapter("claude"), consent=consent)
+
+        self.assertEqual((1, 2), (len(primary.dispatched), len(fallback.dispatched)))
+        # Claude applies the grant through its command table, not a sandbox
+        # option, so the adapter never sees `sandbox_grants` itself.
+        self.assertNotIn("sandbox_grants", fallback.dispatch_kwargs[1])
+        self.assertEqual(("docker_host",), consent.granted("claude"))
+        self.assertIn("docker compose up, down, ps, logs and build only",
+                      fallback.dispatched[1])
+        attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
+        self.assertEqual(["codex", "claude", "claude"],
+                         [attempt["executor"] for attempt in attempts])
+
+    @codex_only_grant()
     def test_a_fallback_that_hits_the_same_wall_stops_to_ask_when_nobody_answers(self):
         consent = grants.ConsentBroker("owner/repo", platform="linux")
         recorder, primary, fallback, outcome = self.execute(
@@ -154,6 +181,7 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertIn("permission required: docker_host", outcome.result.detail)
         self.assertEqual(set(), consent.granted_ids)
 
+    @codex_only_grant()
     def test_a_fallback_that_left_effects_is_not_handed_back_to_the_primary(self):
         consent = grants.ConsentBroker("owner/repo", platform="linux",
                                        answers={"docker_host": "cycle"})

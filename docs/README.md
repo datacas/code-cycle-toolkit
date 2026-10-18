@@ -29,6 +29,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 | Document | Contents |
 |---|---|
 | [Role workspace policy](role-workspace-policy.md) | The write permission each dispatched role has, and which executors can enforce it |
+| [Host permissions](host-permissions.md) | Each stage's closed command table, how Claude and Codex enforce it, their limits, and the opt-in global set |
 | [Instrumentation internals](instrumentation.md) | Design reference: the comment record, paired review, routing v1, executor dispatch, telemetry schema |
 | [Codex plugin adapter contract](../skills/cc-orchestrator/references/codex-plugin-cc.md) | Discovery, handoff, and failure rules for Claude + Codex mode |
 | [ECC comparison](ecc-contrast-2026-10-10.md) | Dated comparison with the toolkit code and backlog; architectural ideas to adopt, in Spanish |

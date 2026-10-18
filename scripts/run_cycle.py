@@ -54,7 +54,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
@@ -120,6 +120,7 @@ from router import (
     load_profiles,
     load_routing_strategy,
 )
+from stage_permissions import PolicyError, StagePolicy, prompt_note, validate_verify_prefix
 from stage_signals import boundary_rule_fired, collect_change_signals
 from telemetry import (
     AWAITING_CI_STATUS,
@@ -460,11 +461,11 @@ def load_config(path: Path) -> dict:
         if not isinstance(allowed_commands, dict):
             raise CycleDriverError(
                 f"{path}: code_cycle.allowed_commands must be a mapping")
-        unknown = sorted(str(key) for key in set(allowed_commands) - {"test"})
+        unknown = sorted(str(key) for key in set(allowed_commands) - {"test", "verify"})
         if unknown:
             raise CycleDriverError(
                 f"{path}: unknown key under code_cycle.allowed_commands: "
-                + ", ".join(unknown) + "; known keys are test")
+                + ", ".join(unknown) + "; known keys are test, verify")
         if "test" in allowed_commands:
             command = allowed_commands["test"]
             if not isinstance(command, str) or not command.strip():
@@ -474,6 +475,22 @@ def load_config(path: Path) -> dict:
                 raise CycleDriverError(
                     f"{path}: code_cycle.allowed_commands.test must be one exact command; "
                     "wildcards and shell operators are not allowed")
+        if "verify" in allowed_commands:
+            # Exact prefixes (#142): a stage may append arguments to one, but
+            # an entry may never be an interpreter, a shell or inline code.
+            entries = allowed_commands["verify"]
+            if (not isinstance(entries, list) or not entries
+                    or not all(isinstance(entry, str) for entry in entries)):
+                raise CycleDriverError(
+                    f"{path}: code_cycle.allowed_commands.verify must be a non-empty "
+                    "list of command prefixes")
+            for entry in entries:
+                try:
+                    validate_verify_prefix(entry)
+                except PolicyError as error:
+                    raise CycleDriverError(
+                        f"{path}: code_cycle.allowed_commands.verify entry {entry!r}: "
+                        f"{error}") from error
 
     try:
         load_routing_strategy(config)
@@ -489,6 +506,47 @@ def allowed_test_command(config: dict) -> str | None:
     """The validated exact test command, when the repository declares one."""
     allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
     return allowed.get("test")
+
+
+def allowed_verify_commands(config: dict) -> tuple[str, ...]:
+    """The validated verification prefixes, when the repository declares them."""
+    allowed = (config.get("code_cycle") or {}).get("allowed_commands") or {}
+    return tuple(" ".join(entry.split()) for entry in allowed.get("verify") or ())
+
+
+def base_branch_of(config: dict, cwd: str | None, run=subprocess.run) -> str | None:
+    """The base branch no stage may push to: configured, else origin's default."""
+    section = config.get("code_cycle")
+    repository = section.get("repository") if isinstance(section, dict) else None
+    configured = repository.get("default_branch") if isinstance(repository, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    if not cwd:
+        return None
+    try:
+        symbolic = run(["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                       cwd=cwd, capture_output=True, text=True, timeout=10,
+                       stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    reference = (symbolic.stdout or "").strip()
+    prefix = "refs/remotes/origin/"
+    return reference[len(prefix):] if symbolic.returncode == 0 and reference.startswith(prefix) else None
+
+
+def code_host_of(config: dict, cwd: str | None, run=subprocess.run) -> str | None:
+    """`code_cycle.code_host`, else GitHub when `origin` unambiguously is."""
+    configured = (config.get("code_cycle") or {}).get("code_host")
+    if configured is not None or not cwd:
+        return configured
+    try:
+        remote = run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True,
+                     text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    url = (remote.stdout or "").strip()
+    host = urlsplit(url).hostname or (re.match(r"(?:[^@/]+@)?([^:/]+):", url) or [None, None])[1]
+    return "github" if remote.returncode == 0 and (host or "").lower() == "github.com" else None
 
 
 def docker_host_socket_access(config: dict) -> bool:
@@ -734,6 +792,8 @@ class StageReportDetails:
     findings: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     duration_seconds: float | None = None
+    #: Bash commands the stage's permission layer or command hook denied.
+    blocked_commands: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -956,6 +1016,20 @@ def _findings_line(role: str, findings: dict[str, int]) -> str | None:
     return line
 
 
+def _blocked_commands(outcome: StageOutcome) -> list[str]:
+    """The denied commands a Claude stage's result reported, made safe to print."""
+    result = outcome.result
+    denied = result.artifacts.get("permission_denials") if result is not None else None
+    if not isinstance(denied, (list, tuple)):
+        return []
+    commands = []
+    for command in denied:
+        text = readable(command, 300) if isinstance(command, str) else ""
+        if text and text not in commands:
+            commands.append(text.replace("`", "'"))
+    return commands
+
+
 def _stage_warnings(outcome: StageOutcome) -> list[str]:
     result = outcome.result
     if result is None:
@@ -980,12 +1054,17 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             workspace: str = "task",
             allowed_test_command: str | None = None,
             ci_policy: str = DEFAULT_CI_POLICY,
-            resolve_review_base: str | None = None) -> str:
+            resolve_review_base: str | None = None,
+            command_policy: StagePolicy | None = None) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied.
 
     Under parallel, writing stages read checks once without waiting; resolution
     reviews its fix delta from the latest trusted review receipt. Reviews still
     judge the accumulated diff. A strict prompt is the original one.
+
+    An active `command_policy` (#142) tells the stage it runs under a closed
+    command table, which commands verify, and to stop BLOCKED naming a denied
+    command rather than working around it.
     """
     skill = SKILL_FOR_ROLE.get(role)
     if skill is None:
@@ -997,7 +1076,10 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         parts = [f"Run {skill} for {task_id} in {repo_id}."]
     if instruction:
         parts.append(instruction)
-    if role in {"implement", "resolve"} and allowed_test_command:
+    policed = command_policy is not None and command_policy.active
+    if policed:
+        parts.append(prompt_note(command_policy))
+    elif role in {"implement", "resolve"} and allowed_test_command:
         parts.append(
             "For Claude writing stages, the repository permits this exact test "
             f"command: `{allowed_test_command}`. Run it verbatim; do not change "
@@ -2061,6 +2143,9 @@ def run_cycle(
     resolve_effort: str | None = None,
     comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
     allowed_test_command: str | None = None,
+    allowed_verify_commands: tuple[str, ...] = (),
+    base_branch: str | None = None,
+    policy_code_host: str | None = None,
     history_remote: HistoryRemote | None = None,
     ci_policy: str = DEFAULT_CI_POLICY,
     ci_timeout: int = ci_gate.DEFAULT_TIMEOUT,
@@ -2095,6 +2180,15 @@ def run_cycle(
     `history_remote` injects how it is read; without one, a GitHub code host
     is checked through `gh`, and `comment_reader` alone rebuilds the history
     from the comments on every resume, as before.
+
+    Every stage receives its command policy (#142): the closed table native
+    Claude enforces through a hook, and Codex's `--ignore-rules` and review
+    clone. It is active when both the code host and the issue provider are
+    GitHub; otherwise each dispatch reports it inactive and keeps its tooling.
+    `allowed_test_command` and `allowed_verify_commands` are the verification
+    it may run, and `base_branch` the branch no stage may push to.
+    `policy_code_host` is the code host the policy assumes when `code_host` is
+    not configured, inferred from an unambiguous GitHub `origin`.
 
     `ci_policy` is `strict` by default: the original flow, unchanged. Under
     `parallel` (#228) the implementation and the reviews do not wait for the
@@ -2169,6 +2263,21 @@ def run_cycle(
 
     previous_resolve_target = None
     previous_resolve_used_fallback = False
+
+    # A GitHub issue number may be inferred only when the code host is GitHub.
+    policy_host = code_host or policy_code_host
+    policy_provider = work_item_provider or (
+        "github" if policy_host == "github" and str(task_id).isdecimal() else None)
+
+    def stage_policy(role: str, request: str | None) -> StagePolicy:
+        """The closed command table this stage receives (#142)."""
+        return StagePolicy(
+            role=role, repo=repo_id, change_request_id=request,
+            work_item_id=task_id, base_branch=base_branch,
+            test_command=allowed_test_command,
+            verify_prefixes=tuple(allowed_verify_commands),
+            code_host=policy_host, issue_provider=policy_provider,
+        )
 
     # The local history of the change request (#223). With a remote that can
     # be checked, every comment-publishing stage is expected to publish, and
@@ -2310,6 +2419,8 @@ def run_cycle(
                     **stage_kwargs,
                     "claude_allowed_commands": (allowed_test_command,),
                 }
+            command_policy = stage_policy(role, change_request_id)
+            stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             outcome = recorder.stage(
                 role, compose(role, repo_id, task_id, instruction,
                               change_request_id=change_request_id,
@@ -2319,7 +2430,8 @@ def run_cycle(
                               allowed_test_command=(
                                   allowed_test_command
                                   if role in {"implement", "resolve"} else None),
-                              ci_policy=ci_policy, resolve_review_base=review_base),
+                              ci_policy=ci_policy, resolve_review_base=review_base,
+                              command_policy=command_policy),
                 escalated=escalated,
                 effort_override=(resolve_effort or "high") if role == "resolve" else None,
                 target_override=resolve_target if role == "resolve" else None,
@@ -2362,6 +2474,8 @@ def run_cycle(
                     )
         findings = _findings(reported.payload, role)
         warnings = _stage_warnings(outcome)
+        blocked = _blocked_commands(outcome)
+        warnings += [f"blocked command: `{command}`" for command in blocked]
         reported_status = reported.status if outcome.succeeded else None
         duration = status_writer.stage_finished(
             outcome.result, reported_status,
@@ -2374,12 +2488,21 @@ def run_cycle(
             findings=findings,
             warnings=warnings,
             duration_seconds=duration if outcome.result is not None else None,
+            blocked_commands=blocked,
         ))
         return outcome, reported, tampered, findings
 
     def stop(because: str, status: str = UNRESOLVED_END,
              reported: Reported | None = None, *,
              stop_reason: str = "stage_not_completed") -> CycleReport:
+        if report.stages and report.stage_details:
+            # The exact command a permission stopped, in the stop line, so a
+            # person can authorize it once and resume (#142).
+            denied = report.stage_details[-1].blocked_commands
+            if denied:
+                more = f" (and {len(denied) - 1} more)" if len(denied) > 1 else ""
+                because += (f"; blocked command in the {report.stages[-1].role} stage: "
+                            f"`{denied[0]}`{more}")
         report.stopped_because = because
         report.status = status
         report.iterations = recorder.iteration
@@ -3970,10 +4093,13 @@ def main(argv: list[str] | None = None) -> int:
                 work_item_provider=work_item_provider,
                 work_item_repository=work_item_repository,
                 code_host=code_host,
+                policy_code_host=code_host_of(config, args.cwd),
                 trusted_authors=tuple(((config.get("code_cycle") or {}).get("review") or {}).get(
                     "trusted_authors", [])),
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
                 allowed_test_command=allowed_test_command(config),
+                allowed_verify_commands=allowed_verify_commands(config),
+                base_branch=base_branch_of(config, args.cwd),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
                 consent=consent,

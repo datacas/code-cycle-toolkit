@@ -43,6 +43,8 @@
       "test_work_item_outcomes": 46.5
     },
     "unmeasured_modules": [
+      "test_stage_dispatch",
+      "test_stage_permissions",
       "test_support",
       "test_validate_workflow"
     ],
@@ -95,6 +97,8 @@
       "test_router",
       "test_security_gate",
       "test_spike_fixture_runner",
+      "test_stage_dispatch",
+      "test_stage_permissions",
       "test_stage_recovery",
       "test_stop_questions",
       "test_work_item_outcomes"

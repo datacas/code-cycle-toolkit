@@ -51,7 +51,7 @@ from grants import (
     denial_context, granted_context,
 )
 from environment_recovery import (
-    ENVIRONMENT_RECOVERY_GUIDANCE, recovery_context, sandbox_blocker,
+    ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,
 )
 from reroute import effect_snapshot, reconcile
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
@@ -151,10 +151,15 @@ PUBLICATION_PROHIBITIONS = (
 def publication_policy(role: str, publication_permissions: tuple[str, ...]) -> str:
     """The stage's publication rules, stated to the agent.
 
-    This is a behavioural boundary. Agents keep their normal `gh`, `git` and
-    network access; nothing here or in the adapters prevents an operation the
-    contract does not list. The prompt states the rule, and the published
-    comments and telemetry are how a person audits that it was followed.
+    On a GitHub cycle (#142) the rules are also enforced for native Claude
+    dispatches: each stage receives only its closed command table
+    (`stage_permissions`), derived from these contracts, and a hook denies any
+    other Bash command. Codex stages are confined by their sandbox profile and
+    run with `--ignore-rules`, which filters files and network, not commands.
+    Elsewhere — another code host or issue provider, or an Orca worker — the
+    agent keeps its normal `gh`, `git` and network access, and this prompt is
+    the boundary. Published comments and telemetry are how a person audits
+    that it was followed either way.
     """
     if not publication_permissions:
         return (f"Publication policy for this {role} stage: it publishes nothing. "
@@ -812,6 +817,8 @@ class CycleRecorder:
                             detail=f"{result.detail}; {stopped_reason} for unsupported effort",
                         )
             blocker = (sandbox_blocker(result.agent_output)
+                       or denied_docker_blocker(result.agent_output,
+                                                result.artifacts.get("permission_denials"))
                        if result.outcome is DispatchOutcome.SUCCEEDED
                        and not result.asynchronous else None)
             if blocker is not None:

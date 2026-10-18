@@ -15,6 +15,7 @@ ci_gate.py
 reroute.py
 environment_recovery.py
 grants.py
+stage_permissions.py
 run_cycle.py
 executors.py
 usage.py

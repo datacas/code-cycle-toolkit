@@ -26,9 +26,24 @@ class GrantRegistryTests(unittest.TestCase):
 
     def test_a_scope_exists_only_where_it_was_verified(self) -> None:
         for executor, platform in (("codex", "macos"), ("codex", "windows"),
-                                   ("claude", "linux")):
+                                   ("claude", "macos"), ("claude", "windows"),
+                                   ("orca", "linux")):
             with self.subTest(executor=executor, platform=platform):
                 self.assertIsNone(grants.DOCKER_HOST.scope_for(executor, platform))
+
+    def test_claude_has_a_compose_only_scope_on_the_same_platforms_as_codex(self) -> None:
+        claude = grants.DOCKER_HOST.scope_for("claude", "linux")
+        self.assertIsNotNone(claude)
+        self.assertEqual({scope.platform for scope in grants.DOCKER_HOST.scopes
+                          if scope.executor == "codex"},
+                         {scope.platform for scope in grants.DOCKER_HOST.scopes
+                          if scope.executor == "claude"})
+        self.assertIn("docker compose up, down, ps, logs and build only", claude.effective)
+        self.assertIn("docker compose run", claude.effective)
+        self.assertIn("root", claude.risks)
+        self.assertTrue(claude.isolated_per_dispatch)
+        self.assertNotEqual(grants.DOCKER_HOST.fingerprint(LINUX),
+                            grants.DOCKER_HOST.fingerprint(claude))
 
     def test_a_blocker_names_the_resource_or_mentions_it(self) -> None:
         local = {"kind": "sandbox_local_access", "command": "docker info", "error": "denied"}
@@ -146,7 +161,8 @@ class BrokerTests(unittest.TestCase):
         broker.request(grants.DOCKER_HOST, "codex", role="implement")
 
         self.assertEqual(("docker_host",), broker.granted("codex"))
-        self.assertEqual((), broker.granted("claude"))
+        self.assertEqual(("docker_host",), broker.granted("claude"))
+        self.assertEqual((), broker.granted("orca"))
 
     def test_an_unreadable_store_grants_nothing_and_asks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
