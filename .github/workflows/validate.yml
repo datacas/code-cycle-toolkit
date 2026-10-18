@@ -19,7 +19,7 @@ env:
     cc-rereview
     cc-orchestrator cc-orca-orchestrator cc-pr-review cc-code-review
     cc-security-review cc-verify cc-run cc-provider-bootstrap cc-stats
-    cc-profile-config
+    cc-profile-config cc-host-permissions
 
 jobs:
   validate:

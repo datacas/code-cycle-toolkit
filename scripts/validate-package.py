@@ -37,6 +37,7 @@ SUPPORT_SKILLS = {
     "cc-run",
     "cc-stats",
     "cc-profile-config",
+    "cc-host-permissions",
 }
 REQUIRED_SKILLS = CYCLE_SKILLS | SUPPORT_SKILLS
 CLAUDE_CODEX_REFERENCE = Path(

@@ -23,6 +23,7 @@ Fifteen skills in two layers. The source of truth for each one is its `skills/<n
 | [`cc-provider-bootstrap`](#cc-provider-bootstrap) | supporting | Resolve and health-check providers | writes `.code-cycle.yml` only on confirmation | `cc-implement-issue`, orchestrators | ✅ |
 | [`cc-stats`](#cc-stats) | supporting | Report local telemetry | — | you | ✅ |
 | [`cc-profile-config`](#cc-profile-config) | supporting | Show, choose, and write routing profiles | writes `.code-cycle.yml` only on confirmation | you | ✅ |
+| [`cc-host-permissions`](#cc-host-permissions) | supporting | Explain stage permissions; apply or revert the opt-in global set | writes global host files only on confirmation | you | ✅ |
 
 ```text
 cc-orchestrator / cc-orca-orchestrator
@@ -256,6 +257,16 @@ Shows the repository's effective routing profiles: each profile's roles, primary
 Use cc-profile-config.
 Use cc-profile-config with preset=balanced-openai-implements.
 Show me which models this repository uses for each role.
+```
+
+### `cc-host-permissions`
+
+Explains how dispatched stages get their permissions — each native Claude stage receives its stage's closed command table and a validation hook, each Codex stage its sandbox profile and `--ignore-rules` — and, for interactive sessions only, plans, applies, validates, and reverts an opt-in global set in `~/.claude/settings.json` and `~/.codex/rules/default.rules`. That set allows only reading and Git queries and denies force-pushes, merges, and branch or remote-ref deletion. Entries are recorded or marked, backed up before a change, reverted without touching later user edits, and reported as a conflict when edited by hand. It needs the runtime. See [Host permissions](host-permissions.md).
+
+```text
+Use cc-host-permissions.
+Why was my implementation stage denied a command?
+Use cc-host-permissions to revert the global entries.
 ```
 
 ---

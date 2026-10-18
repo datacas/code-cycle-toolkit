@@ -164,6 +164,7 @@ Fifteen skills in two layers. **Cycle skills** own the workflow: the change requ
 | `cc-provider-bootstrap` | supporting | Resolve and health-check the provider pair | — |
 | `cc-stats` | supporting | Report local telemetry for this repository | — |
 | `cc-profile-config` | supporting | Show, choose, and write routing profiles | — |
+| `cc-host-permissions` | supporting | Explain stage permissions; apply or revert the opt-in global set | — |
 
 → Inputs, statuses, and examples for each: [Skills reference](docs/skills.md)
 
@@ -212,7 +213,7 @@ The skills work better when the host offers semantic code navigation (Serena), p
 |---|---|
 | [Getting started](docs/getting-started.md) | Requirements, installation, authentication, first run |
 | [Workflows](docs/workflows.md) | Every way to run the toolkit, and when to choose each |
-| [Skills reference](docs/skills.md) | All fifteen skills: inputs, outputs, statuses |
+| [Skills reference](docs/skills.md) | All sixteen skills: inputs, outputs, statuses |
 | [Review lifecycle](docs/review-cycle.md) | `REV-xxx` findings, severities, dispositions, run lines |
 | [Verification](docs/verification.md) | Evidence rules, stop conditions, CI reporting |
 | [Routing and models](docs/routing.md) | Profiles, executors, fallbacks, strategies, Jev, calibration |

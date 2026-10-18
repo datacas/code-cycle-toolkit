@@ -24,6 +24,7 @@ router.py
 telemetry.py
 cycle_status.py
 profile_config.py
+host_permissions.py
 stats.py
 work_item_outcomes.py
 security_gate.py
