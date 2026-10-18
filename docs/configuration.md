@@ -65,7 +65,10 @@ code_cycle:
   resolve:
     # effort: high                  # low | medium | high | max; explicit value disables automatic escalation
   allowed_commands:
-    test: python3 -m unittest discover -s tests  # one exact command for Claude writing stages
+    test: python3 -m unittest discover -s tests  # one exact command
+    verify:                         # exact prefixes a stage may extend with arguments
+      - python3 scripts/validate-package.py
+      - python3 -m unittest
   ci:
     policy: strict                  # strict | parallel (GitHub only); --ci-policy overrides
     timeout: 900                    # seconds the parallel CI gate waits for one SHA
@@ -105,10 +108,11 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `routing.jev.model` | `jev-latest` · `jev-x.y.z` (`typesafe-ai/jev` → `jev-latest`) | `jev-latest` | `run_cycle.py` |
 | `routing.jev.timeout_seconds` | number, > 0 and ≤ 10 | `3` | `run_cycle.py` |
 | `resolve.effort` | `low` · `medium` · `high` · `max` | primary resolve uses `high`; an explicit value disables automatic escalation | `run_cycle.py` |
-| `allowed_commands.test` | one exact command string; wildcards and shell operators are refused | unset | `run_cycle.py`, Claude implementation and resolution stages |
+| `allowed_commands.test` | one exact command string; wildcards and shell operators are refused | unset: no stage may run tests | `run_cycle.py`; the command table of implementation and resolution, and of review and rereview inside their disposable clone ([host permissions](host-permissions.md)) |
+| `allowed_commands.verify` | non-empty list of exact command prefixes; a stage may append arguments. Wildcards, variables, shell operators, a bare interpreter or shell, inline code (`python3 -c`, `node -e`) and launchers without a target (`npx`, `npm run`) are refused | unset: no verification command | same as `test`. A runtime older than #142 rejects this key as unknown |
 | `ci.policy` | `strict` · `parallel` | `strict` | `run_cycle.py`, both orchestrators |
 | `ci.timeout` | whole seconds, 1 to 86400 | `900` | `run_cycle.py` and the orchestrators' `ci_gate.py` call, under `parallel` |
-| `docker.host_socket_access` | boolean | `false`: a stage that needs Docker asks first. `true` authorizes the `docker_host` grant in advance, which on Linux Codex opens every local Unix socket | `run_cycle.py` (sensitive grants) |
+| `docker.host_socket_access` | boolean | `false`: a stage that needs Docker asks first. `true` authorizes the `docker_host` grant in advance for both of its scopes, with the same semantics: on Linux Codex it opens every local Unix socket; on Linux Claude it adds `docker compose up`, `down`, `ps`, `logs` and `build` to the stage's command table | `run_cycle.py` (sensitive grants) |
 | `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
@@ -170,6 +174,12 @@ code_cycle:
 ### Review
 
 `review.trusted_authors` controls which comments can create or advance recovered findings. When it is absent, `cc-provider-bootstrap` adds the authenticated code-host login to the configuration it proposes, and writes it only on confirmation. An existing list is never changed. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
+
+### Allowed commands
+
+On a GitHub cycle (`code_host` and `issue_provider` both GitHub), every native Claude stage runs under a closed command table and a hook that denies everything outside it ([Host permissions](host-permissions.md)). `allowed_commands.test` and `allowed_commands.verify` are the only verification commands any stage receives: implementation and resolution in their worktree, review and rereview only inside their disposable clone. Without them no verification command is granted and no global permission is inherited in its place. A stage that needs one stops `BLOCKED`, and the cycle's stop line names the exact denied command. Add it here, then resume with `--continue` (or `--from`); the progress made so far is kept.
+
+**Upgrading.** A cycle that used to run tests through a stage's inherited permissions now needs `allowed_commands.test` or `allowed_commands.verify`. A runtime older than this change refuses `verify` as an unknown key, so update the runtime before adding it.
 
 ### Security review rule
 
@@ -233,7 +243,8 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 | `CODE_CYCLE_HOME` | telemetry, calibration store | Overrides the directory holding `telemetry.sqlite` and `calibration/` |
 | `XDG_CONFIG_HOME` | telemetry, calibration store (Unix) | Base for `code-cycle-toolkit/` when `CODE_CYCLE_HOME` is unset |
 | `APPDATA` | same (Windows) | Base for `code-cycle-toolkit\` when `CODE_CYCLE_HOME` is unset |
-| `CODEX_HOME` | Codex probe | Where the Codex credential (`auth.json`) is looked for; default `~/.codex` |
+| `CODEX_HOME` | Codex probe, `host_permissions.py` | Where the Codex credential (`auth.json`) and `rules/default.rules` are looked for; default `~/.codex` |
+| `CLAUDE_CONFIG_DIR` | Claude stage preflight, `host_permissions.py` | Where Claude's `settings.json` and plugins are read; default `~/.claude` |
 | `TYPESAFE_API_KEY` | Jev shadow | API key, read at call time and never stored. Without it, Jev records `unavailable`. |
 | `JEV_API_KEY` | Jev shadow | Legacy fallback for `TYPESAFE_API_KEY` |
 
@@ -271,6 +282,10 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 ### `profile_config.py` (used by `cc-profile-config`)
 
 `show | propose | write | presets` · `--cwd <repo root>` · `--config <path>` · `--preset <name>` · `--set <profile>.primary|fallback=<target|none>` (repeatable) · `--allow-cross-split` · `--confirmed` (required by `write`) · `--no-probe` · `--format markdown|json`. An explicit `--config` path may name a file that does not exist yet: `show` and `propose` use built-in defaults, while a confirmed `write` creates the file. From a linked worktree, writes target the repository's current or main worktree configuration; symlinked configuration files are followed while validating and writing. See [Routing → Changing profiles](routing.md#changing-profiles).
+
+### `host_permissions.py` (used by `cc-host-permissions`)
+
+`plan | apply | revert | validate` · `--host claude|codex|both` (default both) · `--yes` (required by `apply` and `revert`). Exit status `3` reports a conflict with a hand-edited entry, `2` a file it could not read. See [Host permissions → Global opt-in](host-permissions.md#global-opt-in).
 
 ### `validate-package.py`
 

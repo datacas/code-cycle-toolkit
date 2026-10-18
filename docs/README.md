@@ -10,7 +10,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 |---|---|---|
 | 1 | [Getting started](getting-started.md) | install the toolkit, authenticate providers, and run a first cycle |
 | 2 | [Workflows](workflows.md) | choose between single skills, the manual cycle, the orchestrators, and the runtime driver |
-| 3 | [Skills reference](skills.md) | know what each of the fifteen skills takes, does, and returns |
+| 3 | [Skills reference](skills.md) | know what each of the sixteen skills takes, does, and returns |
 | 4 | [Review lifecycle](review-cycle.md) | understand `REV-xxx` findings, severities, statuses, dispositions, and run lines |
 | 5 | [Verification](verification.md) | know what counts as evidence and when a stage stops to ask |
 
@@ -29,6 +29,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 | Document | Contents |
 |---|---|
 | [Role workspace policy](role-workspace-policy.md) | The write permission each dispatched role has, and which executors can enforce it |
+| [Host permissions](host-permissions.md) | Each stage's closed command table, how Claude and Codex enforce it, their limits, and the opt-in global set |
 | [Instrumentation internals](instrumentation.md) | Design reference: the comment record, paired review, routing v1, executor dispatch, telemetry schema |
 | [Codex plugin adapter contract](../skills/cc-orchestrator/references/codex-plugin-cc.md) | Discovery, handoff, and failure rules for Claude + Codex mode |
 | [ECC comparison](ecc-contrast-2026-10-10.md) | Dated comparison with the toolkit code and backlog; architectural ideas to adopt, in Spanish |

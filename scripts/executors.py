@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import threading
 import shutil
@@ -47,11 +48,15 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import stage_permissions as sp
 from router import Availability, RoutingDecision, RoutingMode, Target
+from stage_permissions import StagePolicy
 from usage import normalize_executor_output
 
 #: The sensitive grants (`grants.py`) Codex knows how to apply, and how.
 CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets"}
+#: Claude applies `docker_host` by adding the compose subcommands to its table.
+CLAUDE_GRANT_OPTIONS = {"docker_host": "docker_compose"}
 
 SCHEMA_VERSION = 1
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 6 * 60 * 60
@@ -125,7 +130,8 @@ def _paths_overlap(first: str, second: str) -> bool:
 
 @contextmanager
 def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
-                           *, writes: bool, publishes: bool, cwd: str):
+                           *, writes: bool, publishes: bool, cwd: str,
+                           command_policy: StagePolicy | None = None):
     """Give every native dispatch isolated scratch space outside its checkout."""
     try:
         code, root = _git_read(cwd, "rev-parse", "--show-toplevel")
@@ -181,7 +187,9 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                     worker_argv[existing] = f"{rule}{table[:-1]}{separator}{entry}}}"
             options += ["-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
             worker_argv[-1:-1] = options
-        yield worker_argv, worker_env
+        with adapter.policy_files(worker_argv, command_policy, scratch=scratch,
+                                  cwd=cwd) as policed_argv:
+            yield policed_argv, worker_env
 
 
 @dataclass(frozen=True)
@@ -307,6 +315,32 @@ def _events(stdout: str) -> list[dict]:
             else:
                 events.append(event)
     return events
+
+
+def _with_allowed_tools(argv: list[str], patterns: list[str]) -> list[str]:
+    """`argv` with its `--allowedTools` patterns replaced by `patterns`.
+
+    The table is first rendered before the dispatch knows its TMPDIR, whether
+    RTK is installed, or whether the workspace has an `origin`; the hook's
+    policy knows, and the first barrier must agree with it.
+    """
+    if "--allowedTools" not in argv:
+        return argv
+    start = argv.index("--allowedTools") + 1
+    end = start
+    while end < len(argv) and argv[end].startswith("Bash("):
+        end += 1
+    return argv[:start] + patterns + argv[end:]
+
+
+def _tool_result_text(content) -> str:
+    """The text of a `tool_result` block, whether a string or a list of parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content
+                         if isinstance(part, dict) and isinstance(part.get("text"), str))
+    return ""
 
 
 def _start_evidence(events: list[dict]) -> str:
@@ -808,6 +842,28 @@ class NativeAdapter(Adapter):
         """An environment for the dispatched CLI, or None to inherit this one."""
         return None
 
+    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None) -> str | None:
+        """Why this executor cannot enforce the stage's command policy, or None."""
+        return None
+
+    def policy_notice(self, policy: StagePolicy | None, cwd: str | None) -> dict:
+        """What the stage's command policy does not govern, to report; never a stop."""
+        return {}
+
+    @contextmanager
+    def policy_files(self, argv: list[str], policy: StagePolicy | None, *,
+                     scratch: str, cwd: str):
+        """`argv` with whatever the command policy needs once TMPDIR exists."""
+        yield argv
+
+    def extra_artifacts(self, stdout: str) -> dict:
+        """Facts from the complete output that a short tail would lose."""
+        return {}
+
+    def environment_restriction(self, message: str) -> str | None:
+        """An executor error that means its sandbox could not start, or None."""
+        return None
+
     def agent_output(self, stdout: str) -> str:
         """The agent's own message, out of whatever its CLI wraps it in.
 
@@ -1066,6 +1122,8 @@ class NativeAdapter(Adapter):
                  read_dirs: tuple[str, ...] = (),
                  writable_dirs: tuple[str, ...] = (),
                  sandbox_grants: tuple[str, ...] = (),
+                 command_policy: StagePolicy | None = None,
+                 review_clone: str | None = None,
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
@@ -1079,14 +1137,40 @@ class NativeAdapter(Adapter):
         review or a login cannot be driven from here, and answering such a
         screen blind is not something this layer will do — it reports the
         missing capability and stops.
+
+        `command_policy` is the stage's command table (#142). An inactive one,
+        for a non-GitHub cycle, changes nothing and is only reported.
         """
+        policy = command_policy if command_policy is not None and command_policy.active else None
+        policy_note = ({} if command_policy is None else {"command_policy": (
+            "active" if policy is not None
+            else f"inactive: {command_policy.inactive_reason}")})
+        refused = self.policy_preflight(policy, cwd)
+        if refused is not None:
+            return DispatchResult(
+                DispatchOutcome.FAILED, self.name, target,
+                detail=failure_excerpt(f"BLOCKED: {refused}", 600),
+                error_code="precondition", start_state="not_started",
+                lifecycle_state="failed",
+                artifacts={"command_policy": f"blocked: {failure_excerpt(refused, 300)}"},
+            )
+        try:
+            policy_note = {**policy_note, **self.policy_notice(policy, cwd)}
+        except Exception:
+            pass
         argv_options = {}
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
         if self.name == "codex" and sandbox_grants:
             argv_options["sandbox_grants"] = sandbox_grants
+        if self.name == "codex" and policy is not None:
+            argv_options["ignore_rules"] = True
+        if self.name == "codex" and review_clone:
+            argv_options["review_clone"] = review_clone
         if self.name == "claude" and claude_allowed_commands:
             argv_options["allowed_commands"] = claude_allowed_commands
+        if self.name == "claude" and policy is not None:
+            argv_options["command_policy"] = policy
         if publishes and publication_permissions:
             argv = self.argv(
                 target, task, cwd, writes, True,
@@ -1125,7 +1209,7 @@ class NativeAdapter(Adapter):
         try:
             with _native_review_scratch(
                 self, argv, environment, writes=writes, publishes=publishes,
-                cwd=worker_cwd,
+                cwd=worker_cwd, command_policy=policy,
             ) as (worker_argv, worker_env):
                 argv = worker_argv
                 run_options = {"env": worker_env} if worker_env is not None else {}
@@ -1189,6 +1273,17 @@ class NativeAdapter(Adapter):
         evidence = {"usage_observations": usage, "cost_measures": costs,
                     "start_state": start_state,
                     "process_exited": getattr(completed, "process_exited", False)}
+        annotations = {**policy_note, **self.extra_artifacts(stdout)}
+        result = self._classify_completed(target, completed, argv, stdout, signal, evidence)
+        if annotations:
+            # A classification's own note, such as a sandbox that did not
+            # start, outranks the policy's general one.
+            result = replace(result, artifacts={**annotations, **result.artifacts})
+        return result
+
+    def _classify_completed(self, target: Target, completed, argv: list[str], stdout: str,
+                            signal, evidence: dict) -> DispatchResult:
+        """Classify a run whose process returned."""
         if signal is not None:
             raw_code, message = signal
             friction = self._markers_in(message)
@@ -1220,6 +1315,18 @@ class NativeAdapter(Adapter):
             stderr = completed.stderr or ""
             message = "\n".join(line for line in stderr.splitlines()
                                 if line.strip() != "Reading additional input from stdin...")
+            restriction = self.environment_restriction(message)
+            if restriction is not None:
+                # The sandbox a confined stage requires did not start, so no
+                # tool ran. Another executor may still provide the guarantee.
+                return DispatchResult(
+                    DispatchOutcome.FAILED, self.name, target,
+                    detail=failure_excerpt(restriction, 600),
+                    error_code="environment_restricted",
+                    artifacts={"argv": argv, "returncode": completed.returncode,
+                               "command_policy": "blocked: sandbox unavailable"},
+                    **{**evidence, "start_state": "not_started"}, lifecycle_state="failed",
+                )
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
                 detail=failure_excerpt(message),
@@ -1659,7 +1766,9 @@ class CodexAdapter(NativeAdapter):
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
              writable_dirs: tuple[str, ...] = (),
-             sandbox_grants: tuple[str, ...] = ()) -> list[str]:
+             sandbox_grants: tuple[str, ...] = (),
+             ignore_rules: bool = False,
+             review_clone: str | None = None) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -1700,8 +1809,18 @@ class CodexAdapter(NativeAdapter):
             if unix_sockets:
                 argv += ["-c",
                          f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true"]
+        elif review_clone and not writes:
+            profile = "code_cycle_review_read"
+            argv += ["-c", f'default_permissions="{profile}"',
+                     "-c", f'permissions.{profile}.extends=":read-only"']
         else:
             argv += ["-s", "workspace-write" if writes else "read-only"]
+        if review_clone and not writes:
+            # A reviewer verifies in its disposable clone (#142): the clone and,
+            # added with the scratch directory later, its TMPDIR are the only
+            # writable paths. The source checkout stays read-only.
+            argv += ["-c", f"permissions.{profile}.filesystem="
+                           f"{{{json.dumps(review_clone)}=\"write\"}}"]
         if cwd:
             argv += ["-C", cwd]
         if writes:
@@ -1714,7 +1833,81 @@ class CodexAdapter(NativeAdapter):
                     f"permissions.{profile}.filesystem="
                     f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
                 ]
+        if ignore_rules:
+            # Execpolicy rules load only from configuration layers, with no
+            # per-run option, so a stage does not inherit the user's
+            # `~/.codex/rules`, including their `forbidden` entries (#142).
+            argv.append("--ignore-rules")
         return argv + [task]
+
+    def probe_review_confinement(self, *, runner=None) -> tuple[bool, str]:
+        """Show, with the installed CLI, that a review profile confines writes.
+
+        A profile extending `:read-only` with a clone and a TMPDIR writable must
+        let a command write those two and nothing else: not a sibling
+        `code-cycle-tmp-*`, not the clone's parent through `..`, and not a
+        symlink out of the clone. The result is kept for this adapter's life.
+        """
+        cached = getattr(self, "_review_confinement", None)
+        if cached is not None and runner is None:
+            return cached
+        base = Path(tempfile.mkdtemp(prefix="code-cycle-confinement-"))
+        try:
+            clone = base / "clone"
+            clone.mkdir()
+            scratch = Path(tempfile.mkdtemp(prefix="code-cycle-tmp-"))
+            sibling = Path(tempfile.mkdtemp(prefix="code-cycle-tmp-"))
+            try:
+                checks = [("clone", clone / "written", True),
+                          ("TMPDIR", scratch / "written", True),
+                          ("another code-cycle-tmp directory", sibling / "denied", False),
+                          ("the clone's parent through ..", clone / ".." / "denied", False)]
+                if os.name != "nt":
+                    (clone / "escape").symlink_to(sibling, target_is_directory=True)
+                    checks.append(("a symlink out of the clone", clone / "escape" / "link", False))
+                script = "\n".join([
+                    "import sys",
+                    "failed = []",
+                    *(f"try:\n open({json.dumps(str(path))}, 'w').close(); ok = True\n"
+                      f"except OSError:\n ok = False\n"
+                      f"if ok != {expected}: failed.append({json.dumps(label)})"
+                      for label, path, expected in checks),
+                    "sys.exit('; '.join(failed) if failed else 0)",
+                ])
+                profile = "code_cycle_review_probe"
+                filesystem = (f"{{{json.dumps(str(clone))}=\"write\","
+                              f"{json.dumps(str(scratch))}=\"write\"}}")
+                argv = [self.binary, "sandbox", "--permission-profile", profile,
+                        "-c", f'permissions.{profile}.extends=":read-only"',
+                        "-c", f"permissions.{profile}.filesystem={filesystem}",
+                        "--", sys.executable, "-c", script]
+                result = (runner or _run_sandbox_probe)(
+                    argv, cwd=str(clone), capture_output=True, text=True, timeout=30,
+                    stdin=subprocess.DEVNULL,
+                )
+                leaked = [label for label, path, expected in checks
+                          if not expected and Path(os.path.normpath(path)).exists()]
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+                shutil.rmtree(sibling, ignore_errors=True)
+        except subprocess.TimeoutExpired:
+            outcome = (False, "the Codex review-sandbox probe timed out")
+        except Exception as error:
+            outcome = (False, f"the Codex review-sandbox probe could not run ({type(error).__name__})")
+        else:
+            if result.returncode != 0 or leaked:
+                detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")
+                outcome = (False, "the installed Codex sandbox did not confine a review "
+                                  f"profile to its clone and TMPDIR: "
+                                  f"{', '.join(leaked) or failure_excerpt(detail, 300)}")
+            else:
+                outcome = (True, "the installed Codex sandbox confined writes to the clone "
+                                 "and TMPDIR")
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+        if runner is None:
+            self._review_confinement = outcome
+        return outcome
 
     def dispatch_environment(self, *, writes: bool, publishes: bool,
                              writable_dirs: tuple[str, ...]) -> dict | None:
@@ -2008,12 +2201,21 @@ def _remove_workspace(path: str) -> str | None:
     return None
 
 
-def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
-    """Run a reviewer in an independent detached clone and verify its source checkout."""
+def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
+                              read_only_mode: str = "detected",
+                              command_policy: bool = False):
+    """Run a reviewer in an independent detached clone and verify its source checkout.
+
+    `read_only_mode` is what the clone adds to the executor's own guarantee:
+    `detected` for Claude, whose writes are found afterwards, and `enforced`
+    for a Codex sandbox that keeps the source checkout read-only.
+    `command_policy` says whether the stage's tools are already narrowed to
+    its command table (#142), which changes what the prompt can promise.
+    """
     if not isinstance(cwd, str) or not cwd:
         return adapter._blocked(
             target, "review_workspace_isolation",
-            "a Claude read-only stage needs an implementer Git checkout to verify",
+            f"a {adapter.name} isolated review needs an implementer Git checkout to verify",
         )
     worktree = None
     root = None
@@ -2053,11 +2255,18 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
             target, "review_workspace_isolation", detail,
         )
 
+    access = (
+        "Your commands are limited to this stage's table: reading, running the "
+        "configured verification inside this clone, and publishing the comment "
+        "this stage allows."
+        if command_policy else
+        "You keep your normal gh and git access; use it only to read and to "
+        "publish the comment this stage allows."
+    )
     prompt = (
         f"{task}\n\nREAD-ONLY HARNESS CONTRACT: Do not modify files, commit, or push. "
-        "This stage runs in an independent disposable clone; any local edits will "
-        "be discarded. You keep your normal gh and git access; use it only to "
-        "read and to publish the comment this stage allows. A push, merge, or edit to the "
+        "This stage runs in an independent disposable clone without remotes; any "
+        f"local edits will be discarded. {access} A push, merge, or edit to the "
         "change request cannot be undone by the harness and invalidates the "
         "review it is judging. Any change to the implementer's branch or "
         "working tree fails this stage."
@@ -2100,7 +2309,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call):
     if workspace_changed:
         warnings.append("the reviewer changed its disposable workspace; those edits were discarded")
     artifacts = dict(result.artifacts)
-    artifacts["read_only_mode"] = "detected"
+    artifacts["read_only_mode"] = read_only_mode
     artifacts["implementer_head_before"] = before_head
     artifacts["implementer_status_fingerprint_before"] = hashlib.sha256(
         before_status.encode("utf-8"),
@@ -2153,7 +2362,8 @@ class ClaudeAdapter(NativeAdapter):
     }
 
     def publication_access(self, probe: ProbeResult, *, writes: bool) -> tuple[bool, str]:
-        return True, "Claude uses gh for comments and git for writing stages; publication policy stays in its prompt"
+        return True, ("Claude uses gh for comments and git for writing stages; on a "
+                      "GitHub cycle the stage's command table and hook bound them")
 
     def supports_non_writing(self, **dispatch_kwargs) -> bool:
         cwd = dispatch_kwargs.get("cwd")
@@ -2165,6 +2375,7 @@ class ClaudeAdapter(NativeAdapter):
                  publication_permissions: tuple[str, ...] = (),
                  claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
+                 command_policy: StagePolicy | None = None,
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None) -> DispatchResult:
         return super().dispatch(
@@ -2172,9 +2383,150 @@ class ClaudeAdapter(NativeAdapter):
             writes=writes, publishes=publishes,
             publication_permissions=publication_permissions,
             claude_allowed_commands=claude_allowed_commands,
-            read_dirs=read_dirs, on_progress=on_progress,
+            read_dirs=read_dirs, command_policy=command_policy,
+            on_progress=on_progress,
             on_workspace=on_workspace, dispatch_attempt_id=dispatch_attempt_id,
         )
+
+    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None) -> str | None:
+        """Refuse a dispatch whose loaded configuration could override the hook."""
+        if policy is None:
+            return None
+        try:
+            reason = sp.hook_override()
+            if reason:
+                return f"the stage command hook would not run: {reason}"
+            mods = sp.tool_check_mods()
+            if mods:
+                return ("the loaded Claude configuration enables a tool.check mod that "
+                        "could approve commands the stage policy denies: "
+                        f"{', '.join(mods)}. Claude Code offers no flag that turns mods "
+                        "off for one dispatch while keeping the user's other hooks, so "
+                        "disable that plugin for cycle runs")
+            if policy.requires_confined_verification:
+                reason = sp.sandbox_override()
+                if reason:
+                    return reason
+                # The clone's project settings come from the change under review.
+                for name in ("settings.json", "settings.local.json"):
+                    project = Path(cwd or ".") / ".claude" / name
+                    reason = sp.sandbox_override(project) if project.is_file() else None
+                    if reason:
+                        return reason
+        except sp.PolicyError as error:
+            return f"the Claude configuration could not be checked: {error}"
+        return None
+
+    def policy_notice(self, policy: StagePolicy | None, cwd: str | None) -> dict:
+        """The non-Bash tools the user's configuration pre-approves for this stage.
+
+        The table and hook govern the stage's Bash commands and file edits; an
+        MCP tool the user allows runs under the user's own configuration. The
+        cycle names such tools once and keeps running (#142).
+        """
+        if policy is None:
+            return {}
+        tools = sp.preapproved_outside_table(cwd)
+        return {"preapproved_tools": tools} if tools else {}
+
+    @contextmanager
+    def policy_files(self, argv: list[str], policy: StagePolicy | None, *,
+                     scratch: str, cwd: str):
+        """Write the hook and its policy outside the workspace and TMPDIR.
+
+        The directory is the runtime's: read-only to the agent's tools, gone
+        when the dispatch ends, and never inside a path the stage may write.
+        """
+        if policy is None:
+            yield argv
+            return
+        directory = Path(tempfile.mkdtemp(prefix="code-cycle-policy-",
+                                          dir=str(Path(scratch).parent)))
+        try:
+            if _paths_overlap(str(directory), cwd) or _paths_overlap(str(directory), scratch):
+                raise ExecutorError("the stage policy directory overlaps a writable path")
+            try:
+                code, _ = _git_read(cwd, "remote", "get-url", "origin")
+            except (OSError, subprocess.SubprocessError):
+                code = 1
+            runtime_policy = policy.at_dispatch(
+                tmpdir=scratch, rtk=shutil.which("rtk") is not None,
+                fetch_origin=code == 0, docker=policy.docker,
+            )
+            script = directory / "stage_permissions.py"
+            shutil.copyfile(Path(__file__).with_name("stage_permissions.py"), script)
+            policy_file = directory / "policy.json"
+            policy_file.write_text(runtime_policy.to_json(), encoding="utf-8")
+            parts = [sys.executable, str(script), "hook", str(policy_file)]
+            command = (subprocess.list2cmdline(parts) if os.name == "nt"
+                       else " ".join(shlex.quote(part) for part in parts))
+            settings = sp.hook_settings(command)
+            if runtime_policy.requires_confined_verification:
+                settings.update(sp.review_sandbox_settings((cwd, scratch)))
+            if os.name != "nt":
+                for path in (script, policy_file):
+                    os.chmod(path, 0o400)
+                os.chmod(directory, 0o500)
+            argv = _with_allowed_tools(argv, sp.allowed_tool_patterns(runtime_policy))
+            index = argv.index("--verbose") + 1
+            yield argv[:index] + ["--settings", json.dumps(settings)] + argv[index:]
+        finally:
+            if os.name != "nt":
+                try:
+                    os.chmod(directory, 0o700)
+                except OSError:
+                    pass
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def extra_artifacts(self, stdout: str) -> dict:
+        """The Bash commands the permission layer or the stage hook denied.
+
+        Claude's final `result` event lists the permission layer's in
+        `permission_denials`. A hook denial reaches the agent as an error
+        `tool_result` carrying the hook's reason, so those are matched to the
+        Bash call they answer. The cycle reports each command so a person can
+        authorize it once (#142).
+        """
+        denied: list[str] = []
+
+        def add(command) -> None:
+            if isinstance(command, str) and command.strip():
+                text = failure_excerpt(command, 300)
+                if text not in denied:
+                    denied.append(text)
+
+        bash_calls: dict[str, str] = {}
+        for event in _events(stdout):
+            kind = event.get("type")
+            if kind == "result":
+                for denial in event.get("permission_denials") or []:
+                    if isinstance(denial, dict) and denial.get("tool_name") == "Bash":
+                        add((denial.get("tool_input") or {}).get("command"))
+                continue
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if (kind == "assistant" and block.get("type") == "tool_use"
+                        and block.get("name") == "Bash"
+                        and isinstance(block.get("input"), dict)):
+                    bash_calls[str(block.get("id"))] = block["input"].get("command")
+                elif (kind == "user" and block.get("type") == "tool_result"
+                        and block.get("is_error")
+                        and sp.HOOK_DENIAL_MARKER in _tool_result_text(block.get("content"))):
+                    add(bash_calls.get(str(block.get("tool_use_id"))))
+        return {"permission_denials": denied} if denied else {}
+
+    def environment_restriction(self, message: str) -> str | None:
+        lowered = message.lower()
+        if any(marker in lowered for marker in sp.SANDBOX_UNAVAILABLE_MARKERS):
+            return ("BLOCKED: Claude's Bash sandbox is unavailable, so this review "
+                    "cannot run its verification confined to the clone and TMPDIR. "
+                    "On Linux and WSL2 it needs bubblewrap and socat "
+                    "(sudo apt install bubblewrap socat); see "
+                    "docs/host-permissions.md: " + message)
+        return None
 
     def readable(self, argv: list[str], read_dirs: tuple[str, ...]) -> list[str]:
         # A non-interactive Claude reads only inside its working directory
@@ -2188,7 +2540,8 @@ class ClaudeAdapter(NativeAdapter):
     def argv(self, target: Target, task: str, cwd: str | None = None,
              writes: bool = False, publishes: bool = False,
              publication_permissions: tuple[str, ...] = (),
-             allowed_commands: tuple[str, ...] = ()) -> list[str]:
+             allowed_commands: tuple[str, ...] = (),
+             command_policy: StagePolicy | None = None) -> list[str]:
         # No bypass flag. A run that needs elevated permissions to proceed is a
         # run a human should be looking at.
         #
@@ -2212,12 +2565,23 @@ class ClaudeAdapter(NativeAdapter):
                 "--effort", target.effort, "--output-format", "stream-json", "--verbose"]
         if writes:
             argv += ["--permission-mode", "acceptEdits"]
-        # A reading stage keeps its full tooling on purpose. It is told not to
-        # write, runs in a disposable clone, and dispatch() detects a change to
-        # the implementer's checkout or remote refs; nothing here narrows it.
-        # A publishing stage keeps its ordinary GitHub tooling. Which of those
-        # operations the stage may perform is a behavioural rule stated in its
-        # prompt (`cycle.publication_policy`), not a permission narrowed here.
+        if command_policy is not None and command_policy.active:
+            # A GitHub cycle (#142): the stage's closed table is the first
+            # barrier, and the hook `policy_files` adds validates every
+            # argument behind these prefixes. A reviewer gets no write: an
+            # explicit `default` mode keeps the user's `defaultMode` (`auto`,
+            # `acceptEdits`) from approving an edit to `.git/config` that an
+            # allowed `git status` would then run, and the hook refuses one too.
+            if not writes:
+                argv += ["--permission-mode", "default"]
+            return argv + ["--allowedTools", *sp.allowed_tool_patterns(command_policy)]
+        # Without a command policy (another code host or issue provider) the
+        # earlier contract holds. A reading stage keeps its full tooling: it is
+        # told not to write, runs in a disposable clone, and dispatch() detects
+        # a change to the implementer's checkout or remote refs. A publishing
+        # stage keeps its ordinary GitHub tooling, and which operations it may
+        # perform is a behavioural rule in its prompt
+        # (`cycle.publication_policy`).
         allowed_tools = ["Bash(gh:*)", "Bash(git:*)"] if publishes else []
         if writes:
             allowed_tools.extend(f"Bash({command})" for command in allowed_commands)
@@ -2582,6 +2946,13 @@ def dispatch(
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
     on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
     sandbox_grants = tuple(kw.pop("sandbox_grants", ()) or ())
+    command_policy = kw.pop("command_policy", None)
+    if command_policy is not None and not isinstance(command_policy, StagePolicy):
+        raise ExecutorError("a command policy must be a StagePolicy")
+    if (command_policy is not None and target.executor == "claude"
+            and "docker_host" in sandbox_grants):
+        # The grant opens docker compose up/down/ps/logs/build in the table.
+        command_policy = replace(command_policy, docker=True)
 
     probes = probes if probes is not None else registry.probe_all()
     probe = probes.get(target.executor)
@@ -2683,6 +3054,29 @@ def dispatch(
             readiness_policy=policy, dispatched_from=probe.availability,
         )
 
+    policy_note = None
+    if command_policy is not None and isinstance(adapter, OrcaAdapter):
+        # The table and hook are applied to native dispatches only (#142).
+        # Orca workers keep their behaviour and are not presented as
+        # equivalent; a stage that needs the confined verification of a
+        # review clone does not run there.
+        if command_policy.active and command_policy.requires_confined_verification:
+            return DispatchResult(
+                DispatchOutcome.BLOCKED, target.executor, target,
+                missing_capability="review_workspace_isolation",
+                start_state="not_started",
+                detail=("this review verifies in a confined disposable clone, which "
+                        f"{target.executor} workers cannot provide; route the review to a "
+                        "native Codex or Claude executor"),
+                readiness_policy=policy, dispatched_from=probe.availability,
+            )
+        policy_note = (f"inactive: {target.executor} workers keep their current tooling; "
+                       "the per-stage command table applies to native dispatches only")
+        command_policy = None
+    elif command_policy is not None:
+        kw["command_policy"] = command_policy
+    active_policy = command_policy if command_policy is not None and command_policy.active else None
+
     # The contract is consumed by this layer. Adapters receive only concrete
     # execution arguments, never an unrecognised policy keyword.
     kw.pop("workspace", None)
@@ -2739,6 +3133,28 @@ def dispatch(
                 dispatch_call=lambda prompt, isolated_cwd: invoke_adapter(
                     prompt, cwd=isolated_cwd, writes=False,
                 ),
+                command_policy=active_policy is not None,
+            )
+        if (workspace_policy is WorkspacePolicy.READ_ONLY and target.executor == "codex"
+                and active_policy is not None and active_policy.role in sp.REVIEW_ROLES):
+            # Codex reviewers verify in a disposable clone too (#142), under a
+            # profile whose only writable paths are that clone and TMPDIR.
+            if active_policy.requires_confined_verification:
+                confined, detail = adapter.probe_review_confinement()
+                if not confined:
+                    return DispatchResult(
+                        DispatchOutcome.FAILED, target.executor, target,
+                        detail=failure_excerpt(f"BLOCKED: {detail}", 600),
+                        error_code="environment_restricted", start_state="not_started",
+                        lifecycle_state="failed", process_exited=True,
+                        artifacts={"command_policy": "blocked: review sandbox unverified"},
+                    )
+            return _isolated_review_dispatch(
+                adapter, target, task, cwd=kw.get("cwd"),
+                dispatch_call=lambda prompt, isolated_cwd: invoke_adapter(
+                    prompt, cwd=isolated_cwd, writes=False, review_clone=isolated_cwd,
+                ),
+                read_only_mode="enforced", command_policy=True,
             )
         result = invoke_adapter(task)
         if not adapter.completes_work and result.outcome is DispatchOutcome.SUCCEEDED:
@@ -2764,6 +3180,8 @@ def dispatch(
     else:
         result = run_stage()
     elapsed = max(0, round((clock() - started) * 1000))
+    if policy_note is not None:
+        result = replace(result, artifacts={"command_policy": policy_note, **result.artifacts})
     # From what the adapter is, not from what this result remembered to say.
     asynchronous = (result.asynchronous
                     or (not adapter.completes_work

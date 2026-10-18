@@ -1042,4 +1042,4 @@ a persistence layer.
 
 ---
 
-[← Role workspace policy](role-workspace-policy.md) · [↑ Documentation index](README.md)
+[← Host permissions](host-permissions.md) · [↑ Documentation index](README.md)

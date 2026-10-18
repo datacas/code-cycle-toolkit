@@ -8,6 +8,13 @@ code_cycle:
   ci:
     policy: parallel
     timeout: 2700
+  # What a stage may run to verify (#142). `test` is one exact command; each
+  # `verify` entry is an exact prefix a stage may extend with arguments.
+  allowed_commands:
+    test: python3 -m unittest discover -s tests
+    verify:
+      - python3 scripts/validate-package.py
+      - python3 -m unittest
   review:
     # The provider identities whose comments may advance recovered findings.
     # Provider logins are compared case-insensitively. An absent or empty list

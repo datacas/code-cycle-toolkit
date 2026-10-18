@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
+
+from stage_permissions import StagePolicy, check
 
 
 SANDBOX_BLOCKERS = frozenset({
@@ -80,6 +83,59 @@ def sandbox_blocker(spoken: str) -> dict | None:
     if isinstance(resource, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", resource):
         cleaned["resource"] = resource
     return cleaned
+
+
+def _final_status(spoken: str) -> str | None:
+    end = spoken.rfind("END_ORCHESTRATION_RESULT")
+    begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
+    if begin < 0:
+        return None
+    try:
+        payload = json.loads(spoken[begin + len("ORCHESTRATION_RESULT"):end].strip())
+    except ValueError:
+        return None
+    return payload.get("status") if isinstance(payload, dict) else None
+
+
+def _never_run(*_args, **_kwargs):
+    raise RuntimeError("no command runs while reading a denial")
+
+
+def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
+    """The `docker_host` blocker for a Claude stage the command hook stopped.
+
+    Claude's stage table holds `docker compose` only under the `docker_host`
+    grant (#142). When the hook denied such a command and the stage then
+    reported BLOCKED, the denial is the restriction, observed by the runtime
+    itself rather than claimed by the agent, so it enters the grant flow. Only
+    a denial the grant would lift counts: `docker compose run`, `exec` and the
+    rest stay denied with it, so asking a person for it would change nothing.
+    """
+    if not isinstance(denied_commands, (list, tuple)) or _final_status(spoken) != "BLOCKED":
+        return None
+    # The dispatch's TMPDIR is gone by now; an empty stand-in lets a
+    # `> $TMPDIR/...` redirect pass as it did in the stage, so the docker rule decides.
+    with tempfile.TemporaryDirectory(prefix="code-cycle-probe-") as probe:
+        ungranted = StagePolicy(role="implement", rtk=True, tmpdir=probe)
+        for command in denied_commands:
+            # Only the docker rule matters here; a git rule that would read the
+            # branch through `run` fails closed instead of running anything.
+            if isinstance(command, str) and check(command, ungranted,
+                                                  run=_never_run).needs_docker:
+                return _docker_blocker(command)
+    return None
+
+
+def _docker_blocker(command: str) -> dict:
+    return {
+        "kind": "sandbox_local_access",
+        "command": command,
+        "error": "denied by the stage command policy: docker compose needs "
+                 "the docker_host grant",
+        "attempted": ["the stage command hook denied it before it ran"],
+        "requires_human": False,
+        "resource": "docker_host",
+    }
 
 
 def recovery_context(blocker: dict) -> str:

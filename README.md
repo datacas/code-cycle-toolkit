@@ -77,7 +77,7 @@ Not sure? Read [Choosing a workflow](docs/workflows.md#choosing-a-workflow).
 > [!NOTE]
 > This is the shortest path. [Getting started](docs/getting-started.md) covers each step in full, including Windows and repository-level installs.
 
-**1. Requirements.** Git, Python 3, an agent host (Claude Code, Codex, or OpenCode), and authenticated tooling for your issue provider and code host. For GitHub, that is [`gh`](https://cli.github.com/):
+**1. Requirements.** Git, Python 3, an agent host (Claude Code, Codex, or OpenCode), and authenticated tooling for your issue provider and code host. On Linux and WSL2, Claude reviews that run verification also need `bubblewrap` and `socat` for Claude Code's sandbox (`sudo apt install bubblewrap socat`); without them those reviews stop rather than run unconfined. For GitHub, that is [`gh`](https://cli.github.com/):
 
 ```bash
 gh auth status
@@ -164,6 +164,7 @@ Fifteen skills in two layers. **Cycle skills** own the workflow: the change requ
 | `cc-provider-bootstrap` | supporting | Resolve and health-check the provider pair | — |
 | `cc-stats` | supporting | Report local telemetry for this repository | — |
 | `cc-profile-config` | supporting | Show, choose, and write routing profiles | — |
+| `cc-host-permissions` | supporting | Explain stage permissions; apply or revert the opt-in global set | — |
 
 → Inputs, statuses, and examples for each: [Skills reference](docs/skills.md)
 
@@ -184,6 +185,7 @@ Configuration is optional. Invocation parameters override `.code-cycle.yml`, whi
 | When the security audit always runs | `security_review.always_when.*` | [Configuration → Security](docs/configuration.md#security-review-rule) |
 | Orchestration mode | `orchestration.mode`, `orchestration_mode=` | [Workflows → cc-orchestrator](docs/workflows.md#cc-orchestrator) |
 | Reviewer calibration candidates | `calibration.profiles.*` | [Routing → Calibration](docs/routing.md#calibration) |
+| Commands a stage may run to verify | `allowed_commands.test`, `allowed_commands.verify` | [Host permissions](docs/host-permissions.md) |
 | Output language | `lang=` in the prompt | [Configuration → Language](docs/configuration.md#output-language) |
 | Iterations, agents, paired review | `max_iterations=`, `implementer=`, `reviewer=`, `paired_review=` | [Configuration → Invocation parameters](docs/configuration.md#invocation-parameters) |
 | Telemetry location | `CODE_CYCLE_HOME` | [Configuration → Environment](docs/configuration.md#environment-variables) |
@@ -203,7 +205,7 @@ The skills work better when the host offers semantic code navigation (Serena), p
 - **Treat silence as success.** Skipped, pending, or missing checks are reported as exactly that.
 - **Pick models from statistics.** Routing follows declared rules. Telemetry records outcomes, and nothing adapts automatically. Jev only ever runs in shadow mode.
 - **Bundle external components.** Orca (for `cc-orca-orchestrator`) and `codex-plugin-cc` (for Claude + Codex mode) are installed and authenticated separately. See the [adapter contract](skills/cc-orchestrator/references/codex-plugin-cc.md).
-- **Enforce publication technically.** What each stage may publish is a rule in its prompt, not a sandbox. Use separate credentials when you need a hard guarantee. → [Routing → Publication](docs/routing.md#publication-boundary)
+- **Enforce publication everywhere.** On a GitHub cycle, each native Claude stage runs under its closed command table and a hook that denies anything else; Codex stages are confined by their sandbox profile, which filters files and network, not commands. Elsewhere, and on Orca workers, what a stage may publish is a rule in its prompt. Use separate credentials when you need a hard guarantee. → [Host permissions](docs/host-permissions.md) · [Routing → Publication](docs/routing.md#publication-boundary)
 
 ## Documentation
 
@@ -211,7 +213,7 @@ The skills work better when the host offers semantic code navigation (Serena), p
 |---|---|
 | [Getting started](docs/getting-started.md) | Requirements, installation, authentication, first run |
 | [Workflows](docs/workflows.md) | Every way to run the toolkit, and when to choose each |
-| [Skills reference](docs/skills.md) | All fifteen skills: inputs, outputs, statuses |
+| [Skills reference](docs/skills.md) | All sixteen skills: inputs, outputs, statuses |
 | [Review lifecycle](docs/review-cycle.md) | `REV-xxx` findings, severities, dispositions, run lines |
 | [Verification](docs/verification.md) | Evidence rules, stop conditions, CI reporting |
 | [Routing and models](docs/routing.md) | Profiles, executors, fallbacks, strategies, Jev, calibration |

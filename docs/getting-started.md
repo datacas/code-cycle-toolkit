@@ -17,6 +17,7 @@ From nothing to a first reviewed pull request. No knowledge of the architecture 
 | PyYAML (`pip install pyyaml`) | reading `.code-cycle.yml` from the runtime | Only when a `.code-cycle.yml` exists. The runtime then stops if PyYAML is missing rather than ignoring the file. |
 | Node.js / `npx` | `npx skills` installation only | Not needed with the bundled installers. |
 | Codex CLI and/or Claude Code CLI | `run_cycle.py` dispatching | Codex CLI 0.138.0 or later for stages that publish. |
+| `bubblewrap` and `socat` (Linux and WSL2) | Claude reviews that run verification | Claude Code's Bash sandbox needs both on Linux and WSL2; macOS needs nothing extra. Without them a Claude review or rereview that may run `allowed_commands` stops `BLOCKED` instead of running unconfined. Install with `sudo apt install bubblewrap socat` (Debian, Ubuntu) or `sudo dnf install bubblewrap socat` (Fedora). See [Host permissions](host-permissions.md#reviewers-verify-in-a-confined-clone). |
 | Orca | `cc-orca-orchestrator` only | Installed and authenticated separately. |
 | `codex-plugin-cc` + Codex | Claude + Codex mode only | Installed separately inside Claude Code. |
 | Workspace tools (Serena, AgentMemory, Graphify, RTK, context-mode, Context7) | nothing; optional | Recommended, not installed by any installer or `npx skills`, and never checked. Their absence is not an error. See [Optional workspace tools](workspace-tools.md). |
@@ -241,6 +242,7 @@ It never merges, never force-pushes, never deletes remote refs, and never closes
 | `cc-stats` or `cc-orchestrator` says the runtime isn't installed | You installed with `npx skills` or `--no-runtime`. Run the one-command installer. |
 | `run_cycle.py` stops with `publication_access` | `gh` isn't authenticated, the account can't push, Codex CLI is older than 0.138.0, or the working tree isn't on a named branch. |
 | `run_cycle.py` refuses a key in `.code-cycle.yml` | Unknown keys are refused by name to catch typos. See [Configuration](configuration.md). |
+| A Claude review stops with "Claude's Bash sandbox is unavailable" | On Linux or WSL2, `bubblewrap` or `socat` is missing. Install both (`sudo apt install bubblewrap socat`) and resume with `--from review --pr <n>`. |
 
 ---
 

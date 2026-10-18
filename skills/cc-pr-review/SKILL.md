@@ -134,8 +134,15 @@ the base branch:
 
 ```bash
 git fetch origin
-git diff "$(git merge-base HEAD origin/<base>)"...HEAD
+git merge-base HEAD origin/<base>
+git diff <merge-base>...HEAD
 ```
+
+Run each command on its own and pass the merge base it prints, literally, to
+`git diff`; a command substitution is refused by a runtime that validates each
+command. Skip `git fetch origin` when the workspace has no `origin` remote, as
+in a disposable review clone, and use the base reference the clone already
+has. When an invocation names a diff file, that file is the diff under review.
 
 Do not use `git diff HEAD~1` and do not use `git show`. Both give a partial
 view that hides earlier commits in the same pull request.
