@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 
 from stage_permissions import StagePolicy, check
 
@@ -112,22 +113,29 @@ def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
     """
     if not isinstance(denied_commands, (list, tuple)) or _final_status(spoken) != "BLOCKED":
         return None
-    ungranted = StagePolicy(role="implement", rtk=True)
-    for command in denied_commands:
-        # Only the docker rule matters here; a git rule that would read the
-        # branch through `run` fails closed instead of running anything.
-        if isinstance(command, str) and check(command, ungranted,
-                                              run=_never_run).needs_docker:
-            return {
-                "kind": "sandbox_local_access",
-                "command": command,
-                "error": "denied by the stage command policy: docker compose needs "
-                         "the docker_host grant",
-                "attempted": ["the stage command hook denied it before it ran"],
-                "requires_human": False,
-                "resource": "docker_host",
-            }
+    # The dispatch's TMPDIR is gone by now; an empty stand-in lets a
+    # `> $TMPDIR/...` redirect pass as it did in the stage, so the docker rule decides.
+    with tempfile.TemporaryDirectory(prefix="code-cycle-probe-") as probe:
+        ungranted = StagePolicy(role="implement", rtk=True, tmpdir=probe)
+        for command in denied_commands:
+            # Only the docker rule matters here; a git rule that would read the
+            # branch through `run` fails closed instead of running anything.
+            if isinstance(command, str) and check(command, ungranted,
+                                                  run=_never_run).needs_docker:
+                return _docker_blocker(command)
     return None
+
+
+def _docker_blocker(command: str) -> dict:
+    return {
+        "kind": "sandbox_local_access",
+        "command": command,
+        "error": "denied by the stage command policy: docker compose needs "
+                 "the docker_host grant",
+        "attempted": ["the stage command hook denied it before it ran"],
+        "requires_human": False,
+        "resource": "docker_host",
+    }
 
 
 def recovery_context(blocker: dict) -> str:

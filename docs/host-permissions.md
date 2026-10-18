@@ -57,7 +57,9 @@ The hook validates arguments, not only the program, and it is fail-closed:
   and `master` are never a destination, whether spelled `main`,
   `refs/heads/main`, `heads/main` or `HEAD` while on it;
 - Git options that run another program (`-c`, `-C`, `--upload-pack`,
-  `--receive-pack`, `--exec-path`, `grep -O`) are refused;
+  `--receive-pack`, `--exec-path`, `grep -O`) are refused, including the
+  abbreviations Git expands (`--open-files=…`, `--upload-pa=…`) and `O` in a
+  bundled `git grep` flag (`-iO…`);
 - `gh` is limited to this cycle's repository (`-R`/`--repo`, URLs), change
   request and work item; `--hostname` is refused; `gh api` is refused except
   `gh api user --jq .login` and resolve's three thread calls;

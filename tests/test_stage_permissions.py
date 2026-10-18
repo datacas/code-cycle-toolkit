@@ -240,6 +240,31 @@ class GitTests(PolicyTestCase):
             with self.subTest(command=command):
                 self.denied(command, policy)
 
+    def test_bundled_and_abbreviated_executing_options_are_refused(self) -> None:
+        # Git expands unambiguous long-option prefixes and bundles short
+        # options, so `-iO<cmd>` and `--open-files=<cmd>` run <cmd> (REV-005).
+        for role in ("review", "rereview", "implement", "resolve"):
+            policy = self.policy(role)
+            for command in ("git grep -iO'touch x' foo", "git grep -nOvim foo",
+                            "git grep -inO foo", "git grep --open-files='touch x' foo",
+                            "git grep --open-files-in-p=vim foo", "git grep --op=vim foo",
+                            "git grep --o=vim foo", "git log --exec=x", "git diff --outp=/etc/x",
+                            "git show --ou /etc/x"):
+                with self.subTest(role=role, command=command):
+                    self.denied(command, policy)
+        for command in ("git fetch --upload-pa='touch x; git-upload-pack' origin",
+                        "git fetch --up=x origin", "git pull --upload=x origin main"):
+            with self.subTest(command=command):
+                self.denied(command, self.policy("resolve"))
+
+    def test_ordinary_options_that_share_letters_stay_allowed(self) -> None:
+        policy = self.policy("review")
+        for command in ("git grep -in foo", "git grep --or -e a -e b",
+                        "git grep --only-matching foo", "git log --oneline",
+                        "git diff --output-indicator-new=+", "git log -S foo"):
+            with self.subTest(command=command):
+                self.assertTrue(sp.check(command, policy).allowed, command)
+
 
 class GhTests(PolicyTestCase):
     def test_every_stage_reads(self) -> None:

@@ -56,9 +56,10 @@ GIT_COMMON_READ = frozenset({"status", "diff", "log", "rev-parse", "show"})
 GIT_REVIEW_READ = frozenset({"merge-base", "ls-files", "grep", "blame"})
 GIT_WRITE = frozenset({"add", "commit", "push", "fetch", "checkout", "switch", "pull",
                        "rm", "mv"})
-#: Options that make Git run another program, on any subcommand.
+#: Options that make Git run another program, on any subcommand. Git also
+#: accepts any unambiguous prefix of a long option, so a prefix is refused too.
 GIT_EXECUTING_OPTIONS = ("--upload-pack", "--receive-pack", "--exec", "--exec-path",
-                         "--open-files-in-pager", "-O")
+                         "--open-files-in-pager")
 
 DOCKER_COMPOSE_SUBCOMMANDS = frozenset({"up", "down", "ps", "logs", "build"})
 DOCKER_COMPOSE_GLOBAL = {"-f": True, "--file": True, "-p": True, "--project-name": True,
@@ -430,24 +431,33 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
     if subcommand not in allowed:
         raise PolicyError(f"git {subcommand} is not in the {policy.role} stage's command table")
     for word in rest:
-        if any(word == option or word.startswith(option + "=")
-               or (option == "-O" and word.startswith("-O"))
-               for option in GIT_EXECUTING_OPTIONS):
+        if (any(_names_git_option(word, option) for option in GIT_EXECUTING_OPTIONS)
+                or word.startswith("-O")
+                # `git grep -O` runs a pager; short options bundle, as in `-iO<cmd>`.
+                or (subcommand == "grep" and word.startswith("-")
+                    and not word.startswith("--") and "O" in word)):
             raise PolicyError(f"git option {word} runs another program")
     for index, word in enumerate(rest):
-        if word.startswith("--output="):
-            if not inside_tmpdir(word.split("=", 1)[1], policy.tmpdir):
-                raise PolicyError("git --output may write only into $TMPDIR")
-        elif word == "--output":
+        if not _names_git_option(word, "--output"):
+            continue
+        if "=" in word:
+            target = word.split("=", 1)[1]
+        else:
             target = rest[index + 1] if index + 1 < len(rest) else ""
-            if not inside_tmpdir(target, policy.tmpdir):
-                raise PolicyError("git --output may write only into $TMPDIR")
+        if not inside_tmpdir(target, policy.tmpdir):
+            raise PolicyError("git --output may write only into $TMPDIR")
     if subcommand == "push":
         _check_push(rest, policy, cwd=cwd, run=run)
     elif subcommand in {"fetch", "pull"}:
         remotes = [word for word in rest if not word.startswith("-")]
         if remotes and remotes[0] != "origin":
             raise PolicyError(f"git {subcommand} may use only the origin remote")
+
+
+def _names_git_option(word: str, option: str) -> bool:
+    """Whether `word` is the long `option`, in full or as a prefix Git expands to it."""
+    name = word.split("=", 1)[0]
+    return name.startswith("--") and len(name) > 2 and option.startswith(name)
 
 
 def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> None:

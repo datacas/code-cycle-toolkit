@@ -368,6 +368,15 @@ class DockerBlockerTests(unittest.TestCase):
                         {"status": "BLOCKED", "environment_blocker": blocker})
                     + '\nEND_ORCHESTRATION_RESULT')["resource"])
 
+    def test_a_compose_redirected_into_tmpdir_enters_the_grant_flow(self) -> None:
+        # The stage allowed the redirect; only the grant was missing (REV-004).
+        for command in ("docker compose logs > $TMPDIR/l.txt",
+                        "docker compose ps 2> ${TMPDIR}/err.txt"):
+            with self.subTest(command=command):
+                blocker = recovery.denied_docker_blocker(self.BLOCKED, [command])
+                self.assertEqual("docker_host", blocker["resource"])
+                self.assertEqual(command, blocker["command"])
+
     def test_nothing_else_is_a_docker_blocker(self) -> None:
         implemented = 'ORCHESTRATION_RESULT\n{"status": "IMPLEMENTED"}\nEND_ORCHESTRATION_RESULT'
         for spoken, denied in ((implemented, ["docker compose up"]),
