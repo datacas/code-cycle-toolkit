@@ -557,8 +557,8 @@ class RuntimeStopTests(unittest.TestCase):
         notices = [warning for detail in noted.stage_details for warning in detail.warnings
                    if "outside the stage table" in warning]
         self.assertEqual(1, len(notices))
-        self.assertIn("mcp__ctx__ctx_execute, mcp__docs__query-docs", notices[0])
-        self.assertIn("mcp__ctx__ctx_execute can run code or write files", notices[0])
+        self.assertIn(": mcp__ctx__ctx_execute can run code or write files", notices[0])
+        self.assertIn("; also mcp__docs__query-docs (the table governs", notices[0])
         self.assertEqual((plain.status, plain.stop_reason, [s.role for s in plain.stages]),
                          (noted.status, noted.stop_reason, [s.role for s in noted.stages]))
         self.assertFalse(any("outside the stage table" in warning

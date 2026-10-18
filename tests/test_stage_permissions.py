@@ -942,8 +942,11 @@ class ClaudeConfigurationTests(unittest.TestCase):
         self.assertNotIn("worth a thought", quiet)
         flagged = sp.preapproved_notice(["mcp__docs__query-docs", "mcp__ctx__ctx_execute",
                                          "mcp__ctx__ctx_batch_execute"])
-        self.assertIn("; mcp__ctx__ctx_execute, mcp__ctx__ctx_batch_execute can run code or "
-                      "write files, worth a thought when the cycle runs unattended", flagged)
+        self.assertEqual("outside the stage table, pre-approved by your configuration: "
+                         "mcp__ctx__ctx_execute, mcp__ctx__ctx_batch_execute can run code or "
+                         "write files, worth a thought when the cycle runs unattended; also "
+                         "mcp__docs__query-docs (the table governs this cycle's Bash commands "
+                         "and file edits)", flagged)
         for word in ("BLOCKED", "danger", "unsafe"):
             self.assertNotIn(word, flagged)
 
@@ -959,11 +962,41 @@ class ClaudeConfigurationTests(unittest.TestCase):
         self.assertIsNone(sp.unnamed_tools("managed permissions.defaultMode auto"))
         notice = sp.preapproved_notice(["mcp__docs__query-docs", "mcp__shell", "mcp__ctx__*",
                                         "mcp__ctx__ctx_*"])
-        self.assertIn("; mcp__shell (every tool of that server), mcp__ctx__* (every tool of "
+        self.assertIn(": mcp__shell (every tool of that server), mcp__ctx__* (every tool of "
                       "that server), mcp__ctx__ctx_* (every tool that pattern matches) can run "
                       "code or write files, worth a thought when the cycle runs unattended",
                       notice)
-        self.assertNotIn("mcp__docs__query-docs (", notice)
+        self.assertNotIn("mcp__docs__query-docs (every", notice)
+
+    def test_a_long_notice_keeps_the_code_running_flag(self) -> None:
+        # REV-009: cutting the whole line at the cap dropped the flag clause,
+        # which came after the full list.
+        prefix = "mcp__plugin_context-mode_context-mode__"
+        reads = [f"{prefix}ctx_{name}" for name in (
+            "search", "index", "stats", "doctor", "fetch_and_index", "insight", "purge",
+            "upgrade", "search_more", "index_more", "stats_more", "doctor_more")]
+        tools = [*reads, f"{prefix}ctx_execute", "mcp__shell"]
+        # The pre-fix notice was longer than the cap, so the flag was lost.
+        self.assertGreater(len(", ".join(tools)), sp.NOTICE_LIMIT)
+        notice = sp.preapproved_notice(tools)
+        self.assertLessEqual(len(notice), sp.NOTICE_LIMIT)
+        self.assertIn(f": {prefix}ctx_execute, mcp__shell (every tool of that server) can run "
+                      "code or write files, worth a thought when the cycle runs unattended; "
+                      f"also {prefix}ctx_search, ", notice)
+        self.assertRegex(notice, r", and \d+ more \(the table governs this cycle's Bash "
+                                 r"commands and file edits\)$")
+        self.assertNotIn("…", notice)
+        # Code-running tools beyond the cap are counted too, and the clause stays.
+        many = [f"mcp__s{index}__run_{'x' * 100}" for index in range(10)] + reads
+        crowded = sp.preapproved_notice(many)
+        self.assertLessEqual(len(crowded), sp.NOTICE_LIMIT)
+        self.assertRegex(crowded, r", and \d+ more can run code or write files, worth a "
+                                  r"thought when the cycle runs unattended; also .+ \(the "
+                                  r"table governs this cycle's Bash commands and file edits\)$")
+        quiet = sp.preapproved_notice(reads * 3)
+        self.assertLessEqual(len(quiet), sp.NOTICE_LIMIT)
+        self.assertNotIn("worth a thought", quiet)
+        self.assertRegex(quiet, r", and \d+ more \(the table governs")
 
 
 if __name__ == "__main__":

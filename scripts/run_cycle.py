@@ -120,8 +120,8 @@ from router import (
     load_profiles,
     load_routing_strategy,
 )
-from stage_permissions import (PolicyError, StagePolicy, preapproved_notice, prompt_note,
-                               validate_verify_prefix)
+from stage_permissions import (NOTICE_LIMIT, PolicyError, StagePolicy, preapproved_notice,
+                               prompt_note, validate_verify_prefix)
 from stage_signals import boundary_rule_fired, collect_change_signals
 from telemetry import (
     AWAITING_CI_STATUS,
@@ -1039,7 +1039,7 @@ def _preapproved_notice(outcome: StageOutcome) -> str | None:
         return None
     notice = preapproved_notice([readable(tool, 120).replace("`", "'")
                                  for tool in tools if isinstance(tool, str)])
-    return readable(notice, 600) if notice else None
+    return readable(notice, NOTICE_LIMIT) if notice else None
 
 
 def _stage_warnings(outcome: StageOutcome) -> list[str]:

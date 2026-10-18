@@ -50,8 +50,9 @@ All notable changes to this project are documented here. This project follows
   pre-approves. The cycle names them once in the stage report and keeps
   running. It flags those whose names suggest they run code or write files,
   and every server-wide approval (`mcp__<server>`, `mcp__<server>__*`),
-  since they are worth a thought for unattended runs. The table is not a
-  sandbox against hostile code.
+  since they are worth a thought for unattended runs. Flagged tools are listed
+  first, and a list too long for the notice ends in `and N more`. The table is
+  not a sandbox against hostile code.
 - `cc-pr-review` runs `git merge-base` on its own instead of inside a command
   substitution, and skips `git fetch origin` in a clone without remotes;
   `cc-resolve-comments` documents the three `gh api graphql` review-thread calls.

@@ -123,14 +123,16 @@ the configuration the dispatch loads (managed, user and project settings) and
 names those tools once in the stage report:
 
 ```text
-outside the stage table, pre-approved by your configuration: mcp__…__ctx_execute, mcp__…__query-docs (the table governs this cycle's Bash commands and file edits); mcp__…__ctx_execute can run code or write files, worth a thought when the cycle runs unattended
+outside the stage table, pre-approved by your configuration: mcp__…__ctx_execute can run code or write files, worth a thought when the cycle runs unattended; also mcp__…__query-docs (the table governs this cycle's Bash commands and file edits)
 ```
 
 The stage keeps running; the notice is never a stop or a question. A tool is
 flagged only when its name suggests it runs code or writes files (`execute`,
 `run`, `shell`, `write`, …). That is a hint from the name, not an analysis of
-the tool. A read-only tool, such as a documentation lookup or a symbol search,
-is listed without a flag. A server-wide approval, `mcp__<server>` or
+the tool. Flagged tools come first. The notice is at most 600 characters: a
+list that does not fit ends in `and N more` rather than being cut, so the flag
+is never lost. A read-only tool, such as a documentation lookup or a symbol
+search, is listed without a flag. A server-wide approval, `mcp__<server>` or
 `mcp__<server>__*`, approves every tool of that server without naming any, so
 it is always flagged, as `mcp__<server> (every tool of that server)`; so is
 any other MCP rule with a `*`. A managed `permissions.defaultMode` of `auto` or

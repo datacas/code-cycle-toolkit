@@ -1315,20 +1315,47 @@ def may_run_code(tool: str) -> bool:
     return bool(words & CODE_RUNNING_WORDS)
 
 
-def preapproved_notice(tools) -> str | None:
-    """One line for the stage report naming what the table does not govern."""
+#: The longest pre-approved-tools notice the stage report prints.
+NOTICE_LIMIT = 600
+
+
+def _listed(names: list[str], room: int) -> str:
+    """`names` in order within `room` characters, the rest as `and N more`."""
+    shown: list[str] = []
+    for index, name in enumerate(names):
+        rest = len(names) - index - 1
+        if len(", ".join([*shown, name]) + (f", and {rest} more" if rest else "")) > room:
+            break
+        shown.append(name)
+    hidden = len(names) - len(shown)
+    if not shown:
+        return f"{hidden} tool" + ("s" if hidden > 1 else "")
+    return ", ".join(shown) + (f", and {hidden} more" if hidden else "")
+
+
+def preapproved_notice(tools, limit: int = NOTICE_LIMIT) -> str | None:
+    """One line for the stage report naming what the table does not govern.
+
+    The tools that can run code come first, and a list too long for `limit`
+    ends in `and N more`, so the cap never cuts off their flag (REV-009).
+    """
     tools = [tool for tool in tools or () if isinstance(tool, str) and tool.strip()]
     if not tools:
         return None
-    notice = ("outside the stage table, pre-approved by your configuration: "
-              + ", ".join(tools)
-              + " (the table governs this cycle's Bash commands and file edits)")
     running = [f"{tool} ({unnamed_tools(tool)})" if unnamed_tools(tool) else tool
                for tool in tools if may_run_code(tool)]
-    if running:
-        notice += (f"; {', '.join(running)} can run code or write files, worth a thought "
-                   "when the cycle runs unattended")
-    return notice
+    quiet = [tool for tool in tools if not may_run_code(tool)]
+    head = "outside the stage table, pre-approved by your configuration: "
+    flag = " can run code or write files, worth a thought when the cycle runs unattended"
+    tail = " (the table governs this cycle's Bash commands and file edits)"
+    if not running:
+        return head + _listed(quiet, limit - len(head) - len(tail)) + tail
+    fixed = len(head) + len(flag) + len(tail) + (len("; also ") if quiet else 0)
+    reserve = len(_listed(quiet, 0)) if quiet else 0
+    notice = head + _listed(running, limit - fixed - reserve) + flag
+    if quiet:
+        notice += "; also " + _listed(quiet, limit - len(notice) - len("; also ") - len(tail))
+    return notice + tail
 
 
 #: The code hosts a sandboxed reviewer's `gh` must reach to read the change
