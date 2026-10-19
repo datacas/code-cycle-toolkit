@@ -345,20 +345,28 @@ TMPDIR_LOG_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.log")
 
 
 def is_tmpdir_helper(path: str, tmpdir: str | None) -> bool:
-    """Whether `path` names one of the stage's own helper files in `$TMPDIR`.
+    """Whether path names a stage helper in TMPDIR or Claude's own subdir.
 
-    Both the path as written and the file it resolves to must be a helper
-    name directly in `$TMPDIR`, so a symlink cannot redirect the write to a
-    file of the same directory that the stage does not own.
+    Both the path as written and the file it resolves to must have a helper
+    name and remain in TMPDIR. The nested exception is limited to Claude's
+    per-user claude-<uid> directory directly below TMPDIR.
     """
     if not inside_tmpdir(path, tmpdir):
         return False
     root = Path(tmpdir).resolve(strict=True)
     literal = Path(os.path.normpath(path))
     resolved = Path(path).resolve(strict=False)
-    return all((name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)) and parent == root
-               for name, parent in ((literal.name, literal.parent.resolve()),
-                                    (resolved.name, resolved.parent)))
+
+    def owned_parent(parent: Path) -> bool:
+        return (parent == root or
+                (parent.parent == root and re.fullmatch(r"claude-\d+", parent.name) is not None))
+
+    def helper_in_tmpdir(name: str, parent: Path) -> bool:
+        is_helper = name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)
+        return bool(is_helper and owned_parent(parent))
+
+    return (helper_in_tmpdir(literal.name, literal.parent.resolve())
+            and helper_in_tmpdir(resolved.name, resolved.parent))
 
 
 def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
@@ -1108,12 +1116,13 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
     if policy.tmpdir:
-        # The only files a non-writing stage may write (#272); the hook still
-        # resolves every target, so `..` or a symlink cannot redirect one.
+        # Native helpers may live in an executor-owned subdirectory (#280).
+        # The hook validates names and resolved paths, including symlinks.
         for tmpdir in (policy.tmpdir, str(Path(policy.tmpdir).resolve(strict=False))):
             root = _absolute_rule_path(tmpdir)
             patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
-            patterns.append(f"Edit({root}/*.log)")
+            patterns += [f"Edit({root}/claude-*/{name})" for name in TMPDIR_HELPER_FILES]
+            patterns += [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"]
     return list(dict.fromkeys(patterns))
 
 

@@ -616,11 +616,12 @@ class AllowedToolsTests(PolicyTestCase):
             self.assertNotIn(write, issue_review)
 
     def test_the_only_edit_rules_name_the_helper_files_in_tmpdir(self) -> None:
-        # #272, REV-001: Claude keeps its own session files in $TMPDIR, so the
-        # rules name the helper files rather than the whole directory.
+        # #272/#273/#280: nested executor helper paths stay limited to owned names.
         root = sp._absolute_rule_path(str(self.tmpdir))
-        expected = [f"Edit({root}/pr-comment.md)", f"Edit({root}/report.md)",
-                    f"Edit({root}/reply.md)", f"Edit({root}/*.log)"]
+        names = ("pr-comment.md", "report.md", "reply.md")
+        expected = ([f"Edit({root}/{name})" for name in names]
+                    + [f"Edit({root}/claude-*/{name})" for name in names]
+                    + [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"])
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             edits = [p for p in self.patterns(role) if not p.startswith("Bash(")]
             with self.subTest(role=role):
@@ -660,7 +661,8 @@ class AllowedToolsTests(PolicyTestCase):
             for pattern in sp.allowed_tool_patterns(policy):
                 if pattern.startswith("Edit("):
                     root = sp._absolute_rule_path(str(self.tmpdir)) + "/"
-                    name = pattern[len(f"Edit({root}"):-1].replace("*", "verify")
+                    name = pattern[len(f"Edit({root}"):-1]
+                    name = name.replace("claude-*", "claude-1000").replace("*", "verify")
                     with self.subTest(role=role, pattern=pattern):
                         self.assertTrue(pattern.startswith(f"Edit({root}"))
                         self.assertTrue(sp.check_file_edit(
@@ -671,9 +673,9 @@ class AllowedToolsTests(PolicyTestCase):
                 if words[-2:] in (["api", "graphql"],) or words[-1] in {"push", "comment",
                                                                        "review", "edit"}:
                     continue  # need arguments the prefix cannot carry
-                if words[-1] in {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",
-                                 "mv", "view", "diff", "checks", "create", "list"} \
-                        and words[0:2] != ["gh", "issue"]:
+                non_completable = {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",
+                                   "mv", "view", "diff", "checks", "create", "list"}
+                if words[-1] in non_completable and words[0:2] != ["gh", "issue"]:
                     continue
                 with self.subTest(role=role, pattern=pattern):
                     self.allowed(prefix, policy)
@@ -810,27 +812,31 @@ class HookTests(PolicyTestCase):
                         self.assertIn("No grant lifts this rule", output)
 
     def test_a_non_writing_stage_edits_only_inside_its_tmpdir(self) -> None:
-        # #272: the review skills write the comment they publish with
-        # `--body-file` to $TMPDIR, and a review could write nothing at all.
+        # #272/#273/#280: comment bodies may live in an executor subdirectory.
         root = Path(self.directory.name)
         clone = root / "clone"
         clone.mkdir()
-        allowed = [str(self.tmpdir / name) for name in
-                   ("pr-comment.md", "report.md", "reply.md", "unittest.log", "validate_pkg-2.log")]
+        helpers = ("pr-comment.md", "report.md", "reply.md", "unittest.log",
+                   "validate_pkg-2.log")
+        nested = self.tmpdir / "claude-1000"
+        allowed = [str(self.tmpdir / name) for name in helpers]
+        allowed += [str(nested / name) for name in helpers]
         denied = [str(self.tmpdir), str(clone / "notes.md"), str(self.sibling / "pr-comment.md"),
                   str(self.tmpdir / ".." / "code-cycle-tmp-other" / "pr-comment.md"),
                   str(self.tmpdir / ".." / "clone" / "notes.md"),
                   str(self.tmpdir / ".git" / "config"), "pr-comment.md",
-                  # REV-001: Claude's own state in the same directory.
+                  # REV-001: Claude's own state is not a stage helper.
                   str(self.tmpdir / "claude-settings-2f3c004aa6835f81.json"),
                   str(self.tmpdir / "tasks" / "b1.output"), str(self.tmpdir / "tasks" / "x.log"),
+                  str(self.tmpdir / "claude-1000" / "notes.md"),
                   str(self.tmpdir / "bash-edit-diff" / "pr-comment.md"),
                   str(self.tmpdir / "notes.md"), str(self.tmpdir / ".hidden.log"),
                   str(self.tmpdir / "x.log.json"), str(self.tmpdir / "pr-comment.md.bak"),
                   str(self.tmpdir / "PR-COMMENT.MD"), str(self.tmpdir / "a b.log")]
         try:
             (self.tmpdir / "out").symlink_to(clone, target_is_directory=True)
-            denied.append(str(self.tmpdir / "out" / "notes.md"))
+            denied.extend([str(self.tmpdir / "out" / "notes.md"),
+                           str(self.tmpdir / "out" / "claude-1000" / "pr-comment.md")])
             # A helper name that resolves to a file the stage does not own.
             (self.tmpdir / "tasks").mkdir()
             (self.tmpdir / "tasks" / "b1.output").write_text("FAILED\n", encoding="utf-8")
@@ -838,6 +844,9 @@ class HookTests(PolicyTestCase):
             (self.tmpdir / "settings.log").symlink_to(self.tmpdir / "claude-settings.json")
             (self.tmpdir / "tasks" / "pr-comment.md").write_text("", encoding="utf-8")
             (self.tmpdir / "reply.md").symlink_to(self.tmpdir / "tasks" / "pr-comment.md")
+            # Nested helpers are accepted only when the resolved parent stays inside.
+            (self.tmpdir / "nested-out").symlink_to(clone, target_is_directory=True)
+            denied.append(str(self.tmpdir / "nested-out" / "claude-1000" / "report.md"))
             denied += [str(self.tmpdir / "report.md"), str(self.tmpdir / "settings.log"),
                        str(self.tmpdir / "reply.md")]
             allowed = [a for a in allowed if a not in denied]
