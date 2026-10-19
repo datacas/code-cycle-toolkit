@@ -2448,9 +2448,7 @@ def run_cycle(
                                   allowed_test_command
                                   if role in {"implement", "resolve"} else None),
                               ci_policy=ci_policy, resolve_review_base=review_base,
-                              command_policy=command_policy,
-                              temporary_directory=(command_policy.tmpdir
-                                                   if command_policy else None)),
+                              command_policy=command_policy),
                 escalated=escalated,
                 effort_override=(resolve_effort or "high") if role == "resolve" else None,
                 target_override=resolve_target if role == "resolve" else None,

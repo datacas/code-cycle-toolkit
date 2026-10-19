@@ -507,6 +507,30 @@ class VerificationTests(PolicyTestCase):
         self.assertIn("python3 -m unittest", sp.prompt_note(
             replace(policy, verify_prefixes=self.VERIFY)))
 
+    def test_dispatch_tmpdir_is_the_only_environment_value_stages_can_read(self) -> None:
+        policy = self.policy("resolve", tmpdir="/tmp/code-cycle-tmp-test", rtk=True)
+        for command in ("printenv TMPDIR", "rtk printenv TMPDIR",
+                        "rtk proxy printenv TMPDIR"):
+            with self.subTest(command=command):
+                self.allowed(command, policy)
+        for command in ("printenv", "printenv HOME", "rtk printenv HOME",
+                        "printenv TMPDIR HOME"):
+            with self.subTest(command=command):
+                self.denied(command, policy)
+        self.denied("printenv TMPDIR", replace(policy, tmpdir=None))
+        self.assertIn("`rtk printenv TMPDIR`", sp.prompt_note(policy))
+
+    def test_dispatch_tmpdir_tool_rule_is_exact_and_requires_a_live_tmpdir(self) -> None:
+        policy = self.policy("resolve", tmpdir="/tmp/code-cycle-tmp-test", rtk=True)
+        patterns = sp.allowed_tool_patterns(policy)
+        self.assertIn("Bash(printenv TMPDIR:*)", patterns)
+        self.assertIn("Bash(rtk printenv TMPDIR:*)", patterns)
+        self.assertIn("Bash(rtk proxy printenv TMPDIR:*)", patterns)
+        self.assertNotIn("Bash(printenv:*)", patterns)
+        self.assertFalse(any("printenv" in pattern
+                             for pattern in sp.allowed_tool_patterns(
+                                 replace(policy, tmpdir=None))))
+
     def test_a_reviewer_that_verifies_requires_confinement(self) -> None:
         self.assertTrue(self.policy("review", verify_prefixes=self.VERIFY)
                         .requires_confined_verification)

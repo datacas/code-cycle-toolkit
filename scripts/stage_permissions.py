@@ -473,6 +473,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if words == expected or (not exact and words[:len(expected)] == expected):
             return
     program = words[0]
+    if program == "printenv":
+        if policy.tmpdir and words == ["printenv", "TMPDIR"] and not parsed.redirects:
+            return
+        raise PolicyError("only `printenv TMPDIR` is allowed to inspect the dispatch temp path")
     if program in READ_SHELL:
         if parsed.redirects:
             raise PolicyError(f"{program} may not redirect its output")
@@ -1108,6 +1112,11 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     if policy.docker:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
     patterns = []
+    if policy.tmpdir:
+        patterns.append("Bash(printenv TMPDIR:*)")
+        if policy.rtk:
+            patterns += ["Bash(rtk printenv TMPDIR:*)",
+                         "Bash(rtk proxy printenv TMPDIR:*)"]
     for prefix in prefixes:
         patterns.append(f"Bash({prefix}:*)")
         if policy.rtk:
@@ -1156,6 +1165,10 @@ def prompt_note(policy: StagePolicy) -> str:
         if policy.verification_commands else
         "No test or verify command is configured for this repository, so no "
         "verification command is available.")
+    tmpdir_note = (
+        " For native dispatches, the actual per-dispatch TMPDIR path is "
+        f"available with `{'rtk ' if policy.rtk else ''}printenv TMPDIR`."
+    )
     return (
         f"Command policy for this {policy.role} stage: a runtime hook validates "
         "every Bash command against this stage's closed table. Run one simple "
@@ -1163,7 +1176,7 @@ def prompt_note(policy: StagePolicy) -> str:
         "other than into $TMPDIR. " + verification + " When a command you need is "
         "denied, do not try a variant or another tool to get around it: stop "
         "BLOCKED and name the exact denied command, so a person can authorize it "
-        "and resume the cycle."
+        "and resume the cycle." + tmpdir_note
     )
 
 
