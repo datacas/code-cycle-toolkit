@@ -40,6 +40,28 @@ class ValidateWorkflowTests(unittest.TestCase):
             r"pull_request' \}\}$",
         )
 
+    def test_fork_pr_runner_routing_preserves_required_check(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        job = re.search(
+            r"(?ms)^  validate:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job, "workflow must declare the required Linux job")
+        body = job.group("body")
+        self.assertRegex(
+            body,
+            r"(?m)^    name: Skills, manifests, and Bash installer$",
+        )
+        self.assertRegex(
+            body,
+            r"(?m)^    runs-on: \$\{\{ github\.event_name == 'pull_request' "
+            r"&& github\.event\.pull_request\.head\.repo\.fork && "
+            r"'ubuntu-latest' \|\| fromJSON\('\[\"self-hosted\","
+            r"\"Linux\",\"X64\"\]'\) \}\}$",
+        )
+        self.assertNotRegex(body, r"(?m)^    if:")
+
     def test_windows_test_shards_feed_the_required_aggregating_job(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
