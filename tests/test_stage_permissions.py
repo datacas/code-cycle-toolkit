@@ -137,14 +137,13 @@ class GitTests(PolicyTestCase):
                             "git --no-pager log", "git branch --show-current"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, self.policy(role))
-        for role in ("review", "rereview", "implement", "resolve"):
+        for role in ("review", "rereview", "implement", "resolve", "issue_review"):
             for command in ("git merge-base HEAD origin/main", "git ls-files",
                             "git grep -n needle", "git blame README.md",
                             "git merge-base --is-ancestor abc HEAD"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, self.policy(role))
-        for command in ("git merge-base HEAD main", "git blame a", "git grep x"):
-            self.denied(command, self.policy("issue_review"))
+        self.denied("git fetch origin", self.policy("issue_review", fetch_origin=True))
 
     def test_review_fetch_needs_an_origin_remote(self) -> None:
         review = self.policy("review")
@@ -229,21 +228,22 @@ class GitTests(PolicyTestCase):
         self.assertFalse(decision.allowed)
 
     def test_options_that_run_programs_or_write_elsewhere_are_refused(self) -> None:
-        policy = self.policy("implement")
-        for command in ("git -c core.pager=sh status", "git -C /etc status",
-                        "git --exec-path=/x status", "git grep -Ovim x",
-                        "git grep --open-files-in-pager=vim x",
-                        "git fetch --upload-pack=/bin/sh origin",
-                        "git push --receive-pack=/bin/sh origin x", "git diff --output=/tmp/x",
-                        f"git diff --output='{self.sibling}/x'", "git diff --output",
-                        "git log --output ../x", "git fetch upstream", "git pull other main"):
-            with self.subTest(command=command):
-                self.denied(command, policy)
+        for role in ("implement", "issue_review"):
+            policy = self.policy(role)
+            for command in ("git -c core.pager=sh status", "git -C /etc status",
+                            "git --exec-path=/x status", "git grep -Ovim x",
+                            "git grep --open-files-in-pager=vim x",
+                            "git fetch --upload-pack=/bin/sh origin",
+                            "git push --receive-pack=/bin/sh origin x", "git diff --output=/tmp/x",
+                            f"git diff --output='{self.sibling}/x'", "git diff --output",
+                            "git log --output ../x", "git fetch upstream", "git pull other main"):
+                with self.subTest(role=role, command=command):
+                    self.denied(command, policy)
 
     def test_bundled_and_abbreviated_executing_options_are_refused(self) -> None:
         # Git expands unambiguous long-option prefixes and bundles short
         # options, so `-iO<cmd>` and `--open-files=<cmd>` run <cmd> (REV-005).
-        for role in ("review", "rereview", "implement", "resolve"):
+        for role in ("review", "rereview", "implement", "resolve", "issue_review"):
             policy = self.policy(role)
             for command in ("git grep -iO'touch x' foo", "git grep -nOvim foo",
                             "git grep -inO foo", "git grep --open-files='touch x' foo",

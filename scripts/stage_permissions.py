@@ -457,7 +457,7 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
         raise PolicyError("git global options other than --no-pager are not allowed")
     subcommand, rest = args[0], args[1:]
     allowed = set(GIT_COMMON_READ)
-    if policy.role in REVIEW_ROLES | WRITING_ROLES:
+    if policy.role in REVIEW_ROLES | WRITING_ROLES | {ISSUE_REVIEW_ROLE}:
         allowed |= GIT_REVIEW_READ
     if policy.role in WRITING_ROLES:
         allowed |= GIT_WRITE
