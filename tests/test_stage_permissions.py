@@ -602,6 +602,19 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "review", "rereview", "issue_review"):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
+    def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
+        # #270: the hook allowed `git grep` for issue_review while these
+        # patterns, the first barrier, still left it out.
+        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+            patterns = self.patterns(role)
+            for sub in sorted(sp.GIT_REVIEW_READ):
+                with self.subTest(role=role, sub=sub):
+                    self.assertIn(f"Bash(git {sub}:*)", patterns)
+        issue_review = self.patterns("issue_review", fetch_origin=True)
+        for write in ("Bash(git fetch:*)", "Bash(git fetch origin:*)", "Bash(git push:*)",
+                      "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git worktree list:*)"):
+            self.assertNotIn(write, issue_review)
+
     def test_docker_and_verification_appear_only_when_configured(self) -> None:
         self.assertFalse([p for p in self.patterns("implement") if "docker" in p])
         compose = [p for p in self.patterns("implement", docker=True) if "docker" in p]
@@ -732,6 +745,27 @@ class HookTests(PolicyTestCase):
 
     def decision(self, output: str) -> str:
         return json.loads(output)["hookSpecificOutput"]["permissionDecision"] if output else ""
+
+    def test_issue_review_runs_the_git_search_it_was_denied(self) -> None:
+        # #270: the exact command the #268 issue review was refused, passed by
+        # both barriers and then run against a real repository.
+        command = 'git grep -n -I "publication_changed" -- .'
+        policy = self.policy("issue_review")
+        self.assertIn("Bash(git grep:*)", sp.allowed_tool_patterns(policy))
+        clone = Path(self.directory.name) / "clone"
+        clone.mkdir()
+        (clone / "reroute.py").write_text("STOP = 'publication_changed'\n", encoding="utf-8")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for argv in (["init", "-q"], ["add", "reroute.py"], ["commit", "-qm", "seed"]):
+            subprocess.run(git + argv, cwd=clone, check=True, capture_output=True)
+        self.assertEqual("", self.run_hook(policy, {
+            "tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(clone)}))
+        found = subprocess.run(sp.parse_command(command, None).words, cwd=clone,
+                               capture_output=True, text=True, check=True)
+        self.assertIn("reroute.py:1:", found.stdout)
+        self.assertEqual("deny", self.decision(self.run_hook(policy, {
+            "tool_name": "Bash", "tool_input": {"command": "git grep -Ovim publication_changed"},
+            "cwd": str(clone)})))
 
     def test_a_non_writing_stage_edits_no_file_with_any_tool(self) -> None:
         # REV-006: under the user's `auto` mode a reviewer edited .git/config

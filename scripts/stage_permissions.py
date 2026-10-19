@@ -54,6 +54,9 @@ FIND_FORBIDDEN = frozenset({
 
 GIT_COMMON_READ = frozenset({"status", "diff", "log", "rev-parse", "show"})
 GIT_REVIEW_READ = frozenset({"merge-base", "ls-files", "grep", "blame"})
+#: Stages that search the repository with `GIT_REVIEW_READ`. The hook and the
+#: `--allowedTools` patterns both read this set, so the two barriers agree.
+GIT_SEARCH_ROLES = WRITING_ROLES | REVIEW_ROLES | {ISSUE_REVIEW_ROLE}
 GIT_WRITE = frozenset({"add", "commit", "push", "fetch", "checkout", "switch", "pull",
                        "rm", "mv"})
 #: Options that make Git run another program, on any subcommand. Git also
@@ -457,7 +460,7 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
         raise PolicyError("git global options other than --no-pager are not allowed")
     subcommand, rest = args[0], args[1:]
     allowed = set(GIT_COMMON_READ)
-    if policy.role in REVIEW_ROLES | WRITING_ROLES | {ISSUE_REVIEW_ROLE}:
+    if policy.role in GIT_SEARCH_ROLES:
         allowed |= GIT_REVIEW_READ
     if policy.role in WRITING_ROLES:
         allowed |= GIT_WRITE
@@ -1052,7 +1055,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     """
     prefixes = [f"git {sub}" for sub in sorted(GIT_COMMON_READ)]
     prefixes.append("git branch --show-current")
-    if policy.role in REVIEW_ROLES | WRITING_ROLES:
+    if policy.role in GIT_SEARCH_ROLES:
         prefixes += [f"git {sub}" for sub in sorted(GIT_REVIEW_READ)]
     if policy.role in WRITING_ROLES:
         prefixes += [f"git {sub}" for sub in sorted(GIT_WRITE)]
