@@ -67,6 +67,15 @@ All notable changes to this project are documented here. This project follows
   contracts, data, security, and host Docker access. Shared conventions grant no
   additional capabilities to read-only stages.
 
+### Fixed
+
+- **A reroute stops on a publication only when the cycle's own account made it
+  (#268).** Reconciliation compares the pull requests, comments and reviews
+  that the authenticated code-host account created or edited, by identity and
+  content. Another account's comment or pull request, a reaction, or a changed
+  timestamp no longer blocks the single fallback. An unreadable account is
+  unavailable evidence.
+
 ## [0.6.1] - 2026-10-16
 
 v0.6.0 was never published as a GitHub release: the release workflow failed
