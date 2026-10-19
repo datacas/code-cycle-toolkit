@@ -30,7 +30,7 @@ confined clone is never routed to Orca.
 | Stage | Reads | Writes and publication |
 |---|---|---|
 | every stage | `git status`, `diff`, `log`, `rev-parse`, `show`, `branch --show-current`; `gh issue view`, `pr view`, `pr checks`, `auth status`, `repo view`; `gh api user --jq .login`; `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `jq` | — |
-| `issue_review` | `gh issue list`, `gh pr list`, `gh search issues\|prs` | none |
+| `issue_review` | `gh issue list`, `gh pr list`, `gh search issues\|prs`; `git merge-base`, `ls-files`, `grep`, `blame` | none |
 | `review`, `rereview` | `gh pr diff`, `git merge-base`, `ls-files`, `grep`, `blame`; `git fetch origin` only when the workspace has an `origin` remote (Claude's review clones have none) | `gh pr comment` and `gh pr review --comment` on the cycle's change request |
 | `implement` | as review, plus `git worktree list`, `gh pr list`, `gh run view\|list` | `git add`, `commit`, `push`, `fetch`, `checkout`, `switch`, `pull`, `rm`, `mv`; `gh pr create`, `gh pr edit` and `gh pr comment` on the branch's change request; `gh issue comment` on the work item |
 | `resolve` | as implement | as implement without `gh pr create`/`edit`; and exactly three `gh api graphql` calls for review threads |
