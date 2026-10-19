@@ -390,16 +390,18 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
                     cwd: str | None = None) -> Decision:
     """Decide whether this stage may edit a file with a non-Bash tool. Never raises.
 
-    A non-writing stage edits nothing. No stage edits Git's configuration, a
-    `.git` directory or a `.git` file: `core.fsmonitor`, `diff.external` and
-    the like would make an allowed `git status` or `git diff` run a program.
+    A non-writing stage edits only inside its own `$TMPDIR`, where its skills
+    write the comment body they publish with `--body-file` (#272). No stage
+    edits Git's configuration, a `.git` directory or a `.git` file:
+    `core.fsmonitor`, `diff.external` and the like would make an allowed
+    `git status` or `git diff` run a program.
     """
     try:
-        if policy.role not in WRITING_ROLES:
-            raise PolicyError(f"a {policy.role} stage edits no file")
         path = (tool_input or {}).get(FILE_EDIT_TOOLS[tool_name])
         if not isinstance(path, str) or not path.strip():
             raise PolicyError("the edit names no file")
+        if policy.role not in WRITING_ROLES and not inside_tmpdir(path, policy.tmpdir):
+            raise PolicyError(f"a {policy.role} stage edits no file outside its $TMPDIR")
         if not os.path.isabs(path):
             if not cwd:
                 raise PolicyError("a relative path needs the working directory")
@@ -1075,7 +1077,24 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     for command in policy.verification_commands:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
+    if policy.tmpdir:
+        # The one place a non-writing stage may write (#272); the hook still
+        # resolves every target, so `..` or a symlink cannot lead out of it.
+        for tmpdir in (policy.tmpdir, str(Path(policy.tmpdir).resolve(strict=False))):
+            patterns.append(f"Edit({_absolute_rule_path(tmpdir)}/**)")
     return list(dict.fromkeys(patterns))
+
+
+def _absolute_rule_path(path: str) -> str:
+    """`path` as a Claude path rule names an absolute path: `//` from the root.
+
+    Claude matches Windows paths in POSIX form, `C:\\x` as `/c/x`.
+    """
+    target = Path(path)
+    if target.drive:
+        rest = "/".join(target.parts[1:])
+        return f"//{target.drive.rstrip(':').lower()}/{rest}".rstrip("/")
+    return "/" + target.as_posix().rstrip("/")
 
 
 def hook_settings(hook_command: str) -> dict:
