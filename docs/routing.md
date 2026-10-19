@@ -144,6 +144,21 @@ disables the sandbox, substitutes an unconfigured model, or repeats the same
 sandbox with a different model. Missing fallback, unknown or changed effects,
 calibration mode, or a second failure still stops with a recorded reason.
 
+A Codex stage cannot run the installed Codex CLI's own sandbox (#268). Codex's
+Linux sandbox overmounts its app-server socket directory,
+`/tmp/codex-daemon-<uid>`, with a read-only mode-000 tmpfs for the commands it
+runs, so a nested `codex sandbox` or `codex exec` fails with "app-server socket
+directory must be a user-owned directory with mode 0700". The runtime's
+profile and per-dispatch `TMPDIR` do not cause this, and no `TMPDIR`,
+`CODEX_HOME` or `--no-daemon` change avoids it; the stage itself still starts
+and runs. The guidance tells the stage to report it once as
+`sandbox_filesystem_access`. The runtime's own pre-dispatch Codex probes run
+where the runtime runs, outside the stage's sandbox, and are unaffected unless
+the runtime itself was started inside a Codex sandbox. Nothing widens the
+sandbox for it: the Unix socket grant stays person-only (#239), and a check
+that needs the installed Codex sandbox runs on the host or on an executor that
+is not itself inside Codex.
+
 ## Workspace policy
 
 Each role has a fixed write permission. Only an executor that can **enforce** it is eligible:

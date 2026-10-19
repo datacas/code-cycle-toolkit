@@ -75,6 +75,11 @@ All notable changes to this project are documented here. This project follows
   content. Another account's comment or pull request, a reaction, or a changed
   timestamp no longer blocks the single fallback. An unreadable account is
   unavailable evidence.
+- The environment recovery guidance explains that a Codex stage cannot run a
+  nested `codex sandbox` or `codex exec`. Codex hides its app-server socket
+  directory `/tmp/codex-daemon-<uid>` from the commands it runs, so the stage
+  reports this once as `sandbox_filesystem_access` instead of retrying
+  variants. No grant is enabled for it.
 
 ## [0.6.1] - 2026-10-16
 

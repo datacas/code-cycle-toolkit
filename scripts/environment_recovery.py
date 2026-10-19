@@ -39,6 +39,11 @@ restriction is the host Docker daemon, add "resource":"docker_host": the
 runtime then asks the user whether to grant it, and never grants it on your
 word. Report only observed restrictions; connection refused alone does not
 prove isolation.
+Codex's Linux sandbox hides its own app-server socket directory
+(/tmp/codex-daemon-<uid>, a read-only mode-000 mount) from the commands it
+runs, so `codex sandbox` or `codex exec` cannot start inside a Codex stage. No
+TMPDIR, CODEX_HOME or --no-daemon change recovers it: report it once as
+sandbox_filesystem_access with that command, without retrying variants.
 Do not use this report for a genuinely unavailable service, missing credentials,
 login/trust prompts, an approval denial, or an action requiring a human. Those
 remain ordinary blockers. Forward a delegated verifier's environment_blocker
