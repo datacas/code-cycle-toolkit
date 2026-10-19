@@ -137,14 +137,13 @@ class GitTests(PolicyTestCase):
                             "git --no-pager log", "git branch --show-current"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, self.policy(role))
-        for role in ("review", "rereview", "implement", "resolve"):
+        for role in ("review", "rereview", "implement", "resolve", "issue_review"):
             for command in ("git merge-base HEAD origin/main", "git ls-files",
                             "git grep -n needle", "git blame README.md",
                             "git merge-base --is-ancestor abc HEAD"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, self.policy(role))
-        for command in ("git merge-base HEAD main", "git blame a", "git grep x"):
-            self.denied(command, self.policy("issue_review"))
+        self.denied("git fetch origin", self.policy("issue_review", fetch_origin=True))
 
     def test_review_fetch_needs_an_origin_remote(self) -> None:
         review = self.policy("review")
@@ -229,21 +228,22 @@ class GitTests(PolicyTestCase):
         self.assertFalse(decision.allowed)
 
     def test_options_that_run_programs_or_write_elsewhere_are_refused(self) -> None:
-        policy = self.policy("implement")
-        for command in ("git -c core.pager=sh status", "git -C /etc status",
-                        "git --exec-path=/x status", "git grep -Ovim x",
-                        "git grep --open-files-in-pager=vim x",
-                        "git fetch --upload-pack=/bin/sh origin",
-                        "git push --receive-pack=/bin/sh origin x", "git diff --output=/tmp/x",
-                        f"git diff --output='{self.sibling}/x'", "git diff --output",
-                        "git log --output ../x", "git fetch upstream", "git pull other main"):
-            with self.subTest(command=command):
-                self.denied(command, policy)
+        for role in ("implement", "issue_review"):
+            policy = self.policy(role)
+            for command in ("git -c core.pager=sh status", "git -C /etc status",
+                            "git --exec-path=/x status", "git grep -Ovim x",
+                            "git grep --open-files-in-pager=vim x",
+                            "git fetch --upload-pack=/bin/sh origin",
+                            "git push --receive-pack=/bin/sh origin x", "git diff --output=/tmp/x",
+                            f"git diff --output='{self.sibling}/x'", "git diff --output",
+                            "git log --output ../x", "git fetch upstream", "git pull other main"):
+                with self.subTest(role=role, command=command):
+                    self.denied(command, policy)
 
     def test_bundled_and_abbreviated_executing_options_are_refused(self) -> None:
         # Git expands unambiguous long-option prefixes and bundles short
         # options, so `-iO<cmd>` and `--open-files=<cmd>` run <cmd> (REV-005).
-        for role in ("review", "rereview", "implement", "resolve"):
+        for role in ("review", "rereview", "implement", "resolve", "issue_review"):
             policy = self.policy(role)
             for command in ("git grep -iO'touch x' foo", "git grep -nOvim foo",
                             "git grep -inO foo", "git grep --open-files='touch x' foo",
@@ -602,6 +602,19 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "review", "rereview", "issue_review"):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
+    def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
+        # #270: the hook allowed `git grep` for issue_review while these
+        # patterns, the first barrier, still left it out.
+        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+            patterns = self.patterns(role)
+            for sub in sorted(sp.GIT_REVIEW_READ):
+                with self.subTest(role=role, sub=sub):
+                    self.assertIn(f"Bash(git {sub}:*)", patterns)
+        issue_review = self.patterns("issue_review", fetch_origin=True)
+        for write in ("Bash(git fetch:*)", "Bash(git fetch origin:*)", "Bash(git push:*)",
+                      "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git worktree list:*)"):
+            self.assertNotIn(write, issue_review)
+
     def test_the_only_edit_rule_is_the_dispatch_tmpdir(self) -> None:
         # #272: one absolute `//` rule per spelling of $TMPDIR, nothing broader.
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
@@ -755,6 +768,27 @@ class HookTests(PolicyTestCase):
 
     def decision(self, output: str) -> str:
         return json.loads(output)["hookSpecificOutput"]["permissionDecision"] if output else ""
+
+    def test_issue_review_runs_the_git_search_it_was_denied(self) -> None:
+        # #270: the exact command the #268 issue review was refused, passed by
+        # both barriers and then run against a real repository.
+        command = 'git grep -n -I "publication_changed" -- .'
+        policy = self.policy("issue_review")
+        self.assertIn("Bash(git grep:*)", sp.allowed_tool_patterns(policy))
+        clone = Path(self.directory.name) / "clone"
+        clone.mkdir()
+        (clone / "reroute.py").write_text("STOP = 'publication_changed'\n", encoding="utf-8")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for argv in (["init", "-q"], ["add", "reroute.py"], ["commit", "-qm", "seed"]):
+            subprocess.run(git + argv, cwd=clone, check=True, capture_output=True)
+        self.assertEqual("", self.run_hook(policy, {
+            "tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(clone)}))
+        found = subprocess.run(sp.parse_command(command, None).words, cwd=clone,
+                               capture_output=True, text=True, check=True)
+        self.assertIn("reroute.py:1:", found.stdout)
+        self.assertEqual("deny", self.decision(self.run_hook(policy, {
+            "tool_name": "Bash", "tool_input": {"command": "git grep -Ovim publication_changed"},
+            "cwd": str(clone)})))
 
     def test_a_non_writing_stage_edits_no_file_with_any_tool(self) -> None:
         # REV-006: under the user's `auto` mode a reviewer edited .git/config
