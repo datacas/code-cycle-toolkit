@@ -111,7 +111,7 @@ Resolve keeps the `cheap_coder` / `deep_coder` profile choice. With `code_cycle.
 - **Probe once per run.** An executor that is only *installed* isn't dispatchable. Codex and Claude can only prove `authenticated`: remaining quota and session validity are invisible until something is spent. Production uses the `attempt` readiness policy to dispatch from `authenticated`, and records that it did (`dispatched_from`).
 - **Fallback (production only).** If the primary is unavailable or not eligible for the role's workspace policy, the profile's `fallback` is used, and the decision says so.
 - **Sandbox recovery.** An explicit, complete agent-reported restriction can use the same reroute machinery. See [Recovering sandbox restrictions](#recovering-sandbox-restrictions) for its additional conditions.
-- **One reroute per stage.** A `capacity`, `transport`, `timeout`, or `quota` failure can use that profile's distinct, available fallback once, sharing the quota retry budget. The previous process group must have exited; asynchronous launches and missing exit proof stop. A `not_started` attempt can reroute directly. A `started` or `unknown` attempt that could write or publish first reconciles the workspace, local HEAD, remote refs, PR state, comments and reviews, and issue comments. Dirty or changed state, a publication, or unavailable evidence stops with a closed reason token. A review's read-only workspace does not exempt its publication boundary. Other error classes and human friction never reroute. Both attempts and the parent's `error_code` and `start_state` are recorded. The fallback applies only to this stage; later stages keep the original executor availability. Recovery from published evidence remains a separate operation.
+- **One reroute per stage.** A `capacity`, `transport`, `timeout`, or `quota` failure can use that profile's distinct, available fallback once, sharing the quota retry budget. The previous process group must have exited; asynchronous launches and missing exit proof stop. A `not_started` attempt can reroute directly. A `started` or `unknown` attempt that could write or publish first reconciles the workspace, local HEAD, remote refs, PR state, comments and reviews, and issue comments. Dirty or changed state, a publication, or unavailable evidence stops with a closed reason token. A publication is what the cycle's own code-host account (`gh api user`) created or edited: pull requests (state, head, title, body), comments and reviews. Other accounts' comments and newly opened pull requests, reactions and timestamps do not stop the reroute; an unreadable account is unavailable evidence. A pull request carries no editor identity, so any edit to an existing in-scope pull request stops conservatively, whoever opened it. A review's read-only workspace does not exempt its publication boundary. Other error classes and human friction never reroute. Both attempts and the parent's `error_code` and `start_state` are recorded. The fallback applies only to this stage; later stages keep the original executor availability. Recovery from published evidence remains a separate operation.
 
 Native POSIX dispatches run in their own process group and stop remaining children before returning exit proof, including on timeout. The group first receives `SIGTERM`, so a sandbox can unmount and remove what it set up, then `SIGKILL` after a bounded grace period (`PROCESS_GROUP_GRACE_SECONDS`, 10 seconds); output pipes a stray descendant keeps open are waited on for at most `OUTPUT_DRAIN_SECONDS`, so cleanup never blocks the cycle indefinitely. Windows currently lacks group exit proof and therefore stops rather than automatically rerouting. Reconciliation reads GitHub through `gh`; unsupported publication boundaries fail closed. Snapshots are transient and never enter telemetry.
 
@@ -143,6 +143,21 @@ It never rewrites project configuration, grants additional permissions,
 disables the sandbox, substitutes an unconfigured model, or repeats the same
 sandbox with a different model. Missing fallback, unknown or changed effects,
 calibration mode, or a second failure still stops with a recorded reason.
+
+A Codex stage cannot run the installed Codex CLI's own sandbox (#268). Codex's
+Linux sandbox overmounts its app-server socket directory,
+`/tmp/codex-daemon-<uid>`, with a read-only mode-000 tmpfs for the commands it
+runs, so a nested `codex sandbox` or `codex exec` fails with "app-server socket
+directory must be a user-owned directory with mode 0700". The runtime's
+profile and per-dispatch `TMPDIR` do not cause this, and no `TMPDIR`,
+`CODEX_HOME` or `--no-daemon` change avoids it; the stage itself still starts
+and runs. The guidance tells the stage to report it once as
+`sandbox_filesystem_access`. The runtime's own pre-dispatch Codex probes run
+where the runtime runs, outside the stage's sandbox, and are unaffected unless
+the runtime itself was started inside a Codex sandbox. Nothing widens the
+sandbox for it: the Unix socket grant stays person-only (#239), and a check
+that needs the installed Codex sandbox runs on the host or on an executor that
+is not itself inside Codex.
 
 ## Workspace policy
 

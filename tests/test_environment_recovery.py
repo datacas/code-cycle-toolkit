@@ -91,6 +91,14 @@ class SandboxReportTests(unittest.TestCase):
         self.assertIsNone(recovery.sandbox_blocker(block(
             "BLOCKED", environment_blocker=BLOCKER, questions=[{"prompt": "Allow?"}])))
 
+    def test_guidance_names_the_nested_codex_limit_without_a_grant(self):
+        """#268: a Codex stage cannot start Codex; the guidance must not widen anything."""
+        guidance = recovery.ENVIRONMENT_RECOVERY_GUIDANCE
+        self.assertIn("/tmp/codex-daemon-<uid>", guidance)
+        self.assertIn("cannot start inside a Codex stage", guidance)
+        self.assertIn("without retrying variants", guidance)
+        self.assertNotIn("unix_sockets", guidance)
+
 
 class SandboxRerouteTests(CycleTestCase):
     def execute(self, primary=None, fallback=None, **kwargs):
