@@ -4,8 +4,9 @@ Snapshots are transient. Only the closed decision and reason reach telemetry.
 An unreadable boundary is unknown, never evidence that nothing happened.
 
 A publication is what the cycle's own code-host account created or edited
-(#268): its pull requests, comments and reviews. Other accounts' activity,
-reactions and timestamps are not the stage's effects and do not stop a reroute.
+(#268): pull requests, comments and reviews. PR edits have no editor identity,
+so edits to any existing in-scope PR stop conservatively. New foreign PRs,
+other accounts' comments, reactions and timestamps do not stop a reroute.
 """
 from __future__ import annotations
 
@@ -27,11 +28,11 @@ def _authored_by(item: dict, login: str) -> bool:
     return str(author.get("login") or "").casefold() == login.casefold()
 
 
-def _own_pulls(pulls: list, login: str) -> list:
-    return [{"number": pull["number"], "headRefOid": pull.get("headRefOid"),
+def _pulls(pulls: list) -> dict:
+    return {pull["number"]: {"number": pull["number"], "headRefOid": pull.get("headRefOid"),
              "state": pull.get("state"),
              "text": _digest(pull.get("title"), pull.get("body"))}
-            for pull in pulls if _authored_by(pull, login)]
+            for pull in pulls}
 
 
 def _own_comments(endpoint: str, pages: list, login: str) -> list:
@@ -98,7 +99,10 @@ def effect_snapshot(cwd: str | None, repo: str, *, publishes: bool,
         endpoint = f"repos/{issue_repo or repo}/issues/{issue_id}/comments"
         comments.extend(_own_comments(endpoint, gh(
             "api", "--paginate", "--slurp", endpoint), login))
-    snapshot.update(pulls=_own_pulls(pulls, login), comments=comments)
+    observed_pulls = _pulls(pulls)
+    snapshot.update(pulls=[observed_pulls[pull["number"]] for pull in pulls
+                           if _authored_by(pull, login)],
+                    observed_pulls=observed_pulls, comments=comments)
     return snapshot
 
 
@@ -112,6 +116,11 @@ def reconcile(before: dict | None, after: dict | None) -> tuple[str, str]:
     if before["remote"] != after["remote"]:
         return "stop", "remote_changed"
     if before.get("pulls") != after.get("pulls"):
+        return "stop", "publication_changed"
+    # PR authorship cannot attribute later edits. Keep every pre-existing PR
+    # protected, while allowing newly appearing PRs from another account.
+    if any(after.get("observed_pulls", {}).get(number) != pull
+           for number, pull in before.get("observed_pulls", {}).items()):
         return "stop", "publication_changed"
     if before.get("comments") != after.get("comments"):
         return "stop", "publication_changed"

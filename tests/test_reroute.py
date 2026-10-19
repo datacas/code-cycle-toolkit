@@ -46,7 +46,7 @@ class ReconciliationBoundaryTests(unittest.TestCase):
         after = reroute.effect_snapshot(self.root, "owner/repo", publishes=False)
         self.assertEqual(("stop", "remote_changed"), reroute.reconcile(before, after))
 
-    def publication_snapshots(self, change, *, seed=None):
+    def publication_snapshots(self, change, *, seed=None, change_request_id=None):
         """Snapshot a fake GitHub before and after `change` mutates its state.
 
         The cycle publishes as `cycle-bot`; PR #7 on the branch is its own.
@@ -69,14 +69,18 @@ class ReconciliationBoundaryTests(unittest.TestCase):
                 result = {"login": "cycle-bot"}
             elif argv[1:3] == ["pr", "list"]:
                 result = state["pulls"]
+            elif argv[1:3] == ["pr", "view"]:
+                result = state["pulls"][0]
             else:
                 result = [state["comments"].get(argv[-1], [])]
             return subprocess.CompletedProcess(argv, 0, json.dumps(result), "")
 
         with patch("subprocess.run", side_effect=run), patch("reroute._remote_ref_fingerprint", return_value="remote"):
-            before = reroute.effect_snapshot(self.root, "owner/repo", publishes=True, issue_id="173")
+            before = reroute.effect_snapshot(self.root, "owner/repo", publishes=True,
+                                             issue_id="173", change_request_id=change_request_id)
             change(state)
-            after = reroute.effect_snapshot(self.root, "owner/repo", publishes=True, issue_id="173")
+            after = reroute.effect_snapshot(self.root, "owner/repo", publishes=True,
+                                            issue_id="173", change_request_id=change_request_id)
         return before, after, calls
 
     @staticmethod
@@ -126,6 +130,36 @@ class ReconciliationBoundaryTests(unittest.TestCase):
                 before, after, _ = self.publication_snapshots(change)
                 expected = "stop" if reason != "no_effects" else "reroute"
                 self.assertEqual((expected, reason), reroute.reconcile(before, after))
+
+    def test_existing_foreign_pull_edits_stop_a_reroute(self):
+        """REV-001: PR authorship does not identify who later edited it."""
+        changes = {
+            "unchanged": ({}, "no_effects"),
+            "closed": ({"state": "CLOSED"}, "publication_changed"),
+            "reopened": ({"state": "OPEN"}, "publication_changed"),
+            "merged": ({"state": "MERGED"}, "publication_changed"),
+            "head pushed": ({"headRefOid": "new-head"}, "publication_changed"),
+            "retitled": ({"title": "Edited by the cycle"}, "publication_changed"),
+            "body edited": ({"body": "Edited by the cycle"}, "publication_changed"),
+            "metadata only": ({"updatedAt": "later"}, "no_effects"),
+        }
+        for change_request_id in (None, "7"):
+            for name, (fields, reason) in changes.items():
+                with self.subTest(scope=change_request_id, change=name), tempfile.TemporaryDirectory() as root:
+                    self.root = root
+                    self.git("init", "--initial-branch=task")
+                    self.git("commit", "--allow-empty", "-m", "baseline")
+
+                    def seed(state):
+                        state["pulls"][0]["author"] = {"login": "someone-else"}
+                        if name == "reopened":
+                            state["pulls"][0]["state"] = "CLOSED"
+
+                    before, after, _ = self.publication_snapshots(
+                        lambda state: state["pulls"][0].update(fields),
+                        seed=seed, change_request_id=change_request_id)
+                    expected = "stop" if reason == "publication_changed" else "reroute"
+                    self.assertEqual((expected, reason), reroute.reconcile(before, after))
 
     def test_reactions_and_metadata_on_own_comments_are_not_publications(self):
         issue = "repos/owner/repo/issues/173/comments"
