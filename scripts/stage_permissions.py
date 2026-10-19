@@ -335,6 +335,32 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     return parsed
 
 
+#: The files a non-writing stage writes in its `$TMPDIR` (#272): the comment,
+#: report and thread-reply bodies its skills publish, and check logs named
+#: after the check. Claude keeps its own session state in the same directory
+#: (materialised settings, `tasks/` output, `bash-edit-diff/`), so the grant
+#: names these top-level files rather than the whole directory.
+TMPDIR_HELPER_FILES = ("pr-comment.md", "report.md", "reply.md")
+TMPDIR_LOG_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.log")
+
+
+def is_tmpdir_helper(path: str, tmpdir: str | None) -> bool:
+    """Whether `path` names one of the stage's own helper files in `$TMPDIR`.
+
+    Both the path as written and the file it resolves to must be a helper
+    name directly in `$TMPDIR`, so a symlink cannot redirect the write to a
+    file of the same directory that the stage does not own.
+    """
+    if not inside_tmpdir(path, tmpdir):
+        return False
+    root = Path(tmpdir).resolve(strict=True)
+    literal = Path(os.path.normpath(path))
+    resolved = Path(path).resolve(strict=False)
+    return all((name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)) and parent == root
+               for name, parent in ((literal.name, literal.parent.resolve()),
+                                    (resolved.name, resolved.parent)))
+
+
 def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
     """Whether `path` resolves strictly inside the dispatch's temporary directory.
 
@@ -393,16 +419,19 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
                     cwd: str | None = None) -> Decision:
     """Decide whether this stage may edit a file with a non-Bash tool. Never raises.
 
-    A non-writing stage edits nothing. No stage edits Git's configuration, a
-    `.git` directory or a `.git` file: `core.fsmonitor`, `diff.external` and
-    the like would make an allowed `git status` or `git diff` run a program.
+    A non-writing stage edits only inside its own `$TMPDIR`, where its skills
+    write the comment body they publish with `--body-file` (#272). No stage
+    edits Git's configuration, a `.git` directory or a `.git` file:
+    `core.fsmonitor`, `diff.external` and the like would make an allowed
+    `git status` or `git diff` run a program.
     """
     try:
-        if policy.role not in WRITING_ROLES:
-            raise PolicyError(f"a {policy.role} stage edits no file")
         path = (tool_input or {}).get(FILE_EDIT_TOOLS[tool_name])
         if not isinstance(path, str) or not path.strip():
             raise PolicyError("the edit names no file")
+        if policy.role not in WRITING_ROLES and not is_tmpdir_helper(path, policy.tmpdir):
+            raise PolicyError(f"a {policy.role} stage edits only its comment, report, reply "
+                              "and check-log files in $TMPDIR")
         if not os.path.isabs(path):
             if not cwd:
                 raise PolicyError("a relative path needs the working directory")
@@ -1078,7 +1107,26 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     for command in policy.verification_commands:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
+    if policy.tmpdir:
+        # The only files a non-writing stage may write (#272); the hook still
+        # resolves every target, so `..` or a symlink cannot redirect one.
+        for tmpdir in (policy.tmpdir, str(Path(policy.tmpdir).resolve(strict=False))):
+            root = _absolute_rule_path(tmpdir)
+            patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
+            patterns.append(f"Edit({root}/*.log)")
     return list(dict.fromkeys(patterns))
+
+
+def _absolute_rule_path(path: str) -> str:
+    """`path` as a Claude path rule names an absolute path: `//` from the root.
+
+    Claude matches Windows paths in POSIX form, `C:\\x` as `/c/x`.
+    """
+    target = Path(path)
+    if target.drive:
+        rest = "/".join(target.parts[1:])
+        return f"//{target.drive.rstrip(':').lower()}/{rest}".rstrip("/")
+    return "/" + target.as_posix().rstrip("/")
 
 
 def hook_settings(hook_command: str) -> dict:

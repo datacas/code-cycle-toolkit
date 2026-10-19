@@ -615,6 +615,26 @@ class AllowedToolsTests(PolicyTestCase):
                       "Bash(git commit:*)", "Bash(git checkout:*)", "Bash(git worktree list:*)"):
             self.assertNotIn(write, issue_review)
 
+    def test_the_only_edit_rules_name_the_helper_files_in_tmpdir(self) -> None:
+        # #272, REV-001: Claude keeps its own session files in $TMPDIR, so the
+        # rules name the helper files rather than the whole directory.
+        root = sp._absolute_rule_path(str(self.tmpdir))
+        expected = [f"Edit({root}/pr-comment.md)", f"Edit({root}/report.md)",
+                    f"Edit({root}/reply.md)", f"Edit({root}/*.log)"]
+        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+            edits = [p for p in self.patterns(role) if not p.startswith("Bash(")]
+            with self.subTest(role=role):
+                self.assertEqual(expected, edits)
+                self.assertFalse([p for p in edits if "**" in p])
+                self.assertFalse([p for p in self.patterns(role, tmpdir=None)
+                                  if not p.startswith("Bash(")])
+
+    def test_an_absolute_rule_path_has_the_root_anchor_claude_expects(self) -> None:
+        self.assertEqual("//tmp/code-cycle-tmp-x", sp._absolute_rule_path("/tmp/code-cycle-tmp-x/"))
+        if os.name == "nt":
+            self.assertEqual("//c/Temp/code-cycle-tmp-x",
+                             sp._absolute_rule_path("C:\\Temp\\code-cycle-tmp-x"))
+
     def test_docker_and_verification_appear_only_when_configured(self) -> None:
         self.assertFalse([p for p in self.patterns("implement") if "docker" in p])
         compose = [p for p in self.patterns("implement", docker=True) if "docker" in p]
@@ -638,6 +658,14 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             policy = self.policy(role, rtk=True, docker=True)
             for pattern in sp.allowed_tool_patterns(policy):
+                if pattern.startswith("Edit("):
+                    root = sp._absolute_rule_path(str(self.tmpdir)) + "/"
+                    name = pattern[len(f"Edit({root}"):-1].replace("*", "verify")
+                    with self.subTest(role=role, pattern=pattern):
+                        self.assertTrue(pattern.startswith(f"Edit({root}"))
+                        self.assertTrue(sp.check_file_edit(
+                            "Write", {"file_path": str(self.tmpdir / name)}, policy).allowed)
+                    continue
                 prefix = pattern[len("Bash("):-len(":*)")]
                 words = prefix.split()
                 if words[-2:] in (["api", "graphql"],) or words[-1] in {"push", "comment",
@@ -780,6 +808,68 @@ class HookTests(PolicyTestCase):
                         self.assertEqual("deny", self.decision(output))
                         self.assertIn(sp.HOOK_DENIAL_MARKER, output)
                         self.assertIn("No grant lifts this rule", output)
+
+    def test_a_non_writing_stage_edits_only_inside_its_tmpdir(self) -> None:
+        # #272: the review skills write the comment they publish with
+        # `--body-file` to $TMPDIR, and a review could write nothing at all.
+        root = Path(self.directory.name)
+        clone = root / "clone"
+        clone.mkdir()
+        allowed = [str(self.tmpdir / name) for name in
+                   ("pr-comment.md", "report.md", "reply.md", "unittest.log", "validate_pkg-2.log")]
+        denied = [str(self.tmpdir), str(clone / "notes.md"), str(self.sibling / "pr-comment.md"),
+                  str(self.tmpdir / ".." / "code-cycle-tmp-other" / "pr-comment.md"),
+                  str(self.tmpdir / ".." / "clone" / "notes.md"),
+                  str(self.tmpdir / ".git" / "config"), "pr-comment.md",
+                  # REV-001: Claude's own state in the same directory.
+                  str(self.tmpdir / "claude-settings-2f3c004aa6835f81.json"),
+                  str(self.tmpdir / "tasks" / "b1.output"), str(self.tmpdir / "tasks" / "x.log"),
+                  str(self.tmpdir / "bash-edit-diff" / "pr-comment.md"),
+                  str(self.tmpdir / "notes.md"), str(self.tmpdir / ".hidden.log"),
+                  str(self.tmpdir / "x.log.json"), str(self.tmpdir / "pr-comment.md.bak"),
+                  str(self.tmpdir / "PR-COMMENT.MD"), str(self.tmpdir / "a b.log")]
+        try:
+            (self.tmpdir / "out").symlink_to(clone, target_is_directory=True)
+            denied.append(str(self.tmpdir / "out" / "notes.md"))
+            # A helper name that resolves to a file the stage does not own.
+            (self.tmpdir / "tasks").mkdir()
+            (self.tmpdir / "tasks" / "b1.output").write_text("FAILED\n", encoding="utf-8")
+            (self.tmpdir / "report.md").symlink_to(self.tmpdir / "tasks" / "b1.output")
+            (self.tmpdir / "settings.log").symlink_to(self.tmpdir / "claude-settings.json")
+            (self.tmpdir / "tasks" / "pr-comment.md").write_text("", encoding="utf-8")
+            (self.tmpdir / "reply.md").symlink_to(self.tmpdir / "tasks" / "pr-comment.md")
+            denied += [str(self.tmpdir / "report.md"), str(self.tmpdir / "settings.log"),
+                       str(self.tmpdir / "reply.md")]
+            allowed = [a for a in allowed if a not in denied]
+        except OSError:  # Windows without the symlink privilege
+            pass
+        for role in ("review", "rereview", "issue_review"):
+            for tool, key in sp.FILE_EDIT_TOOLS.items():
+                for target in allowed + denied:
+                    with self.subTest(role=role, tool=tool, target=target):
+                        output = self.run_hook(self.policy(role), {
+                            "tool_name": tool, "tool_input": {key: target},
+                            "cwd": str(self.tmpdir)})
+                        self.assertEqual("" if target in allowed else "deny",
+                                         self.decision(output))
+            with self.subTest(role=role, tmpdir=None):
+                self.assertEqual("deny", self.decision(self.run_hook(
+                    self.policy(role, tmpdir=None),
+                    {"tool_name": "Write", "tool_input": {"file_path": allowed[0]}})))
+
+    def test_a_review_publishes_the_comment_it_wrote_to_tmpdir(self) -> None:
+        # #272 end to end: the Edit rule, the hook's edit rule and the
+        # `--body-file` rule all agree on $TMPDIR/pr-comment.md.
+        policy = self.policy("review")
+        body = self.tmpdir / "pr-comment.md"
+        self.assertIn(f"Edit({sp._absolute_rule_path(str(self.tmpdir))}/pr-comment.md)",
+                      sp.allowed_tool_patterns(policy))
+        self.assertEqual("", self.run_hook(policy, {
+            "tool_name": "Write", "tool_input": {"file_path": str(body), "content": "x"}}))
+        body.write_text("## Code Cycle initial review\n", encoding="utf-8")
+        self.assertEqual("", self.run_hook(policy, {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr comment 7 --body-file $TMPDIR/pr-comment.md"}}))
 
     def test_no_stage_edits_git_configuration(self) -> None:
         root = Path(self.directory.name)
