@@ -2568,8 +2568,8 @@ class ClaudeAdapter(NativeAdapter):
         if command_policy is not None and command_policy.active:
             # A GitHub cycle (#142): the stage's closed table is the first
             # barrier, and the hook `policy_files` adds validates every
-            # argument behind these prefixes. A reviewer writes only to its
-            # $TMPDIR, through the one `Edit` rule the table grants: an
+            # argument behind these prefixes. A reviewer writes only its helper
+            # files in $TMPDIR, through the `Edit` rules the table grants: an
             # explicit `default` mode keeps the user's `defaultMode` (`auto`,
             # `acceptEdits`) from approving an edit to `.git/config` that an
             # allowed `git status` would then run, and the hook refuses one too.

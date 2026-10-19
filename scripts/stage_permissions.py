@@ -335,6 +335,32 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     return parsed
 
 
+#: The files a non-writing stage writes in its `$TMPDIR` (#272): the comment,
+#: report and thread-reply bodies its skills publish, and check logs named
+#: after the check. Claude keeps its own session state in the same directory
+#: (materialised settings, `tasks/` output, `bash-edit-diff/`), so the grant
+#: names these top-level files rather than the whole directory.
+TMPDIR_HELPER_FILES = ("pr-comment.md", "report.md", "reply.md")
+TMPDIR_LOG_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.log")
+
+
+def is_tmpdir_helper(path: str, tmpdir: str | None) -> bool:
+    """Whether `path` names one of the stage's own helper files in `$TMPDIR`.
+
+    Both the path as written and the file it resolves to must be a helper
+    name directly in `$TMPDIR`, so a symlink cannot redirect the write to a
+    file of the same directory that the stage does not own.
+    """
+    if not inside_tmpdir(path, tmpdir):
+        return False
+    root = Path(tmpdir).resolve(strict=True)
+    literal = Path(os.path.normpath(path))
+    resolved = Path(path).resolve(strict=False)
+    return all((name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)) and parent == root
+               for name, parent in ((literal.name, literal.parent.resolve()),
+                                    (resolved.name, resolved.parent)))
+
+
 def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
     """Whether `path` resolves strictly inside the dispatch's temporary directory.
 
@@ -403,8 +429,9 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
         path = (tool_input or {}).get(FILE_EDIT_TOOLS[tool_name])
         if not isinstance(path, str) or not path.strip():
             raise PolicyError("the edit names no file")
-        if policy.role not in WRITING_ROLES and not inside_tmpdir(path, policy.tmpdir):
-            raise PolicyError(f"a {policy.role} stage edits no file outside its $TMPDIR")
+        if policy.role not in WRITING_ROLES and not is_tmpdir_helper(path, policy.tmpdir):
+            raise PolicyError(f"a {policy.role} stage edits only its comment, report, reply "
+                              "and check-log files in $TMPDIR")
         if not os.path.isabs(path):
             if not cwd:
                 raise PolicyError("a relative path needs the working directory")
@@ -1081,10 +1108,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
     if policy.tmpdir:
-        # The one place a non-writing stage may write (#272); the hook still
-        # resolves every target, so `..` or a symlink cannot lead out of it.
+        # The only files a non-writing stage may write (#272); the hook still
+        # resolves every target, so `..` or a symlink cannot redirect one.
         for tmpdir in (policy.tmpdir, str(Path(policy.tmpdir).resolve(strict=False))):
-            patterns.append(f"Edit({_absolute_rule_path(tmpdir)}/**)")
+            root = _absolute_rule_path(tmpdir)
+            patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
+            patterns.append(f"Edit({root}/*.log)")
     return list(dict.fromkeys(patterns))
 
 

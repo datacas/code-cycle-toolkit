@@ -99,9 +99,12 @@ request. The exact forms are in `cc-resolve-comments`.
 - The user's global configuration otherwise still loads, so hooks such as the
   RTK rewrite keep working.
 - The hook also sees the file-editing tools (`Edit`, `Write`, `MultiEdit`,
-  `NotebookEdit`). A non-writing stage edits only inside its own `$TMPDIR`,
-  where it writes the comment body it publishes with `--body-file`; its
-  `--allowedTools` carries one `Edit(//<tmpdir>/**)` rule for that. No stage
+  `NotebookEdit`). A non-writing stage edits only its own helper files directly
+  in `$TMPDIR`: `pr-comment.md`, `report.md`, `reply.md` and `<check>.log`. Its
+  `--allowedTools` names exactly those (`Edit(//<tmpdir>/pr-comment.md)`, ...,
+  `Edit(//<tmpdir>/*.log)`), because Claude keeps its own session files in the
+  same directory, and the hook refuses a helper name that resolves elsewhere.
+  No stage
   edits a `.git` directory or file, `~/.gitconfig` or
   `$XDG_CONFIG_HOME/git`: a `core.fsmonitor` or `diff.external` setting would
   make an allowed `git status` or `git diff` run a program. Symlinks and `..`
