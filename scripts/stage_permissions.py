@@ -345,20 +345,28 @@ TMPDIR_LOG_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.log")
 
 
 def is_tmpdir_helper(path: str, tmpdir: str | None) -> bool:
-    """Whether `path` names one of the stage's own helper files in `$TMPDIR`.
+    """Whether path names a stage helper in TMPDIR or Claude's own subdir.
 
-    Both the path as written and the file it resolves to must be a helper
-    name directly in `$TMPDIR`, so a symlink cannot redirect the write to a
-    file of the same directory that the stage does not own.
+    Both the path as written and the file it resolves to must have a helper
+    name and remain in TMPDIR. The nested exception is limited to Claude's
+    per-user claude-<uid> directory directly below TMPDIR.
     """
     if not inside_tmpdir(path, tmpdir):
         return False
     root = Path(tmpdir).resolve(strict=True)
     literal = Path(os.path.normpath(path))
     resolved = Path(path).resolve(strict=False)
-    return all((name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)) and parent == root
-               for name, parent in ((literal.name, literal.parent.resolve()),
-                                    (resolved.name, resolved.parent)))
+
+    def owned_parent(parent: Path) -> bool:
+        return (parent == root or
+                (parent.parent == root and re.fullmatch(r"claude-\d+", parent.name) is not None))
+
+    def helper_in_tmpdir(name: str, parent: Path) -> bool:
+        is_helper = name in TMPDIR_HELPER_FILES or TMPDIR_LOG_FILE.fullmatch(name)
+        return bool(is_helper and owned_parent(parent))
+
+    return (helper_in_tmpdir(literal.name, literal.parent.resolve())
+            and helper_in_tmpdir(resolved.name, resolved.parent))
 
 
 def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
@@ -465,6 +473,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if words == expected or (not exact and words[:len(expected)] == expected):
             return
     program = words[0]
+    if program == "printenv":
+        if policy.tmpdir and words == ["printenv", "TMPDIR"] and not parsed.redirects:
+            return
+        raise PolicyError("only `printenv TMPDIR` is allowed to inspect the dispatch temp path")
     if program in READ_SHELL:
         if parsed.redirects:
             raise PolicyError(f"{program} may not redirect its output")
@@ -1100,6 +1112,11 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     if policy.docker:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
     patterns = []
+    if policy.tmpdir:
+        patterns.append("Bash(printenv TMPDIR:*)")
+        if policy.rtk:
+            patterns += ["Bash(rtk printenv TMPDIR:*)",
+                         "Bash(rtk proxy printenv TMPDIR:*)"]
     for prefix in prefixes:
         patterns.append(f"Bash({prefix}:*)")
         if policy.rtk:
@@ -1108,12 +1125,13 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
     if policy.tmpdir:
-        # The only files a non-writing stage may write (#272); the hook still
-        # resolves every target, so `..` or a symlink cannot redirect one.
+        # Native helpers may live in an executor-owned subdirectory (#280).
+        # The hook validates names and resolved paths, including symlinks.
         for tmpdir in (policy.tmpdir, str(Path(policy.tmpdir).resolve(strict=False))):
             root = _absolute_rule_path(tmpdir)
             patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
-            patterns.append(f"Edit({root}/*.log)")
+            patterns += [f"Edit({root}/claude-*/{name})" for name in TMPDIR_HELPER_FILES]
+            patterns += [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"]
     return list(dict.fromkeys(patterns))
 
 
@@ -1147,6 +1165,10 @@ def prompt_note(policy: StagePolicy) -> str:
         if policy.verification_commands else
         "No test or verify command is configured for this repository, so no "
         "verification command is available.")
+    tmpdir_note = (
+        " For native dispatches, the actual per-dispatch TMPDIR path is "
+        f"available with `{'rtk ' if policy.rtk else ''}printenv TMPDIR`."
+    )
     return (
         f"Command policy for this {policy.role} stage: a runtime hook validates "
         "every Bash command against this stage's closed table. Run one simple "
@@ -1154,7 +1176,7 @@ def prompt_note(policy: StagePolicy) -> str:
         "other than into $TMPDIR. " + verification + " When a command you need is "
         "denied, do not try a variant or another tool to get around it: stop "
         "BLOCKED and name the exact denied command, so a person can authorize it "
-        "and resume the cycle."
+        "and resume the cycle." + tmpdir_note
     )
 
 

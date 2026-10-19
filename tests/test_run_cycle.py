@@ -788,10 +788,13 @@ class PromptContractTests(unittest.TestCase):
     def test_all_stage_prompts_name_stable_native_helpers_and_exclude_orca(self) -> None:
         for role in rc.SKILL_FOR_ROLE:
             with self.subTest(role=role):
-                prompt = rc.compose(role, "owner/repository", "141")
+                prompt = rc.compose(role, "owner/repository", "141",
+                                    temporary_directory="/tmp/code-cycle-dispatch")
                 for helper in ("$TMPDIR/pr-comment.md", "$TMPDIR/report.md",
                                "$TMPDIR/<check>.log"):
                     self.assertIn(helper, prompt)
+                self.assertIn("supplied per-dispatch TMPDIR is `/tmp/code-cycle-dispatch`",
+                              prompt)
                 self.assertIn("does not apply to Orca workers", prompt)
 
     def test_compose_can_request_a_local_only_run(self) -> None:

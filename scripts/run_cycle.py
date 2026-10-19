@@ -1067,7 +1067,8 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
             allowed_test_command: str | None = None,
             ci_policy: str = DEFAULT_CI_POLICY,
             resolve_review_base: str | None = None,
-            command_policy: StagePolicy | None = None) -> str:
+            command_policy: StagePolicy | None = None,
+            temporary_directory: str | None = None) -> str:
     """The prompt for one stage. Named skill, named work item, nothing implied.
 
     Under parallel, writing stages read checks once without waiting; resolution
@@ -1141,6 +1142,8 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
         "concurrent dispatches and removes each directory at completion. "
         "This native temporary-directory policy does not apply to Orca workers."
     )
+    if temporary_directory:
+        parts.append(f"The supplied per-dispatch TMPDIR is `{temporary_directory}`.")
     if local_only:
         parts.append(LOCAL_ONLY_REQUEST)
     parts.append(STRUCTURED_REQUEST)
