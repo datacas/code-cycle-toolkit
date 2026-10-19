@@ -56,7 +56,8 @@ class ValidateWorkflowTests(unittest.TestCase):
         self.assertRegex(
             body,
             r"(?m)^    runs-on: \$\{\{ github\.event_name == 'pull_request' "
-            r"&& github\.event\.pull_request\.head\.repo\.fork && "
+            r"&& github\.event\.pull_request\.head\.repo\.full_name != "
+            r"github\.repository && "
             r"'ubuntu-latest' \|\| fromJSON\('\[\"self-hosted\","
             r"\"Linux\",\"X64\"\]'\) \}\}$",
         )

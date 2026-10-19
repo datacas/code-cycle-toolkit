@@ -24,8 +24,10 @@ env:
 jobs:
   validate:
     name: Skills, manifests, and Bash installer
-    # Fork pull requests run on GitHub-hosted runners; all other events use self-hosted.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64"]') }}
+    # Pull requests from any other repository run on GitHub-hosted runners;
+    # all other events use self-hosted. Comparing the head repository fails
+    # closed: a null head repository also selects ubuntu-latest.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64"]') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
