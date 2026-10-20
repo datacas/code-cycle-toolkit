@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import platform
-import shlex
 import signal
 import shutil
 import subprocess
@@ -111,7 +110,10 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
                        "denyWrite": [str(path) for path in protected],
                        "denyRead": ["~/.ssh", "~/.aws", "~/.config/gh"]},
     }), encoding="utf-8")
-    return [srt, "--settings", str(settings), shlex.join(command)]
+    # srt shell-quotes each positional argument itself, so a pre-joined string
+    # would run as one word. "--" keeps srt from parsing npm's own flags, such
+    # as --version.
+    return [srt, "--settings", str(settings), "--", *command]
 
 
 def _digest(paths: list[Path]) -> str:

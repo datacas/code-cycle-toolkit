@@ -272,6 +272,10 @@ class SetupTests(unittest.TestCase):
                     config = json.loads(settings.read_text())
                     self.assertEqual(list(ds.REGISTRIES), config["network"]["allowedDomains"])
                     self.assertIn(str(self.root / "pnpm-lock.yaml"), config["filesystem"]["denyWrite"])
+                    # srt quotes each positional argument; a joined string
+                    # would run as one word, and its own --version would win.
+                    self.assertEqual(["/usr/bin/srt", "--settings", str(settings), "--",
+                                      "npm", "ci", "--ignore-scripts"], argv)
                 else:
                     self.assertIn('permissions.code_cycle_prepare.extends=":read-only"', argv)
                     self.assertNotIn("danger-full-access", argv)
