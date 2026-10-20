@@ -16,7 +16,7 @@ import sys
 import time
 
 BASE = Path(__file__).resolve().parent
-REPO = Path('/home/datacas/www/code-cycle-toolkit')
+REPO = Path('$HOME/www/code-cycle-toolkit')
 ENV = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
 
 

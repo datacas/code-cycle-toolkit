@@ -67,7 +67,7 @@ Preparación y agente son secuenciales en el runtime normal. Pasan a estar anida
 
 ### B.2. Inventario real de etapas y roles
 
-El driver automatiza cinco roles funcionales: `issue_review`, `implement`, `review`, `resolve`, `rereview`. Los puntos de reanudación CLI son `implement`, `review`, `resolve`, `rereview`; `issue_review` se inserta según su modo de readiness. Hay otros cinco contratos de rol disponibles que no constituyen cinco etapas automáticas adicionales. [Contratos](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:103), [skills del driver](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:173), [inicios](/home/datacas/www/code-cycle-toolkit/scripts/telemetry.py:122).
+El driver automatiza cinco roles funcionales: `issue_review`, `implement`, `review`, `resolve`, `rereview`. Los puntos de reanudación CLI son `implement`, `review`, `resolve`, `rereview`; `issue_review` se inserta según su modo de readiness. Hay otros cinco contratos de rol disponibles que no constituyen cinco etapas automáticas adicionales. [Contratos]($HOME/www/code-cycle-toolkit/scripts/cycle.py:103), [skills del driver]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:173), [inicios]($HOME/www/code-cycle-toolkit/scripts/telemetry.py:122).
 
 | Rol | Iniciador y selección del agente | Workspace lógico | Publicación permitida por contrato |
 | --- | --- | --- | --- |
@@ -82,7 +82,7 @@ El driver automatiza cinco roles funcionales: `issue_review`, `implement`, `revi
 | `run` | Skill/llamada auxiliar; auxiliary_tool | DISPOSABLE | Ninguna |
 | `coordinate` | Coordinador; perfil coordinator | READ_ONLY | Ninguna |
 
-El modelo concreto procede de perfiles efectivos y señales, no del nombre de la etapa. En esta configuración, por ejemplo, deep_coder apunta a Codex y reviewer a Claude; no es una propiedad universal del producto. [Selector](/home/datacas/www/code-cycle-toolkit/scripts/router.py:372). Un contrato READ_ONLY describe protección del workspace original; no implica que ningún archivo pueda escribirse: se permite scratch y, para verificar, un clone descartable.
+El modelo concreto procede de perfiles efectivos y señales, no del nombre de la etapa. En esta configuración, por ejemplo, deep_coder apunta a Codex y reviewer a Claude; no es una propiedad universal del producto. [Selector]($HOME/www/code-cycle-toolkit/scripts/router.py:372). Un contrato READ_ONLY describe protección del workspace original; no implica que ningún archivo pueda escribirse: se permite scratch y, para verificar, un clone descartable.
 
 ### B.3. Procesos, recursos y fallos por familia de ejecución
 
@@ -113,40 +113,40 @@ Los enlaces abren la primera línea del símbolo; los intervalos describen su ex
 
 | Archivo / símbolo | Líneas | Responsabilidad y dependencias |
 | --- | --- | --- |
-| [run_cycle.main](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:3941) | 3941–4151 | CLI, configuración, broker de consentimiento, telemetría y ejecución/interrupción |
-| [select_workspace](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:1506) | 1506–1628 | Worktree por tarea o workspace actual; no sandbox de seguridad |
-| [run_cycle](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:2131) | 2131–3234 | Máquina funcional, historial, dispatch y CI |
-| [check_continuation](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:1747) | 1747–1779 | Evita continuar en checkout equivocado o sin trabajo |
-| [recovery_evidence](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:1897) | 1897–1982 | Recuperación desde publicaciones/receipts confiables y HEAD correspondiente |
-| [clean_review_problem](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:3650) | 3650–3680 | SHA completo revisado, findings legibles y ausencia explícita de bloqueos |
-| [_test_outcome / _checks](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:3528) | 3528–3595; 3600–3625 | Distingue evidencia de tests de afirmaciones; checks del code host y SHA |
-| [CycleRecorder.stage](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:403) | 403–988 | Routing, contratos por rol, hasta tres intentos, reconciliación, grants y telemetría |
-| [executors.dispatch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2969) | 2969–3251 | Readiness, capacidades, policy activa y selección de aislamiento |
-| [NativeAdapter.dispatch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:1122) | 1122–1316 | Preparación previa al agente, stream, resultado y evidencias |
-| [CodexAdapter.argv](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:1799) | 1799–1876 | Perfiles de filesystem/red, raíces Git y socket grant |
-| [probe_git_metadata_write](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:1603) | 1603–1757 | Verifica acceso real a Git en linked worktrees antes de dispatch |
-| [probe_review_confinement](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:1878) | 1878–1946 | Pruebas positivas/negativas del clone y scratch; no basta argv |
-| [ClaudeAdapter.policy_preflight](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2434) | 2434–2461 | Detecta hooks/mods/settings que invalidan la política |
-| [ClaudeAdapter.policy_files](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2476) | 2476–2531 | Copia política/hook fuera del workspace y añade settings de sandbox |
-| [ClaudeAdapter.argv](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2592) | 2592–2643 | Herramientas permitidas, modos de permiso y proceso Claude |
-| [OrcaAdapter.dispatch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2749) | 2749–2895 | Worker asíncrono, contexto requerido y receipt/modelo efectivo |
-| [_native_review_scratch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:132) | 132–193 | TMPDIR aislado por dispatch, fuera del checkout; limpieza y perfiles |
-| [_isolated_review_dispatch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:2239) | 2239–2386 | Clone sin hardlinks, HEAD exacto, detección de efectos y limpieza |
-| [_publication_preflight](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:680) | 680–728 | Credenciales y push dry-run sin alterar remoto; no prueba transporte desde el sandbox |
-| [StagePolicy / check](/home/datacas/www/code-cycle-toolkit/scripts/stage_permissions.py:108) | 108–190; 399–421 | Contexto inmutable y validación de sintaxis, argumentos y redirecciones |
-| [_check_words](/home/datacas/www/code-cycle-toolkit/scripts/stage_permissions.py:477) | 477–511 | Git/gh/Docker antes de herramientas elegidas; preserva invariantes explícitas |
-| [review_sandbox_settings](/home/datacas/www/code-cycle-toolkit/scripts/stage_permissions.py:1470) | 1470–1484 | Filesystem y red del sandbox Bash Claude |
-| [dependency_setup.prepare](/home/datacas/www/code-cycle-toolkit/scripts/dependency_setup.py:226) | 226–388 | Frozen installs, copia scratch, cache, dos intentos transitorios, logs y detección de builds pendientes |
-| [sandbox_command](/home/datacas/www/code-cycle-toolkit/scripts/dependency_setup.py:79) | 79–116 | Wrappers Codex/srt; no fallback a install no confinado |
-| [user_choices.load](/home/datacas/www/code-cycle-toolkit/scripts/user_choices.py:15) | 15–42 | Herramientas, comandos, integraciones y registros declarados sin enumerar ejecutables en código |
-| [sandbox_blocker](/home/datacas/www/code-cycle-toolkit/scripts/environment_recovery.py:57) | 57–90 | Solo un BLOCKED estructurado completo y sin requiere-humano activa recuperación |
-| [effect_snapshot / reconcile](/home/datacas/www/code-cycle-toolkit/scripts/reroute.py:47) | 47–127 | Workspace, remoto y publicaciones atribuibles; fallo cerrado si falta evidencia |
-| [ConsentStore / ConsentBroker](/home/datacas/www/code-cycle-toolkit/scripts/grants.py:163) | 163–215; 270–358 | Consentimiento fuera del checkout; fingerprint de alcance, decisiones y propagación |
-| [CycleHistoryStore.acquire](/home/datacas/www/code-cycle-toolkit/scripts/cycle_history.py:234) | 234–258 | Lock local por PR; SQLite |
-| [expect_publication](/home/datacas/www/code-cycle-toolkit/scripts/cycle_history.py:524) | 524–571 | Publicación pendiente y confirmación idempotente del registro, no ejecución exactly-once |
-| [telemetry.create_dispatch_attempt](/home/datacas/www/code-cycle-toolkit/scripts/telemetry.py:1388) | 1388–1440 | Intentos e identidad de ejecución durables; updates en 1624–1793 |
-| [CycleStatusWriter](/home/datacas/www/code-cycle-toolkit/scripts/cycle_status.py:618) | 618–1018 | Progreso, workspace observado, estado atómico y cursores |
-| [issue_review.assess](/home/datacas/www/code-cycle-toolkit/scripts/issue_review.py:368) | 368–406 | READY solo con resultado coherente, evidencia e identidad correctas |
+| [run_cycle.main]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:3941) | 3941–4151 | CLI, configuración, broker de consentimiento, telemetría y ejecución/interrupción |
+| [select_workspace]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:1506) | 1506–1628 | Worktree por tarea o workspace actual; no sandbox de seguridad |
+| [run_cycle]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:2131) | 2131–3234 | Máquina funcional, historial, dispatch y CI |
+| [check_continuation]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:1747) | 1747–1779 | Evita continuar en checkout equivocado o sin trabajo |
+| [recovery_evidence]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:1897) | 1897–1982 | Recuperación desde publicaciones/receipts confiables y HEAD correspondiente |
+| [clean_review_problem]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:3650) | 3650–3680 | SHA completo revisado, findings legibles y ausencia explícita de bloqueos |
+| [_test_outcome / _checks]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:3528) | 3528–3595; 3600–3625 | Distingue evidencia de tests de afirmaciones; checks del code host y SHA |
+| [CycleRecorder.stage]($HOME/www/code-cycle-toolkit/scripts/cycle.py:403) | 403–988 | Routing, contratos por rol, hasta tres intentos, reconciliación, grants y telemetría |
+| [executors.dispatch]($HOME/www/code-cycle-toolkit/scripts/executors.py:2969) | 2969–3251 | Readiness, capacidades, policy activa y selección de aislamiento |
+| [NativeAdapter.dispatch]($HOME/www/code-cycle-toolkit/scripts/executors.py:1122) | 1122–1316 | Preparación previa al agente, stream, resultado y evidencias |
+| [CodexAdapter.argv]($HOME/www/code-cycle-toolkit/scripts/executors.py:1799) | 1799–1876 | Perfiles de filesystem/red, raíces Git y socket grant |
+| [probe_git_metadata_write]($HOME/www/code-cycle-toolkit/scripts/executors.py:1603) | 1603–1757 | Verifica acceso real a Git en linked worktrees antes de dispatch |
+| [probe_review_confinement]($HOME/www/code-cycle-toolkit/scripts/executors.py:1878) | 1878–1946 | Pruebas positivas/negativas del clone y scratch; no basta argv |
+| [ClaudeAdapter.policy_preflight]($HOME/www/code-cycle-toolkit/scripts/executors.py:2434) | 2434–2461 | Detecta hooks/mods/settings que invalidan la política |
+| [ClaudeAdapter.policy_files]($HOME/www/code-cycle-toolkit/scripts/executors.py:2476) | 2476–2531 | Copia política/hook fuera del workspace y añade settings de sandbox |
+| [ClaudeAdapter.argv]($HOME/www/code-cycle-toolkit/scripts/executors.py:2592) | 2592–2643 | Herramientas permitidas, modos de permiso y proceso Claude |
+| [OrcaAdapter.dispatch]($HOME/www/code-cycle-toolkit/scripts/executors.py:2749) | 2749–2895 | Worker asíncrono, contexto requerido y receipt/modelo efectivo |
+| [_native_review_scratch]($HOME/www/code-cycle-toolkit/scripts/executors.py:132) | 132–193 | TMPDIR aislado por dispatch, fuera del checkout; limpieza y perfiles |
+| [_isolated_review_dispatch]($HOME/www/code-cycle-toolkit/scripts/executors.py:2239) | 2239–2386 | Clone sin hardlinks, HEAD exacto, detección de efectos y limpieza |
+| [_publication_preflight]($HOME/www/code-cycle-toolkit/scripts/executors.py:680) | 680–728 | Credenciales y push dry-run sin alterar remoto; no prueba transporte desde el sandbox |
+| [StagePolicy / check]($HOME/www/code-cycle-toolkit/scripts/stage_permissions.py:108) | 108–190; 399–421 | Contexto inmutable y validación de sintaxis, argumentos y redirecciones |
+| [_check_words]($HOME/www/code-cycle-toolkit/scripts/stage_permissions.py:477) | 477–511 | Git/gh/Docker antes de herramientas elegidas; preserva invariantes explícitas |
+| [review_sandbox_settings]($HOME/www/code-cycle-toolkit/scripts/stage_permissions.py:1470) | 1470–1484 | Filesystem y red del sandbox Bash Claude |
+| [dependency_setup.prepare]($HOME/www/code-cycle-toolkit/scripts/dependency_setup.py:226) | 226–388 | Frozen installs, copia scratch, cache, dos intentos transitorios, logs y detección de builds pendientes |
+| [sandbox_command]($HOME/www/code-cycle-toolkit/scripts/dependency_setup.py:79) | 79–116 | Wrappers Codex/srt; no fallback a install no confinado |
+| [user_choices.load]($HOME/www/code-cycle-toolkit/scripts/user_choices.py:15) | 15–42 | Herramientas, comandos, integraciones y registros declarados sin enumerar ejecutables en código |
+| [sandbox_blocker]($HOME/www/code-cycle-toolkit/scripts/environment_recovery.py:57) | 57–90 | Solo un BLOCKED estructurado completo y sin requiere-humano activa recuperación |
+| [effect_snapshot / reconcile]($HOME/www/code-cycle-toolkit/scripts/reroute.py:47) | 47–127 | Workspace, remoto y publicaciones atribuibles; fallo cerrado si falta evidencia |
+| [ConsentStore / ConsentBroker]($HOME/www/code-cycle-toolkit/scripts/grants.py:163) | 163–215; 270–358 | Consentimiento fuera del checkout; fingerprint de alcance, decisiones y propagación |
+| [CycleHistoryStore.acquire]($HOME/www/code-cycle-toolkit/scripts/cycle_history.py:234) | 234–258 | Lock local por PR; SQLite |
+| [expect_publication]($HOME/www/code-cycle-toolkit/scripts/cycle_history.py:524) | 524–571 | Publicación pendiente y confirmación idempotente del registro, no ejecución exactly-once |
+| [telemetry.create_dispatch_attempt]($HOME/www/code-cycle-toolkit/scripts/telemetry.py:1388) | 1388–1440 | Intentos e identidad de ejecución durables; updates en 1624–1793 |
+| [CycleStatusWriter]($HOME/www/code-cycle-toolkit/scripts/cycle_status.py:618) | 618–1018 | Progreso, workspace observado, estado atómico y cursores |
+| [issue_review.assess]($HOME/www/code-cycle-toolkit/scripts/issue_review.py:368) | 368–406 | READY solo con resultado coherente, evidencia e identidad correctas |
 
 ### C.2. Qué protege cada mecanismo; qué se perdería al retirarlo
 
@@ -171,7 +171,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-001 — Alta: el constructor Codex no es composable dentro de su propia frontera de comandos
 
-**Archivo/símbolo:** upstream Codex 0.163.0, `bwrap.rs` construcción del sandbox y `append_daemon_socket_masks`, líneas 436–437 y 869–897; `uds/src/daemon_directory.rs`, líneas 12–38. Toolkit: [ENVIRONMENT_RECOVERY_GUIDANCE](/home/datacas/www/code-cycle-toolkit/scripts/environment_recovery.py:19).
+**Archivo/símbolo:** upstream Codex 0.163.0, `bwrap.rs` construcción del sandbox y `append_daemon_socket_masks`, líneas 436–437 y 869–897; `uds/src/daemon_directory.rs`, líneas 12–38. Toolkit: [ENVIRONMENT_RECOVERY_GUIDANCE]($HOME/www/code-cycle-toolkit/scripts/environment_recovery.py:19).
 
 **Causa:** el directorio reservado es fijo respecto a `/tmp` y UID; no depende de HOME/TMPDIR/CODEX_HOME. El constructor verifica propietario y modo 0700. El sandbox exterior lo oculta con tmpfs modo 000 y remount read-only, deliberadamente. El constructor interior encuentra esa vista y falla.
 
@@ -181,7 +181,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-002 — Alta operativa: tener instalados los prerrequisitos no hace arrancable la preparación dentro del sandbox exterior
 
-**Archivos/símbolos:** [sandbox_command](/home/datacas/www/code-cycle-toolkit/scripts/dependency_setup.py:79), [prepare.run](/home/datacas/www/code-cycle-toolkit/scripts/dependency_setup.py:281).
+**Archivos/símbolos:** [sandbox_command]($HOME/www/code-cycle-toolkit/scripts/dependency_setup.py:79), [prepare.run]($HOME/www/code-cycle-toolkit/scripts/dependency_setup.py:281).
 
 **Causa/evidencia:** srt 0.0.81 está instalado y falla con `listen EPERM … srt-mux-….sock` en E3 y E5-Claude. E5-Codex falla reservando listeners del proxy administrado antes de ejecutar `npm --version`. Todos los intentos se mantienen dentro de la frontera exterior original. El bloqueo del socket es observado; atribuir cada syscall concreta a un filtro determinado sin tracing adicional sería una inferencia.
 
@@ -189,7 +189,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-003 — Media: fixtures del toolkit dependen de una vista del checkout sin placeholders y de temporales adicionales
 
-**Archivos/símbolos:** [ValidatePackageTests.copy_package](/home/datacas/www/code-cycle-toolkit/tests/test_validate_package.py:22), líneas 22–31; [test_scratch_never_uses_a_temp_parent_inside_the_checkout](/home/datacas/www/code-cycle-toolkit/tests/test_executors.py:2810), líneas 2810–2818; [_native_review_scratch](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:132), líneas 132–193.
+**Archivos/símbolos:** [ValidatePackageTests.copy_package]($HOME/www/code-cycle-toolkit/tests/test_validate_package.py:22), líneas 22–31; [test_scratch_never_uses_a_temp_parent_inside_the_checkout]($HOME/www/code-cycle-toolkit/tests/test_executors.py:2810), líneas 2810–2818; [_native_review_scratch]($HOME/www/code-cycle-toolkit/scripts/executors.py:132), líneas 132–193.
 
 **Causa:** copytree ignora `.git`/pycache pero copia también placeholders ajenos a los datos que necesita el validador. Otro test simula TMPDIR dentro del checkout y supone que existe otro padre escribible; ese supuesto deja de cumplirse bajo escritura restringida a clone/scratch.
 
@@ -199,7 +199,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-004 — Alta: el reintento con grant al mismo ejecutor puede omitir la reconciliación de publicación
 
-**Archivo/símbolo:** [CycleRecorder.stage](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:903), líneas 903–938; comparar `reroute_gate`, líneas 763–775.
+**Archivo/símbolo:** [CycleRecorder.stage]($HOME/www/code-cycle-toolkit/scripts/cycle.py:903), líneas 903–938; comparar `reroute_gate`, líneas 763–775.
 
 **Causa:** después de una respuesta de consentimiento se calcula `safe` con salida del proceso, no-asíncrono y ausencia de requisito humano. La llamada a `reroute_gate()` solo se añade cuando `consent_decision is not decision`. Para el mismo target, un efecto ya observado no veta repetir la etapa.
 
@@ -209,7 +209,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-005 — Media: los grants persistentes se recuperan tarde para evitar el primer fallo de un ciclo nuevo
 
-**Archivo/símbolo:** [ConsentBroker](/home/datacas/www/code-cycle-toolkit/scripts/grants.py:270), líneas 270–358; [CycleRecorder.stage](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:692), obtención de grants antes de dispatch.
+**Archivo/símbolo:** [ConsentBroker]($HOME/www/code-cycle-toolkit/scripts/grants.py:270), líneas 270–358; [CycleRecorder.stage]($HOME/www/code-cycle-toolkit/scripts/cycle.py:692), obtención de grants antes de dispatch.
 
 **Causa:** `granted_ids` empieza vacío y `granted()` solo consulta ese conjunto. El store/preautorización/respuestas se consultan en `request()`, una vez detectado el bloqueo. No existe hidratación equivalente antes del primer dispatch en esa ruta.
 
@@ -219,7 +219,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-006 — Alta, límite de seguridad conocido: las fronteras actuales no garantizan aislamiento completo de credenciales/publicación frente al código revisado
 
-**Archivos/símbolos:** [CodexAdapter.argv](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:1799), [review_sandbox_settings](/home/datacas/www/code-cycle-toolkit/scripts/stage_permissions.py:1470), [tabla/hook](/home/datacas/www/code-cycle-toolkit/scripts/stage_permissions.py:477), [limitaciones documentadas](/home/datacas/www/code-cycle-toolkit/docs/host-permissions.md:168).
+**Archivos/símbolos:** [CodexAdapter.argv]($HOME/www/code-cycle-toolkit/scripts/executors.py:1799), [review_sandbox_settings]($HOME/www/code-cycle-toolkit/scripts/stage_permissions.py:1470), [tabla/hook]($HOME/www/code-cycle-toolkit/scripts/stage_permissions.py:477), [limitaciones documentadas]($HOME/www/code-cycle-toolkit/docs/host-permissions.md:168).
 
 **Causa:** permitir gh y dominios del code host con las credenciales del usuario permite publicar; restringir el comando que escribe el agente no intercepta una llamada API que haga el código de un test o una integración. Las herramientas preaprobadas y MCP mantienen otra frontera. Además, la política activa cubre GitHub/GitHub nativo; otros proveedores/workers tienen un techo distinto.
 
@@ -229,7 +229,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-007 — Media/alta según operación: reconciliación de reintentos no sustituye una auditoría después de cada etapa publicadora exitosa
 
-**Archivos/símbolos:** [reroute.effect_snapshot/reconcile](/home/datacas/www/code-cycle-toolkit/scripts/reroute.py:47), [CycleRecorder.stage](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:403).
+**Archivos/símbolos:** [reroute.effect_snapshot/reconcile]($HOME/www/code-cycle-toolkit/scripts/reroute.py:47), [CycleRecorder.stage]($HOME/www/code-cycle-toolkit/scripts/cycle.py:403).
 
 **Causa:** la comparación de efectos sirve para decidir reintentos de fallos concretos. No implementa las tres comprobaciones de #261 después de toda etapa exitosa: PR sin merge/cierre, avance fast-forward de la rama propia y ausencia de cambios prohibidos/deleciones de refs protegidas.
 
@@ -239,7 +239,7 @@ Las severidades expresan impacto arquitectónico/operativo. Un hallazgo de contr
 
 ### AR-008 — Media: recuperación actual difiere de las decisiones vigentes de #288/#289
 
-**Archivos/símbolos:** [sandbox_blocker](/home/datacas/www/code-cycle-toolkit/scripts/environment_recovery.py:57), [CycleRecorder.stage](/home/datacas/www/code-cycle-toolkit/scripts/cycle.py:833), [gating de review](/home/datacas/www/code-cycle-toolkit/scripts/executors.py:3191), [_checks](/home/datacas/www/code-cycle-toolkit/scripts/run_cycle.py:3600).
+**Archivos/símbolos:** [sandbox_blocker]($HOME/www/code-cycle-toolkit/scripts/environment_recovery.py:57), [CycleRecorder.stage]($HOME/www/code-cycle-toolkit/scripts/cycle.py:833), [gating de review]($HOME/www/code-cycle-toolkit/scripts/executors.py:3191), [_checks]($HOME/www/code-cycle-toolkit/scripts/run_cycle.py:3600).
 
 **Causa:** el runtime reconoce BLOCKED estructurado como señal de recuperación y puede cambiar de ejecutor ante `environment_restricted`. Si no acredita confinamiento de review, detiene la revisión completa. Las decisiones actuales exigen no reroute por sandbox, resultados por check y continuación estática solo si sigue siendo segura.
 

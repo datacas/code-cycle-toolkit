@@ -13,7 +13,7 @@
             "--version"
           ],
           "sandbox_command": [
-            "/home/datacas/.nvm/versions/node/v22.23.2/bin/srt",
+            "$HOME/.nvm/versions/node/v22.23.2/bin/srt",
             "--settings",
             "/tmp/code-cycle-prepare-1l3tty0z/sandbox.json",
             "--",
