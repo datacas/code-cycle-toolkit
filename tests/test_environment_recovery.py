@@ -135,7 +135,63 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertEqual(("docker_host",), primary.dispatch_kwargs[1]["sandbox_grants"])
         attempts = self.store.dispatch_attempts("owner/repo", cycle_id=recorder.cycle_id)
         self.assertEqual("retry", attempts[1]["relationship"])
+        first = self.store.rows("owner/repo")[-2]
+        self.assertEqual("permission_answered", first["payload"]["reroute_reason"])
         self.assertFalse(outcome.succeeded)
+
+    def test_consent_answers_never_replay_changed_or_unknown_effects(self):
+        changes = (
+            (None, "evidence_unavailable"),
+            ({**CLEAN, "dirty": True}, "dirty_workspace"),
+            ({**CLEAN, "workspace": {"head": "new commit"}}, "workspace_changed"),
+            ({**CLEAN, "remote": "pushed"}, "remote_changed"),
+            ({**CLEAN, "comments": ["published"]}, "publication_changed"),
+            ({**CLEAN, "pulls": ["new PR"]}, "publication_changed"),
+        )
+        for answer in ("cycle", "persistent", "deny"):
+            for after, reason in changes:
+                with self.subTest(answer=answer, reason=reason):
+                    primary = RestrictedAdapter()
+                    # Keep persistent answers inside this test's workspace.
+                    consent = grants.ConsentBroker(
+                        "owner/repo", platform="linux",
+                        store=grants.ConsentStore(self.store.path.parent / "consents.json"),
+                        answers={"docker_host": answer})
+                    recorder = self.recorder([primary], consent=consent)
+                    with patch("cycle.effect_snapshot", side_effect=lambda *a, **k:
+                               CLEAN if not primary.dispatched else after):
+                        outcome = recorder.stage("implement", "implement the work")
+
+                    self.assertEqual(1, len(primary.dispatched))
+                    self.assertFalse(outcome.succeeded)
+                    self.assertIn(f"reroute stopped: {reason}", outcome.result.detail)
+                    row = self.store.rows("owner/repo")[-1]["payload"]
+                    self.assertEqual("stop", row["reroute_action"])
+                    self.assertEqual(reason, row["reroute_reason"])
+
+    def test_consent_keeps_the_full_guards_conservative_dirty_workspace_stop(self):
+        consent = grants.ConsentBroker("owner/repo", platform="linux",
+                                       answers={"docker_host": "cycle"})
+        primary = RestrictedAdapter()
+        recorder = self.recorder([primary], consent=consent)
+        with patch("cycle.effect_snapshot", return_value={**CLEAN, "dirty": True}):
+            outcome = recorder.stage("implement", "implement the work")
+        self.assertEqual(1, len(primary.dispatched))
+        self.assertIn("reroute stopped: dirty_workspace", outcome.result.detail)
+
+    def test_consent_answer_without_exit_proof_never_repeats_the_stage(self):
+        for answer in ("cycle", "persistent", "deny"):
+            with self.subTest(answer=answer):
+                primary = RestrictedAdapter(exited=False)
+                consent = grants.ConsentBroker(
+                    "owner/repo", platform="linux",
+                    store=grants.ConsentStore(self.store.path.parent / "consents.json"),
+                    answers={"docker_host": answer})
+                recorder = self.recorder([primary], consent=consent)
+                with patch("cycle.effect_snapshot", return_value=CLEAN):
+                    outcome = recorder.stage("implement", "implement the work")
+                self.assertEqual(1, len(primary.dispatched))
+                self.assertIn("reroute stopped: exit_unproven", outcome.result.detail)
 
     def test_a_fallback_that_hits_the_same_wall_hands_the_question_to_the_primary(self):
         """The fallback was tried first; the grant still reaches the primary."""

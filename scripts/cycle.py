@@ -902,16 +902,11 @@ class CycleRecorder:
                                reroute_error_code="environment_restricted",
                                reroute_start_state=result.start_state)
             elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
-                # The same target reruns, told the answer. A rerun after an
-                # exit nobody proved could overlap a live worker.
-                safe = (not result.asynchronous and result.process_exited
-                        and not result.needs_human_action and attempt_id is not None)
-                stop_reason = "exit_unproven"
-                if safe and consent_decision is not decision:
-                    # Back to the primary from its fallback: another executor,
-                    # so the fallback's effects are reconciled first.
-                    action, stop_reason = reroute_gate()
-                    safe = action == "reroute"
+                # An answer permits access, not replaying effects. Reconcile
+                # every full rerun, including one on the same executor.
+                action, stop_reason = (("stop", "exit_unproven")
+                                       if attempt_id is None else reroute_gate())
+                safe = action == "reroute"
                 signals.update(reroute_action="reroute" if safe else "stop",
                                reroute_reason="permission_answered" if safe else stop_reason,
                                process_exited=result.process_exited,
