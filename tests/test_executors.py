@@ -2807,14 +2807,14 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
         self.assertEqual(1, len(observed))
 
-    def test_scratch_never_uses_a_temp_parent_inside_the_checkout(self) -> None:
+    def test_scratch_refuses_when_no_writable_parent_exists_outside_the_checkout(self) -> None:
         subdirectory = self.repo / "nested"
         subdirectory.mkdir()
-        with patch.object(ex.tempfile, "gettempdir", return_value=str(self.repo)):
+        with patch.object(ex.tempfile, "gettempdir", return_value=str(self.repo)), \
+             patch.object(ex.os, "access", return_value=False):
             result = self.dispatch("codex", "temporary", cwd=str(subdirectory))
-        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
-        scratch = Path(self.tmp_result.read_text(encoding="utf-8")).parent
-        self.assertNotIn(self.repo, scratch.parents)
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertIn("no temporary directory outside the dispatch checkout", result.detail)
         self.assertEqual("", git(self.repo, "status", "--porcelain"))
 
     def test_every_adapter_fails_a_stage_that_writes_the_checkout(self) -> None:

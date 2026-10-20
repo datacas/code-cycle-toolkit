@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,12 +24,31 @@ class ValidatePackageTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         target = Path(temporary.name) / "package"
-        shutil.copytree(
-            ROOT,
-            target,
-            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-        )
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout.split(b"\0")
+        for entry in filter(None, tracked):
+            relative = Path(os.fsdecode(entry))
+            source = ROOT / relative
+            destination = target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_symlink():
+                destination.symlink_to(os.readlink(source))
+            else:
+                shutil.copy2(source, destination)
         return target
+
+    def test_copy_package_omits_untracked_files(self) -> None:
+        marker = ROOT / ".untracked-package-fixture"
+        self.assertFalse(marker.exists())
+        marker.write_text("not part of the tracked package", encoding="utf-8")
+        self.addCleanup(marker.unlink)
+
+        package = self.copy_package()
+
+        self.assertFalse((package / marker.name).exists())
 
     def assert_error_contains(self, errors: list[str], expected: str) -> None:
         self.assertTrue(
