@@ -305,6 +305,12 @@ Nothing below is written into your repository, except a project-scope installati
 
 On Windows, the `~/.config/code-cycle-toolkit` directory is `%APPDATA%\code-cycle-toolkit`.
 
+## Project tool choices and dependency setup
+
+See [dependency preparation](dependency-preparation.md) for automatic frozen
+Node installs, contained lifecycle-build recovery, persistent setup evidence,
+and the `code_cycle.user_choices` configuration shared by dispatched stages.
+
 ---
 
 [← Routing and models](routing.md) · [↑ Documentation index](README.md) · [Providers →](provider-contract.md)

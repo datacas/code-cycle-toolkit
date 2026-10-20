@@ -359,6 +359,14 @@ class AllowedCommandsConfigTests(RunCycleTestCase):
             rc.allowed_test_command(config),
         )
 
+    def test_user_choices_load_without_a_tool_name_allowlist(self) -> None:
+        config = self.load("code_cycle:\n  user_choices:\n    tools: [bespoke-tool, rg]\n"
+                           "    commands: [sha256sum]\n    integrations: [mcp__custom__query]\n"
+                           "    registry_domains: [registry.example.org]\n")
+        self.assertEqual(("bespoke-tool", "rg"), rc.user_choices.load(config)["tools"])
+        with self.assertRaises(rc.CycleDriverError):
+            self.load("code_cycle:\n  user_choices:\n    tools: 'anything'\n")
+
     def test_unknown_allowed_command_key_is_rejected(self) -> None:
         with self.assertRaises(rc.CycleDriverError) as raised:
             self.load("code_cycle:\n  allowed_commands:\n    shell: echo hello\n")
@@ -407,12 +415,14 @@ class AllowedCommandsConfigTests(RunCycleTestCase):
                 claude, Talker("codex"), profiles=profiles,
                 cwd=str(worktree), local_only=True,
                 allowed_test_command="python3 -m unittest discover -s tests",
+                user_tool_choices={"tools": ("bespoke-tool", "rg")},
             )
 
         self.assertEqual(1, len(claude.calls))
         task, kwargs = claude.calls[0]
         self.assertIn("`python3 -m unittest discover -s tests`", task)
         self.assertFalse(kwargs["publishes"])
+        self.assertEqual(("bespoke-tool", "rg"), kwargs["command_policy"].tools)
         self.assertEqual(
             ("python3 -m unittest discover -s tests",),
             kwargs["claude_allowed_commands"],

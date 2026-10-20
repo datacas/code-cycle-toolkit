@@ -503,7 +503,8 @@ class VerificationTests(PolicyTestCase):
         self.denied("npm test", policy)
         note = sp.prompt_note(policy)
         self.assertIn("No test or verify command is configured", note)
-        self.assertIn("stop BLOCKED and name the exact denied command", note)
+        self.assertIn("available search alternative", note)
+        self.assertIn("Do not bypass a forbidden operation", note)
         self.assertIn("python3 -m unittest", sp.prompt_note(
             replace(policy, verify_prefixes=self.VERIFY)))
 
@@ -646,6 +647,7 @@ class AllowedToolsTests(PolicyTestCase):
         expected = ([f"Edit({root}/{name})" for name in names]
                     + [f"Edit({root}/claude-*/{name})" for name in names]
                     + [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"])
+        expected += [pattern.replace("Edit(", "Write(") for pattern in list(expected)]
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             edits = [p for p in self.patterns(role) if not p.startswith("Bash(")]
             with self.subTest(role=role):
@@ -683,12 +685,13 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             policy = self.policy(role, rtk=True, docker=True)
             for pattern in sp.allowed_tool_patterns(policy):
-                if pattern.startswith("Edit("):
+                if pattern.startswith(("Edit(", "Write(")):
                     root = sp._absolute_rule_path(str(self.tmpdir)) + "/"
-                    name = pattern[len(f"Edit({root}"):-1]
+                    tool = pattern.split("(", 1)[0]
+                    name = pattern[len(f"{tool}({root}"):-1]
                     name = name.replace("claude-*", "claude-1000").replace("*", "verify")
                     with self.subTest(role=role, pattern=pattern):
-                        self.assertTrue(pattern.startswith(f"Edit({root}"))
+                        self.assertTrue(pattern.startswith(f"{tool}({root}"))
                         self.assertTrue(sp.check_file_edit(
                             "Write", {"file_path": str(self.tmpdir / name)}, policy).allowed)
                     continue
@@ -789,7 +792,7 @@ class HookTests(PolicyTestCase):
         self.assertEqual("PreToolUse", decision["hookEventName"])
         self.assertEqual("deny", decision["permissionDecision"])
         self.assertIn(sp.HOOK_DENIAL_MARKER, decision["permissionDecisionReason"])
-        self.assertIn("stop BLOCKED", decision["permissionDecisionReason"])
+        self.assertIn("report BLOCKED", decision["permissionDecisionReason"])
 
     def test_an_allowed_command_gets_no_decision_so_the_permission_layer_still_applies(self):
         self.assertEqual("", self.run_hook(self.policy("review"), {

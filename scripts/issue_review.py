@@ -29,10 +29,12 @@ mixes them in is refused rather than half-read.
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 
 import stop_questions
+from environment_recovery import sandbox_blocker
 
 #: The skill this stage runs, and the role it is recorded under.
 SKILL = "cc-issue-review"
@@ -68,7 +70,7 @@ MAX_REFERENCE_LENGTH = 200
 RESULT_KEYS = frozenset({
     "skill", "status", "issue_provider", "issue_id", "issue_number",
     "code_host", "repo", "confidence", "dimensions", "findings",
-    "uncertainties", "questions", "summary", "error", "blocking",
+    "uncertainties", "questions", "summary", "error", "blocking", "environment_blocker",
 })
 REQUIRED_RESULT_KEYS = frozenset({
     "skill", "status", "issue_id", "confidence", "dimensions", "findings",
@@ -152,6 +154,13 @@ def result_errors(payload: object) -> list[str]:
     if not _text(payload.get("issue_id")) or len(payload["issue_id"]) > MAX_REFERENCE_LENGTH:
         problems.append("`issue_id` must name the work item that was reviewed")
     status = payload.get("status")
+    if "environment_blocker" in payload:
+        blocker = payload["environment_blocker"]
+        valid = sandbox_blocker("ORCHESTRATION_RESULT\n" + json.dumps(payload)
+                                + "\nEND_ORCHESTRATION_RESULT")
+        if valid is None or valid != blocker:
+            problems.append("`environment_blocker` must be a complete sandbox report "
+                            "on a BLOCKED result without questions")
     if status not in STATUSES:
         problems.append(f"`status` must be one of {', '.join(STATUSES)}")
     if payload.get("confidence") not in CONFIDENCES:
