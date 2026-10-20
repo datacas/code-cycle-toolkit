@@ -92,6 +92,9 @@ THREAD_MUTATIONS = {
 
 #: In every denial reason, so the runtime can tell this hook's denials apart.
 HOOK_DENIAL_MARKER = "stage policy denied this command"
+#: The fixed Bash timeout of a dispatched Claude `-p` stage, in milliseconds
+#: (10 minutes). Claude Code reads it from the `env` of the dispatch settings.
+CLAUDE_VERIFICATION_TIMEOUT_MS = 600_000
 
 DENY_ADVICE = ("Do not bypass a forbidden operation. For an authorized source read, "
                "use an available permitted equivalent (git grep or grep). Explicit "
@@ -421,8 +424,49 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
     return Decision(True, "allowed by the stage command table")
 
 
+def _is_verification_command(command, policy: StagePolicy) -> bool:
+    """Whether a Bash tool call reliably identifies a configured check."""
+    if not isinstance(command, str):
+        return False
+    try:
+        words = list(parse_command(command, policy.tmpdir).words)
+        if words[:1] == ["rtk"]:
+            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+        if not words:
+            return False
+        if policy.test_command and words == list(parse_command(policy.test_command, None).words):
+            return True
+        for prefix in policy.verify_prefixes:
+            prefix_words = list(parse_command(prefix, None).words)
+            if words[:len(prefix_words)] == prefix_words:
+                return True
+        return False
+    except (PolicyError, IndexError):
+        return False
+
+
+def check_bash_tool_input(tool_input: dict, policy: StagePolicy, *,
+                          cwd: str | None = None) -> Decision:
+    """Apply Claude -p foreground and verification-timeout safeguards."""
+    command = tool_input.get("command")
+    if tool_input.get("run_in_background") is True:
+        return Decision(False, "Bash commands must run in the foreground")
+    timeout = tool_input.get("timeout")
+    if (_is_verification_command(command, policy)
+            and isinstance(timeout, int) and not isinstance(timeout, bool)
+            and timeout < CLAUDE_VERIFICATION_TIMEOUT_MS):
+        return Decision(
+            False,
+            "configured verification needs a timeout of at least "
+            f"{CLAUDE_VERIFICATION_TIMEOUT_MS} ms",
+        )
+    if not policy.active:
+        return Decision(True, "foreground policy only")
+    return check(command, policy, cwd=cwd)
+
+
 #: Claude's file-editing tools and the input key that names their target.
-FILE_EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+FILE_EDIT_TOOLS ={"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
                    "NotebookEdit": "notebook_path"}
 
 
@@ -1168,24 +1212,38 @@ def _absolute_rule_path(path: str) -> str:
     return "/" + target.as_posix().rstrip("/")
 
 
-def hook_settings(hook_command: str) -> dict:
-    """The `--settings` hook block that makes the hook part of the dispatch."""
+def hook_settings(hook_command: str, *, bash_only: bool = False) -> dict:
+    """The `--settings` hook block that makes the hook part of the dispatch.
+
+    `bash_only` is the minimal hook of a non-GitHub cycle: it validates Bash
+    calls for the foreground rule and leaves file edits to the executor.
+    """
     return {"hooks": {"PreToolUse": [{
-        "matcher": "|".join(["Bash", *FILE_EDIT_TOOLS]),
+        "matcher": "Bash" if bash_only else "|".join(["Bash", *FILE_EDIT_TOOLS]),
         "hooks": [{"type": "command", "command": hook_command, "timeout": 60}],
     }]}}
 
 
 def prompt_note(policy: StagePolicy) -> str:
-    """What the agent is told about the table it runs under."""
+    """Claude -p guidance; active GitHub policies also explain their command table."""
+    foreground = (
+        "This is a dispatched Claude `-p` stage. Run every Bash command in "
+        "the foreground and wait for it to finish before returning the structured "
+        "result. Never use `run_in_background: true`. For a configured "
+        "verification command, do not set a timeout below 10 minutes; if "
+        "verification cannot finish within that limit, return an explicit "
+        "`BLOCKED` result with the timeout reason."
+    )
     if not policy.active:
-        return ""
+        return foreground
+
     verification = (
-        "The configured verification commands are " + ", ".join(
+        " The configured verification commands are " + ", ".join(
             f"`{command}`" for command in policy.verification_commands) + "."
         if policy.verification_commands else
-        "No test or verify command is configured for this repository, so no "
-        "verification command is available.")
+        " No test or verify command is configured for this repository, so no "
+        "verification command is available."
+    )
     tmpdir_note = (
         " For native dispatches, the actual per-dispatch TMPDIR path is "
         f"available with `{'rtk ' if policy.rtk else ''}printenv TMPDIR`."
@@ -1196,18 +1254,20 @@ def prompt_note(policy: StagePolicy) -> str:
     if choices:
         tmpdir_note += " Effective project choices: " + json.dumps(choices) + "."
     return (
-        f"Command policy for this {policy.role} stage: a runtime hook validates "
+        foreground +
+        f" Command policy for this {policy.role} stage: a runtime hook validates "
         "every Bash command against this stage's closed table. Run one simple "
         "command per call, without chaining, pipes, substitutions or redirections "
-        "other than into $TMPDIR. " + verification + " When a command you need is "
-        "denied, distinguish a forbidden operation from an unavailable executable. "
-        "For authorized source reads, use an available search alternative: "
-        "`git grep` or `grep`. Do not bypass a forbidden operation. Report its "
-        "exact command when no authorized path remains. "
-        "Explicit project tool, command and integration choices take precedence "
-        "over the built-in table; a table warning is informational only. "
-        "Write multiline temporary helpers with the native file-write tools, "
-        "then publish using --body-file; shell heredocs are unsupported." + tmpdir_note
+        "other than into $TMPDIR. " + verification +
+        " When a command you need is denied, distinguish a forbidden operation "
+        "from an unavailable executable. For authorized source reads, use an "
+        "available search alternative: `git grep` or `grep`. Do not bypass a "
+        "forbidden operation. Report its exact command when no authorized path "
+        "remains. Explicit project tool, command and integration choices take "
+        "precedence over the built-in table; a table warning is informational "
+        "only. Write multiline temporary helpers with the native file-write "
+        "tools, then publish using --body-file; shell heredocs are unsupported."
+        + tmpdir_note
     )
 
 
@@ -1513,14 +1573,16 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         policy = StagePolicy.from_json(Path(arguments[0]).read_text(encoding="utf-8"))
         event = json.loads(stdin.read())
         tool = event.get("tool_name")
+        if tool in FILE_EDIT_TOOLS and not policy.active:
+            return 0
         if tool in FILE_EDIT_TOOLS:
             decision = check_file_edit(tool, event.get("tool_input"), policy,
                                        cwd=event.get("cwd"))
         elif tool != "Bash":
             return 0
         else:
-            command = (event.get("tool_input") or {}).get("command")
-            decision = check(command, policy, cwd=event.get("cwd"))
+            decision = check_bash_tool_input(event.get("tool_input") or {}, policy,
+                                             cwd=event.get("cwd"))
     except Exception as error:
         print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: the stage policy "
                                    f"could not run ({type(error).__name__}). {DENY_ADVICE}"),

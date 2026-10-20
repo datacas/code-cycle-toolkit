@@ -1095,9 +1095,9 @@ def compose(role: str, repo_id: str, task_id: str, instruction: str = "",
     if instruction:
         parts.append(instruction)
     policed = command_policy is not None and command_policy.active
-    if policed:
+    if command_policy is not None:
         parts.append(prompt_note(command_policy))
-    elif role in {"implement", "resolve"} and allowed_test_command:
+    if not policed and role in {"implement", "resolve"} and allowed_test_command:
         parts.append(
             "For Claude writing stages, the repository permits this exact test "
             f"command: `{allowed_test_command}`. Run it verbatim; do not change "
@@ -2484,6 +2484,11 @@ def run_cycle(
             has_output = bool(result.agent_output.strip())
             code = "unreadable_result" if has_output else "no_error_report"
             detail = "no parseable structured stage result"
+            pending = result.artifacts.get("background_command")
+            if has_output and pending in {"confirmed", "suspected"}:
+                detail = ("background_command_pending: verification command did not "
+                          "complete before stage exit"
+                          + (" (suspected)" if pending == "suspected" else ""))
             if has_output:
                 detail += ": " + failure_excerpt(result.agent_output)
             outcome.result = replace(result, error_code=code,
