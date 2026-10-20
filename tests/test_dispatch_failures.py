@@ -117,6 +117,21 @@ class ExecutorFailureTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertIsNone(result.failure_code)
 
+    def test_claude_session_limit_dispatch_is_a_quota_failure(self):
+        output = stream(
+            {"type": "system", "subtype": "init", "session_id": "C"},
+            {"type": "result", "is_error": True,
+             "errors": ["You've hit your session limit · resets 2:50pm"]},
+        )
+        result = ex.ClaudeAdapter().dispatch(
+            TARGET, "work", cwd=tempfile.gettempdir(),
+            runner=lambda *a, **k: subprocess.CompletedProcess([], 0, output, ""),
+        )
+
+        self.assertEqual("quota", result.failure_code)
+        self.assertEqual("operating_quota", result.missing_capability)
+        self.assertEqual(ex.Availability.QUOTA_EXHAUSTED, result.learned_availability)
+
     def test_claude_stream_error_and_activity(self):
         output = stream({"type": "system", "subtype": "init", "session_id": "C"},
                         {"type": "result", "is_error": True, "errors": ["401 Unauthorized"]})
