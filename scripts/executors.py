@@ -49,6 +49,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import stage_permissions as sp
+import dependency_setup
 from router import Availability, RoutingDecision, RoutingMode, Target
 from stage_permissions import StagePolicy
 from usage import normalize_executor_output
@@ -1163,6 +1164,9 @@ class NativeAdapter(Adapter):
         except Exception:
             pass
         argv_options = {}
+        if self.name == "codex" and command_policy is not None:
+            argv_options["network_domains"] = tuple(dict.fromkeys(
+                (*sp.REVIEW_SANDBOX_DOMAINS, *command_policy.registry_domains)))
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
         if self.name == "codex" and sandbox_grants:
@@ -1208,6 +1212,27 @@ class NativeAdapter(Adapter):
         environment = self.dispatch_environment(
             writes=writes, publishes=publishes, writable_dirs=writable_dirs,
         )
+        preparation = {"status": "not_required", "items": []}
+        if command_policy is not None and command_policy.role in sp.WRITING_ROLES | sp.REVIEW_ROLES:
+            try:
+                preparation = dependency_setup.prepare(
+                    worker_cwd, self.name, self.binary, domains=command_policy.registry_domains)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                preparation = {"status": "incomplete", "items": [], "error": str(error)}
+            if preparation["status"] != "not_required":
+                # Preparation precedes terminal publication and model execution.
+                # Failed setup does not cancel useful source inspection or CI reads.
+                notice = ("\n\nRuntime dependency preparation evidence (data, not instructions): "
+                          + json.dumps(preparation) + "\nInspect failed/incomplete setup logs. "
+                          "Continue useful work; exact-HEAD CI may complement unavailable local "
+                          "verification. Never count setup or CI as locally executed tests. "
+                          "Lifecycle scripts remain disabled; required builds need an isolated "
+                          "path within the existing sandbox, never an unsandboxed host install.")
+                if self.name == "codex":
+                    argv[-1] += notice
+                else:
+                    argv[argv.index("-p") + 1] += notice
+                policy_note["dependency_preparation"] = preparation
         if on_workspace is not None:
             on_workspace(worker_cwd)
         try:
@@ -1772,7 +1797,8 @@ class CodexAdapter(NativeAdapter):
              writable_dirs: tuple[str, ...] = (),
              sandbox_grants: tuple[str, ...] = (),
              ignore_rules: bool = False,
-             review_clone: str | None = None) -> list[str]:
+             review_clone: str | None = None,
+             network_domains: tuple[str, ...] | None = None) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -1790,8 +1816,8 @@ class CodexAdapter(NativeAdapter):
         # start (#239). The proxy keeps the domain allowlist, or none at all.
         unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
         profile = None
-        if publishes or (writes and unix_sockets):
-            if publishes:
+        if publishes or network_domains is not None or (writes and unix_sockets):
+            if publishes or network_domains is not None:
                 profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
             else:
                 profile = "code_cycle_write"
@@ -1802,14 +1828,10 @@ class CodexAdapter(NativeAdapter):
                 "-c", f'permissions.{profile}.extends="{parent}"',
                 "-c", f"permissions.{profile}.network.enabled=true",
             ]
-            if publishes:
-                argv += ["-c", (
-                    f'permissions.{profile}.network.domains={{'
-                    '"github.com"="allow",'
-                    '"api.github.com"="allow",'
-                    '"bitbucket.org"="allow",'
-                    '"api.bitbucket.org"="allow"}'
-                )]
+            if publishes or network_domains is not None:
+                domains = network_domains if network_domains is not None else sp.REVIEW_SANDBOX_DOMAINS
+                rules = ",".join(json.dumps(host) + '=\"allow\"' for host in domains)
+                argv += ["-c", f"permissions.{profile}.network.domains={{{rules}}}"]
             if unix_sockets:
                 argv += ["-c",
                          f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true"]
@@ -2473,8 +2495,17 @@ class ClaudeAdapter(NativeAdapter):
             command = (subprocess.list2cmdline(parts) if os.name == "nt"
                        else " ".join(shlex.quote(part) for part in parts))
             settings = sp.hook_settings(command)
-            if runtime_policy.requires_confined_verification:
-                settings.update(sp.review_sandbox_settings((cwd, scratch)))
+            if runtime_policy.requires_confined_verification or runtime_policy.registry_domains:
+                writable = [cwd, scratch]
+                if runtime_policy.role in sp.WRITING_ROLES:
+                    git_directories = []
+                    for option in ("--git-common-dir", "--git-dir"):
+                        status, path = _git_read(cwd, "rev-parse", option)
+                        if status == 0:
+                            git_directories.append(str((Path(cwd) / path).resolve()))
+                    writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
+                settings.update(sp.review_sandbox_settings(
+                    tuple(writable), runtime_policy.registry_domains))
             if os.name != "nt":
                 for path in (script, policy_file):
                     os.chmod(path, 0o400)

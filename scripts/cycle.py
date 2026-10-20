@@ -866,7 +866,14 @@ class CycleRecorder:
                 elif not (blocker is not None and self.consent is not None
                           and self.consent.grant_for(blocker) is not None
                           and reason != "calibration"):
-                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}")
+                    diagnostic = ""
+                    if result.failure_code == "environment_restricted" and reason == "publication_changed":
+                        diagnostic = (
+                            "; this attempt already published: preserve that result and "
+                            "reconcile an explicit continuation before another executor runs. "
+                            "An alternative executor has not demonstrated recovery; this is "
+                            "an environment restriction, not model-quality evidence")
+                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}{diagnostic}")
             # Only when no executor could recover without a wider sandbox does
             # a person get asked: least privilege first.
             grant = (self.consent.grant_for(blocker)

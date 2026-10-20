@@ -93,8 +93,10 @@ THREAD_MUTATIONS = {
 #: In every denial reason, so the runtime can tell this hook's denials apart.
 HOOK_DENIAL_MARKER = "stage policy denied this command"
 
-DENY_ADVICE = ("If this stage needs that command, do not work around the policy: "
-               "stop BLOCKED and name the exact command so a person can grant it once.")
+DENY_ADVICE = ("Do not bypass a forbidden operation. For an authorized source read, "
+               "use an available permitted equivalent (git grep or grep). Explicit "
+               "project choices are authorization. If no authorized path remains, "
+               "report BLOCKED with the exact command and observed denial.")
 EDIT_DENY_ADVICE = ("No grant lifts this rule: finish without the edit, or stop BLOCKED "
                     "and say which file the stage needed to change.")
 
@@ -125,6 +127,11 @@ class StagePolicy:
     rtk: bool = False
     tmpdir: str | None = None
     fetch_origin: bool = True
+    # Explicit project choices are authorization, not suggestions to the table.
+    tools: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    integrations: tuple[str, ...] = ()
+    registry_domains: tuple[str, ...] = ()
 
     @property
     def active(self) -> bool:
@@ -173,6 +180,8 @@ class StagePolicy:
         if unknown:
             raise PolicyError(f"unknown stage policy keys: {', '.join(unknown)}")
         data["verify_prefixes"] = tuple(data.get("verify_prefixes") or ())
+        for key in ("tools", "commands", "integrations", "registry_domains"):
+            data[key] = tuple(data.get(key) or ())
         return cls(**data)
 
     def at_dispatch(self, *, tmpdir: str | None, rtk: bool, fetch_origin: bool,
@@ -467,6 +476,20 @@ class _DockerDenied(PolicyError):
 
 def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *,
                  cwd: str | None, run) -> None:
+    # User authorization never changes the publication or Git invariants.
+    guarded_program = os.path.basename(words[0]).removesuffix(".exe")
+    if guarded_program == "git":
+        return _check_git(words[1:], policy, cwd=cwd, run=run)
+    if guarded_program == "gh":
+        return _check_gh(words[1:], policy, cwd=cwd, run=run)
+    if guarded_program == "docker":
+        return _check_docker(words[1:], policy)
+    if words[0] in policy.tools:
+        return
+    for command in policy.commands:
+        expected = parse_command(command, None).words
+        if words[:len(expected)] == expected:
+            return
     for configured in policy.verification_commands:
         expected = configured.split()
         exact = configured == policy.test_command
@@ -485,12 +508,6 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
                 if word in FIND_FORBIDDEN:
                     raise PolicyError(f"find {word} runs, deletes or writes; it is not allowed")
         return
-    if program == "git":
-        return _check_git(words[1:], policy, cwd=cwd, run=run)
-    if program == "gh":
-        return _check_gh(words[1:], policy, cwd=cwd, run=run)
-    if program == "docker":
-        return _check_docker(words[1:], policy)
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
 
 
@@ -1109,9 +1126,11 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     if policy.role == "resolve":
         prefixes.append("gh api graphql")
     prefixes += sorted(READ_SHELL)
+    prefixes += list(policy.tools) + list(policy.commands)
     if policy.docker:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
     patterns = []
+    patterns.extend(policy.integrations)
     if policy.tmpdir:
         patterns.append("Bash(printenv TMPDIR:*)")
         if policy.rtk:
@@ -1132,6 +1151,8 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
             patterns += [f"Edit({root}/claude-*/{name})" for name in TMPDIR_HELPER_FILES]
             patterns += [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"]
+        patterns += [pattern.replace("Edit(", "Write(") for pattern in list(patterns)
+                     if pattern.startswith("Edit(")]
     return list(dict.fromkeys(patterns))
 
 
@@ -1169,14 +1190,24 @@ def prompt_note(policy: StagePolicy) -> str:
         " For native dispatches, the actual per-dispatch TMPDIR path is "
         f"available with `{'rtk ' if policy.rtk else ''}printenv TMPDIR`."
     )
+    choices = {key: getattr(policy, key) for key in
+               ("tools", "commands", "integrations", "registry_domains")
+               if getattr(policy, key)}
+    if choices:
+        tmpdir_note += " Effective project choices: " + json.dumps(choices) + "."
     return (
         f"Command policy for this {policy.role} stage: a runtime hook validates "
         "every Bash command against this stage's closed table. Run one simple "
         "command per call, without chaining, pipes, substitutions or redirections "
         "other than into $TMPDIR. " + verification + " When a command you need is "
-        "denied, do not try a variant or another tool to get around it: stop "
-        "BLOCKED and name the exact denied command, so a person can authorize it "
-        "and resume the cycle." + tmpdir_note
+        "denied, distinguish a forbidden operation from an unavailable executable. "
+        "For authorized source reads, use an available search alternative: "
+        "`git grep` or `grep`. Do not bypass a forbidden operation. Report its "
+        "exact command when no authorized path remains. "
+        "Explicit project tool, command and integration choices take precedence "
+        "over the built-in table; a table warning is informational only. "
+        "Write multiline temporary helpers with the native file-write tools, "
+        "then publish using --body-file; shell heredocs are unsupported." + tmpdir_note
     )
 
 
@@ -1436,7 +1467,8 @@ def preapproved_notice(tools, limit: int = NOTICE_LIMIT) -> str | None:
 REVIEW_SANDBOX_DOMAINS = ("github.com", "api.github.com", "bitbucket.org", "api.bitbucket.org")
 
 
-def review_sandbox_settings(writable: tuple[str, ...]) -> dict:
+def review_sandbox_settings(writable: tuple[str, ...],
+                            registry_domains: tuple[str, ...] = ()) -> dict:
     """Claude's Bash sandbox for a reviewer that verifies in its clone.
 
     A sandboxed command has no network route except the allowed domains, and a
@@ -1447,7 +1479,8 @@ def review_sandbox_settings(writable: tuple[str, ...]) -> dict:
         "failIfUnavailable": True,
         "allowUnsandboxedCommands": False,
         "filesystem": {"allowWrite": list(writable)},
-        "network": {"allowedDomains": list(REVIEW_SANDBOX_DOMAINS)},
+        "network": {"allowedDomains": list(dict.fromkeys(
+            (*REVIEW_SANDBOX_DOMAINS, *registry_domains)))},
     }}
 
 

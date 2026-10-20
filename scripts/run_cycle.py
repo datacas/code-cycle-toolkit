@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
 import ci_gate
+import user_choices
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
 from cycle_history import (
     COMMENT_STAGES,
@@ -141,7 +142,7 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
                          "resolve", "worktree_dir", "allowed_commands", "ci",
-                         "docker"})
+                         "docker", "user_choices"})
 
 #: The keys under `code_cycle.ci` (#228), all read by this driver.
 CI_KEYS = frozenset({"policy", "timeout"})
@@ -457,6 +458,10 @@ def load_config(path: Path) -> dict:
             f"{path}: code_cycle.docker.host_socket_access must be true or false")
 
     code_cycle = config.get("code_cycle") or {}
+    try:
+        user_choices.load(config)
+    except PolicyError as error:
+        raise CycleDriverError(f"{path}: {error}") from error
     if "allowed_commands" in code_cycle:
         allowed_commands = code_cycle["allowed_commands"]
         if not isinstance(allowed_commands, dict):
@@ -2159,6 +2164,7 @@ def run_cycle(
     comment_reader: Callable[[str, str, str | None], list[ProviderComment]] | None = None,
     allowed_test_command: str | None = None,
     allowed_verify_commands: tuple[str, ...] = (),
+    user_tool_choices: dict | None = None,
     base_branch: str | None = None,
     policy_code_host: str | None = None,
     history_remote: HistoryRemote | None = None,
@@ -2294,6 +2300,7 @@ def run_cycle(
             test_command=allowed_test_command,
             verify_prefixes=tuple(allowed_verify_commands),
             code_host=policy_host, issue_provider=policy_provider,
+            **(user_tool_choices or {}),
         )
 
     # The local history of the change request (#223). With a remote that can
@@ -4120,6 +4127,7 @@ def main(argv: list[str] | None = None) -> int:
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
                 allowed_test_command=allowed_test_command(config),
                 allowed_verify_commands=allowed_verify_commands(config),
+                user_tool_choices=user_choices.load(config),
                 base_branch=base_branch_of(config, args.cwd),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,

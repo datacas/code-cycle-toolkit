@@ -68,6 +68,20 @@ def uncertainty(**fields) -> dict:
     return value
 
 
+class EnvironmentContractTests(unittest.TestCase):
+    def test_complete_environment_blocker_matches_recovery_guidance(self):
+        blocker = {"kind": "sandbox_network_access", "command": "gh issue view 7",
+                   "error": "proxy denied api.github.com",
+                   "attempted": ["checked the configured proxy route"], "requires_human": False}
+        self.assertEqual([], ir.result_errors(result("BLOCKED", environment_blocker=blocker)))
+        for change in ({"attempted": []}, {"requires_human": True},
+                       {"resource": "bad resource"}, {"permission": "grant anything"}):
+            with self.subTest(change=change):
+                self.assertTrue(ir.result_errors(result(
+                    "BLOCKED", environment_blocker={**blocker, **change})))
+        self.assertTrue(ir.result_errors(result("READY", environment_blocker=blocker)))
+
+
 def question(**fields) -> dict:
     value = {"id": "Q-001", "prompt": "SECRET-PROSE what should the criterion observe?",
              "options": ["The exit status", "The printed report"],

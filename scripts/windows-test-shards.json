@@ -43,6 +43,7 @@
       "test_work_item_outcomes": 46.5
     },
     "unmeasured_modules": [
+      "test_dependency_setup",
       "test_host_permissions",
       "test_stage_dispatch",
       "test_stage_permissions",
@@ -63,6 +64,7 @@
     ],
     "windows-2": [
       "test_behavioral",
+      "test_dependency_setup",
       "test_environment_recovery",
       "test_issue_review",
       "test_jev_shadow",

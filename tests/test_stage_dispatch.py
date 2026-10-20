@@ -89,6 +89,35 @@ class DispatchTestCase(unittest.TestCase):
 
 
 class ClaudePolicyTests(DispatchTestCase):
+    def test_project_choices_reach_both_barriers_and_private_registry_profile(self) -> None:
+        def runner(argv, timeout=None, cwd=None, env=None):
+            settings = settings_of(argv)
+            command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            policy_path = Path(command.rsplit(" ", 1)[1].strip("'\""))
+            policy = sp.StagePolicy.from_json(policy_path.read_text())
+            patterns = argv[argv.index("--allowedTools") + 1:]
+            for tool in ("bespoke-search", "rg"):
+                self.assertIn(f"Bash({tool}:*)", patterns)
+                self.assertTrue(sp.check(f"{tool} -n evidence .", policy).allowed)
+            self.assertIn("mcp__company__query", patterns)
+            self.assertEqual(env["TMPDIR"], policy.tmpdir)
+            self.assertIn("packages.example.org", settings["sandbox"]["network"]["allowedDomains"])
+            helper = str(Path(policy.tmpdir) / "pr-comment.md")
+            self.assertTrue(sp.check_file_edit("Write", {"file_path": helper}, policy).allowed)
+            self.assertFalse(sp.check_file_edit("Write", {
+                "file_path": str(Path(policy.tmpdir).parent / "pr-comment.md")},
+                replace(policy, role="review")).allowed)
+            self.assertTrue(sp.check(f"gh pr comment 7 --repo owner/repo --body-file {helper}",
+                                     policy).allowed)
+            self.assertFalse(sp.check("gh pr merge 7 --repo owner/repo", policy).allowed)
+            return completed()
+        result = ex.ClaudeAdapter().dispatch(
+            CLAUDE, "implement it", cwd=str(self.repo), writes=True,
+            command_policy=self.policy(tools=("bespoke-search", "rg"),
+                                       integrations=("mcp__company__query",),
+                                       registry_domains=("packages.example.org",)), runner=runner)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+
     def test_a_writer_gets_its_table_and_a_hook_outside_its_workspace(self) -> None:
         seen = {}
 
@@ -481,7 +510,8 @@ class RuntimePolicyTests(unittest.TestCase):
         prompt = rc.compose("implement", "owner/api", "142", command_policy=policy)
         self.assertIn("closed table", prompt)
         self.assertIn("`python3 -m unittest`", prompt)
-        self.assertIn("name the exact denied command", prompt)
+        self.assertIn("available search alternative", prompt)
+        self.assertIn("Do not bypass a forbidden operation", prompt)
         inactive = rc.compose("implement", "owner/api", "142",
                               command_policy=replace(policy, code_host="bitbucket"),
                               allowed_test_command="python3 -m unittest")

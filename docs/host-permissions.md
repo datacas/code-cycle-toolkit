@@ -27,6 +27,12 @@ confined clone is never routed to Orca.
 
 ## The stage table
 
+The table is the default. Explicit `code_cycle.user_choices` extend executable,
+command and integration access without another confirmation; unknown names are
+not a reason to block. Git, code-host publication and Docker boundaries still
+apply. For authorized source reads, an unavailable preferred search tool can
+fall back to `git grep` or `grep`. See [project choices and preparation](dependency-preparation.md).
+
 | Stage | Reads | Writes and publication |
 |---|---|---|
 | every stage | `git status`, `diff`, `log`, `rev-parse`, `show`, `branch --show-current`; `gh issue view`, `pr view`, `pr checks`, `auth status`, `repo view`; `gh api user --jq .login`; `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `jq` | — |
@@ -163,8 +169,9 @@ their comment. When they may verify, they do it only in a disposable clone:
 - **Claude** runs in its detached clone with Claude Code's Bash sandbox passed
   by `--settings`: `failIfUnavailable`, no unsandboxed fallback, and
   `filesystem.allowWrite` limited to the clone and the dispatch's `TMPDIR`. Its
-  `network.allowedDomains` holds only the code hosts (`github.com`,
-  `api.github.com`, `bitbucket.org`, `api.bitbucket.org`), the same hosts the
+  `network.allowedDomains` holds the code hosts (`github.com`,
+  `api.github.com`, `bitbucket.org`, `api.bitbucket.org`) plus explicitly selected
+  registry domains, the same hosts the
   Codex review profile allows, so `gh` can read the change request and publish
   the comment. That route is open to any sandboxed command, including the code
   under review that a verification runs, and `gh`'s credentials are readable:
@@ -180,7 +187,8 @@ their comment. When they may verify, they do it only in a disposable clone:
   `sandbox.bwrapPath` and `sandbox.socatPath`. `/sandbox` inside Claude Code
   shows what is missing. This applies only to a Claude review or rereview that
   may verify, in a repository with `allowed_commands` configured; other stages
-  do not start the sandbox.
+  do not start the sandbox unless registry choices require the explicit profile.
+  A writer with registry choices also receives its scoped Git write directories.
 - **Codex** reviewers now get a disposable clone too, under a profile extending
   `:read-only` whose only writable paths are the clone and `TMPDIR`. Before the
   first such review the runtime proves it with the installed CLI
@@ -191,6 +199,12 @@ their comment. When they may verify, they do it only in a disposable clone:
 The clone and its `TMPDIR` are removed when the review ends. The review still
 publishes its comment with the user's `gh` credentials; no further secret is
 passed to it.
+
+Native writing/review stages prepare Node dependencies in a separate restricted
+sandbox before the agent starts. Preparation has registry-only networking,
+disabled lifecycle scripts, persistent evidence and bounded retries; it never
+inherits another revision's `node_modules`. Non-publishing Codex issue review
+receives explicit code-host read networking without publication rights.
 
 ## When a command is denied
 
