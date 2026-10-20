@@ -29,8 +29,10 @@ confined clone is never routed to Orca.
 
 The table is the default. Explicit `code_cycle.user_choices` extend executable,
 command and integration access without another confirmation; unknown names are
-not a reason to block. Git, code-host publication and Docker boundaries still
-apply. For authorized source reads, an unavailable preferred search tool can
+not a reason to block. Direct Git, code-host publication and Docker invocations
+still pass their guards. Selecting a wrapper, interpreter, arbitrary-code command
+or MCP integration trusts its nested operations; the command hook cannot enforce
+publication boundaries inside it. For authorized source reads, an unavailable preferred search tool can
 fall back to `git grep` or `grep`. See [project choices and preparation](dependency-preparation.md).
 
 | Stage | Reads | Writes and publication |
@@ -203,8 +205,10 @@ passed to it.
 Native writing/review stages prepare Node dependencies in a separate restricted
 sandbox before the agent starts. Preparation has registry-only networking,
 disabled lifecycle scripts, persistent evidence and bounded retries; it never
-inherits another revision's `node_modules`. Non-publishing Codex issue review
-receives explicit code-host read networking without publication rights.
+inherits another revision's `node_modules`. Non-publishing Codex stages receive
+no default code-host network route, because readable credentials would permit
+writes as well as reads. Issue review needs host-supplied context or host-side
+reads; explicitly selected registry domains do not add code-host domains.
 
 ## When a command is denied
 

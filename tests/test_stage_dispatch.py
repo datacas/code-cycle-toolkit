@@ -88,6 +88,99 @@ class DispatchTestCase(unittest.TestCase):
                                  "work_item_id": "142", "base_branch": "main", **fields})
 
 
+class DependencyPreparationDispatchTests(DispatchTestCase):
+    def test_preparation_role_gating_and_evidence_reach_each_native_prompt(self) -> None:
+        for executor, adapter_type, target in (("codex", ex.CodexAdapter, CODEX),
+                                                ("claude", ex.ClaudeAdapter, CLAUDE)):
+            for role in ("implement", "resolve", "review", "rereview",
+                         "issue_review", "security", "bootstrap"):
+                with self.subTest(executor=executor, role=role):
+                    expected = role in {"implement", "resolve", "review", "rereview"}
+                    report = {"status": "prepared", "items": [], "evidence": "fixture-report.json"}
+                    def runner(argv, **options):
+                        prompt = argv[-1] if executor == "codex" else argv[argv.index("-p") + 1]
+                        self.assertEqual(expected, "Runtime dependency preparation evidence" in prompt)
+                        if expected:
+                            self.assertIn(json.dumps(report), prompt)
+                        return completed('{"type":"turn.completed"}')
+                    with mock.patch.object(ex.dependency_setup, "prepare", return_value=report) as prepare:
+                        result = adapter_type().dispatch(
+                            target, "inspect fixture", cwd=str(self.repo),
+                            writes=role in {"implement", "resolve"},
+                            command_policy=self.policy(role, registry_domains=("packages.example.org",)),
+                            runner=runner)
+                    self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                    if expected:
+                        prepare.assert_called_once_with(str(self.repo), executor, executor,
+                                                        domains=("packages.example.org",))
+                        self.assertEqual(report, result.artifacts["dependency_preparation"])
+                    else:
+                        prepare.assert_not_called()
+                        self.assertNotIn("dependency_preparation", result.artifacts)
+
+    def test_preparation_exception_reaches_prompt_and_artifacts_without_skipping_agent(self) -> None:
+        for adapter, target in ((ex.CodexAdapter(), CODEX), (ex.ClaudeAdapter(), CLAUDE)):
+            with self.subTest(executor=adapter.name):
+                seen = []
+                def runner(argv, **options):
+                    prompt = argv[-1] if adapter.name == "codex" else argv[argv.index("-p") + 1]
+                    seen.append(prompt)
+                    self.assertIn('"status": "incomplete"', prompt)
+                    self.assertIn("fixture setup unavailable", prompt)
+                    return completed('{"type":"turn.completed"}')
+                with mock.patch.object(ex.dependency_setup, "prepare",
+                                       side_effect=OSError("fixture setup unavailable")):
+                    result = adapter.dispatch(target, "inspect fixture", cwd=str(self.repo),
+                                              writes=True, command_policy=self.policy(), runner=runner)
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                self.assertEqual(1, len(seen))
+                self.assertEqual({"status": "incomplete", "items": [],
+                                  "error": "fixture setup unavailable"},
+                                 result.artifacts["dependency_preparation"])
+
+    def test_codex_nonpublishing_dispatches_do_not_get_default_code_host_domains(self) -> None:
+        # Includes local-only implement/resolve and inactive command policies.
+        for role in ("implement", "resolve", "review", "rereview", "issue_review", "security", "bootstrap"):
+            for active in (True, False):
+                for registry_domains in ((), ("packages.example.org",)):
+                    with self.subTest(role=role, active=active, registries=registry_domains):
+                        seen = []
+                        def runner(argv, **options):
+                            seen.extend(argv)
+                            return completed('{"type":"turn.completed"}')
+                        result = ex.CodexAdapter().dispatch(
+                            CODEX, "inspect supplied context", cwd=str(self.repo),
+                            writes=role in {"implement", "resolve"}, publishes=False,
+                            review_clone=str(self.repo) if role in {"review", "rereview"} else None,
+                            command_policy=self.policy(role, code_host="github" if active else "bitbucket",
+                                                       registry_domains=registry_domains), runner=runner)
+                        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                        for domain in sp.REVIEW_SANDBOX_DOMAINS:
+                            self.assertNotIn(domain, " ".join(seen))
+                        self.assertNotIn("code_cycle_publish", " ".join(seen))
+                        if registry_domains:
+                            self.assertIn('"packages.example.org"="allow"', " ".join(seen))
+                            self.assertIn("code_cycle_registry", " ".join(seen))
+                        else:
+                            self.assertFalse(any(".network.enabled=true" in arg for arg in seen))
+                            if role in {"review", "rereview"}:
+                                self.assertIn('default_permissions="code_cycle_review_read"', seen)
+
+    def test_codex_publishing_dispatch_keeps_code_host_and_registry_domains(self) -> None:
+        seen = []
+        def runner(argv, **options):
+            seen.extend(argv)
+            return completed('{"type":"turn.completed"}')
+        result = ex.CodexAdapter().dispatch(
+            CODEX, "resolve fixture", cwd=str(self.repo), writes=True, publishes=True,
+            command_policy=self.policy("resolve", registry_domains=("packages.example.org",)),
+            runner=runner)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        for domain in (*sp.REVIEW_SANDBOX_DOMAINS, "packages.example.org"):
+            self.assertIn(json.dumps(domain) + '="allow"', " ".join(seen))
+        self.assertIn('default_permissions="code_cycle_publish_write"', seen)
+
+
 class ClaudePolicyTests(DispatchTestCase):
     def test_project_choices_reach_both_barriers_and_private_registry_profile(self) -> None:
         def runner(argv, timeout=None, cwd=None, env=None):
@@ -107,7 +200,7 @@ class ClaudePolicyTests(DispatchTestCase):
             self.assertFalse(sp.check_file_edit("Write", {
                 "file_path": str(Path(policy.tmpdir).parent / "pr-comment.md")},
                 replace(policy, role="review")).allowed)
-            self.assertTrue(sp.check(f"gh pr comment 7 --repo owner/repo --body-file {helper}",
+            self.assertTrue(sp.check(f"gh pr comment 7 --repo owner/repo --body-file {json.dumps(helper)}",
                                      policy).allowed)
             self.assertFalse(sp.check("gh pr merge 7 --repo owner/repo", policy).allowed)
             return completed()

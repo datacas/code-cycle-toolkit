@@ -75,9 +75,22 @@ the effective source policy with PR-controlled configuration.
 
 Claude receives both the allowed-tool patterns and the command hook policy.
 Codex retains normal tools/MCP access and receives the matching explicit network
-profile, including code-host reads for non-publishing issue review. Choices do
-not grant force-pushes, merges, remote-ref deletion, base-branch modification or
-publication outside the current stage. Actual command execution can still fail.
+profile. Default code-host domains are granted only to publishing stages;
+non-publishing stages, including issue review and local-only writers, receive
+only explicitly selected registry domains. Issue review must use host-supplied
+issue context; missing context requires host-side reads, not a worker route
+with write-capable credentials. Registry choices alone do not select a publication
+profile.
+
+The command hook checks direct Git, code-host and Docker invocations before
+applying choices. Selecting an interpreter, wrapper or arbitrary-code runner
+(such as `python3`, `bash`, `env`, `xargs` or `npx`), a command prefix that runs
+code, or an MCP integration trusts everything that tool can execute. The hook
+does not inspect nested commands or tool implementations: those selections can
+bypass the command publication boundary, including force-push and merge guards.
+The user must trust the selected tool and scope its own credentials and access.
+Stages remain instructed to obey their publication contract, and OS sandbox
+restrictions still apply. Actual command execution can still fail.
 
 For an unselected/unavailable preferred search executable, an authorized source
 read can use `git grep` or `grep`. A forbidden operation cannot use another tool

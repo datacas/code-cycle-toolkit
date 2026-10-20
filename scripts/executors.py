@@ -1165,8 +1165,13 @@ class NativeAdapter(Adapter):
             pass
         argv_options = {}
         if self.name == "codex" and command_policy is not None:
+            # A domain grant also exposes readable code-host credentials. Only
+            # publishing stages get that route; a command table is not a
+            # read-only HTTP boundary for Codex. Issue context must be supplied
+            # by the host rather than opening its write-capable credentials.
             argv_options["network_domains"] = tuple(dict.fromkeys(
-                (*sp.REVIEW_SANDBOX_DOMAINS, *command_policy.registry_domains)))
+                (*(sp.REVIEW_SANDBOX_DOMAINS if publishes else ()),
+                 *command_policy.registry_domains)))
         if self.name == "codex" and writable_dirs:
             argv_options["writable_dirs"] = writable_dirs
         if self.name == "codex" and sandbox_grants:
@@ -1816,9 +1821,11 @@ class CodexAdapter(NativeAdapter):
         # start (#239). The proxy keeps the domain allowlist, or none at all.
         unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
         profile = None
-        if publishes or network_domains is not None or (writes and unix_sockets):
-            if publishes or network_domains is not None:
+        if publishes or network_domains or (writes and unix_sockets):
+            if publishes:
                 profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+            elif network_domains:
+                profile = "code_cycle_registry_write" if writes else "code_cycle_registry_read"
             else:
                 profile = "code_cycle_write"
             parent = ":workspace" if writes else ":read-only"
@@ -1828,8 +1835,10 @@ class CodexAdapter(NativeAdapter):
                 "-c", f'permissions.{profile}.extends="{parent}"',
                 "-c", f"permissions.{profile}.network.enabled=true",
             ]
-            if publishes or network_domains is not None:
-                domains = network_domains if network_domains is not None else sp.REVIEW_SANDBOX_DOMAINS
+            if publishes or network_domains:
+                domains = tuple(dict.fromkeys(
+                    (*(sp.REVIEW_SANDBOX_DOMAINS if publishes else ()),
+                     *(network_domains or ()))))
                 rules = ",".join(json.dumps(host) + '=\"allow\"' for host in domains)
                 argv += ["-c", f"permissions.{profile}.network.domains={{{rules}}}"]
             if unix_sockets:

@@ -83,7 +83,13 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
     if executor == "codex":
         profile = "code_cycle_prepare"
         rules = {str(path): "write" for path in writable}
-        rules.update({str(path): "read" for path in protected})
+        # :read-only already protects the rest of the checkout. Serialising
+        # every tracked source file here can exceed the OS per-argument limit.
+        # Keep exceptions inside writable roots, and tracked ancestors that
+        # must prevent a writable output from replacing a source file.
+        rules.update({str(path): "read" for path in protected
+                      if any(path.is_relative_to(output) or output.is_relative_to(path)
+                             for output in writable)})
         filesystem = "{" + ",".join(json.dumps(key) + "=" + json.dumps(value)
                                     for key, value in rules.items()) + "}"
         network = "{" + ",".join(json.dumps(host) + '=\"allow\"' for host in domains) + "}"

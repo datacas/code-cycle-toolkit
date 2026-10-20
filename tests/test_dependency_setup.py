@@ -86,7 +86,9 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(before, self.git("status", "--porcelain"))
         self.assertTrue(Path(result["evidence"]).is_file())
         for argv, options in self.calls:
-            self.assertIn(str(self.root / "apps/web/node_modules"), " ".join(argv))
+            self.assertIn(json.dumps(str(self.root / "apps/web/node_modules")) + '="write"',
+                          next(arg for arg in argv if arg.startswith(
+                              "permissions.code_cycle_prepare.filesystem=")))
             self.assertIn("registry.npmjs.org", " ".join(argv))
             self.assertEqual("true", options["env"]["npm_config_ignore_scripts"])
             self.assertNotIn("GITHUB_TOKEN", options["env"])
@@ -98,6 +100,35 @@ class SetupTests(unittest.TestCase):
         self.assertEqual("failed", result["items"][0]["status"])
         self.assertNotIn("tests", result)
         self.assertEqual(2, len(self.calls))
+
+    def test_large_tracked_source_tree_does_not_inflate_codex_filesystem_argument(self):
+        # This source listing alone exceeded Linux's 128 KiB argv-entry limit.
+        source = self.root / "src"
+        source.mkdir()
+        for index in range(3000):
+            (source / f"component-{index:05d}-with-a-descriptive-name.js").touch()
+        (self.root / ".yarn").mkdir()
+        protected = self.root / ".yarn/tracked-plugin.cjs"
+        protected.write_text("tracked plugin")
+        self.git("add", ".")
+        result = self.prepare()
+        self.assertEqual("prepared", result["status"])
+        for argv, _ in self.calls:
+            filesystem = next(arg for arg in argv if arg.startswith(
+                "permissions.code_cycle_prepare.filesystem="))
+            self.assertLess(len(filesystem.encode()), 16 * 1024)
+            self.assertNotIn("component-", filesystem)
+            self.assertIn(json.dumps(str(protected)) + '="read"', filesystem)
+            self.assertIn(json.dumps(str(self.root / "apps/web/node_modules")) + '="write"', filesystem)
+            self.assertIn('permissions.code_cycle_prepare.extends=":read-only"', argv)
+
+    def test_codex_protects_tracked_ancestors_of_writable_outputs(self):
+        ancestor = self.root / ".yarn"
+        argv = ds.sandbox_command(
+            "codex", "codex", ["npm", "--version"],
+            writable=[ancestor / "cache"], protected=[ancestor], domains=(),
+            settings=Path(self.temp.name) / "settings.json")
+        self.assertIn(json.dumps(str(ancestor)) + '="read"', " ".join(argv))
 
     def test_rereview_reuses_only_same_head_and_present_package_local_outputs(self):
         self.prepare()
@@ -183,15 +214,31 @@ class SetupTests(unittest.TestCase):
             for executor in ("codex", "claude"):
                 with self.subTest(role=role, executor=executor):
                     adapter = ex.CodexAdapter() if executor == "codex" else ex.ClaudeAdapter()
+                    adapter.binary = str(binary)
+                    target = Target(executor, "openai" if executor == "codex" else "anthropic",
+                                    "test", "medium")
+                    real_prepare = ds.prepare
                     def review(prompt, clone):
                         self.assertFalse((Path(clone) / "apps/web/node_modules").exists())
-                        report = ds.prepare(clone, executor, str(binary),
-                                            evidence_root=self.evidence)
+                        def prepare(*args, **kwargs):
+                            self.assertEqual(clone, args[0])
+                            return real_prepare(*args, **kwargs, evidence_root=self.evidence)
+                        def runner(argv, **options):
+                            self.assertEqual(clone, options["cwd"])
+                            self.assertTrue((Path(clone) / "apps/web/node_modules").is_dir())
+                            notice = argv[-1] if executor == "codex" else argv[argv.index("-p") + 1]
+                            self.assertIn("Runtime dependency preparation evidence", notice)
+                            self.assertIn(source_head, notice)
+                            return subprocess.CompletedProcess(argv, 0, '{"type":"turn.completed"}', "")
+                        with patch.object(ds, "prepare", side_effect=prepare) as called:
+                            result = adapter.dispatch(
+                                target, prompt, cwd=clone,
+                                command_policy=sp.StagePolicy(role=role), runner=runner)
+                        called.assert_called_once()
+                        report = result.artifacts["dependency_preparation"]
                         self.assertEqual("prepared", report["status"])
                         self.assertEqual(source_head, report["items"][0]["head_sha"])
-                        self.assertTrue((Path(clone) / "apps/web/node_modules").is_dir())
-                        return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, executor, target,
-                                                 artifacts={"dependency_preparation": report})
+                        return result
                     with patch.object(ds.shutil, "which", return_value=str(binary)):
                         result = ex._isolated_review_dispatch(
                             adapter, target, role, cwd=str(self.root), dispatch_call=review,
@@ -222,11 +269,11 @@ class ChoiceTests(unittest.TestCase):
             with self.assertRaises(sp.PolicyError):
                 user_choices.load({"code_cycle": {"user_choices": choices}})
 
-    def test_nonpublishing_codex_has_code_host_route_and_registry_choice(self):
+    def test_nonpublishing_codex_registry_choice_does_not_grant_code_host_route(self):
         target = Target("codex", "openai", "test", "medium")
         argv = ex.CodexAdapter().argv(
-            target, "read issue", network_domains=(*sp.REVIEW_SANDBOX_DOMAINS,
-                                                   "packages.example.org"))
-        self.assertIn("api.github.com", " ".join(argv))
+            target, "read supplied issue context", network_domains=("packages.example.org",))
+        for host in sp.REVIEW_SANDBOX_DOMAINS:
+            self.assertNotIn(host, " ".join(argv))
         self.assertIn("packages.example.org", " ".join(argv))
-        self.assertIn('permissions.code_cycle_publish_read.extends=":read-only"', argv)
+        self.assertIn('permissions.code_cycle_registry_read.extends=":read-only"', argv)
