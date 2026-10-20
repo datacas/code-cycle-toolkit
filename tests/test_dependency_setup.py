@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -56,9 +57,17 @@ class SetupTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
         if self.failures:
             return subprocess.CompletedProcess(argv, 1, "", self.failures.pop(0))
-        for directory in (self.root, self.root / "apps/web"):
+        for directory in (Path(options["cwd"]), Path(options["cwd"]) / "apps/web"):
             (directory / "node_modules").mkdir(exist_ok=True)
         return subprocess.CompletedProcess(argv, 0, "installed\n", "")
+
+    def filesystem(self, argv):
+        return next(arg for arg in argv if arg.startswith(
+            "permissions.code_cycle_prepare.filesystem="))
+
+    def writable(self, argv):
+        return [Path(json.loads(key)) for key in
+                re.findall(r'("(?:[^"\\]|\\.)*")="write"', self.filesystem(argv))]
 
     def prepare(self):
         return ds.prepare(str(self.root), "codex", "codex", runner=self.runner,
@@ -86,10 +95,11 @@ class SetupTests(unittest.TestCase):
         self.assertEqual("ECONNRESET", Path(item["attempts"][1]["stderr"]).read_text())
         self.assertEqual(before, self.git("status", "--porcelain"))
         self.assertTrue(Path(result["evidence"]).is_file())
+        self.assertTrue((self.root / "apps/web/node_modules").is_dir())
         for argv, options in self.calls:
-            self.assertIn(json.dumps(str(self.root / "apps/web/node_modules")) + '="write"',
-                          next(arg for arg in argv if arg.startswith(
-                              "permissions.code_cycle_prepare.filesystem=")))
+            self.assertTrue(self.writable(argv))
+            self.assertFalse([path for path in self.writable(argv) if path.is_relative_to(self.root)])
+            self.assertFalse(Path(options["cwd"]).is_relative_to(self.root))
             self.assertIn("registry.npmjs.org", " ".join(argv))
             self.assertEqual("true", options["env"]["npm_config_ignore_scripts"])
             self.assertNotIn("GITHUB_TOKEN", options["env"])
@@ -102,37 +112,77 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("tests", result)
         self.assertEqual(2, len(self.calls))
 
-    def test_missing_outputs_exist_before_the_native_sandbox_grants_writes(self):
-        # Codex binds only existing write roots: npm ci then failed with
-        # ENOENT mkdir node_modules under the read-only checkout.
-        missing = []
+    def test_install_runs_in_a_scratch_copy_and_replaces_checkout_outputs(self):
+        # Codex mounts a protected .agents inside every writable root, and
+        # npm ci failed with EBUSY emptying such a node_modules. The checkout
+        # gets no write grant; finished outputs move in from the scratch copy.
+        stale = self.root / "apps/web/node_modules/stale.js"
+        stale.parent.mkdir()
+        stale.write_text("stale")
+        seen = []
         def runner(argv, **options):
             command = argv[argv.index("--") + 1:]
-            if command[-1] == "--version":
-                return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
-            missing.extend(str(path) for path in (self.root / "node_modules",
-                                                  self.root / "apps/web/node_modules")
-                           if not path.is_dir())
-            return subprocess.CompletedProcess(argv, 0, "installed\n", "")
+            if command[-1] != "--version":
+                cwd = Path(options["cwd"])
+                seen.append(sorted(str(path.relative_to(cwd)) for path in cwd.rglob("*")))
+                (cwd / "node_modules/.agents").mkdir(parents=True)
+                (cwd / "node_modules/is-number").mkdir()
+                (cwd / "apps/web/node_modules/local").mkdir(parents=True)
+            return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
         result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
                             evidence_root=self.evidence, sleep=lambda _: None)
-        self.assertEqual([], missing)
-        self.assertEqual("prepared", result["status"])
-        self.assertFalse((self.root / ".yarn").exists())
+        self.assertEqual("prepared", result["status"], result)
+        self.assertEqual([[".gitignore", "apps", "apps/web", "apps/web/package.json",
+                           "package.json", "pnpm-lock.yaml"]], seen)
+        self.assertTrue((self.root / "node_modules/is-number").is_dir())
+        self.assertTrue((self.root / "apps/web/node_modules/local").is_dir())
+        self.assertFalse(stale.exists())
 
-    def test_empty_precreated_output_is_not_a_successful_install(self):
+    def test_failed_install_leaves_checkout_outputs_untouched(self):
+        existing = self.root / "node_modules/kept.js"
+        existing.parent.mkdir()
+        existing.write_text("kept")
+        self.failures = ["invalid credentials", "invalid credentials"]
+        self.assertEqual("incomplete", self.prepare()["status"])
+        self.assertEqual("kept", existing.read_text())
+        self.assertFalse((self.root / "apps/web/node_modules").exists())
+
+    def test_yarn_publishes_only_untracked_generated_outputs(self):
+        (self.root / "pnpm-lock.yaml").unlink()
+        (self.root / "yarn.lock").write_text("# yarn lockfile v1\n")
+        release = self.root / ".yarn/releases/yarn.cjs"
+        release.parent.mkdir(parents=True)
+        release.write_text("tracked release")
+        self.git("add", "-A")
+        def runner(argv, **options):
+            command = argv[argv.index("--") + 1:]
+            if command[-1] != "--version":
+                cwd = Path(options["cwd"])
+                (cwd / ".yarn/releases/yarn.cjs").write_text("rewritten")
+                (cwd / ".yarn/install-state.gz").write_text("state")
+                (cwd / ".pnp.cjs").write_text("pnp")
+            return subprocess.CompletedProcess(argv, 0, "4.1.0\n", "")
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual("prepared", result["status"], result)
+        self.assertEqual("tracked release", release.read_text())
+        self.assertEqual("state", (self.root / ".yarn/install-state.gz").read_text())
+        self.assertEqual("pnp", (self.root / ".pnp.cjs").read_text())
+
+    def test_placeholder_only_output_is_not_a_successful_install(self):
         (self.root / "package.json").write_text(json.dumps(
             {"name": "fixture", "dependencies": {"is-number": "7.0.0"}}))
         self.git("add", ".")
         def runner(argv, **options):
             version = argv[-1] == "--version"
             if not version:
-                (self.root / "node_modules/.agents").mkdir()
+                (Path(options["cwd"]) / "node_modules/.agents").mkdir(parents=True)
             return subprocess.CompletedProcess(argv, 0, "9.1.0\n" if version else "", "")
         result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
                             evidence_root=self.evidence, sleep=lambda _: None)
         self.assertEqual("incomplete", result["status"])
         self.assertIn("without required dependency outputs", result["items"][0]["error"])
+        self.assertFalse((self.root / "node_modules").exists())
 
     def test_large_tracked_source_tree_does_not_inflate_codex_filesystem_argument(self):
         # This source listing alone exceeded Linux's 128 KiB argv-entry limit.
@@ -146,14 +196,15 @@ class SetupTests(unittest.TestCase):
         self.git("add", ".")
         result = self.prepare()
         self.assertEqual("prepared", result["status"])
-        for argv, _ in self.calls:
-            filesystem = next(arg for arg in argv if arg.startswith(
-                "permissions.code_cycle_prepare.filesystem="))
+        for argv, options in self.calls:
+            filesystem = self.filesystem(argv)
             self.assertLess(len(filesystem.encode()), 16 * 1024)
             self.assertNotIn("component-", filesystem)
-            self.assertIn(json.dumps(str(protected)) + '="read"', filesystem)
-            self.assertIn(json.dumps(str(self.root / "apps/web/node_modules")) + '="write"', filesystem)
+            self.assertNotIn(str(protected), filesystem)
+            self.assertIn(json.dumps(str(Path(options["cwd"]) / "pnpm-lock.yaml")) + '="read"',
+                          filesystem)
             self.assertIn('permissions.code_cycle_prepare.extends=":read-only"', argv)
+        self.assertEqual("tracked plugin", protected.read_text())
 
     def test_codex_protects_tracked_ancestors_of_writable_outputs(self):
         ancestor = self.root / ".yarn"

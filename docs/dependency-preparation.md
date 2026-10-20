@@ -16,19 +16,27 @@ with lifecycle scripts disabled:
 
 Conflicting managers or a mismatched declared version are reported rather than
 silently installing with another manager. Workspace package manifests determine
-package-local writable dependency directories, including `apps/web/node_modules`.
+the package-local dependency directories, including `apps/web/node_modules`.
 Independent nested lock roots are prepared separately. PnP outputs are supported.
 
 Preparation runs through `codex sandbox` for Codex, and the installed `srt`
 (Anthropic sandbox runtime) for Claude. Neither path falls back to a host install.
-The sandbox grants only dependency outputs and its isolated scratch/cache paths,
-keeps tracked files and Git metadata read-only, and permits the npm/Yarn registry
+The install runs in a scratch copy of the lock root's tracked files. The sandbox
+can write only that scratch directory and the download cache; the lockfile and
+manifests stay read-only there too. The checkout and its Git metadata are never
+writable. Codex mounts protected placeholders (`.agents`, `.codex`, `.git`) inside
+every writable root, and `npm ci` cannot empty a `node_modules` that holds one.
+After a successful frozen install, the host moves each package's `node_modules`
+into the checkout, replacing the previous one, and does the same for untracked
+Yarn outputs (`.pnp.cjs`, `.pnp.loader.mjs`, untracked `.yarn` entries). A failed
+install leaves the checkout's outputs untouched. The sandbox permits the npm/Yarn registry
 hosts plus explicitly declared private registry hosts. Credentials are not copied
 into scratch and credential environment variables are not inherited. Registry
 authentication that is not available in this environment is a concrete setup
 failure, not a successful install or a model failure.
 
-The host must supply the selected native sandbox and package manager. Missing
+The host must supply the selected native sandbox and package manager. On Linux,
+`srt` refuses to start without `rg` (ripgrep) on the `PATH`. Missing
 binaries and sandbox startup failures are recorded. The runtime tries transient
 failures/timeouts at most twice, reaps timed-out process groups before retrying,
 and continues the stage with the setup evidence when preparation is exhausted.

@@ -132,6 +132,59 @@ def _populated(path: Path) -> bool:
     return path.is_dir() and any(not entry.name.startswith(".") for entry in path.iterdir())
 
 
+def _stage(root: Path, project: Path, names: list[str], inputs: list[Path], stage: Path) -> Path:
+    """Copy the project's sources so the install never writes the checkout.
+
+    Codex mounts protected placeholders (.agents, .codex, .git) inside every
+    writable root, and npm ci cannot empty a node_modules holding a mount
+    point. Only the scratch copy is writable; the checkout stays read-only.
+    """
+    for source in [*(root / name for name in names), *inputs]:
+        if not source.is_relative_to(project) or not (source.is_file() or source.is_symlink()):
+            continue
+        target = stage / source.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            continue
+        if source.is_symlink():
+            os.symlink(os.readlink(source), target)
+        else:
+            shutil.copy2(source, target)
+    return stage / project.relative_to(root)
+
+
+def _replace(source: Path, target: Path) -> None:
+    """Move a finished output from the scratch copy; never follow links."""
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.exists():
+        shutil.rmtree(target)
+    if source.is_symlink() or source.exists():
+        shutil.move(str(source), str(target))
+
+
+def _publish(staged: Path, project: Path, outputs: list[Path], tracked: set[Path]) -> None:
+    """Replace each package's node_modules, as a frozen install does.
+
+    Yarn writes into .yarn beside tracked releases or plugins; only its
+    untracked entries and untracked PnP files are generated outputs.
+    """
+    for output in outputs:
+        _replace(staged / output.relative_to(project), output)
+        # A package without dependencies may get none; a rereview's reuse
+        # check still expects every package-local output to exist.
+        output.mkdir(exist_ok=True)
+    for name in (".pnp.cjs", ".pnp.loader.mjs"):
+        if (staged / name).is_file() and project / name not in tracked:
+            _replace(staged / name, project / name)
+    if (staged / ".yarn").is_dir():
+        (project / ".yarn").mkdir(exist_ok=True)
+        for entry in (staged / ".yarn").iterdir():
+            target = project / ".yarn" / entry.name
+            if not any(path == target or path.is_relative_to(target) for path in tracked):
+                _replace(entry, target)
+
+
 def _installed_digest(outputs: list[Path]) -> str:
     """Verify the cached tree itself, including pnpm's real .pnpm contents."""
     digest = hashlib.sha256()
@@ -189,8 +242,8 @@ def prepare(cwd: str, executor: str, binary: str, *,
                           capture_output=True, text=True, timeout=30, check=True).stdout.strip()
     tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root,
                              capture_output=True, text=True, timeout=30, check=True).stdout
-    protected = [root / name for name in tracked.split("\0") if name]
-    protected.append(root / ".git")
+    names = [name for name in tracked.split("\0") if name]
+    tracked_paths = {root / name for name in names}
     for index, (project, manager, lock) in enumerate(plans):
         item = {"cwd": str(project), "head_sha": head, "manager": manager,
                 "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
@@ -217,10 +270,12 @@ def prepare(cwd: str, executor: str, binary: str, *,
                 env.update(HOME=str(scratch), TMPDIR=str(scratch), CI="true",
                            COREPACK_ENABLE_DOWNLOAD_PROMPT="0", COREPACK_HOME=str(scratch / "corepack"),
                            YARN_ENABLE_SCRIPTS="false", npm_config_ignore_scripts="true")
-                writable = [scratch, *outputs]
-                # Yarn PnP and install state are outputs too. Tracked files
-                # remain read-only, even within these directories.
-                writable += generated
+                staged = _stage(root, project, names, inputs, scratch / "tree")
+                staged_inputs = [staged / path.relative_to(project) for path in inputs]
+                # Nothing in the checkout is writable. The lockfile and
+                # manifests stay read-only in the copy as well.
+                writable = [scratch]
+                protected = staged_inputs
                 def run(command, label, timeout):
                     record = {"command": command}
                     item["attempts"].append(record)
@@ -229,7 +284,7 @@ def prepare(cwd: str, executor: str, binary: str, *,
                                                protected=protected, domains=tuple(dict.fromkeys(
                                                    (*REGISTRIES, *domains))), settings=scratch / "sandbox.json")
                         record["sandbox_command"] = argv
-                        result = runner(argv, cwd=project, env=env, capture_output=True,
+                        result = runner(argv, cwd=staged, env=env, capture_output=True,
                                         text=True, timeout=timeout, stdin=subprocess.DEVNULL)
                         code, stdout, stderr = result.returncode, _text(result.stdout), _text(result.stderr)
                     except subprocess.TimeoutExpired as error:
@@ -273,11 +328,6 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         item.update(status="prepared", reused=True)
                         continue
                 env["YARN_CACHE_FOLDER"] = str(cache)
-                # A native sandbox grants writes only to paths that exist; a
-                # missing node_modules stays under the read-only checkout and
-                # the manager cannot create it. Paths were checked above.
-                for output in [*outputs, *([project / ".yarn"] if manager == "yarn" else [])]:
-                    output.mkdir(exist_ok=True)
                 command = install_command(manager, version, cache)
                 for attempt in range(2):
                     code, stdout, stderr = run(command, f"install-{attempt + 1}", 600)
@@ -286,18 +336,24 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         break
                     if attempt == 0:
                         sleep(1)
-                if _digest(inputs) != fingerprint:
+                if _digest(inputs) != fingerprint or _digest(staged_inputs) != fingerprint:
                     raise ValueError("preparation changed the lockfile or package manifests")
                 if code != 0:
                     raise ValueError(f"frozen install failed with exit {code}")
-                required_outputs = [path.parent / "node_modules" for path in packages
+                required_outputs = [staged / path.parent.relative_to(project) / "node_modules"
+                                    for path in packages
                                     if any(_manifest(path).get(key) for key in
                                            ("dependencies", "devDependencies", "optionalDependencies"))]
-                # Outputs were pre-created, so an empty directory is no install.
-                if (required_outputs and not (project / ".pnp.cjs").is_file()
+                # Neither an empty directory nor a sandbox placeholder is an install.
+                if (required_outputs and not (staged / ".pnp.cjs").is_file()
                         and (any(not _populated(output) for output in required_outputs)
-                             if manager == "pnpm" else not _populated(project / "node_modules"))):
+                             if manager == "pnpm" else not _populated(staged / "node_modules"))):
                     raise ValueError("frozen install returned success without required dependency outputs")
+                # Output paths were checked above; check again before host writes.
+                if any(path.is_symlink() or not path.resolve().is_relative_to(root)
+                       for path in [*outputs, *generated]):
+                    raise ValueError("dependency output path escapes the checkout")
+                _publish(staged, project, outputs, tracked_paths)
                 # Disabled lifecycle scripts can leave native modules incomplete.
                 needs_build = []
                 installed = list(project.glob("node_modules/*/package.json"))
