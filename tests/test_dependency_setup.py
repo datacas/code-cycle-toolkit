@@ -102,6 +102,38 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("tests", result)
         self.assertEqual(2, len(self.calls))
 
+    def test_missing_outputs_exist_before_the_native_sandbox_grants_writes(self):
+        # Codex binds only existing write roots: npm ci then failed with
+        # ENOENT mkdir node_modules under the read-only checkout.
+        missing = []
+        def runner(argv, **options):
+            command = argv[argv.index("--") + 1:]
+            if command[-1] == "--version":
+                return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
+            missing.extend(str(path) for path in (self.root / "node_modules",
+                                                  self.root / "apps/web/node_modules")
+                           if not path.is_dir())
+            return subprocess.CompletedProcess(argv, 0, "installed\n", "")
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual([], missing)
+        self.assertEqual("prepared", result["status"])
+        self.assertFalse((self.root / ".yarn").exists())
+
+    def test_empty_precreated_output_is_not_a_successful_install(self):
+        (self.root / "package.json").write_text(json.dumps(
+            {"name": "fixture", "dependencies": {"is-number": "7.0.0"}}))
+        self.git("add", ".")
+        def runner(argv, **options):
+            version = argv[-1] == "--version"
+            if not version:
+                (self.root / "node_modules/.agents").mkdir()
+            return subprocess.CompletedProcess(argv, 0, "9.1.0\n" if version else "", "")
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual("incomplete", result["status"])
+        self.assertIn("without required dependency outputs", result["items"][0]["error"])
+
     def test_large_tracked_source_tree_does_not_inflate_codex_filesystem_argument(self):
         # This source listing alone exceeded Linux's 128 KiB argv-entry limit.
         source = self.root / "src"

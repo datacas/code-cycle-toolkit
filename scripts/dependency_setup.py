@@ -126,6 +126,12 @@ def _text(value) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
 
 
+def _populated(path: Path) -> bool:
+    # Sandbox placeholders such as Codex's .agents are dot-entries; installed
+    # packages are not.
+    return path.is_dir() and any(not entry.name.startswith(".") for entry in path.iterdir())
+
+
 def _installed_digest(outputs: list[Path]) -> str:
     """Verify the cached tree itself, including pnpm's real .pnpm contents."""
     digest = hashlib.sha256()
@@ -267,6 +273,11 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         item.update(status="prepared", reused=True)
                         continue
                 env["YARN_CACHE_FOLDER"] = str(cache)
+                # A native sandbox grants writes only to paths that exist; a
+                # missing node_modules stays under the read-only checkout and
+                # the manager cannot create it. Paths were checked above.
+                for output in [*outputs, *([project / ".yarn"] if manager == "yarn" else [])]:
+                    output.mkdir(exist_ok=True)
                 command = install_command(manager, version, cache)
                 for attempt in range(2):
                     code, stdout, stderr = run(command, f"install-{attempt + 1}", 600)
@@ -282,9 +293,10 @@ def prepare(cwd: str, executor: str, binary: str, *,
                 required_outputs = [path.parent / "node_modules" for path in packages
                                     if any(_manifest(path).get(key) for key in
                                            ("dependencies", "devDependencies", "optionalDependencies"))]
+                # Outputs were pre-created, so an empty directory is no install.
                 if (required_outputs and not (project / ".pnp.cjs").is_file()
-                        and (any(not output.is_dir() for output in required_outputs)
-                             if manager == "pnpm" else not (project / "node_modules").is_dir())):
+                        and (any(not _populated(output) for output in required_outputs)
+                             if manager == "pnpm" else not _populated(project / "node_modules"))):
                     raise ValueError("frozen install returned success without required dependency outputs")
                 # Disabled lifecycle scripts can leave native modules incomplete.
                 needs_build = []
