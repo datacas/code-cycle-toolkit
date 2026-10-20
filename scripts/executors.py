@@ -412,7 +412,11 @@ def _error_class(code: str | None, message: str) -> str:
         ("auth", ("401", "unauthorized", "invalid api key", "missing credentials")),
         ("transport", ("connection refused", "connection reset", "stream disconnect", "network error")),
         ("capacity", ("at capacity", "server overloaded")),
-        ("quota", ("usage limit", "quota exceeded", "hit your limit", "rate limit")),
+        ("quota", (
+            "usage limit", "quota exceeded", "hit your limit", "rate limit",
+            "you've hit your session limit", "you've hit your weekly limit",
+            "you've hit your opus limit", "you've hit your sonnet limit",
+        )),
     ):
         if any(marker in lowered for marker in markers):
             return token
@@ -2354,7 +2358,15 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
 class ClaudeAdapter(NativeAdapter):
     name = "claude"
     binary = "claude"
-    quota_markers = ("usage limit", "rate limit", "out of credits")
+    quota_markers = (
+        "usage limit",
+        "rate limit",
+        "out of credits",
+        "you've hit your session limit",
+        "you've hit your weekly limit",
+        "you've hit your opus limit",
+        "you've hit your sonnet limit",
+    )
     interactive_markers = {
         "bypass permissions mode": "bypass_acknowledgement",
         "is this a project you created or one you trust": "folder_trust",

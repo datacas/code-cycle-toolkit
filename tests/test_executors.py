@@ -478,6 +478,28 @@ class InteractiveFrictionTests(unittest.TestCase):
 
         self.assertEqual("folder_trust", capability)
 
+    def test_claude_usage_limit_wordings_are_narrowly_recognised(self) -> None:
+        messages = (
+            "You've hit your session limit · resets 2:50pm",
+            "You've hit your weekly limit · resets Mon 12:00am",
+            "You've hit your Opus limit · resets 2:50pm",
+            "You've hit your Sonnet limit · resets 2:50pm",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                capability, detail = ex.ClaudeAdapter().classify_failure(1, message, "")
+                self.assertEqual("operating_quota", capability)
+                self.assertIn("exhausted window", detail)
+                self.assertEqual("quota", ex._error_class(None, message))
+
+        for message in (
+            "A test mentions a session limit",
+            "You've used 85% of your session limit · resets 2:50pm",
+        ):
+            with self.subTest(message=message):
+                self.assertIsNone(ex.ClaudeAdapter().classify_failure(1, message, ""))
+                self.assertEqual("executor_error", ex._error_class(None, message))
+
     def test_an_exhausted_window_is_named_as_quota_not_as_failure(self) -> None:
         capability, detail = ex.CodexAdapter().classify_failure(
             1, "You have 2 usage limit resets available", ""

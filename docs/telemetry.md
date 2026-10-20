@@ -107,7 +107,7 @@ including `BLOCKED`. It is distinct from executor availability and
 | `error_code` | Meaning |
 |---|---|
 | `capacity` | Temporarily overloaded model or server; Codex `server_overloaded` |
-| `quota` | Exhausted usage window; Codex `usage_limit_exceeded` |
+| `quota` | Exhausted usage window; Codex `usage_limit_exceeded`; Claude session, weekly, Opus, and Sonnet limit messages |
 | `auth` | Missing or rejected credentials, including a reported 401 |
 | `transport` | Network/API connection failure or stream disconnect |
 | `timeout` | Dispatch exceeded its time limit; work may still be alive |
