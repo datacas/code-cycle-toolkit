@@ -124,7 +124,7 @@ class SetupTests(unittest.TestCase):
             command = argv[argv.index("--") + 1:]
             if command[-1] != "--version":
                 cwd = Path(options["cwd"])
-                seen.append(sorted(str(path.relative_to(cwd)) for path in cwd.rglob("*")))
+                seen.append(sorted(path.relative_to(cwd).as_posix() for path in cwd.rglob("*")))
                 (cwd / "node_modules/.agents").mkdir(parents=True)
                 (cwd / "node_modules/is-number").mkdir()
                 (cwd / "apps/web/node_modules/local").mkdir(parents=True)
