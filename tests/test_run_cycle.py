@@ -516,6 +516,24 @@ class NeedsDocker(Talker):
 class PermissionConsentTests(RunCycleTestCase):
     """A sensitive grant is a person's answer, never a stage's claim."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        snapshots = mock.patch("cycle.effect_snapshot", return_value={
+            "dirty": False, "workspace": {}, "remote": "unchanged", "comments": [],
+        })
+        snapshots.start()
+        self.addCleanup(snapshots.stop)
+
+    def run_cycle(self, implementer, reviewer, **kw):
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"},
+        }}})
+        # These cases exercise consent after no narrower recovery is available.
+        profile = profiles["cheap_coder"]
+        profiles["cheap_coder"] = router.Profile(profile.name, profile.primary, None)
+        kw.setdefault("profiles", profiles)
+        return super().run_cycle(implementer, reviewer, **kw)
+
     def broker(self, **kw) -> grants.ConsentBroker:
         kw.setdefault("store", grants.ConsentStore(self.home / "consents.json"))
         return grants.ConsentBroker("owner/api", platform="linux", **kw)
