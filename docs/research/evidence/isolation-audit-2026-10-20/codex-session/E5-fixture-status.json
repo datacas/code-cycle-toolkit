@@ -1,0 +1,16 @@
+{
+  "label": "E5-fixture-status",
+  "argv": [
+    "rtk",
+    "proxy",
+    "git",
+    "status",
+    "--porcelain=v1"
+  ],
+  "cwd": "/tmp/cct-isolation-audit-20261020/checkout-git",
+  "timeout": 60,
+  "exit_code": 0,
+  "stdout": "?? audit-node-fixture/\n",
+  "stderr": "",
+  "duration_seconds": 0.004
+}

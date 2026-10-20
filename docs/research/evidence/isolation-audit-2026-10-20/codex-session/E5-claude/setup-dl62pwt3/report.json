@@ -1,0 +1,33 @@
+{
+  "status": "incomplete",
+  "items": [
+    {
+      "cwd": "/tmp/cct-isolation-audit-20261020/checkout-git/audit-node-fixture",
+      "head_sha": "310d7067864ac9d09a864a46bb4a62d8e78a0eb2",
+      "manager": "npm",
+      "lock_sha256": "f41bd0e8ddc19b4aab54f95c2efc0a88aa1d4ff887239543785aadd07398ae84",
+      "attempts": [
+        {
+          "command": [
+            "npm",
+            "--version"
+          ],
+          "sandbox_command": [
+            "$HOME/.nvm/versions/node/v22.23.2/bin/srt",
+            "--settings",
+            "/tmp/code-cycle-prepare-1l3tty0z/sandbox.json",
+            "--",
+            "npm",
+            "--version"
+          ],
+          "exit_code": 1,
+          "stdout": "/tmp/cct-isolation-audit-20261020/E5-claude/setup-dl62pwt3/0-version.stdout.log",
+          "stderr": "/tmp/cct-isolation-audit-20261020/E5-claude/setup-dl62pwt3/0-version.stderr.log"
+        }
+      ],
+      "status": "failed",
+      "error": "package manager version failed with exit 1: Error: listen EPERM: operation not permitted /tmp/code-cycle-prepare-1l3tty0z/srt-mux-41-0.sock\n"
+    }
+  ],
+  "evidence": "/tmp/cct-isolation-audit-20261020/E5-claude/setup-dl62pwt3/report.json"
+}

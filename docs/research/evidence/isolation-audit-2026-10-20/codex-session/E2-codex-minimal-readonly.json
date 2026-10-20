@@ -1,0 +1,22 @@
+{
+  "label": "E2-codex-minimal-readonly",
+  "argv": [
+    "rtk",
+    "proxy",
+    "codex",
+    "sandbox",
+    "-P",
+    ":read-only",
+    "--",
+    "python3",
+    "-B",
+    "-c",
+    "print(\"native sandbox command reached\")"
+  ],
+  "cwd": "/tmp/cct-isolation-audit-20261020/writable",
+  "timeout": 45,
+  "exit_code": 1,
+  "stdout": "",
+  "stderr": "WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)\nerror building bubblewrap command: app-server socket directory must be a user-owned directory with mode 0700\n",
+  "duration_seconds": 0.045
+}

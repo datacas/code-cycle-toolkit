@@ -1,0 +1,60 @@
+{
+  "timestamp_utc": "2026-10-20T13:51:45Z",
+  "kernel": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "uid": 1000,
+  "euid": 1000,
+  "cwd": "$HOME/www/code-cycle-toolkit",
+  "executables": {
+    "codex": "$HOME/.nvm/versions/node/v22.23.2/bin/codex",
+    "claude": "$HOME/.local/bin/claude",
+    "srt": "$HOME/.nvm/versions/node/v22.23.2/bin/srt",
+    "bwrap": "/usr/local/bin/bwrap",
+    "socat": "/usr/bin/socat",
+    "rg": "$HOME/.codex/packages/app-server-daemon/releases/0.163.0-x86_64-unknown-linux-musl/codex-path/rg",
+    "node": "$HOME/.nvm/versions/node/v22.23.2/bin/node",
+    "npm": "$HOME/.nvm/versions/node/v22.23.2/bin/npm",
+    "orca": null,
+    "python3": "/usr/bin/python3"
+  },
+  "selected_environment": {
+    "TMPDIR": null,
+    "TEMP": null,
+    "TMP": null,
+    "CODEX_SANDBOX_NETWORK_DISABLED": "1",
+    "CODEX_SANDBOX": null
+  },
+  "daemon_directory": {
+    "path": "/tmp/codex-daemon-1000",
+    "mode": "0o0",
+    "uid": 1000,
+    "list_error": "[Errno 13] Permission denied: '/tmp/codex-daemon-1000'"
+  },
+  "relevant_mounts": [
+    "1536 516 8:48 / / ro,nosuid,nodev,relatime - ext4 /dev/sdd rw,discard,errors=remount-ro,data=ordered",
+    "2105 1536 0:155 / /tmp/codex-daemon-1000 ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=000,uid=1000,gid=1000",
+    "2106 1536 8:48 /tmp /tmp rw,nosuid,nodev,relatime - ext4 /dev/sdd rw,discard,errors=remount-ro,data=ordered",
+    "2108 2106 0:156 / /tmp/codex-daemon-1000 ro,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=000,uid=1000,gid=1000"
+  ],
+  "process_security": [
+    "CapEff:\t0000000000000000",
+    "NoNewPrivs:\t1",
+    "Seccomp:\t2"
+  ],
+  "ancestors": [
+    {
+      "pid": 3,
+      "comm": "python3",
+      "ppid": 2
+    },
+    {
+      "pid": 2,
+      "comm": "rtk",
+      "ppid": 1
+    },
+    {
+      "pid": 1,
+      "comm": "codex",
+      "ppid": 0
+    }
+  ]
+}

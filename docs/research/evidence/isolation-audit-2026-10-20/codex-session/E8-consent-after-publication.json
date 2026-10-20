@@ -1,0 +1,17 @@
+{
+  "kind": "scripted adapter only; no host access or GitHub side effects",
+  "simulated_effect": "pulls changed",
+  "snapshot_call_count": 3,
+  "dispatch_count": 2,
+  "grants_per_dispatch": [
+    [],
+    [
+      "docker_host"
+    ]
+  ],
+  "row_ids": [
+    1,
+    2
+  ],
+  "detail": "agent reported sandbox_local_access: sandbox denied access to /var/run/docker.sock; reroute stopped: retry_exhausted"
+}

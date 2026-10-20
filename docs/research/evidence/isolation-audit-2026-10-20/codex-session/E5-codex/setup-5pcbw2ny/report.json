@@ -1,0 +1,44 @@
+{
+  "status": "incomplete",
+  "items": [
+    {
+      "cwd": "/tmp/cct-isolation-audit-20261020/checkout-git/audit-node-fixture",
+      "head_sha": "310d7067864ac9d09a864a46bb4a62d8e78a0eb2",
+      "manager": "npm",
+      "lock_sha256": "f41bd0e8ddc19b4aab54f95c2efc0a88aa1d4ff887239543785aadd07398ae84",
+      "attempts": [
+        {
+          "command": [
+            "npm",
+            "--version"
+          ],
+          "sandbox_command": [
+            "codex",
+            "sandbox",
+            "--permission-profile",
+            "code_cycle_prepare",
+            "-c",
+            "permissions.code_cycle_prepare.extends=\":read-only\"",
+            "-c",
+            "features.network_proxy=true",
+            "-c",
+            "permissions.code_cycle_prepare.network.enabled=true",
+            "-c",
+            "permissions.code_cycle_prepare.network.domains={\"registry.npmjs.org\"=\"allow\",\"registry.yarnpkg.com\"=\"allow\"}",
+            "-c",
+            "permissions.code_cycle_prepare.filesystem={\"/tmp/code-cycle-prepare-mjrs3pxe\"=\"write\",\"/tmp/code-cycle-prepare-mjrs3pxe/tree/package-lock.json\"=\"read\",\"/tmp/code-cycle-prepare-mjrs3pxe/tree/package.json\"=\"read\"}",
+            "--",
+            "npm",
+            "--version"
+          ],
+          "exit_code": 1,
+          "stdout": "/tmp/cct-isolation-audit-20261020/E5-codex/setup-5pcbw2ny/0-version.stdout.log",
+          "stderr": "/tmp/cct-isolation-audit-20261020/E5-codex/setup-5pcbw2ny/0-version.stderr.log"
+        }
+      ],
+      "status": "failed",
+      "error": "package manager version failed with exit 1: WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir \"/tmp/code-cycle-prepare-mjrs3pxe\" (codex_home: AbsolutePathBuf(\"/tmp/code-cycle-prepare-mjrs3pxe/.codex\"))\nError: failed to start managed network proxy: failed to build network proxy: reserve managed loopback proxy listeners\n"
+    }
+  ],
+  "evidence": "/tmp/cct-isolation-audit-20261020/E5-codex/setup-5pcbw2ny/report.json"
+}

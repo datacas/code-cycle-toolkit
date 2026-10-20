@@ -1,0 +1,147 @@
+[
+  {
+    "file": "E1-E2-codex-native-attempt.json",
+    "sha256": "2632732a2c88db6b71e6bff04b3d95a8562080a4206d5505b06aa8b68b78f0c0",
+    "bytes": 1151
+  },
+  {
+    "file": "E1-E2-codex-native-corrected.json",
+    "sha256": "f48777ed4196553d30f84a5d973b60128f8b468ac7054cba3298a3865741bb3b",
+    "bytes": 1014
+  },
+  {
+    "file": "E2-codex-minimal-readonly.json",
+    "sha256": "64aa9c08982d68155989cc94249b0d8dc7ab508067af83ea34447f52f17cd45a",
+    "bytes": 597
+  },
+  {
+    "file": "E3-E7-srt-attempt.json",
+    "sha256": "218d2085507a7e26b3382cf58319b5db64db0defa65a91df45fd05157ce57459",
+    "bytes": 583
+  },
+  {
+    "file": "E4-synthetic-masked-copy.json",
+    "sha256": "156695976ef9ddcb1f6934b5092a3b42a21d645d18af01e8ec6fd4baa296b043",
+    "bytes": 509
+  },
+  {
+    "file": "E5-claude/setup-dl62pwt3/0-version.stderr.log",
+    "sha256": "f7d4d5c3bb18f47d41c2e5efbc2ca8b2dd6c368d837ba7d754e86d688f210406",
+    "bytes": 96
+  },
+  {
+    "file": "E5-claude/setup-dl62pwt3/0-version.stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "file": "E5-claude/setup-dl62pwt3/report.json",
+    "sha256": "fdac9ffcf0478fbfeafa14ffe7f55e0613a617d241aedda6417e4a140e62ec84",
+    "bytes": 1196
+  },
+  {
+    "file": "E5-claude-preparation.json",
+    "sha256": "fdac9ffcf0478fbfeafa14ffe7f55e0613a617d241aedda6417e4a140e62ec84",
+    "bytes": 1196
+  },
+  {
+    "file": "E5-codex/setup-5pcbw2ny/0-version.stderr.log",
+    "sha256": "f7afb281d592805329c9537fb5309f6bda33c74453ad5824816d431334c4af42",
+    "bytes": 348
+  },
+  {
+    "file": "E5-codex/setup-5pcbw2ny/0-version.stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "file": "E5-codex/setup-5pcbw2ny/report.json",
+    "sha256": "abbe93b794a315064b3dcd8025726628278fb7d018c00e1e5bb34ad29628857f",
+    "bytes": 2060
+  },
+  {
+    "file": "E5-codex-preparation.json",
+    "sha256": "abbe93b794a315064b3dcd8025726628278fb7d018c00e1e5bb34ad29628857f",
+    "bytes": 2060
+  },
+  {
+    "file": "E5-fixture-retained/package-lock.json",
+    "sha256": "f41bd0e8ddc19b4aab54f95c2efc0a88aa1d4ff887239543785aadd07398ae84",
+    "bytes": 150
+  },
+  {
+    "file": "E5-fixture-retained/package.json",
+    "sha256": "92bd1176c79aa7bd62c8d7fc152f41cca19ed2db53d253926364199d2d7c2351",
+    "bytes": 62
+  },
+  {
+    "file": "E5-fixture-status.json",
+    "sha256": "945af77d97526a10a54e3d4e40e42825496d1ad44c6945a3cef852ea87242df6",
+    "bytes": 300
+  },
+  {
+    "file": "E7-policy-controls.json",
+    "sha256": "f68ba1bf90249303567a5169ef64fe0818765c74854a45ec0c3b672f81745d70",
+    "bytes": 1546
+  },
+  {
+    "file": "E8-consent-after-publication.json",
+    "sha256": "0a01c5941d34162196839745765f1e8afb6b8bfb49044b56b26b4d274c615f18",
+    "bytes": 403
+  },
+  {
+    "file": "E9-persistent-consent-hydration.json",
+    "sha256": "333ebdad2e400cc373a75734d88f2a98af9a9ff9f2c192f6c5e3d3f62c907958",
+    "bytes": 164
+  },
+  {
+    "file": "audit.py",
+    "sha256": "9139457ff396bc51b8e3bce0854cfda6765bac31d5bfd6941eeab44779b86409",
+    "bytes": 9296
+  },
+  {
+    "file": "check_report.py",
+    "sha256": "9f9334fddde5483b95e0f75fc5c6581568b4b0f33c34ed049f4bcf4018d59558",
+    "bytes": 1817
+  },
+  {
+    "file": "complexity.json",
+    "sha256": "82c2ead8313093158b0954787bd51b52e9f87b17533b6370d99c1b09d01ac365",
+    "bytes": 1261
+  },
+  {
+    "file": "environment.json",
+    "sha256": "c5bcfb3c0bdf1031878016afd34a55fab3760e8214dad823271238278e9cfbb3",
+    "bytes": 1865
+  },
+  {
+    "file": "focused_experiments.py",
+    "sha256": "8abc25adb339a1e0dadc2996855cb1bfbdc31a6f3e6489c0e0cf4c8d08cf3901",
+    "bytes": 3857
+  },
+  {
+    "file": "policy_controls.py",
+    "sha256": "cf8c19b03277bf889417068fc9bdaa9cfec7e495c11b2bb3cef9b3fedbdc7880",
+    "bytes": 1867
+  },
+  {
+    "file": "probe.py",
+    "sha256": "63e32c2ec43b7f122402a70d2edbf831107a456c94bc385a824a473a0f17fcb9",
+    "bytes": 1076
+  },
+  {
+    "file": "srt-settings.json",
+    "sha256": "d8ce4383ae21a2f6f266b1f51999871b5573e0c50548f3fd2dc8302ea6f5f817",
+    "bytes": 317
+  },
+  {
+    "file": "test_runner.py",
+    "sha256": "20a92735bd3b40c5a948d57b7f865bc2396cafe7b5928d3c963298328c6b862a",
+    "bytes": 1017
+  },
+  {
+    "file": "validator_tests.py",
+    "sha256": "5972e7dd7bb0e3b2258727645f52b8540e55c35057aaf05ab165b06ddead6db1",
+    "bytes": 809
+  }
+]
