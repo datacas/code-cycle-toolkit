@@ -1,0 +1,7 @@
+{
+  "kind": "synthetic unreadable placeholder, not an actual Claude launch",
+  "symbol": "ValidatePackageTests.copy_package",
+  "placeholder": "/tmp/cct-isolation-audit-20261020/checkout-git/.claude/settings.local.json",
+  "observed": "Error",
+  "details": "[('/tmp/cct-isolation-audit-20261020/checkout-git/.claude/settings.local.json', '/tmp/tmpp0gt_9pm/package/.claude/settings.local.json', \"[Errno 13] Permission denied: '/tmp/cct-isolation-audit-20261020/checkout-git/.claude/settings.local.json'\")]"
+}

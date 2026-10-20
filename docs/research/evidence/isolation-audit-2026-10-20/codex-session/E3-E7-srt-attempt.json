@@ -1,0 +1,22 @@
+{
+  "label": "E3-E7-srt-attempt",
+  "argv": [
+    "rtk",
+    "proxy",
+    "srt",
+    "--settings",
+    "/tmp/cct-isolation-audit-20261020/srt-settings.json",
+    "--",
+    "python3",
+    "-B",
+    "/tmp/cct-isolation-audit-20261020/probe.py",
+    "/tmp/cct-isolation-audit-20261020/writable",
+    "/tmp/cct-isolation-audit-20261020/synthetic-credential.txt"
+  ],
+  "cwd": "/tmp/cct-isolation-audit-20261020/writable",
+  "timeout": 45,
+  "exit_code": 1,
+  "stdout": "",
+  "stderr": "Error: listen EPERM: operation not permitted /tmp/srt-mux-41-0.sock\n",
+  "duration_seconds": 0.121
+}

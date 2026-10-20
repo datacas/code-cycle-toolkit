@@ -1,0 +1,29 @@
+{
+  "label": "E1-E2-codex-native-attempt",
+  "argv": [
+    "rtk",
+    "proxy",
+    "codex",
+    "sandbox",
+    "-P",
+    "audit_read",
+    "-c",
+    "permissions.audit_read.extends=\":read-only\"",
+    "-c",
+    "permissions.audit_read.network.enabled=false",
+    "-c",
+    "permissions.audit_read.filesystem={\"/tmp/cct-isolation-audit-20261020/writable\": \"write\", \"/tmp/cct-isolation-audit-20261020/synthetic-credential.txt\": \"none\"}",
+    "--",
+    "python3",
+    "-B",
+    "/tmp/cct-isolation-audit-20261020/probe.py",
+    "/tmp/cct-isolation-audit-20261020/writable",
+    "/tmp/cct-isolation-audit-20261020/synthetic-credential.txt"
+  ],
+  "cwd": "/tmp/cct-isolation-audit-20261020/writable",
+  "timeout": 45,
+  "exit_code": 1,
+  "stdout": "",
+  "stderr": "WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)\nError: invalid type: string \"{\\\"/tmp/cct-isolation-audit-20261020/writable\\\": \\\"write\\\", \\\"/tmp/cct-isolation-audit-20261020/synthetic-credential.txt\\\": \\\"none\\\"}\", expected struct FilesystemPermissionsToml\nin `permissions`\n\n",
+  "duration_seconds": 0.036
+}

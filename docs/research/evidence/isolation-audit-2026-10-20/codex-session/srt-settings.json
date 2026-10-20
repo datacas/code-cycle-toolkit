@@ -1,0 +1,16 @@
+{
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "allowLocalBinding": false
+  },
+  "filesystem": {
+    "allowWrite": [
+      "/tmp/cct-isolation-audit-20261020/writable"
+    ],
+    "denyWrite": [],
+    "denyRead": [
+      "/tmp/cct-isolation-audit-20261020/synthetic-credential.txt"
+    ]
+  }
+}

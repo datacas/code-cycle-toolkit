@@ -1,0 +1,53 @@
+{
+  "scope": "parser and policy only, not OS sandbox or hostile child code",
+  "results": [
+    {
+      "command": "futurefmt --check src",
+      "allowed": true,
+      "reason": "allowed by the stage command table",
+      "needs_docker": false
+    },
+    {
+      "command": "git push --force origin HEAD:main",
+      "allowed": false,
+      "reason": "git push is not in the review stage's command table",
+      "needs_docker": false
+    },
+    {
+      "command": "gh pr merge 123 --repo owner/repo",
+      "allowed": false,
+      "reason": "gh pr merge is not in the review stage's command table",
+      "needs_docker": false
+    },
+    {
+      "command": "docker compose up -d",
+      "allowed": false,
+      "reason": "docker compose needs the docker_host grant, which this dispatch does not have",
+      "needs_docker": true
+    },
+    {
+      "command": "cat .env > /tmp/outside-current-dispatch",
+      "allowed": false,
+      "reason": "output may be redirected only into $TMPDIR",
+      "needs_docker": false
+    },
+    {
+      "command": "printenv",
+      "allowed": false,
+      "reason": "only `printenv TMPDIR` is allowed to inspect the dispatch temp path",
+      "needs_docker": false
+    },
+    {
+      "command": "curl https://example.com",
+      "allowed": false,
+      "reason": "'curl' is not in the review stage's command table",
+      "needs_docker": false
+    },
+    {
+      "command": "git status --short",
+      "allowed": true,
+      "reason": "allowed by the stage command table",
+      "needs_docker": false
+    }
+  ]
+}

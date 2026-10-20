@@ -1,0 +1,72 @@
+[
+  {
+    "file": "scripts/cycle.py",
+    "lines": 1262,
+    "functions": 23,
+    "if_nodes": 110,
+    "try_nodes": 6
+  },
+  {
+    "file": "scripts/executors.py",
+    "lines": 3251,
+    "functions": 110,
+    "if_nodes": 310,
+    "try_nodes": 48
+  },
+  {
+    "file": "scripts/run_cycle.py",
+    "lines": 4155,
+    "functions": 128,
+    "if_nodes": 426,
+    "try_nodes": 57
+  },
+  {
+    "file": "scripts/reroute.py",
+    "lines": 127,
+    "functions": 7,
+    "if_nodes": 16,
+    "try_nodes": 0
+  },
+  {
+    "file": "scripts/environment_recovery.py",
+    "lines": 155,
+    "functions": 6,
+    "if_nodes": 9,
+    "try_nodes": 2
+  },
+  {
+    "file": "scripts/grants.py",
+    "lines": 397,
+    "functions": 22,
+    "if_nodes": 31,
+    "try_nodes": 3
+  },
+  {
+    "file": "scripts/stage_permissions.py",
+    "lines": 1540,
+    "functions": 62,
+    "if_nodes": 227,
+    "try_nodes": 9
+  },
+  {
+    "file": "scripts/dependency_setup.py",
+    "lines": 388,
+    "functions": 15,
+    "if_nodes": 38,
+    "try_nodes": 4
+  },
+  {
+    "file": "scripts/user_choices.py",
+    "lines": 42,
+    "functions": 1,
+    "if_nodes": 7,
+    "try_nodes": 0
+  },
+  {
+    "file": "scripts/issue_review.py",
+    "lines": 406,
+    "functions": 12,
+    "if_nodes": 55,
+    "try_nodes": 1
+  }
+]

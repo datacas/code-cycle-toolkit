@@ -1,0 +1,8 @@
+{
+  "scope": "synthetic repository and temporary store only",
+  "before_request": [],
+  "request_answer": "persistent",
+  "after_request": [
+    "docker_host"
+  ]
+}
