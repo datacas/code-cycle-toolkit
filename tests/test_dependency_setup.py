@@ -23,7 +23,8 @@ class SetupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name) / "source"
+        # prepare() canonicalizes the checkout; Windows temp paths may be 8.3 short names.
+        self.root = Path(self.temp.name).resolve() / "source"
         self.root.mkdir()
         self.evidence = Path(self.temp.name) / "evidence"
         self.git("init", "-q")
