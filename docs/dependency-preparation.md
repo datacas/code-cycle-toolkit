@@ -71,9 +71,17 @@ After a successful build (`lifecycle_build.status: built`), the host moves the
 built dependency outputs into the checkout. It also moves any new entries the
 build created beside a package manifest, such as a Nuxt `.nuxt` directory, but
 only those the checkout's own Git ignore rules ignore, and never tracked paths,
-links, `.git` or sandbox placeholders. These are listed in
+links, `.git`, sandbox placeholders or configuration that host tools load
+outside the sandbox (such as `.envrc`, `.vscode`, `.idea`, `.claude`,
+`.mcp.json` or shell profiles). These are listed in
 `lifecycle_build.generated`. Ignore rules are read from the read-only checkout,
 never from the build copy. A new untracked entry that is not ignored stays out.
+The build copy holds no untracked checkout content, so an existing ignored
+entry, such as a developer's `.env` or `dist/`, was not created by the build.
+It is replaced only when an earlier preparation of the same checkout published
+it and its content is unchanged since; otherwise it is kept and listed in
+`lifecycle_build.preserved`. The content digests of published entries are kept
+beside the receipts under the preparation state directory.
 Native builds that download something other than registry packages, such as
 prebuilt binaries from another host or Node headers, fail inside the sandbox.
 They then stay incomplete, rather than gaining wider network access.

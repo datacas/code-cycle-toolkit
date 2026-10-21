@@ -1244,8 +1244,9 @@ class NativeAdapter(Adapter):
                       + json.dumps(preparation) + "\nInspect failed/incomplete setup logs. "
                       "Continue useful work; exact-HEAD CI may complement unavailable local "
                       "verification. Never count setup or CI as locally executed tests. "
-                      "Lifecycle scripts remain disabled; required builds need an isolated "
-                      "path within the existing sandbox, never an unsandboxed host install.")
+                      "Required lifecycle builds run only in the preparation sandbox; an "
+                      "item that stays scripts_disabled is unverified, and never gets an "
+                      "unsandboxed host install.")
             if self.name == "codex":
                 argv[-1] += notice
             else:

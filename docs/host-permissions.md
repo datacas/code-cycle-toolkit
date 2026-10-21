@@ -208,8 +208,12 @@ an install with lifecycle scripts disabled, a separate contained lifecycle build
 only when one is required, persistent evidence and bounded retries; it never
 inherits another revision's `node_modules`. Non-publishing Codex stages receive
 no default code-host network route, because readable credentials would permit
-writes as well as reads. Issue review needs host-supplied context or host-side
-reads; explicitly selected registry domains do not add code-host domains.
+writes as well as reads. The exception is Codex issue review, which by the
+owner's #279 decision receives `github.com` and `api.github.com` with the
+existing `gh` credentials (see
+[dependency preparation](dependency-preparation.md#explicit-user-choices)); its
+command table still denies publication. Explicitly selected registry domains do
+not add code-host domains.
 
 ## When a command is denied
 

@@ -273,10 +273,11 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(12, attempt["exit_code"])
         self.assertIn("fixture install failed", Path(attempt["stderr"]).read_text())
 
-    def lifecycle_fixture(self, build):
+    def lifecycle_fixture(self, build, ignored=()):
         """Root postinstall; `build` simulates the scripts-enabled install."""
         self.package(self.root, {"postinstall": "node generate.js"})
-        (self.root / ".gitignore").write_text("node_modules/\n.generated/\n")
+        (self.root / ".gitignore").write_text("".join(
+            f"{pattern}\n" for pattern in ("node_modules/", ".generated/", *ignored)))
         self.git("add", ".")
         self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                  "commit", "-qm", "lifecycle fixture")
@@ -293,6 +294,7 @@ class SetupTests(unittest.TestCase):
             if "--ignore-scripts" in command:
                 return subprocess.CompletedProcess(argv, 0, "installed\n", "")
             return build(cwd, argv)
+        self.lifecycle_runner = runner
         result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
                             evidence_root=self.evidence, sleep=lambda _: None)
         return result, calls
@@ -344,6 +346,65 @@ class SetupTests(unittest.TestCase):
         self.assertTrue(self.prepare()["items"][0]["reused"])
         shutil.rmtree(self.root / ".generated")
         self.assertNotIn("reused", self.prepare()["items"][0])
+
+    def test_lifecycle_build_never_replaces_existing_ignored_checkout_entries(self):
+        # The build copy holds only tracked files, so a postinstall such as
+        # `cp -n .env.example .env` always creates a template there.
+        secret = self.root / ".env"
+        secret.write_text("TOKEN=real")
+        (self.root / "dist").mkdir()
+        (self.root / "dist/app.js").write_text("developer build")
+        def build(cwd, argv):
+            (cwd / ".env").write_text("TOKEN=")
+            (cwd / "dist").mkdir()
+            (cwd / "dist/out.js").write_text("cycle build")
+            (cwd / ".generated").mkdir()
+            (cwd / ".generated/types.d.ts").write_text("generated")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+        result, _ = self.lifecycle_fixture(build, ignored=(".env", "dist/"))
+        item = result["items"][0]
+        self.assertEqual("prepared", item["status"], result)
+        self.assertEqual([".generated"], item["lifecycle_build"]["generated"])
+        self.assertEqual([".env", "dist"], item["lifecycle_build"]["preserved"])
+        self.assertEqual("TOKEN=real", secret.read_text())
+        self.assertEqual(["app.js"], sorted(path.name for path in (self.root / "dist").iterdir()))
+        self.assertEqual("generated", (self.root / ".generated/types.d.ts").read_text())
+
+    def test_lifecycle_build_refreshes_only_its_own_unchanged_outputs(self):
+        versions = iter(("1", "2"))
+        def build(cwd, argv):
+            version = next(versions)
+            (cwd / ".env").write_text("TOKEN=")
+            (cwd / ".generated").mkdir()
+            (cwd / ".generated/types.d.ts").write_text(f"generated {version}")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+        result, _ = self.lifecycle_fixture(build, ignored=(".env",))
+        self.assertEqual([".env", ".generated"], result["items"][0]["lifecycle_build"]["generated"])
+        # The developer fills in the template the cycle created; a later
+        # preparation that cannot reuse the install must keep that edit.
+        (self.root / ".env").write_text("TOKEN=real")
+        (self.root / "node_modules/changed.js").write_text("changed")
+        item = ds.prepare(str(self.root), "codex", "codex", runner=self.lifecycle_runner,
+                          evidence_root=self.evidence, sleep=lambda _: None)["items"][0]
+        self.assertNotIn("reused", item)
+        self.assertEqual([".generated"], item["lifecycle_build"]["generated"])
+        self.assertEqual([".env"], item["lifecycle_build"]["preserved"])
+        self.assertEqual("TOKEN=real", (self.root / ".env").read_text())
+        self.assertEqual("generated 2", (self.root / ".generated/types.d.ts").read_text())
+
+    def test_lifecycle_build_never_publishes_host_config_or_sandbox_placeholders(self):
+        directories, files = (".vscode", ".idea", ".claude"), (".envrc", ".mcp.json", ".bashrc")
+        def build(cwd, argv):
+            for name in directories:
+                (cwd / name).mkdir()
+            for name in files:
+                (cwd / name).write_text("project script")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+        names = (*directories, *files)
+        result, _ = self.lifecycle_fixture(build, ignored=names)
+        self.assertEqual([], result["items"][0]["lifecycle_build"]["generated"])
+        for name in names:
+            self.assertFalse((self.root / name).exists(), name)
 
     def test_failed_lifecycle_build_publishes_scripts_disabled_install_as_incomplete(self):
         def build(cwd, argv):
@@ -452,6 +513,8 @@ class SetupTests(unittest.TestCase):
                             notice = argv[-1] if executor == "codex" else argv[argv.index("-p") + 1]
                             self.assertIn("Runtime dependency preparation evidence", notice)
                             self.assertIn(source_head, notice)
+                            # The runtime now runs required builds itself.
+                            self.assertNotIn("remain disabled", notice)
                             return subprocess.CompletedProcess(argv, 0, '{"type":"turn.completed"}', "")
                         with patch.object(ds, "prepare", side_effect=prepare) as called:
                             result = adapter.dispatch(

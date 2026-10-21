@@ -23,9 +23,13 @@ LOCKS = {"pnpm-lock.yaml": "pnpm", "package-lock.json": "npm",
 TRANSIENT = ("econnreset", "etimedout", "eai_again", "502", "503", "504",
              "socket hang up", "fetch failed")
 LIFECYCLE = ("preinstall", "install", "postinstall", "prepare")
-# Never publish Git metadata or a native sandbox's protected placeholders.
+# Never publish Git metadata, a native sandbox's protected placeholders (Codex's
+# and srt's), or configuration that host tools load outside the sandbox.
 UNPUBLISHED = {".git", ".agents", ".codex", "node_modules", ".yarn",
-               ".pnp.cjs", ".pnp.loader.mjs"}
+               ".pnp.cjs", ".pnp.loader.mjs",
+               ".vscode", ".idea", ".claude", ".mcp.json", ".gitconfig", ".gitmodules",
+               ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ripgreprc",
+               ".envrc", ".cursor", ".husky"}
 
 
 def projects(root: Path) -> list[tuple[Path, str, Path]]:
@@ -242,6 +246,27 @@ def _generated(built: Path, root: Path, project: Path, packages: list[Path],
     return [candidates[name] for name in result.stdout.split("\0") if name in candidates]
 
 
+def _entry_digest(path: Path) -> str:
+    if path.is_file() and not path.is_symlink():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _installed_digest([path])
+
+
+def _owned(ledger: Path) -> dict[str, str]:
+    """Generated entries this checkout's preparation published, by content digest.
+
+    An unreadable ledger owns nothing, so every existing entry is preserved.
+    """
+    try:
+        data = json.loads(ledger.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: value for key, value in data.items()
+            if isinstance(key, str) and isinstance(value, str)}
+
+
 def _installed_digest(outputs: list[Path]) -> str:
     """Verify the cached tree itself, including pnpm's real .pnpm contents."""
     digest = hashlib.sha256()
@@ -456,22 +481,39 @@ def prepare(cwd: str, executor: str, binary: str, *,
                     else:
                         source = built
                         built_outputs = _generated(built, root, project, packages, tracked_paths)
-                        build.update(status="built", generated=[
-                            path.relative_to(project).as_posix() for path in built_outputs])
+                        build["status"] = "built"
                 # Output paths were checked above; check again before host writes.
                 if any(path.is_symlink() or not path.resolve().is_relative_to(root)
                        for path in [*outputs, *generated]):
                     raise ValueError("dependency output path escapes the checkout")
                 _publish(source, project, outputs, tracked_paths)
+                # The build copy holds no untracked checkout content, so an
+                # existing ignored entry such as a developer's .env or dist/ is
+                # not the build's. Replace one only when an earlier preparation
+                # of this checkout published it and it is unchanged since.
+                ledger = base / (hashlib.sha256(str(project).encode()).hexdigest() + "-generated.json")
+                owned, published, preserved = _owned(ledger), [], []
                 for target in built_outputs:
-                    _replace(source / target.relative_to(project), target)
+                    name = target.relative_to(project).as_posix()
+                    if target.is_symlink() or (target.exists() and owned.get(name) != _entry_digest(target)):
+                        preserved.append(name)
+                        owned.pop(name, None)
+                        continue
+                    _replace(source / name, target)
+                    owned[name] = _entry_digest(target)
+                    published.append(name)
+                if built_outputs:
+                    ledger.write_text(json.dumps(owned, sort_keys=True), encoding="utf-8")
+                if source is not staged:
+                    build["generated"] = published
+                    if preserved:
+                        build["preserved"] = preserved
                 if source is not staged or not needs_build:
                     item["status"] = "prepared"
                     receipt.write_text(json.dumps({"head_sha": head, "inputs": fingerprint,
                                                    "cache_key": cache_key,
                                                    "installed": _installed_digest(outputs),
-                                                   "generated": [str(path.relative_to(project))
-                                                                 for path in built_outputs]}),
+                                                   "generated": published}),
                                        encoding="utf-8")
                 else:
                     item["status"] = "scripts_disabled"
