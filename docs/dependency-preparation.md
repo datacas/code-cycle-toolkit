@@ -73,7 +73,8 @@ build created beside a package manifest, such as a Nuxt `.nuxt` directory, but
 only those the checkout's own Git ignore rules ignore, and never tracked paths,
 links, `.git`, sandbox placeholders or configuration that host tools load
 outside the sandbox (such as `.envrc`, `.vscode`, `.idea`, `.claude`,
-`.mcp.json` or shell profiles). These are listed in
+`.mcp.json`, package-manager configuration such as `.npmrc` or `.pnpmfile.cjs`,
+or shell profiles). These are listed in
 `lifecycle_build.generated`. Ignore rules are read from the read-only checkout,
 never from the build copy. A new untracked entry that is not ignored stays out.
 The build copy holds no untracked checkout content, so an existing ignored

@@ -29,7 +29,8 @@ UNPUBLISHED = {".git", ".agents", ".codex", "node_modules", ".yarn",
                ".pnp.cjs", ".pnp.loader.mjs",
                ".vscode", ".idea", ".claude", ".mcp.json", ".gitconfig", ".gitmodules",
                ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ripgreprc",
-               ".envrc", ".cursor", ".husky"}
+               ".envrc", ".cursor", ".husky", ".npmrc", ".yarnrc", ".yarnrc.yml",
+               ".pnpmfile.cjs"}
 
 
 def projects(root: Path) -> list[tuple[Path, str, Path]]:

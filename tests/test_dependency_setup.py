@@ -393,7 +393,8 @@ class SetupTests(unittest.TestCase):
         self.assertEqual("generated 2", (self.root / ".generated/types.d.ts").read_text())
 
     def test_lifecycle_build_never_publishes_host_config_or_sandbox_placeholders(self):
-        directories, files = (".vscode", ".idea", ".claude"), (".envrc", ".mcp.json", ".bashrc")
+        directories = (".vscode", ".idea", ".claude")
+        files = (".envrc", ".mcp.json", ".bashrc", ".npmrc", ".pnpmfile.cjs")
         def build(cwd, argv):
             for name in directories:
                 (cwd / name).mkdir()
