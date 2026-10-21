@@ -140,6 +140,12 @@ cites as evidence, such as a test failure, a check state, or a command result.
 - Do not modify code during verification unless the user explicitly asks.
 - When a check fails, report the exact failure and its likely relation to the
   changes.
+- In a dispatched non-interactive (`claude -p`) run, run verification in the
+  foreground, wait for it, and never end the turn while a command is pending:
+  no notification arrives after the session ends, so a background command
+  leaves no result. A configured check that cannot finish within 10 minutes is
+  a verification timeout reported as `BLOCKED`, not a failure and not a
+  sandbox problem.
 
 ## Recover environment access before stopping
 

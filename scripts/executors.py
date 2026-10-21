@@ -1243,7 +1243,10 @@ class NativeAdapter(Adapter):
         try:
             with _native_review_scratch(
                 self, argv, environment, writes=writes, publishes=publishes,
-                cwd=worker_cwd, command_policy=policy,
+                cwd=worker_cwd,
+                # A Claude stage under an inactive table still gets the minimal
+                # foreground hook (#276); other executors get nothing.
+                command_policy=(command_policy if self.name == "claude" else policy),
             ) as (worker_argv, worker_env):
                 argv = worker_argv
                 run_options = {"env": worker_env} if worker_env is not None else {}
@@ -2503,8 +2506,13 @@ class ClaudeAdapter(NativeAdapter):
             parts = [sys.executable, str(script), "hook", str(policy_file)]
             command = (subprocess.list2cmdline(parts) if os.name == "nt"
                        else " ".join(shlex.quote(part) for part in parts))
-            settings = sp.hook_settings(command)
-            if runtime_policy.requires_confined_verification or runtime_policy.registry_domains:
+            settings = sp.hook_settings(command, bash_only=not runtime_policy.active)
+            settings.setdefault("env", {}).update({
+                "BASH_DEFAULT_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
+                "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
+            })
+            if runtime_policy.active and (runtime_policy.requires_confined_verification
+                                          or runtime_policy.registry_domains):
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []
@@ -2519,7 +2527,8 @@ class ClaudeAdapter(NativeAdapter):
                 for path in (script, policy_file):
                     os.chmod(path, 0o400)
                 os.chmod(directory, 0o500)
-            argv = _with_allowed_tools(argv, sp.allowed_tool_patterns(runtime_policy))
+            if runtime_policy.active:
+                argv = _with_allowed_tools(argv, sp.allowed_tool_patterns(runtime_policy))
             index = argv.index("--verbose") + 1
             yield argv[:index] + ["--settings", json.dumps(settings)] + argv[index:]
         finally:
@@ -2568,7 +2577,46 @@ class ClaudeAdapter(NativeAdapter):
                         and block.get("is_error")
                         and sp.HOOK_DENIAL_MARKER in _tool_result_text(block.get("content"))):
                     add(bash_calls.get(str(block.get("tool_use_id"))))
-        return {"permission_denials": denied} if denied else {}
+        artifacts = {"permission_denials": denied} if denied else {}
+        pending = self.pending_background_evidence(stdout)
+        if pending:
+            artifacts["background_command"] = pending
+        return artifacts
+
+    #: A final message that says the stage is waiting on something it started.
+    _WAITING_TEXT = re.compile(
+        r"still running|in the background|runs? in (the )?background|"
+        r"\bwaiting (on|for)\b|when it finishes|once it finishes", re.IGNORECASE)
+
+    def pending_background_evidence(self, stdout: str) -> str | None:
+        """`confirmed` or `suspected` when the stage exited with a command pending (#276).
+
+        Confirmed needs the execution events: a Bash call made with
+        `run_in_background` that no hook denial answered. Suspected rests on the
+        final message alone, which says it is waiting. Neither is reported
+        without such evidence.
+        """
+        calls: dict[str, bool] = {}
+        for event in _events(stdout):
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if (event.get("type") == "assistant" and block.get("type") == "tool_use"
+                        and block.get("name") == "Bash"
+                        and isinstance(block.get("input"), dict)
+                        and block["input"].get("run_in_background") is True):
+                    calls[str(block.get("id"))] = True
+                elif (event.get("type") == "user" and block.get("type") == "tool_result"
+                        and block.get("is_error")
+                        and sp.HOOK_DENIAL_MARKER in _tool_result_text(block.get("content"))):
+                    calls.pop(str(block.get("tool_use_id")), None)
+        if calls:
+            return "confirmed"
+        if self._WAITING_TEXT.search(self.agent_output(stdout) or ""):
+            return "suspected"
+        return None
 
     def environment_restriction(self, message: str) -> str | None:
         lowered = message.lower()

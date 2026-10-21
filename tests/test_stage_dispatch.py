@@ -313,9 +313,73 @@ class ClaudePolicyTests(DispatchTestCase):
             command_policy=self.policy(code_host="bitbucket"), runner=runner)
 
         self.assertIn("Bash(gh:*)", seen["argv"])
-        self.assertNotIn("--settings", seen["argv"])
+        # Only the minimal foreground hook (#276): no table, no sandbox.
+        settings = settings_of(seen["argv"])
+        self.assertEqual({"hooks", "env"}, set(settings))
+        self.assertEqual("Bash", settings["hooks"]["PreToolUse"][0]["matcher"])
         self.assertTrue(result.artifacts["command_policy"].startswith("inactive: "))
         self.assertIn("GitHub only", result.artifacts["command_policy"])
+
+    def test_every_claude_stage_gets_the_fixed_bash_timeout(self) -> None:
+        for fields in ({}, {"code_host": "bitbucket", "issue_provider": "jira"}):
+            with self.subTest(fields=fields):
+                seen = {}
+
+                def runner(argv, timeout=None, cwd=None, env=None):
+                    seen["env"] = settings_of(argv)["env"]
+                    command = settings_of(argv)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                    seen["policy"] = sp.StagePolicy.from_json(
+                        Path(command.rsplit(" ", 1)[1].strip("'\"")).read_text())
+                    return completed()
+
+                result = ex.ClaudeAdapter().dispatch(
+                    CLAUDE, "implement it", cwd=str(self.repo), writes=True,
+                    command_policy=self.policy(**fields), runner=runner)
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                self.assertEqual({"BASH_DEFAULT_TIMEOUT_MS": "600000",
+                                  "BASH_MAX_TIMEOUT_MS": "600000"}, seen["env"])
+                self.assertEqual(not fields, seen["policy"].active)
+
+    def test_a_slow_verification_still_yields_a_structured_result(self) -> None:
+        # The configured suite outlasts Claude's default foreground timeout:
+        # the stage ran it in the foreground and returned its result.
+        stream = "\n".join(json.dumps(event) for event in (
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {
+                    "command": "python3 -m unittest", "timeout": 600000}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "OK"}]}},
+            {"type": "result", "result": 'ORCHESTRATION_RESULT: {"status": "PASS"}'},
+        ))
+        result = ex.ClaudeAdapter().dispatch(
+            CLAUDE, "implement it", cwd=str(self.repo), writes=True,
+            command_policy=self.policy(test_command="python3 -m unittest"),
+            runner=lambda *a, **k: completed(stream))
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertIn("ORCHESTRATION_RESULT", result.agent_output)
+        self.assertNotIn("background_command", result.artifacts)
+
+    def test_a_pending_background_command_is_reported_only_with_evidence(self) -> None:
+        def stream(*events) -> str:
+            return "\n".join(json.dumps(event) for event in events)
+
+        def background(command_id="t1") -> dict:
+            return {"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": command_id, "name": "Bash", "input": {
+                    "command": "python3 -m unittest", "run_in_background": True}}]}}
+
+        waiting = {"type": "result", "result": "The full suite is still running."}
+        adapter = ex.ClaudeAdapter()
+        self.assertEqual({"background_command": "confirmed"},
+                         adapter.extra_artifacts(stream(background(), waiting)))
+        self.assertEqual({"background_command": "suspected"},
+                         adapter.extra_artifacts(stream(waiting)))
+        denied = {"type": "user", "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "t1", "is_error": True,
+            "content": f"code-cycle implement {sp.HOOK_DENIAL_MARKER}: foreground"}]}}
+        self.assertNotIn("background_command", adapter.extra_artifacts(
+            stream(background(), denied, {"type": "result", "result": "done"})))
+        self.assertEqual({}, adapter.extra_artifacts(stream({"type": "result", "result": "done"})))
 
     def test_denied_commands_are_read_from_the_complete_stream(self) -> None:
         stream = "\n".join(json.dumps(event) for event in (
@@ -610,6 +674,9 @@ class RuntimePolicyTests(unittest.TestCase):
                               allowed_test_command="python3 -m unittest")
         self.assertNotIn("closed table", inactive)
         self.assertIn("permits this exact test command", inactive)
+        for text in (prompt, inactive):
+            self.assertIn("Never use `run_in_background: true`", text)
+            self.assertIn("below 10 minutes", text)
 
 
 class RuntimeStopTests(unittest.TestCase):

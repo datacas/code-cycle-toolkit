@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -449,6 +450,34 @@ class StoreFailureTests(unittest.TestCase):
                 attempt = self.store.dispatch_attempts("repo", task_id="task-" + code)[0]
                 self.assertEqual((code, "failed"), (attempt["error_code"], attempt["outcome"]))
                 self.assertIn("error_code=" + code, report.explain())
+
+    def test_a_pending_background_command_is_named_in_the_unreadable_detail(self):
+        class Waiting(test_run_cycle.Talker):
+            def __init__(self, name, evidence):
+                super().__init__(name, "The full suite is still running.")
+                self.evidence = evidence
+
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                artifacts = {**result.artifacts}
+                if self.evidence:
+                    artifacts["background_command"] = self.evidence
+                return replace(result, artifacts=artifacts)
+
+        expected = {
+            "confirmed": "background_command_pending: verification command did not complete before stage exit",
+            "suspected": "background_command_pending: verification command did not complete before stage exit (suspected)",
+            None: "no parseable structured stage result: The full suite is still running.",
+        }
+        for evidence, detail in expected.items():
+            with self.subTest(evidence=evidence), patch.dict(os.environ, {"CODE_CYCLE_HOME": str(self.path.parent)}):
+                task = f"task-pending-{evidence}"
+                report = run_cycle.run_cycle("repo", task, router.TaskSignals(), self.store,
+                    issue_review="off", registry=ex.Registry([Waiting("codex", evidence), Waiting("claude", evidence)]))
+                attempt = self.store.dispatch_attempts("repo", task_id=task)[0]
+                self.assertEqual("unreadable_result", attempt["error_code"])
+                self.assertIn("error_code=unreadable_result", report.explain())
+                self.assertIn(detail, report.explain())
 
     def test_interruption_after_streamed_tool_activity_is_started(self):
         class Interrupted(test_run_cycle.StreamingNative):
