@@ -112,6 +112,33 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("tests", result)
         self.assertEqual(2, len(self.calls))
 
+    def test_package_manager_bootstrap_retries_transient_failure_in_same_sandbox(self):
+        calls = []
+        def runner(argv, **options):
+            calls.append((argv, options))
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "fetch failed: ECONNRESET")
+            return self.runner(argv, **options)
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual("prepared", result["status"], result)
+        attempts = result["items"][0]["attempts"]
+        self.assertEqual([1, 0, 0], [a["exit_code"] for a in attempts])
+        self.assertEqual(calls[0], calls[1])
+        self.assertIn("ECONNRESET", Path(attempts[0]["stderr"]).read_text())
+
+    def test_package_manager_bootstrap_exhaustion_never_installs_or_changes_outputs(self):
+        calls = []
+        def runner(argv, **options):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "fetch failed: ECONNRESET")
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual("incomplete", result["status"])
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all(argv[-1] == "--version" for argv in calls))
+        self.assertFalse((self.root / "node_modules").exists())
+
     def test_install_runs_in_a_scratch_copy_and_replaces_checkout_outputs(self):
         # Codex mounts a protected .agents inside every writable root, and
         # npm ci failed with EBUSY emptying such a node_modules. The checkout

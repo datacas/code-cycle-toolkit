@@ -299,7 +299,13 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         path.write_text(content, encoding="utf-8")
                         record[stream] = str(path)
                     return code, stdout, stderr
+                # --version may bootstrap a declared pnpm/Corepack binary from
+                # the registry. It needs the same bounded recovery as install.
                 code, version, error = run([manager, "--version"], "version", 60)
+                if code == 124 or (code != 0 and any(
+                        token in (version + error).lower() for token in TRANSIENT)):
+                    sleep(1)
+                    code, version, error = run([manager, "--version"], "version-retry", 60)
                 if code != 0:
                     raise ValueError(f"package manager version failed with exit {code}: {error}")
                 if not version.strip():

@@ -83,12 +83,22 @@ the effective source policy with PR-controlled configuration.
 
 Claude receives both the allowed-tool patterns and the command hook policy.
 Codex retains normal tools/MCP access and receives the matching explicit network
-profile. Default code-host domains are granted only to publishing stages;
-non-publishing stages, including issue review and local-only writers, receive
-only explicitly selected registry domains. Issue review must use host-supplied
-issue context; missing context requires host-side reads, not a worker route
-with write-capable credentials. Registry choices alone do not select a publication
-profile.
+profile. Default code-host domains are granted to publishing stages. Per the
+owner's #279 decision, Codex issue review also receives `github.com` and
+`api.github.com`, with the same existing gh credentials, while its workspace and
+publication contract remain read-only. This is a credential trust decision:
+the domain grant itself does not make an HTTP credential read-only. Other
+non-publishing roles receive only registry access, without a publication profile.
+
+When runtime preparation detects Node dependencies, the worker inherits the
+same npm/Yarn registry domains as preparation, plus explicitly selected registry
+domains. This also applies after incomplete setup: package-manager launchers and
+configured verification can need the registry after the frozen install. Both
+native executors receive this route before dispatch; projects without detected
+Node setup gain no automatic registry access. Transient package-manager bootstrap
+failures (`--version`, which may download the declared manager) get the same
+bounded retry as installation. Neither networking nor retries count as successful
+verification or enable lifecycle scripts.
 
 The command hook checks direct Git, code-host and Docker invocations before
 applying choices. Selecting an interpreter, wrapper or arbitrary-code runner
