@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -368,6 +370,48 @@ class RunLineTests(unittest.TestCase):
         self.assertIn("rejected token 'high'", str(caught.exception))
         self.assertIn("extra stage token 'resolve'", str(caught.exception))
         self.assertIn("remove the leading stage token", str(caught.exception))
+
+
+class TriageValidatorCliTests(unittest.TestCase):
+    script = ROOT / "scripts" / "validate-triage-comment.py"
+
+    def invoke(self, path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(self.script), str(path)],
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_cli_accepts_prose_and_a_valid_triage_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{TRIAGE_RUN}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_cli_reports_contract_errors_and_their_line(self) -> None:
+        malformed = TRIAGE_RUN.replace(f" · triaged:{PRE_EDIT_SHA}", "")
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{malformed}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(str(comment), result.stderr)
+        self.assertIn("line 2", result.stderr)
+        self.assertIn("missing triaged:<sha>", result.stderr)
+
+    def test_cli_reports_an_unreadable_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "missing.md"
+
+            result = self.invoke(comment)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(str(comment), result.stderr)
 
 
 class ModelResolutionTests(unittest.TestCase):

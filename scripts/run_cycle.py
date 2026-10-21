@@ -2375,8 +2375,9 @@ def run_cycle(
 
         A receipt from an attempt nobody here dispatched is another writer:
         the history is already reconciled, and the cycle stops for whoever
-        owns the change request. An unobserved publication of this stage is
-        flagged, and the next dispatch of the same stage retries it.
+        owns the change request. Failed history reconciliation blocks after
+        publication; when reconciliation succeeds but this attempt's
+        publication is absent, the next dispatch of the same stage retries it.
         """
         nonlocal history_store
         if not tracking:

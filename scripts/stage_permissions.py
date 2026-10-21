@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field, replace
@@ -531,7 +532,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
     if words[0] in policy.tools:
         return
     if (policy.role == "resolve" and policy.tmpdir
-            and words == ["python3", "scripts/validate-triage-comment.py",
+            and words == ["python3", _triage_validator_path(),
                           str(Path(policy.tmpdir) / "pr-comment.md")]):
         return
     for command in policy.commands:
@@ -1175,10 +1176,8 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         prefixes.append("gh api graphql")
         if policy.tmpdir:
             prefixes.append(
-                "python3 scripts/validate-triage-comment.py "
-                f"{Path(policy.tmpdir) / 'pr-comment.md'}")
-            prefixes.append(
-                'python3 scripts/validate-triage-comment.py "$TMPDIR/pr-comment.md"')
+                f'python3 {shlex.quote(_triage_validator_path())} '
+                '"$TMPDIR/pr-comment.md"')
     prefixes += sorted(READ_SHELL)
     prefixes += list(policy.tools) + list(policy.commands)
     if policy.docker:
@@ -1208,6 +1207,11 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         patterns += [pattern.replace("Edit(", "Write(") for pattern in list(patterns)
                      if pattern.startswith("Edit(")]
     return list(dict.fromkeys(patterns))
+
+
+def _triage_validator_path() -> str:
+    """Return the validator beside the installed runtime, in shell-safe path form."""
+    return Path(__file__).resolve().with_name("validate-triage-comment.py").as_posix()
 
 
 def _absolute_rule_path(path: str) -> str:
@@ -1263,6 +1267,13 @@ def prompt_note(policy: StagePolicy) -> str:
                if getattr(policy, key)}
     if choices:
         tmpdir_note += " Effective project choices: " + json.dumps(choices) + "."
+    if policy.role == "resolve":
+        tmpdir_note += (
+            " The staged-comment validator is installed with the runtime at "
+            f"`{_triage_validator_path()}`; run "
+            f"`python3 {shlex.quote(_triage_validator_path())} "
+            '`"$TMPDIR/pr-comment.md"`. '
+        )
     return (
         foreground +
         f" Command policy for this {policy.role} stage: a runtime hook validates "
