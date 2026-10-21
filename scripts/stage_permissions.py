@@ -530,6 +530,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         return _check_docker(words[1:], policy)
     if words[0] in policy.tools:
         return
+    if (policy.role == "resolve" and policy.tmpdir
+            and words == ["python3", "scripts/validate-triage-comment.py",
+                          str(Path(policy.tmpdir) / "pr-comment.md")]):
+        return
     for command in policy.commands:
         expected = parse_command(command, None).words
         if words[:len(expected)] == expected:
@@ -1169,6 +1173,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     prefixes.append("gh api user --jq .login")
     if policy.role == "resolve":
         prefixes.append("gh api graphql")
+        if policy.tmpdir:
+            prefixes.append(
+                "python3 scripts/validate-triage-comment.py "
+                f"{Path(policy.tmpdir) / 'pr-comment.md'}")
+            prefixes.append(
+                'python3 scripts/validate-triage-comment.py "$TMPDIR/pr-comment.md"')
     prefixes += sorted(READ_SHELL)
     prefixes += list(policy.tools) + list(policy.commands)
     if policy.docker:

@@ -332,6 +332,43 @@ class RunLineTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError):
             contract.parse_run_line(line)
 
+    def test_staged_comment_validator_reports_the_missing_anchor_and_fix(self) -> None:
+        line = TRIAGE_RUN.replace(f" · triaged:{PRE_EDIT_SHA}", "")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(f"text before\n{line}")
+
+        self.assertIn("line 2", str(caught.exception))
+        self.assertIn("missing triaged:<sha>", str(caught.exception))
+        self.assertIn("using the commit the findings were judged against",
+                      str(caught.exception))
+
+    def test_staged_comment_validator_accepts_free_text_and_valid_triage(self) -> None:
+        contract.validate_triage_comment(
+            f"Ordinary prose is allowed.\n{TRIAGE_RUN}\n"
+            "#### [REV-001] · high · resolved · valid · blocks:yes")
+
+    def test_staged_comment_validator_reports_an_invalid_anchor_format(self) -> None:
+        line = TRIAGE_RUN.replace(PRE_EDIT_SHA, "not-a-sha")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(line)
+
+        self.assertIn("line 1", str(caught.exception))
+        self.assertIn("invalid token 'triaged:not-a-sha'", str(caught.exception))
+        self.assertIn("triaged:<40-hex commit SHA>", str(caught.exception))
+
+    def test_staged_comment_validator_diagnoses_a_leading_duplicate_stage_token(self) -> None:
+        line = ("#### [CCT-20261019-002] · resolve · cheap_coder · "
+                "openai/gpt-6-luna→? · high · schema:2")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(line)
+
+        self.assertIn("rejected token 'high'", str(caught.exception))
+        self.assertIn("extra stage token 'resolve'", str(caught.exception))
+        self.assertIn("remove the leading stage token", str(caught.exception))
+
 
 class ModelResolutionTests(unittest.TestCase):
     def test_unknown_resolved_model_is_valid(self) -> None:

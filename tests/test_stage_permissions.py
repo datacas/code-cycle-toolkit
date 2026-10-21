@@ -629,6 +629,18 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "review", "rereview", "issue_review"):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
+    def test_only_the_resolver_gets_the_staged_triage_validator(self) -> None:
+        resolve = self.policy("resolve")
+        command = ("python3 scripts/validate-triage-comment.py "
+                   f"{self.tmpdir / 'pr-comment.md'}")
+        self.allowed(command, resolve)
+        variable_command = 'python3 scripts/validate-triage-comment.py "$TMPDIR/pr-comment.md"'
+        self.allowed(variable_command, resolve)
+        self.denied("python3 -m unittest", resolve)
+        self.assertIn(f"Bash({command}:*)", self.patterns("resolve"))
+        self.assertIn(f"Bash({variable_command}:*)", self.patterns("resolve"))
+        self.assertNotIn(f"Bash({command}:*)", self.patterns("review"))
+
     def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
         # #270: the hook allowed `git grep` for issue_review while these
         # patterns, the first barrier, still left it out.

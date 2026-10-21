@@ -111,6 +111,7 @@ from review_contract import (
     stage_evidence,
     trusted_logins,
     trusted_receipts,
+    validate_triage_comment,
 )
 from router import (
     ESCALATION_PROFILES,
@@ -2024,11 +2025,13 @@ def read_change_request_comments(
         body = comment.get("body")
         identifier = comment.get("id")
         updated_at = comment.get("updated_at")
+        url = comment.get("html_url")
         comments.append(ProviderComment(
             author=login if isinstance(login, str) else None,
             body=body if isinstance(body, str) else "",
             id=str(identifier) if isinstance(identifier, int) else None,
-            updated_at=updated_at if isinstance(updated_at, str) else None))
+            updated_at=updated_at if isinstance(updated_at, str) else None,
+            url=url if isinstance(url, str) else None))
     return comments
 
 
@@ -2376,17 +2379,38 @@ def run_cycle(
         flagged, and the next dispatch of the same stage retries it.
         """
         nonlocal history_store
-        if not tracking or history_store is None:
+        if not tracking:
             return None
         details = report.stage_details[-1]
+        if history_store is None:
+            try:
+                comments = remote.comments(repo_id, request)
+                for comment in comments:
+                    if comment.author and comment.author.casefold() in {
+                            author.casefold() for author in trusted_authors}:
+                        validate_triage_comment(comment.body)
+            except ContractError as error:
+                return stop(
+                    f"published {role} comment cannot be read: contract validation failed: {error}",
+                    "BLOCKED", reported=reported)
+            except CycleDriverError as error:
+                return stop(
+                    f"published {role} comment validation could not complete: {error}",
+                    "BLOCKED", reported=reported)
+            return None
         try:
             synced = history_store.sync(repo_id, request, trusted_authors=trusted_authors,
                                         remote=remote)
             published = (history_store.publication(attempt_id)
                          if isinstance(attempt_id, str) else None)
-        except (CycleDriverError, ContractError, HistoryError) as error:
-            details.warnings.append(f"local history not synced: {error}")
-            return None
+        except ContractError as error:
+            return stop(
+                f"published {role} comment cannot be read: contract validation failed: {error}",
+                "BLOCKED", reported=reported)
+        except (CycleDriverError, HistoryError) as error:
+            return stop(
+                f"published {role} comment validation could not complete: {error}",
+                "BLOCKED", reported=reported)
         except sqlite3.Error:
             history_store = None
             return None

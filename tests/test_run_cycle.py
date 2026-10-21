@@ -2924,6 +2924,20 @@ class ResumedHistoryTests(RunCycleTestCase):
         self.assert_stopped_before_dispatch(
             report, "BLOCKED", "comment 555", "cannot be parsed")
 
+    def test_a_triage_line_without_anchor_blocks_with_actionable_repair(self) -> None:
+        malformed = contract.ProviderComment(
+            author="Reviewer", id="557",
+            url="https://github.com/datacas/code-cycle-toolkit/pull/252#issuecomment-557",
+            body=("#### [CCT-20261016-001] · cheap_coder · "
+                  "openai/gpt-6-luna→? · high · schema:2"))
+
+        report = self.resume(CLAIMED + [malformed])
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "comment 557", "issuecomment-557", "line 1",
+            "missing triaged:<sha>",
+            "using the commit the findings were judged against")
+
     def test_a_trusted_contract_comment_that_cannot_be_placed_blocks(self) -> None:
         both = contract.ProviderComment(
             author="reviewer", id="777",

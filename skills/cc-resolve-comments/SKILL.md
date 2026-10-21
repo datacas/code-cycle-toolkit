@@ -688,6 +688,19 @@ ones. A skipped check counts in none of the three and is listed as `skipped`.
 Report all three counts or omit `checks`: a missing count would read as zero.
 When the stage never pushed, omit `checks`.
 
+## Validate before publishing
+
+For a native dispatch, write the complete final change-request comment to
+`$TMPDIR/pr-comment.md` before publishing it. Run exactly
+`python3 scripts/validate-triage-comment.py "$TMPDIR/pr-comment.md"` and fix
+every reported contract error before posting. Publish the contents of that
+validated file. If the file changes after validation, validate it again before
+posting. The validator accepts ordinary prose and checks each machine-readable
+line through `review_contract.parse_run_line`; never maintain a second parser.
+After publication, the runtime reads the published comment back and validates
+it through the same contract. A malformed published line or an unavailable
+readback stops the cycle as `BLOCKED`; repair the comment manually and resume.
+
 ## Replies and thread state
 
 For each comment, record:

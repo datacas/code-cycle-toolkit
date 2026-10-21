@@ -182,6 +182,7 @@ class ProviderComment:
     body: str
     id: str | None = None
     updated_at: str | None = None
+    url: str | None = None
 
 
 @dataclass
@@ -394,11 +395,43 @@ def parse_comment(text: str) -> ReviewRecord:
     language-neutral tokens are read.
     """
     record = ReviewRecord()
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped.startswith("#"):
             continue
-        run = parse_run_line(stripped)
+        try:
+            run = parse_run_line(stripped)
+        except ContractError as error:
+            detail = str(error)
+            if "a triage run line must carry triaged:<sha>" in detail:
+                detail = (
+                    "missing triaged:<sha>; add `triaged:<sha>` before "
+                    "`schema:<n>`, using the commit the findings were judged against"
+                )
+            elif "triaged: needs a commit SHA" in detail:
+                invalid = detail.rsplit(": ", 1)[-1]
+                detail = (
+                    f"invalid token {invalid}; replace it with "
+                    "`triaged:<40-hex commit SHA>` for the commit the findings were judged against"
+                )
+            elif "unknown token in run line" in detail:
+                tokens = _split_tokens(_HEADER_RE.match(stripped).group(2))  # type: ignore[union-attr]
+                schema_index = next(
+                    (index for index, token in enumerate(tokens)
+                     if _SCHEMA_RE.match(token)), len(tokens)
+                )
+                stage_tokens = [token for token in tokens[:schema_index]
+                                if token in {"review", "resolve", "rereview"}]
+                if (len(stage_tokens) > 1
+                        or tokens[:1] in (["review"], ["resolve"], ["rereview"])):
+                    rejected = detail.rsplit(" ", 1)[-1].strip("'\"")
+                    leading = tokens[0] if tokens else ""
+                    detail = (
+                        f"rejected token {rejected!r}; extra stage token "
+                        f"{leading!r} shifts the remaining fields; remove the leading "
+                        "stage token"
+                    )
+            raise ContractError(f"line {line_number}: {detail}") from error
         if run is not None:
             record.runs.append(run)
             continue
@@ -407,6 +440,11 @@ def parse_comment(text: str) -> ReviewRecord:
             record.findings.append(finding)
     record.attribution = parse_attribution_block(text)
     return record
+
+
+def validate_triage_comment(text: str) -> None:
+    """Validate every machine-readable contract line in a staged comment."""
+    parse_comment(text)
 
 
 def merge_disposition(previous: str | None, incoming: str) -> str:
@@ -743,6 +781,8 @@ def history_entry(
     comment that does not name its attempt.
     """
     label = f"comment {comment.id}" if comment.id else f"comment #{number}"
+    if comment.url:
+        label += f" ({comment.url})"
     if not isinstance(comment.author, str) or not comment.author.strip():
         raise ContractError(f"{label} carries no author metadata")
     if comment.author.strip().casefold() not in trusted:
