@@ -1796,6 +1796,49 @@ def check_continuation(cwd: str | None, config: dict, *, run=subprocess.run) -> 
             f"--continue found nothing to continue: {cwd} is clean on {where}")
 
 
+#: What a continued implementation is told when its change request exists.
+CONTINUE_CHANGE_REQUEST = (
+    " The open change request {reference} already carries this work: push to "
+    "its branch and report it as change_request_id."
+)
+
+
+def continued_change_request(repo_id: str, cwd: str | None,
+                             *, run=subprocess.run) -> str | None:
+    """The open GitHub pull request an interrupted implementation published.
+
+    An implementation can publish and then stop, for example when verification
+    loses its registry access (#279). Its continuation must reuse that pull
+    request, so the runtime reads it before the dispatch instead of trusting
+    the agent to find it. `None` means none was found or it could not be read;
+    the continuation is then only told not to open a second one.
+    """
+    if not cwd:
+        return None
+
+    def call(command: list[str]) -> str | None:
+        try:
+            done = run(command, capture_output=True, text=True, check=False,
+                       stdin=subprocess.DEVNULL, cwd=cwd)
+        except OSError:
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    branch = call(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if not branch or branch == "HEAD":
+        return None
+    raw = call(["gh", "pr", "list", "--repo", repo_id, "--head", branch,
+                "--state", "open", "--json", "number"])
+    try:
+        pulls = json.loads(raw) if raw else []
+    except ValueError:
+        return None
+    numbers = [pull.get("number") for pull in pulls if isinstance(pull, dict)]
+    if len(numbers) != 1 or isinstance(numbers[0], bool) or not isinstance(numbers[0], int):
+        return None
+    return str(numbers[0])
+
+
 def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
                          *, run=subprocess.run) -> None:
     """Refuse to resume a change request that is not there to work on.
@@ -2204,6 +2247,7 @@ def run_cycle(
     ci_clock: Callable[[], float] | None = None,
     ci_sleep: Callable[[float], None] | None = None,
     repair_approval: str | None = None,
+    published_change_request: Callable[[], str | None] | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -2247,6 +2291,12 @@ def run_cycle(
     and for at most `ci_timeout` seconds, for every required check of the
     reviewed SHA to pass while that SHA is still the change request's head.
     `ci_checks`, `ci_clock` and `ci_sleep` inject the code host and time.
+
+    With `continue_work`, `published_change_request` reads the change request
+    the interrupted implementation already published; by default a GitHub
+    cycle reads the open pull request of the checkout's branch. The
+    continuation is told to reuse it, and a result naming another change
+    request stops before review instead of reviewing a duplicate.
     """
     validate_start(start_from, change_request_id, local_only=local_only,
                    continue_work=continue_work)
@@ -3195,10 +3245,30 @@ def run_cycle(
                 stopped = review_issue()
                 if stopped is not None:
                     return stopped
-            reported, stopped = advance(
-                "implement", CONTINUE_IMPLEMENTATION if continue_work else "")
+            continuation, published = "", None
+            if continue_work:
+                continuation = CONTINUE_IMPLEMENTATION
+                reader = published_change_request
+                if reader is None and (code_host or policy_code_host) == "github":
+                    def reader() -> str | None:
+                        return continued_change_request(repo_id, cwd)
+                published = reader() if reader is not None else None
+                if published is not None and not safe_reference(published):
+                    published = None
+                if published is not None:
+                    continuation += CONTINUE_CHANGE_REQUEST.format(reference=f"#{published}")
+            reported, stopped = advance("implement", continuation)
             if stopped is not None:
                 return stopped
+            if (published is not None and reported.change_request_id is not None
+                    and reported.change_request_id.lstrip("#") != published.lstrip("#")):
+                # The work was already published: reviewing another change
+                # request would split it, and closing either is not ours to do.
+                return stop(
+                    f"the continued implementation reported change request "
+                    f"{reported.change_request_id}, but #{published.lstrip('#')} already "
+                    "carries this work; a person decides which one continues",
+                    "BLOCKED", reported=reported)
             if local_only:
                 return stop(
                     "local-only run stops after implementation; no change request was created for review",
@@ -3207,7 +3277,9 @@ def run_cycle(
                     stop_reason="local_only",
                 )
 
-            change_request_id = reported.change_request_id
+            # A continuation may leave the change request it was told to reuse
+            # unnamed; the runtime read that one itself, so review it.
+            change_request_id = reported.change_request_id or published
             if change_request_id is None:
                 return stop(
                     "implement completed without change_request_id or legacy pr_number; "

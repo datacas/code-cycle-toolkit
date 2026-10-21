@@ -43,13 +43,49 @@ and continues the stage with the setup evidence when preparation is exhausted.
 The agent can continue source inspection and read CI for the exact HEAD. Pending
 CI and unexecuted local checks remain pending/unverified.
 
-Lifecycle scripts and native `binding.gyp` requirements produce
-`scripts_disabled` / `incomplete` evidence with the affected manifests and an
-isolated recovery instruction. This is deliberately not a claim that disabled
-builds succeeded. Required builds must run within the same contained preparation
-boundary, with their generated outputs authorized, before local verification can
-be claimed. An install exit of zero without required dependency outputs also
-remains incomplete.
+An install exit of zero without required dependency outputs remains incomplete.
+
+### Lifecycle builds
+
+After the scripts-disabled install, preparation looks for lifecycle scripts
+(`preinstall`, `install`, `postinstall`, `prepare`) and native `binding.gyp`
+builds. It checks the workspace manifests and the installed packages, and lists
+the affected manifests as `needs_build`. Only then does it run a contained
+lifecycle build: the same frozen install without `--ignore-scripts`
+(`YARN_ENABLE_SCRIPTS=true` for Yarn 2+). It runs in a second scratch copy of the
+tracked files, through the same native sandbox, with the same registry-only
+network and reduced environment. The package manager's own build policy still
+applies, such as pnpm's `onlyBuiltDependencies` or Yarn's `dependenciesMeta`.
+
+Project scripts can write only three places: the build copy, its own `HOME`, and
+a private copy of the download cache. They cannot write the checkout, the shared
+cache or the scripts-disabled tree, and the lockfile and manifests stay
+read-only. The host then checks those inputs. A build that changed them, failed,
+timed out after its bounded retry, or produced no required dependency output is
+recorded as `lifecycle_build.status: failed`. In that case the scripts-disabled
+install is published and the item stays `scripts_disabled` / `incomplete`, with
+the build's logs as evidence. A failed build is never reported as prepared, and
+it never falls back to the host.
+
+After a successful build (`lifecycle_build.status: built`), the host moves the
+built dependency outputs into the checkout. It also moves any new entries the
+build created beside a package manifest, such as a Nuxt `.nuxt` directory, but
+only those the checkout's own Git ignore rules ignore, and never tracked paths,
+links, `.git`, sandbox placeholders or configuration that host tools load
+outside the sandbox (such as `.envrc`, `.vscode`, `.idea`, `.claude`,
+`.mcp.json`, package-manager configuration such as `.npmrc` or `.pnpmfile.cjs`,
+or shell profiles). These are listed in
+`lifecycle_build.generated`. Ignore rules are read from the read-only checkout,
+never from the build copy. A new untracked entry that is not ignored stays out.
+The build copy holds no untracked checkout content, so an existing ignored
+entry, such as a developer's `.env` or `dist/`, was not created by the build.
+It is replaced only when an earlier preparation of the same checkout published
+it and its content is unchanged since; otherwise it is kept and listed in
+`lifecycle_build.preserved`. The content digests of published entries are kept
+beside the receipts under the preparation state directory.
+Native builds that download something other than registry packages, such as
+prebuilt binaries from another host or Node headers, fail inside the sandbox.
+They then stay incomplete, rather than gaining wider network access.
 
 Each preparation writes `report.json`, command arguments, stdout/stderr log
 paths, exit statuses and the exact HEAD under
@@ -57,7 +93,8 @@ paths, exit statuses and the exact HEAD under
 review clones. Download caches are keyed by lockfile/manifests, manager version
 and platform; pnpm copies files so editing an installed dependency cannot alter
 the shared store. Verified installs are reused only in the same checkout and
-HEAD, after checking every package-local output and the installed tree digest.
+HEAD, after checking every package-local output, the installed tree digest and
+any published lifecycle-build outputs.
 Fresh clones always build their own dependency tree.
 
 ## Explicit user choices
@@ -83,12 +120,22 @@ the effective source policy with PR-controlled configuration.
 
 Claude receives both the allowed-tool patterns and the command hook policy.
 Codex retains normal tools/MCP access and receives the matching explicit network
-profile. Default code-host domains are granted only to publishing stages;
-non-publishing stages, including issue review and local-only writers, receive
-only explicitly selected registry domains. Issue review must use host-supplied
-issue context; missing context requires host-side reads, not a worker route
-with write-capable credentials. Registry choices alone do not select a publication
-profile.
+profile. Default code-host domains are granted to publishing stages. Per the
+owner's #279 decision, Codex issue review also receives `github.com` and
+`api.github.com`, with the same existing gh credentials, while its workspace and
+publication contract remain read-only. This is a credential trust decision:
+the domain grant itself does not make an HTTP credential read-only. Other
+non-publishing roles receive only registry access, without a publication profile.
+
+When runtime preparation detects Node dependencies, the worker inherits the
+same npm/Yarn registry domains as preparation, plus explicitly selected registry
+domains. This also applies after incomplete setup: package-manager launchers and
+configured verification can need the registry after the frozen install. Both
+native executors receive this route before dispatch; projects without detected
+Node setup gain no automatic registry access. Transient package-manager bootstrap
+failures (`--version`, which may download the declared manager) get the same
+bounded retry as installation. Neither networking nor retries count as successful
+verification or enable lifecycle scripts.
 
 The command hook checks direct Git, code-host and Docker invocations before
 applying choices. Selecting an interpreter, wrapper or arbitrary-code runner
@@ -120,7 +167,10 @@ python3 -m unittest tests.native_dependency_campaign
 
 It creates a clean npm workspace with an uncached pinned dependency, records its
 HEAD, invokes each actual native preparation sandbox, and runs dependency lookup
-inside that same sandbox. Preserve its report/log evidence and exit statuses.
+inside that same sandbox. A second fixture per executor adds a project
+`postinstall`. That script must run only in the contained lifecycle build. It
+generates an ignored output, which must reach the checkout, and tries to write
+the checkout directly, which the sandbox must deny. Preserve its report/log evidence and exit statuses.
 Do not replace native failures with the subprocess fixture's passing result.
 When invoked inside a Codex stage, the nested Codex app-server socket may be
 masked; report that observed restriction once and use the cycle's configured

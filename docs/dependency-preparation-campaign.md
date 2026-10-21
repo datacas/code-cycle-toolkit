@@ -154,9 +154,45 @@ After that, `srt` started.
   - The no-network `node -e` lookup exited 0.
   - The lockfile and HEAD were unchanged.
 
+## Run 6 — Claude `-p` implement stage, contained lifecycle build (2026-10-21)
+
+Toolkit: PR #302, the lifecycle-build unit on top of `54d514c`. The run used a
+cold cache under the dispatch TMPDIR. Command:
+`python3 -m unittest -v tests.native_dependency_campaign`. Exit **0**, four
+tests, all passed.
+
+- `test_claude` (fixture HEAD `816df64480a1f625f34c792237d2e391203ef0e6`) and
+  `test_codex` (fixture HEAD `0ebf2a667c142a1d86a45994196e254fcca448d8`):
+  passed, as in run 5. No lifecycle build ran, since nothing needed one.
+- `test_claude_lifecycle_build` (fixture HEAD
+  `6af1fd8d1e2c9cad10d276cc5c8243b8cf59b91b`): **passed**.
+  - `npm ci --ignore-scripts …` exited 0. Preparation reported
+    `needs_build: ["package.json"]` for the root `postinstall`.
+  - `srt --settings <scratch>/sandbox.json -- npm ci --no-audit --no-fund
+    --cache <scratch>/build-cache` exited 0, with writes allowed only to
+    `<scratch>/build`, `<scratch>/build-home` and `<scratch>/build-cache`.
+  - The script's write to the checkout path failed inside the sandbox
+    (`checkout write denied: EROFS`).
+  - `lifecycle_build` was `built` and `generated: ["generated"]`.
+    `generated/ok.txt` reached the checkout, containing `built`.
+  - The escape file was absent, `git status --porcelain` was empty, and the
+    no-network `node -e` lookup exited 0. The lockfile and HEAD were unchanged.
+- `test_codex_lifecycle_build` (fixture HEAD
+  `4cafcaab5dcbb0918cc5793754e355168fa33dcc`): **passed**, with the same
+  results.
+  - The `codex sandbox` profile granted `write` only to the build copy, its
+    `HOME` and the cache copy, and `read` to the staged lockfile and manifests.
+  - The checkout write again failed with `EROFS`.
+
+This run does not reproduce failures A and B from #279 on the installed
+runtime. That validation remains pending with the #291 host runner.
+
 ## Not covered by this campaign
 
 - pnpm and Yarn under a native sandbox. Only npm ran.
+- A native `binding.gyp` compile or a dependency's own install script under a
+  native sandbox. The lifecycle fixture covers a project `postinstall`. The unit
+  fixtures cover dependency build outputs and failure fallback.
 - A complete dispatched stage, end to end. The campaign drives `prepare` and
   the dependency lookup through each real sandbox. The stage wiring is covered
   by the fixture tests in `tests/test_stage_dispatch.py`. Pending CI is

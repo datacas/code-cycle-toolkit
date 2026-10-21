@@ -140,7 +140,7 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
 
     def test_codex_nonpublishing_dispatches_do_not_get_default_code_host_domains(self) -> None:
         # Includes local-only implement/resolve and inactive command policies.
-        for role in ("implement", "resolve", "review", "rereview", "issue_review", "security", "bootstrap"):
+        for role in ("implement", "resolve", "review", "rereview", "security", "bootstrap"):
             for active in (True, False):
                 for registry_domains in ((), ("packages.example.org",)):
                     with self.subTest(role=role, active=active, registries=registry_domains):
@@ -179,6 +179,52 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
         for domain in (*sp.REVIEW_SANDBOX_DOMAINS, "packages.example.org"):
             self.assertIn(json.dumps(domain) + '="allow"', " ".join(seen))
         self.assertIn('default_permissions="code_cycle_publish_write"', seen)
+
+    def test_codex_issue_review_can_read_github_without_publication(self) -> None:
+        seen = []
+        policy = self.policy("issue_review")
+        def runner(argv, **options):
+            seen.extend(argv)
+            return completed('{"type":"turn.completed"}')
+        result = ex.CodexAdapter().dispatch(
+            CODEX, "read work item", cwd=str(self.repo), writes=False, publishes=False,
+            command_policy=policy, runner=runner)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        for domain in ("github.com", "api.github.com"):
+            self.assertIn(json.dumps(domain) + '="allow"', " ".join(seen))
+        self.assertIn('permissions.code_cycle_registry_read.extends=":read-only"', seen)
+        self.assertNotIn("code_cycle_publish", " ".join(seen))
+        self.assertTrue(sp.check("gh issue view 142 --repo owner/repo", policy).allowed)
+        for command in ("gh issue comment 142 --repo owner/repo --body forbidden",
+                        "gh pr create --repo owner/repo --title forbidden --body forbidden",
+                        "git push origin HEAD"):
+            self.assertFalse(sp.check(command, policy).allowed, command)
+
+    def test_preparation_registries_reach_worker_even_when_setup_is_incomplete(self) -> None:
+        for adapter, target in ((ex.CodexAdapter(), CODEX), (ex.ClaudeAdapter(), CLAUDE)):
+            for role in ("implement", "resolve", "review", "rereview"):
+                for status in ("prepared", "incomplete"):
+                    with self.subTest(executor=adapter.name, role=role, status=status):
+                        seen = []
+                        report = {"status": status, "items": [{"manager": "pnpm"}]}
+                        def runner(argv, **options):
+                            seen.extend(argv)
+                            return completed('{"type":"turn.completed"}')
+                        policy = self.policy(role, registry_domains=("packages.example.org",))
+                        with mock.patch.object(ex.dependency_setup, "prepare", return_value=report):
+                            result = adapter.dispatch(
+                                target, "verify existing work", cwd=str(self.repo),
+                                writes=role in {"implement", "resolve"}, publishes=True,
+                                command_policy=policy, runner=runner)
+                        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                        domains = (*ex.dependency_setup.REGISTRIES, "packages.example.org")
+                        if adapter.name == "codex":
+                            for domain in domains:
+                                self.assertIn(json.dumps(domain) + '="allow"', " ".join(seen))
+                        else:
+                            allowed = settings_of(seen)["sandbox"]["network"]["allowedDomains"]
+                            self.assertTrue(set(domains).issubset(allowed))
+                        self.assertEqual(("packages.example.org",), policy.registry_domains)
 
 
 class ClaudePolicyTests(DispatchTestCase):

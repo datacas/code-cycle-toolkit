@@ -3631,6 +3631,93 @@ class ContinueImplementationTests(RunCycleTestCase):
         with self.assertRaisesRegex(rc.CycleDriverError, "--continue resumes an interrupted"):
             rc.validate_start("review", "74", continue_work=True)
 
+    def test_a_published_change_request_is_reused_after_verification_stopped(self) -> None:
+        # #279 B: the implementation published, then verification lost access.
+        implementer = Talker("codex", block("IMPLEMENTED", change_request_id="253"))
+        reviewer = Talker("claude")
+        report = self.run_cycle(implementer, reviewer, continue_work=True,
+                                published_change_request=lambda: "253")
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+        self.assertIn("The open change request #253 already carries this work", prompt)
+        self.assertEqual(1, len(reviewer.dispatched))
+        self.assertIn("253", reviewer.dispatched[0])
+        self.assertNotEqual("BLOCKED", report.status)
+
+    def test_a_second_change_request_is_not_reviewed(self) -> None:
+        implementer = Talker("codex", block("IMPLEMENTED", change_request_id="254"))
+        reviewer = Talker("claude")
+        report = self.run_cycle(implementer, reviewer, continue_work=True,
+                                published_change_request=lambda: "253")
+
+        self.assertEqual("BLOCKED", report.status)
+        self.assertIn("#253 already carries this work", report.stopped_because)
+        self.assertEqual([], reviewer.dispatched)
+
+    def test_the_observed_change_request_is_reviewed_when_the_result_omits_it(self) -> None:
+        implementer = Talker("codex", block("IMPLEMENTED", change_request_id=None))
+        reviewer = Talker("claude")
+        self.run_cycle(implementer, reviewer, continue_work=True,
+                       published_change_request=lambda: "253")
+
+        self.assertEqual(1, len(reviewer.dispatched))
+        self.assertIn("253", reviewer.dispatched[0])
+
+    def test_without_a_published_change_request_only_the_generic_note_is_added(self) -> None:
+        implementer = Talker("codex")
+        self.run_cycle(implementer, Talker("claude"), continue_work=True,
+                       published_change_request=lambda: None)
+
+        [prompt] = self.implement_prompts(implementer)
+        self.assertIn(rc.CONTINUE_IMPLEMENTATION, prompt)
+        self.assertNotIn("already carries this work", prompt)
+
+    def test_a_new_implementation_does_not_read_a_published_change_request(self) -> None:
+        reader = mock.Mock(return_value="253")
+        self.run_cycle(Talker("codex"), Talker("claude"), published_change_request=reader)
+
+        reader.assert_not_called()
+
+
+class ContinuedChangeRequestTests(unittest.TestCase):
+    """The pull request an interrupted implementation published, read once."""
+
+    def reader(self, branch: str = "issue-130", pulls: str | None = '[{"number": 253}]',
+               gh_code: int = 0):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[0] == "git":
+                return subprocess.CompletedProcess(command, 0, branch + "\n", "")
+            return subprocess.CompletedProcess(command, gh_code, pulls or "", "denied")
+        return run, calls
+
+    def test_the_single_open_pull_request_of_the_branch_is_returned(self) -> None:
+        run, calls = self.reader()
+        self.assertEqual("253", rc.continued_change_request("owner/web", "/w", run=run))
+        self.assertIn(["gh", "pr", "list", "--repo", "owner/web", "--head", "issue-130",
+                       "--state", "open", "--json", "number"], calls)
+
+    def test_nothing_is_guessed_when_the_answer_is_not_one_pull_request(self) -> None:
+        cases = {
+            "none": self.reader(pulls="[]"),
+            "several": self.reader(pulls='[{"number": 253}, {"number": 254}]'),
+            "unreadable": self.reader(gh_code=1),
+            "malformed": self.reader(pulls="not json"),
+            "not a number": self.reader(pulls='[{"number": "253; rm"}]'),
+            "detached": self.reader(branch="HEAD"),
+        }
+        for name, (run, _calls) in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(rc.continued_change_request("owner/web", "/w", run=run))
+
+    def test_without_a_checkout_nothing_is_read(self) -> None:
+        run = mock.Mock()
+        self.assertIsNone(rc.continued_change_request("owner/web", None, run=run))
+        run.assert_not_called()
+
 
 class CheckContinuationTests(unittest.TestCase):
     def setUp(self) -> None:
