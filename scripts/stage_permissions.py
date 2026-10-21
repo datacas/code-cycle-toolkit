@@ -531,9 +531,9 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         return _check_docker(words[1:], policy)
     if words[0] in policy.tools:
         return
-    if (policy.role == "resolve" and policy.tmpdir
-            and words == ["python3", _triage_validator_path(),
-                          str(Path(policy.tmpdir) / "pr-comment.md")]):
+    if (policy.role == "resolve" and policy.tmpdir and len(words) == 3
+            and words[:2] == ["python3", _triage_validator_path()]
+            and Path(words[2]) == Path(policy.tmpdir) / "pr-comment.md"):
         return
     for command in policy.commands:
         expected = parse_command(command, None).words
@@ -1271,8 +1271,8 @@ def prompt_note(policy: StagePolicy) -> str:
         tmpdir_note += (
             " The staged-comment validator is installed with the runtime at "
             f"`{_triage_validator_path()}`; run "
-            f"`python3 {shlex.quote(_triage_validator_path())} "
-            '`"$TMPDIR/pr-comment.md"`. '
+            f'`python3 {shlex.quote(_triage_validator_path())} '
+            '"$TMPDIR/pr-comment.md"`. '
         )
     return (
         foreground +

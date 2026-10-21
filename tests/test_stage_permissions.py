@@ -639,7 +639,9 @@ class AllowedToolsTests(PolicyTestCase):
         self.assertNotIn(f"Bash({variable_command}:*)", self.patterns("review"))
         self.assertNotIn("python3 scripts/validate-triage-comment.py", " ".join(
             self.patterns("resolve")))
-        self.assertIn(validator, sp.prompt_note(resolve))
+        self.assertIn(
+            f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
+            sp.prompt_note(resolve))
 
     def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
         # #270: the hook allowed `git grep` for issue_review while these
