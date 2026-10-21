@@ -61,6 +61,7 @@ from pathlib import Path, PureWindowsPath
 
 import ci_gate
 import user_choices
+import triage_repair
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
 from cycle_history import (
     COMMENT_STAGES,
@@ -831,6 +832,8 @@ class CycleReport:
     notes: list[tuple[int, str]] = field(default_factory=list)
     #: Sensitive sandbox grants a stage asked for and nobody has answered.
     permission_requests: list[PermissionRequest] = field(default_factory=list)
+    #: One exact, content-bound triage repair offer when a trusted comment qualifies.
+    repair_proposal: dict | None = None
 
     @property
     def approved(self) -> bool:
@@ -844,6 +847,19 @@ class CycleReport:
     def explain(self) -> str:
         lines = [f"{self.repo_id} {self.task_id}: {self.status}"]
         lines.extend(text for position, text in self.notes if position == 0)
+        if self.repair_proposal is not None:
+            lines.extend([
+                "  repair proposal:",
+                f"    repository: {self.repair_proposal['repo']}",
+                f"    comment: {self.repair_proposal['comment_url']} (id {self.repair_proposal['comment_id']})",
+                f"    original content: {self.repair_proposal['original_content']}",
+                f"    original line: {self.repair_proposal['original_line']}",
+                f"    proposed line: {self.repair_proposal['repaired_line']}",
+                f"    evidence: {self.repair_proposal['evidence']}",
+                f"    diff: {self.repair_proposal['diff']}",
+                f"    digest: {self.repair_proposal['digest']}",
+                "    approve by resuming with --repair-approval <comment-id>:<digest>",
+            ])
         for index, stage in enumerate(self.stages):
             details = (self.stage_details[index]
                        if index < len(self.stage_details) else StageReportDetails(0, None))
@@ -2178,6 +2194,7 @@ def run_cycle(
     ci_poll_interval: float = ci_gate.DEFAULT_POLL_INTERVAL,
     ci_clock: Callable[[], float] | None = None,
     ci_sleep: Callable[[float], None] | None = None,
+    repair_approval: str | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -2369,6 +2386,71 @@ def run_cycle(
         return " " + RETRY_PUBLICATION.format(
             role=role, ids=", ".join(item["attempt_id"] for item in pending))
 
+    def repair_proposals(request: str):
+        """Find uniquely provable repairs in trusted GitHub comments."""
+        if not trusted_authors or history_store is None or code_host != "github":
+            return []
+        try:
+            comments = remote.comments(repo_id, request)
+        except (CycleDriverError, HistoryError):
+            return []
+        trusted = {author.casefold() for author in trusted_authors}
+        candidates = []
+        for comment in comments:
+            if (not comment.author or comment.author.casefold() not in trusted
+                    or not comment.id):
+                continue
+            try:
+                receipts = stage_evidence(comment.body)
+            except ContractError:
+                continue
+            if len(receipts) != 1:
+                continue
+            receipt = receipts[0]
+            if receipt.get("repo") != repo_id or receipt.get("stage") != "resolve":
+                continue
+            start_sha = history_store.attempt_start_head(
+                receipt["attempt_id"], repo_id, request)
+            proposal = triage_repair.propose_with_start(
+                repo_id, comment.id, comment.body, start_sha)
+            if proposal is None:
+                continue
+            url = comment.url or (
+                f"https://github.com/{repo_id}/pull/{request}#issuecomment-{comment.id}")
+            diff = "\n".join(difflib.unified_diff(
+                proposal.original.splitlines(), proposal.repaired.splitlines(),
+                fromfile="original", tofile="proposed", lineterm=""))
+            record = {
+                "repo": repo_id, "comment_id": comment.id, "comment_url": url,
+                "original_content": proposal.original, "repaired_content": proposal.repaired,
+                "original_line": proposal.run_line, "repaired_line": proposal.repaired_line,
+                "sha": proposal.sha, "evidence": proposal.evidence, "diff": diff,
+                "digest": proposal.digest,
+            }
+            candidates.append((record, proposal))
+        return candidates
+
+    def audit_repair(record: dict, decision: str, result: str) -> None:
+        telemetry.record_triage_repair(
+            repo=repo_id, pull_number=str(change_request_id),
+            comment_id=record["comment_id"],
+            original_sha256=hashlib.sha256(record["original_content"].encode("utf-8")).hexdigest(),
+            repaired_sha256=hashlib.sha256(record["repaired_content"].encode("utf-8")).hexdigest(),
+            proposal_sha256=record["digest"], triaged_sha=record["sha"],
+            repair_type=record["evidence"], decision=decision, result=result)
+
+    def attach_repair_proposal(request: str) -> None:
+        """Attach one bounded, attempt-proven GitHub comment repair proposal."""
+        candidates = repair_proposals(request)
+        if len(candidates) != 1:
+            return
+        record, _ = candidates[0]
+        if len(json.dumps(record, ensure_ascii=False)) <= 12000:
+            report.repair_proposal = record
+            audit_repair(record, "proposed", "unverified")
+        else:
+            report.note("assisted repair proposal exceeds report bounds; use manual repair")
+
     def after_publication(role: str, request: str, attempt_id,
                           reported: Reported) -> CycleReport | None:
         """Reconcile the history after a publishing stage and check its outbox.
@@ -2391,6 +2473,7 @@ def run_cycle(
                             author.casefold() for author in trusted_authors}:
                         validate_triage_comment(comment.body)
             except ContractError as error:
+                attach_repair_proposal(request)
                 return stop(
                     f"published {role} comment cannot be read: contract validation failed: {error}",
                     "BLOCKED", reported=reported)
@@ -2405,6 +2488,7 @@ def run_cycle(
             published = (history_store.publication(attempt_id)
                          if isinstance(attempt_id, str) else None)
         except ContractError as error:
+            attach_repair_proposal(request)
             return stop(
                 f"published {role} comment cannot be read: contract validation failed: {error}",
                 "BLOCKED", reported=reported)
@@ -2440,6 +2524,10 @@ def run_cycle(
         `publishes` is false for a dispatch that only re-reads a publication
         already recovered, so the outbox expects nothing from it.
         """
+        resolve_start_head = (
+            _git_line(cwd, ["rev-parse", "HEAD"], 30)
+            if role == "resolve" and cwd else None
+        )
         evidence = ""
         stage_kwargs = dispatch_kwargs
         artifact = None
@@ -2498,10 +2586,18 @@ def run_cycle(
             if directory is not None:
                 _remove_workspace(str(directory))
         report.stages.append(outcome)
+        attempt_id = (outcome.result.artifacts.get("dispatch_attempt_id")
+                      if outcome.result is not None else None)
         if publishes:
-            expect_publication(role, change_request_id, (
-                outcome.result.artifacts.get("dispatch_attempt_id")
-                if outcome.result is not None else None))
+            expect_publication(role, change_request_id, attempt_id)
+        if (role == "resolve" and change_request_id and isinstance(attempt_id, str)
+                and resolve_start_head and history_store is not None):
+            try:
+                history_store.record_attempt_start(
+                    attempt_id, repo_id, change_request_id, role, resolve_start_head)
+            except (sqlite3.Error, HistoryError):
+                # Assisted repair requires this proof; absent storage stays manual.
+                pass
         reported = read_structured_result(outcome.result)
         if (outcome.succeeded and outcome.result is not None
                 and not outcome.result.asynchronous and reported.status is None):
@@ -3037,6 +3133,50 @@ def run_cycle(
         nonlocal change_request_id
         reported = Reported()
         verdict = None
+        if repair_approval is not None:
+            if not change_request_id or code_host != "github":
+                return stop("repair approval requires a GitHub change request", reported=reported,
+                            stop_reason="triage_repair_blocked")
+            candidates = repair_proposals(change_request_id)
+            if len(candidates) != 1:
+                return stop("approved repair proposal is no longer uniquely available; use manual repair",
+                            reported=reported, stop_reason="triage_repair_blocked")
+            record, proposal = candidates[0]
+
+            if repair_approval == f"{proposal.comment_id}:{proposal.digest}":
+                try:
+                    audit_repair(record, "approved", "unverified")
+                except (sqlite3.Error, ValueError) as error:
+                    return stop(f"could not record repair approval before editing: {error}",
+                                reported=reported, stop_reason="triage_repair_blocked")
+
+            def edit_comment(comment_id: str, body: str) -> None:
+                result = subprocess.run(
+                    ["gh", "api", f"repos/{repo_id}/issues/comments/{comment_id}",
+                     "--method", "PATCH", "--raw-field", f"body={body}"],
+                    cwd=cwd, capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    raise CycleDriverError("GitHub comment edit failed")
+
+            try:
+                decision, result = triage_repair.execute_approved(
+                    proposal, repair_approval,
+                    lambda: remote.comments(repo_id, change_request_id), edit_comment)
+            except (CycleDriverError, HistoryError, OSError, subprocess.TimeoutExpired):
+                decision, result = "approved", "unverified"
+            try:
+                if decision == "approval_rejected":
+                    audit_repair(record, decision, "failed")
+                else:
+                    audit_repair(record, decision, result)
+            except (sqlite3.Error, ValueError) as error:
+                return stop(f"could not record repair result: {error}",
+                            reported=reported, stop_reason="triage_repair_blocked")
+            if result != "applied":
+                reason = ("repair approval did not match the current proposal"
+                          if decision == "approval_rejected" else
+                          "approved comment repair failed or could not be verified; use manual repair")
+                return stop(reason, reported=reported, stop_reason="triage_repair_blocked")
         if start_from in RESUMES:
             stopped = seed_history()
             if stopped is not None:
@@ -4048,6 +4188,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grant", action="append", default=[], metavar="ID=ANSWER",
                         help="answer a sensitive sandbox permission in advance: "
                              "docker_host=cycle|persistent|deny (repeatable)")
+    parser.add_argument("--repair-approval", default=None,
+                        help="approve exactly one proposed comment repair: COMMENT_ID:SHA256")
     args = parser.parse_args(argv)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
@@ -4161,6 +4303,7 @@ def main(argv: list[str] | None = None) -> int:
                 base_branch=base_branch_of(config, args.cwd),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
+                repair_approval=args.repair_approval,
                 consent=consent,
             )
     except (CycleDriverError, GrantError) as error:

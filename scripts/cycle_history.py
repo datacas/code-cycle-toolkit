@@ -569,6 +569,40 @@ class CycleHistoryStore:
                 "WHERE attempt_id=?) AND attempt_id != ?",
                 (now, *scope, row["stage"], row["attempt_id"], row["attempt_id"]))
 
+    def record_attempt_start(self, attempt_id: str, repo_id: str, change_request_id: str,
+                             stage: str, head_sha: str) -> None:
+        """Bind the runtime-observed stage start head to its dispatch attempt."""
+        attempt_id = _match(_ATTEMPT_ID, attempt_id, "attempt ID")
+        repo_id = _match(_REFERENCE, repo_id, "repository")
+        change_request_id = _match(_REFERENCE, change_request_id, "change request")
+        if stage not in STAGES:
+            raise HistoryError("invalid stage for attempt start head")
+        if _SHA.fullmatch(head_sha) is None:
+            raise HistoryError("attempt start head must be a full commit SHA")
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS cycle_history_attempt_heads ("
+                "attempt_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, "
+                "change_request_id TEXT NOT NULL, stage TEXT NOT NULL, "
+                "head_sha TEXT NOT NULL, created_at TEXT NOT NULL)")
+            connection.execute(
+                "INSERT OR REPLACE INTO cycle_history_attempt_heads VALUES (?, ?, ?, ?, ?, ?)",
+                (attempt_id, repo_id, change_request_id, stage, head_sha, _now()))
+            connection.commit()
+
+    def attempt_start_head(self, attempt_id: str, repo_id: str,
+                           change_request_id: str) -> str | None:
+        """Return a start head only for the exact repository and request scope."""
+        attempt_id = _match(_ATTEMPT_ID, attempt_id, "attempt ID")
+        repo_id = _match(_REFERENCE, repo_id, "repository")
+        change_request_id = _match(_REFERENCE, change_request_id, "change request")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT head_sha FROM cycle_history_attempt_heads WHERE attempt_id=? "
+                "AND repo_id=? AND change_request_id=? AND stage='resolve'",
+                (attempt_id, repo_id, change_request_id)).fetchone()
+        return row["head_sha"] if row is not None else None
+
     def publication(self, attempt_id: str) -> dict | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
