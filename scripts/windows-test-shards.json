@@ -105,6 +105,7 @@
       "test_stage_permissions",
       "test_stage_recovery",
       "test_stop_questions",
+      "test_triage_repair",
       "test_work_item_outcomes"
     ]
   }

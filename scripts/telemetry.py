@@ -1018,6 +1018,20 @@ CREATE TABLE IF NOT EXISTS cycle_history_locks (
     acquired_at       TEXT NOT NULL,
     PRIMARY KEY (repo_id, change_request_id)
 );
+CREATE TABLE IF NOT EXISTS triage_repair_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    pull_number TEXT NOT NULL,
+    comment_id TEXT NOT NULL,
+    original_sha256 TEXT NOT NULL,
+    repaired_sha256 TEXT NOT NULL,
+    proposal_sha256 TEXT NOT NULL,
+    triaged_sha TEXT,
+    repair_type TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    result TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
 """
 
 
@@ -1281,6 +1295,31 @@ class Telemetry:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def record_triage_repair(self, *, repo: str, pull_number: str, comment_id: str,
+                             original_sha256: str, repaired_sha256: str,
+                             proposal_sha256: str, triaged_sha: str | None,
+                             repair_type: str, decision: str, result: str) -> None:
+        """Append repair audit metadata without retaining comment text."""
+        if decision not in {"proposed", "approved", "approval_rejected"}:
+            raise TelemetryError("invalid triage repair decision")
+        if result not in {"applied", "failed", "unverified"}:
+            raise TelemetryError("invalid triage repair result")
+        digests = (original_sha256, repaired_sha256, proposal_sha256)
+        if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests):
+            raise TelemetryError("invalid triage repair digest")
+        if triaged_sha is not None and re.fullmatch(r"[0-9a-f]{40}", triaged_sha) is None:
+            raise TelemetryError("invalid triaged SHA")
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT INTO triage_repair_audit (repo, pull_number, comment_id, "
+                "original_sha256, repaired_sha256, proposal_sha256, triaged_sha, "
+                "repair_type, decision, result, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (repo, pull_number, comment_id, original_sha256, repaired_sha256,
+                 proposal_sha256, triaged_sha, repair_type, decision, result,
+                 self._timestamp()),
+            )
+            connection.commit()
 
     @staticmethod
     def _timestamp(value=None) -> str:
