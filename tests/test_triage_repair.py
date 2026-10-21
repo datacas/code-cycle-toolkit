@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,7 +171,7 @@ class PersistenceTests(unittest.TestCase):
                 repair_type="recorded resolve start head", decision="approved",
                 result="applied")
 
-            with sqlite3.connect(store.path) as connection:
+            with closing(sqlite3.connect(store.path)) as connection:
                 row = connection.execute(
                     "SELECT repo, pull_number, comment_id, original_sha256, "
                     "repaired_sha256, proposal_sha256, triaged_sha, decision, result "
