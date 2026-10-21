@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -331,6 +333,85 @@ class RunLineTests(unittest.TestCase):
 
         with self.assertRaises(contract.ContractError):
             contract.parse_run_line(line)
+
+    def test_staged_comment_validator_reports_the_missing_anchor_and_fix(self) -> None:
+        line = TRIAGE_RUN.replace(f" · triaged:{PRE_EDIT_SHA}", "")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(f"text before\n{line}")
+
+        self.assertIn("line 2", str(caught.exception))
+        self.assertIn("missing triaged:<sha>", str(caught.exception))
+        self.assertIn("using the commit the findings were judged against",
+                      str(caught.exception))
+
+    def test_staged_comment_validator_accepts_free_text_and_valid_triage(self) -> None:
+        contract.validate_triage_comment(
+            f"Ordinary prose is allowed.\n{TRIAGE_RUN}\n"
+            "#### [REV-001] · high · resolved · valid · blocks:yes")
+
+    def test_staged_comment_validator_reports_an_invalid_anchor_format(self) -> None:
+        line = TRIAGE_RUN.replace(PRE_EDIT_SHA, "not-a-sha")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(line)
+
+        self.assertIn("line 1", str(caught.exception))
+        self.assertIn("invalid token 'triaged:not-a-sha'", str(caught.exception))
+        self.assertIn("triaged:<40-hex commit SHA>", str(caught.exception))
+
+    def test_staged_comment_validator_diagnoses_a_leading_duplicate_stage_token(self) -> None:
+        line = ("#### [CCT-20261019-002] · resolve · cheap_coder · "
+                "openai/gpt-6-luna→? · high · schema:2")
+
+        with self.assertRaises(contract.ContractError) as caught:
+            contract.validate_triage_comment(line)
+
+        self.assertIn("rejected token 'high'", str(caught.exception))
+        self.assertIn("extra stage token 'resolve'", str(caught.exception))
+        self.assertIn("remove the leading stage token", str(caught.exception))
+
+
+class TriageValidatorCliTests(unittest.TestCase):
+    script = ROOT / "scripts" / "validate-triage-comment.py"
+
+    def invoke(self, path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(self.script), str(path)],
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_cli_accepts_prose_and_a_valid_triage_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{TRIAGE_RUN}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_cli_reports_contract_errors_and_their_line(self) -> None:
+        malformed = TRIAGE_RUN.replace(f" · triaged:{PRE_EDIT_SHA}", "")
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{malformed}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(str(comment), result.stderr)
+        self.assertIn("line 2", result.stderr)
+        self.assertIn("missing triaged:<sha>", result.stderr)
+
+    def test_cli_reports_an_unreadable_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "missing.md"
+
+            result = self.invoke(comment)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn(str(comment), result.stderr)
 
 
 class ModelResolutionTests(unittest.TestCase):

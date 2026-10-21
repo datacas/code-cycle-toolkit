@@ -67,6 +67,15 @@ class ContractError(ValueError):
     """A line claims to follow the contract but violates it."""
 
 
+class RunLineContractError(ContractError):
+    """A run-line error with a stable diagnostic category and offending token."""
+
+    def __init__(self, message: str, *, kind: str, token: str | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.token = token
+
+
 class FindingCollisionError(ContractError):
     """One stable finding ID was reused for a different finding."""
 
@@ -182,6 +191,7 @@ class ProviderComment:
     body: str
     id: str | None = None
     updated_at: str | None = None
+    url: str | None = None
 
 
 @dataclass
@@ -263,9 +273,13 @@ def parse_run_line(line: str) -> RunLine | None:
         if triaged_match is not None:
             triaged_sha = triaged_match.group(1).strip()
             if not _SHA_RE.match(triaged_sha):
-                raise ContractError(f"triaged: needs a commit SHA: {token!r}")
+                raise RunLineContractError(
+                    f"triaged: needs a commit SHA: {token!r}",
+                    kind="invalid_triage_anchor", token=token)
             continue
-        raise ContractError(f"unknown token in run line: {token!r}")
+        raise RunLineContractError(
+            f"unknown token in run line: {token!r}",
+            kind="unknown_token", token=token)
 
     if schema_version is None:
         raise ContractError(f"run line is missing schema:<n>: {line!r}")
@@ -279,7 +293,9 @@ def parse_run_line(line: str) -> RunLine | None:
         triaged_sha=triaged_sha,
     )
     if run.kind == "triage" and run.triaged_sha is None:
-        raise ContractError(f"a triage run line must carry triaged:<sha>: {line!r}")
+        raise RunLineContractError(
+            f"a triage run line must carry triaged:<sha>: {line!r}",
+            kind="missing_triage_anchor")
     if run.kind == "review" and run.triaged_sha is not None:
         raise ContractError(f"a review run line must not carry triaged: {line!r}")
     return run
@@ -394,11 +410,38 @@ def parse_comment(text: str) -> ReviewRecord:
     language-neutral tokens are read.
     """
     record = ReviewRecord()
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped.startswith("#"):
             continue
-        run = parse_run_line(stripped)
+        try:
+            run = parse_run_line(stripped)
+        except ContractError as error:
+            detail = str(error)
+            if not isinstance(error, RunLineContractError):
+                raise ContractError(f"line {line_number}: {detail}") from error
+            if error.kind == "missing_triage_anchor":
+                detail = (
+                    "missing triaged:<sha>; add `triaged:<sha>` before "
+                    "`schema:<n>`, using the commit the findings were judged against"
+                )
+            elif error.kind == "invalid_triage_anchor":
+                detail = (
+                    f"invalid token {error.token!r}; replace it with "
+                    "`triaged:<40-hex commit SHA>` for the commit the findings were judged against"
+                )
+            elif error.kind == "unknown_token":
+                tokens = _split_tokens(_HEADER_RE.match(stripped).group(2))  # type: ignore[union-attr]
+                if (len(tokens) >= 4
+                        and tokens[0] in {"review", "resolve", "rereview"}
+                        and "/" in tokens[2]):
+                    leading = tokens[0] if tokens else ""
+                    detail = (
+                        f"rejected token {error.token!r}; extra stage token "
+                        f"{leading!r} shifts the remaining fields; remove the leading "
+                        "stage token"
+                    )
+            raise ContractError(f"line {line_number}: {detail}") from error
         if run is not None:
             record.runs.append(run)
             continue
@@ -407,6 +450,11 @@ def parse_comment(text: str) -> ReviewRecord:
             record.findings.append(finding)
     record.attribution = parse_attribution_block(text)
     return record
+
+
+def validate_triage_comment(text: str) -> None:
+    """Validate every machine-readable contract line in a staged comment."""
+    parse_comment(text)
 
 
 def merge_disposition(previous: str | None, incoming: str) -> str:
@@ -743,6 +791,8 @@ def history_entry(
     comment that does not name its attempt.
     """
     label = f"comment {comment.id}" if comment.id else f"comment #{number}"
+    if comment.url:
+        label += f" ({comment.url})"
     if not isinstance(comment.author, str) or not comment.author.strip():
         raise ContractError(f"{label} carries no author metadata")
     if comment.author.strip().casefold() not in trusted:

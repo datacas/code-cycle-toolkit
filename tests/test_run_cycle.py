@@ -2924,6 +2924,63 @@ class ResumedHistoryTests(RunCycleTestCase):
         self.assert_stopped_before_dispatch(
             report, "BLOCKED", "comment 555", "cannot be parsed")
 
+    def test_a_triage_line_without_anchor_blocks_with_actionable_repair(self) -> None:
+        malformed = contract.ProviderComment(
+            author="Reviewer", id="557",
+            url="https://github.com/datacas/code-cycle-toolkit/pull/252#issuecomment-557",
+            body=("#### [CCT-20261016-001] · cheap_coder · "
+                  "openai/gpt-6-luna→? · high · schema:2"))
+
+        report = self.resume(CLAIMED + [malformed])
+
+        self.assert_stopped_before_dispatch(
+            report, "BLOCKED", "comment 557", "issuecomment-557", "line 1",
+            "missing triaged:<sha>",
+            "using the commit the findings were judged against")
+
+    def test_publication_readback_blocks_when_the_history_store_is_unavailable(self) -> None:
+        class Remote:
+            calls = 0
+
+            def __init__(self, failure):
+                self.failure = failure
+
+            def comments(self, *_args):
+                self.calls += 1
+                if self.calls == 1:
+                    return []
+                if isinstance(self.failure, Exception):
+                    raise self.failure
+                return [self.failure]
+
+        malformed = contract.ProviderComment(
+            author="reviewer", id="558",
+            body=("#### [CCT-20261016-002] · cheap_coder · "
+                  "openai/gpt-6-luna→? · high · schema:2"))
+        cases = (
+            (malformed, "contract validation failed", "missing triaged:<sha>"),
+            (rc.CycleDriverError("provider read failed"),
+             "validation could not complete", "provider read failed"),
+        )
+
+        for failure, *fragments in cases:
+            with self.subTest(failure=type(failure).__name__):
+                remote = Remote(failure)
+                with mock.patch.object(
+                        rc.CycleHistoryStore, "acquire",
+                        side_effect=rc.HistoryError("local history unavailable")):
+                    report = self.run_cycle(
+                        Talker("codex", claimed()), Talker("claude", APPROVED),
+                        start_from="resolve", change_request_id="74",
+                        trusted_authors=("reviewer",), history_remote=remote,
+                        ci_policy="strict")
+
+                self.assertEqual("BLOCKED", report.status)
+                self.assertIn("published resolve comment", report.stopped_because)
+                for fragment in fragments:
+                    self.assertIn(fragment, report.stopped_because)
+                self.assertEqual(2, remote.calls)
+
     def test_a_trusted_contract_comment_that_cannot_be_placed_blocks(self) -> None:
         both = contract.ProviderComment(
             author="reviewer", id="777",
