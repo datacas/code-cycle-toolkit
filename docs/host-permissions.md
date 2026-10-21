@@ -204,7 +204,8 @@ passed to it.
 
 Native writing/review stages prepare Node dependencies in a separate restricted
 sandbox before the agent starts. Preparation has registry-only networking,
-disabled lifecycle scripts, persistent evidence and bounded retries; it never
+an install with lifecycle scripts disabled, a separate contained lifecycle build
+only when one is required, persistent evidence and bounded retries; it never
 inherits another revision's `node_modules`. Non-publishing Codex stages receive
 no default code-host network route, because readable credentials would permit
 writes as well as reads. Issue review needs host-supplied context or host-side

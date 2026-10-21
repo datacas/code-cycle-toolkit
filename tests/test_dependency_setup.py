@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -272,12 +273,119 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(12, attempt["exit_code"])
         self.assertIn("fixture install failed", Path(attempt["stderr"]).read_text())
 
-    def test_scripts_are_reported_as_incomplete_with_no_host_execution(self):
-        self.package(self.root, {"postinstall": "touch /tmp/should-not-run"})
-        result = self.prepare()
+    def lifecycle_fixture(self, build):
+        """Root postinstall; `build` simulates the scripts-enabled install."""
+        self.package(self.root, {"postinstall": "node generate.js"})
+        (self.root / ".gitignore").write_text("node_modules/\n.generated/\n")
+        self.git("add", ".")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "-qm", "lifecycle fixture")
+        calls = []
+        def runner(argv, **options):
+            command = argv[argv.index("--") + 1:]
+            calls.append((command, argv, options))
+            cwd = Path(options["cwd"])
+            if command[-1] == "--version":
+                return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
+            for directory in (cwd, cwd / "apps/web"):
+                (directory / "node_modules").mkdir(exist_ok=True)
+            (cwd / "node_modules/dependency").mkdir(exist_ok=True)
+            if "--ignore-scripts" in command:
+                return subprocess.CompletedProcess(argv, 0, "installed\n", "")
+            return build(cwd, argv)
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        return result, calls
+
+    def test_lifecycle_build_runs_contained_and_publishes_only_ignored_outputs(self):
+        def build(cwd, argv):
+            # The project's own script writes beside its manifest; a native
+            # dependency build writes inside node_modules.
+            (cwd / ".generated").mkdir()
+            (cwd / ".generated/types.d.ts").write_text("generated")
+            (cwd / "stray.txt").write_text("not ignored")
+            (cwd / ".git").mkdir(exist_ok=True)
+            (cwd / ".git/planted-hook").write_text("project script")
+            (cwd / "node_modules/dependency/binding.node").write_text("built")
+            store = next(path for path in self.writable(argv) if path.name == "build-cache")
+            (store / "poisoned").write_text("project script")
+            return subprocess.CompletedProcess(argv, 0, "built\n", "")
+        result, calls = self.lifecycle_fixture(build)
+        item = result["items"][0]
+        self.assertEqual("prepared", result["status"], result)
+        self.assertEqual("prepared", item["status"])
+        self.assertEqual(["package.json"], item["needs_build"])
+        self.assertEqual("built", item["lifecycle_build"]["status"])
+        self.assertEqual([".generated"], item["lifecycle_build"]["generated"])
+        self.assertEqual(["install-1", "build-1"],
+                         [Path(a["stdout"]).name.split(".")[0][2:] for a in item["attempts"][1:]])
+        self.assertEqual("generated", (self.root / ".generated/types.d.ts").read_text())
+        self.assertEqual("built", (self.root / "node_modules/dependency/binding.node").read_text())
+        self.assertFalse((self.root / "stray.txt").exists())
+        self.assertFalse((self.root / ".git/planted-hook").exists())
+        self.assertTrue((self.root / ".git/HEAD").is_file())
+        self.assertEqual("", self.git("status", "--porcelain"))
+        install, build_call = calls[1], calls[2]
+        self.assertIn("--ignore-scripts", install[0])
+        self.assertNotIn("--ignore-scripts", build_call[0])
+        self.assertEqual("false", build_call[2]["env"]["npm_config_ignore_scripts"])
+        self.assertEqual("true", build_call[2]["env"]["YARN_ENABLE_SCRIPTS"])
+        self.assertEqual("true", install[2]["env"]["npm_config_ignore_scripts"])
+        writable = self.writable(build_call[1])
+        cache = self.evidence / "cache" / item["cache_key"]
+        self.assertNotIn(cache, writable)
+        self.assertNotIn(Path(install[2]["cwd"]), writable)
+        self.assertFalse([path for path in writable if path.is_relative_to(self.root)])
+        self.assertFalse((cache / "poisoned").exists())
+        self.assertTrue(Path(build_call[2]["cwd"]).is_relative_to(writable[0]))
+        self.assertIn(json.dumps(str(Path(build_call[2]["cwd"]) / "pnpm-lock.yaml")) + '="read"',
+                      self.filesystem(build_call[1]))
+        # Reuse requires the published generated outputs as well.
+        self.assertTrue(self.prepare()["items"][0]["reused"])
+        shutil.rmtree(self.root / ".generated")
+        self.assertNotIn("reused", self.prepare()["items"][0])
+
+    def test_failed_lifecycle_build_publishes_scripts_disabled_install_as_incomplete(self):
+        def build(cwd, argv):
+            (cwd / ".generated").mkdir()
+            (cwd / "node_modules/dependency/partial.node").write_text("partial")
+            return subprocess.CompletedProcess(argv, 1, "", "gyp ERR! build error")
+        result, calls = self.lifecycle_fixture(build)
+        item = result["items"][0]
         self.assertEqual("incomplete", result["status"])
-        self.assertEqual("scripts_disabled", result["items"][0]["status"])
-        self.assertEqual(["package.json"], result["items"][0]["needs_build"])
+        self.assertEqual("scripts_disabled", item["status"])
+        self.assertEqual({"status": "failed", "exit_code": 1}, {
+            key: item["lifecycle_build"][key] for key in ("status", "exit_code")})
+        self.assertIn("never run the build on the host", item["isolated_recovery"].lower())
+        self.assertEqual(3, len(calls))
+        self.assertIn("gyp ERR!", Path(item["attempts"][-1]["stderr"]).read_text())
+        self.assertTrue((self.root / "node_modules/dependency").is_dir())
+        self.assertFalse((self.root / "node_modules/dependency/partial.node").exists())
+        self.assertFalse((self.root / ".generated").exists())
+        self.assertNotIn("reused", self.prepare()["items"][0])
+
+    def test_lifecycle_build_that_rewrites_lockfile_is_not_published(self):
+        def build(cwd, argv):
+            # The fixture runner is no OS sandbox, so it can do what the
+            # protected lockfile would stop; the host check must still catch it.
+            (cwd / "pnpm-lock.yaml").write_text("rewritten")
+            (cwd / "node_modules/dependency/binding.node").write_text("built")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        result, _ = self.lifecycle_fixture(build)
+        item = result["items"][0]
+        self.assertEqual("incomplete", result["status"])
+        self.assertIn("lockfile", item["lifecycle_build"]["error"])
+        self.assertEqual("lockfileVersion: '9.0'\n", (self.root / "pnpm-lock.yaml").read_text())
+        self.assertFalse((self.root / "node_modules/dependency/binding.node").exists())
+
+    def test_lifecycle_build_command_only_drops_ignore_scripts(self):
+        cache = Path("/cache")
+        for manager, version in (("npm", "10.9.0"), ("pnpm", "9.1.0"),
+                                 ("yarn", "1.22.22"), ("yarn", "4.1.0")):
+            install = ds.install_command(manager, version, cache)
+            build = ds.build_command(manager, version, cache)
+            self.assertNotIn("--ignore-scripts", build)
+            self.assertEqual([arg for arg in install if arg != "--ignore-scripts"], build)
 
     def test_symlink_outputs_never_grant_writes_outside_checkout(self):
         if os.name == "nt":

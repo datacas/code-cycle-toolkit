@@ -22,6 +22,10 @@ LOCKS = {"pnpm-lock.yaml": "pnpm", "package-lock.json": "npm",
          "npm-shrinkwrap.json": "npm", "yarn.lock": "yarn"}
 TRANSIENT = ("econnreset", "etimedout", "eai_again", "502", "503", "504",
              "socket hang up", "fetch failed")
+LIFECYCLE = ("preinstall", "install", "postinstall", "prepare")
+# Never publish Git metadata or a native sandbox's protected placeholders.
+UNPUBLISHED = {".git", ".agents", ".codex", "node_modules", ".yarn",
+               ".pnp.cjs", ".pnp.loader.mjs"}
 
 
 def projects(root: Path) -> list[tuple[Path, str, Path]]:
@@ -67,6 +71,15 @@ def install_command(manager: str, version: str, cache: Path) -> list[str]:
         return ["yarn", "install", "--frozen-lockfile", "--ignore-scripts",
                 "--cache-folder", str(cache)]
     return ["yarn", "install", "--immutable"]
+
+
+def build_command(manager: str, version: str, cache: Path) -> list[str]:
+    """The same frozen install with the package manager's scripts enabled.
+
+    The manager's own build policy still applies, such as pnpm's
+    onlyBuiltDependencies or Yarn's dependenciesMeta.
+    """
+    return [arg for arg in install_command(manager, version, cache) if arg != "--ignore-scripts"]
 
 
 def _manifest(path: Path) -> dict:
@@ -187,6 +200,48 @@ def _publish(staged: Path, project: Path, outputs: list[Path], tracked: set[Path
                 _replace(entry, target)
 
 
+def _needs_build(tree: Path, packages: list[Path]) -> list[str]:
+    """Manifests whose lifecycle scripts or native builds a disabled install skipped."""
+    installed = []
+    for pattern in ("node_modules/*/package.json", "node_modules/@*/*/package.json",
+                    "node_modules/.pnpm/*/node_modules/*/package.json",
+                    "node_modules/.pnpm/*/node_modules/@*/*/package.json"):
+        installed += sorted(tree.glob(pattern))
+    found = []
+    for path in [*packages, *installed]:
+        scripts = _manifest(path).get("scripts") or {}
+        if any(name in scripts for name in LIFECYCLE) or (path.parent / "binding.gyp").is_file():
+            found.append(path.relative_to(tree).as_posix())
+    return found
+
+
+def _generated(built: Path, root: Path, project: Path, packages: list[Path],
+               tracked: set[Path]) -> list[Path]:
+    """Checkout paths of untracked, Git-ignored entries a build created beside a manifest.
+
+    Ignore rules come from the read-only checkout, never from the build tree,
+    which project scripts could rewrite. Links are not published.
+    """
+    candidates = {}
+    for manifest in packages:
+        directory = manifest.parent
+        for entry in sorted((built / directory.relative_to(project)).iterdir()):
+            target = directory / entry.name
+            if (entry.name in UNPUBLISHED or entry.is_symlink()
+                    or any(path == target or path.is_relative_to(target) for path in tracked)):
+                continue
+            # A trailing slash lets directory-only patterns such as ".nuxt/"
+            # match a directory that does not exist in the checkout yet.
+            candidates[target.relative_to(root).as_posix() + ("/" if entry.is_dir() else "")] = target
+    if not candidates:
+        return []
+    result = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=root,
+                            input="\0".join(candidates), capture_output=True, text=True, timeout=30)
+    if result.returncode not in (0, 1):
+        raise ValueError(f"git check-ignore failed with exit {result.returncode}: {result.stderr}")
+    return [candidates[name] for name in result.stdout.split("\0") if name in candidates]
+
+
 def _installed_digest(outputs: list[Path]) -> str:
     """Verify the cached tree itself, including pnpm's real .pnpm contents."""
     digest = hashlib.sha256()
@@ -277,16 +332,16 @@ def prepare(cwd: str, executor: str, binary: str, *,
                 # Nothing in the checkout is writable. The lockfile and
                 # manifests stay read-only in the copy as well.
                 writable = [scratch]
-                protected = staged_inputs
-                def run(command, label, timeout):
+                def run(command, label, timeout, *, cwd=staged, environment=env,
+                        allowed=writable, protected=staged_inputs):
                     record = {"command": command}
                     item["attempts"].append(record)
                     try:
-                        argv = sandbox_command(executor, binary, command, writable=writable,
+                        argv = sandbox_command(executor, binary, command, writable=allowed,
                                                protected=protected, domains=tuple(dict.fromkeys(
                                                    (*REGISTRIES, *domains))), settings=scratch / "sandbox.json")
                         record["sandbox_command"] = argv
-                        result = runner(argv, cwd=staged, env=env, capture_output=True,
+                        result = runner(argv, cwd=cwd, env=environment, capture_output=True,
                                         text=True, timeout=timeout, stdin=subprocess.DEVNULL)
                         code, stdout, stderr = result.returncode, _text(result.stdout), _text(result.stderr)
                     except subprocess.TimeoutExpired as error:
@@ -299,6 +354,24 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         path.write_text(content, encoding="utf-8")
                         record[stream] = str(path)
                     return code, stdout, stderr
+                def install(command, label, **options):
+                    for attempt in range(2):
+                        code, stdout, stderr = run(command, f"{label}-{attempt + 1}", 600, **options)
+                        if code == 0 or (code != 124 and not any(
+                                token in (stdout + stderr).lower() for token in TRANSIENT)):
+                            break
+                        if attempt == 0:
+                            sleep(1)
+                    return code
+                def complete(tree):
+                    required = [tree / path.parent.relative_to(project) / "node_modules"
+                                for path in packages
+                                if any(_manifest(path).get(key) for key in
+                                       ("dependencies", "devDependencies", "optionalDependencies"))]
+                    # Neither an empty directory nor a sandbox placeholder is an install.
+                    return not (required and not (tree / ".pnp.cjs").is_file()
+                                and (any(not _populated(output) for output in required)
+                                     if manager == "pnpm" else not _populated(tree / "node_modules")))
                 # --version may bootstrap a declared pnpm/Corepack binary from
                 # the registry. It needs the same bounded recovery as install.
                 code, version, error = run([manager, "--version"], "version", 60)
@@ -332,61 +405,83 @@ def prepare(cwd: str, executor: str, binary: str, *,
                 if receipt.is_file() and all(path.is_dir() for path in outputs):
                     previous = json.loads(receipt.read_text(encoding="utf-8"))
                     if (previous.get("inputs") == fingerprint and previous.get("head_sha") == head
-                            and previous.get("installed") == _installed_digest(outputs)):
+                            and previous.get("installed") == _installed_digest(outputs)
+                            and all((project / name).exists() for name in previous.get("generated", []))):
                         item.update(status="prepared", reused=True)
                         continue
                 env["YARN_CACHE_FOLDER"] = str(cache)
-                command = install_command(manager, version, cache)
-                for attempt in range(2):
-                    code, stdout, stderr = run(command, f"install-{attempt + 1}", 600)
-                    if code == 0 or (code != 124 and not any(
-                            token in (stdout + stderr).lower() for token in TRANSIENT)):
-                        break
-                    if attempt == 0:
-                        sleep(1)
+                code = install(install_command(manager, version, cache), "install")
                 if _digest(inputs) != fingerprint or _digest(staged_inputs) != fingerprint:
                     raise ValueError("preparation changed the lockfile or package manifests")
                 if code != 0:
                     raise ValueError(f"frozen install failed with exit {code}")
-                required_outputs = [staged / path.parent.relative_to(project) / "node_modules"
-                                    for path in packages
-                                    if any(_manifest(path).get(key) for key in
-                                           ("dependencies", "devDependencies", "optionalDependencies"))]
-                # Neither an empty directory nor a sandbox placeholder is an install.
-                if (required_outputs and not (staged / ".pnp.cjs").is_file()
-                        and (any(not _populated(output) for output in required_outputs)
-                             if manager == "pnpm" else not _populated(staged / "node_modules"))):
+                if not complete(staged):
                     raise ValueError("frozen install returned success without required dependency outputs")
+                source, built_outputs = staged, []
+                # Disabled lifecycle scripts can leave native modules or project
+                # outputs incomplete. Rebuild in a separate scratch tree with
+                # scripts enabled, inside the same sandbox and registry-only
+                # network. Only that tree, its own HOME and a private copy of
+                # the download cache are writable: project scripts never write
+                # the checkout, the shared cache or the scripts-disabled tree,
+                # which stays as the fallback when the build fails.
+                needs_build = _needs_build(staged, [staged / path.relative_to(project)
+                                                    for path in packages])
+                if needs_build:
+                    item["needs_build"] = needs_build
+                    built = _stage(root, project, names, inputs, scratch / "build")
+                    built_inputs = [built / path.relative_to(project) for path in inputs]
+                    home, build_cache = scratch / "build-home", scratch / "build-cache"
+                    home.mkdir()
+                    shutil.copytree(cache, build_cache, symlinks=True)
+                    if (scratch / "corepack").is_dir():
+                        shutil.copytree(scratch / "corepack", home / "corepack", symlinks=True)
+                    build_env = {**env, "HOME": str(home), "TMPDIR": str(home),
+                                 "COREPACK_HOME": str(home / "corepack"),
+                                 "YARN_CACHE_FOLDER": str(build_cache),
+                                 "YARN_ENABLE_SCRIPTS": "true", "npm_config_ignore_scripts": "false"}
+                    command = build_command(manager, version, build_cache)
+                    build = {"command": command}
+                    item["lifecycle_build"] = build
+                    code = install(command, "build", cwd=built, environment=build_env,
+                                   allowed=[scratch / "build", home, build_cache], protected=built_inputs)
+                    build["exit_code"] = code
+                    if _digest(built_inputs) != fingerprint:
+                        build.update(status="failed", error="the build changed the lockfile or package manifests")
+                    elif code != 0:
+                        build.update(status="failed", error=f"lifecycle build failed with exit {code}")
+                    elif not complete(built):
+                        build.update(status="failed",
+                                     error="lifecycle build returned success without required dependency outputs")
+                    else:
+                        source = built
+                        built_outputs = _generated(built, root, project, packages, tracked_paths)
+                        build.update(status="built", generated=[
+                            path.relative_to(project).as_posix() for path in built_outputs])
                 # Output paths were checked above; check again before host writes.
                 if any(path.is_symlink() or not path.resolve().is_relative_to(root)
                        for path in [*outputs, *generated]):
                     raise ValueError("dependency output path escapes the checkout")
-                _publish(staged, project, outputs, tracked_paths)
-                # Disabled lifecycle scripts can leave native modules incomplete.
-                needs_build = []
-                installed = list(project.glob("node_modules/*/package.json"))
-                installed += list(project.glob("node_modules/@*/*/package.json"))
-                installed += list(project.glob("node_modules/.pnpm/*/node_modules/*/package.json"))
-                installed += list(project.glob("node_modules/.pnpm/*/node_modules/@*/*/package.json"))
-                for path in [*packages, *installed]:
-                    data = _manifest(path)
-                    scripts = data.get("scripts") or {}
-                    if (any(name in scripts for name in ("preinstall", "install", "postinstall", "prepare"))
-                            or (path.parent / "binding.gyp").is_file()):
-                        needs_build.append(str(path.relative_to(project)))
-                if needs_build:
-                    item.update(status="scripts_disabled", needs_build=needs_build)
-                    item["isolated_recovery"] = (
-                        "Run the required build in this same restricted preparation sandbox, "
-                        "with only generated outputs writable; never run it on the host. "
-                        "Local verification remains unverified until that build and the "
-                        "original checks actually succeed.")
-                    report["status"] = "incomplete"
-                else:
+                _publish(source, project, outputs, tracked_paths)
+                for target in built_outputs:
+                    _replace(source / target.relative_to(project), target)
+                if source is not staged or not needs_build:
                     item["status"] = "prepared"
                     receipt.write_text(json.dumps({"head_sha": head, "inputs": fingerprint,
                                                    "cache_key": cache_key,
-                                                   "installed": _installed_digest(outputs)}), encoding="utf-8")
+                                                   "installed": _installed_digest(outputs),
+                                                   "generated": [str(path.relative_to(project))
+                                                                 for path in built_outputs]}),
+                                       encoding="utf-8")
+                else:
+                    item["status"] = "scripts_disabled"
+                    item["isolated_recovery"] = (
+                        "The required lifecycle build ran in this same restricted preparation "
+                        "sandbox and did not succeed; its logs are in this evidence. The "
+                        "scripts-disabled install was published instead. Never run the build on "
+                        "the host. Local verification remains unverified until that build and "
+                        "the original checks actually succeed.")
+                    report["status"] = "incomplete"
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             item["error"] = str(error)
             report["status"] = "incomplete"

@@ -19,13 +19,25 @@ import dependency_setup as ds
 
 
 class NativeCampaign(unittest.TestCase):
-    def campaign(self, executor):
+    def campaign(self, executor, lifecycle=False):
         with tempfile.TemporaryDirectory(prefix="native-campaign-") as directory:
             root = Path(directory)
             (root / "apps/web").mkdir(parents=True)
-            (root / "package.json").write_text(json.dumps({
-                "name": "native-campaign", "version": "1.0.0", "private": True,
-                "workspaces": ["apps/*"], "dependencies": {"is-number": "7.0.0"}}))
+            manifest = {"name": "native-campaign", "version": "1.0.0", "private": True,
+                        "workspaces": ["apps/*"], "dependencies": {"is-number": "7.0.0"}}
+            escape = root / "escaped-from-build.txt"
+            if lifecycle:
+                # The project's own postinstall runs only in the contained
+                # build: it generates an ignored output and tries to write
+                # the checkout directly, which the sandbox must deny.
+                manifest["scripts"] = {"postinstall": f"node postinstall.js {json.dumps(str(escape))}"}
+                (root / "postinstall.js").write_text(
+                    "const fs = require('fs');\n"
+                    "fs.mkdirSync('generated', {recursive: true});\n"
+                    "fs.writeFileSync('generated/ok.txt', require('is-number')(42) ? 'built' : 'no');\n"
+                    "try { fs.writeFileSync(process.argv[2], 'escaped'); } catch (error) {\n"
+                    "  console.log('checkout write denied: ' + error.code); }\n")
+            (root / "package.json").write_text(json.dumps(manifest))
             (root / "apps/web/package.json").write_text(json.dumps({
                 "name": "campaign-web", "version": "1.0.0"}))
             (root / "package-lock.json").write_text(json.dumps({
@@ -39,7 +51,7 @@ class NativeCampaign(unittest.TestCase):
                         "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
                         "engines": {"node": ">=0.12.0"}},
                 }}))
-            (root / ".gitignore").write_text("node_modules/\n")
+            (root / ".gitignore").write_text("node_modules/\ngenerated/\n")
             def git(*args):
                 return subprocess.run(["git", *args], cwd=root, capture_output=True,
                                       text=True, check=True).stdout.strip()
@@ -50,7 +62,8 @@ class NativeCampaign(unittest.TestCase):
             head = git("rev-parse", "HEAD")
             lock = (root / "package-lock.json").read_bytes()
             # A new cache for every campaign proves cold registry access.
-            evidence = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / f"native-{executor}"
+            label = f"native-{executor}" + ("-lifecycle" if lifecycle else "")
+            evidence = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / label
             result = ds.prepare(str(root), executor, executor, evidence_root=evidence)
             print(json.dumps({"executor": executor, "head_sha": head, "preparation": result}))
             for item in result["items"]:
@@ -58,6 +71,13 @@ class NativeCampaign(unittest.TestCase):
                     for stream in ("stdout", "stderr"):
                         print(f"{executor} {stream}: {Path(attempt[stream]).read_text()}")
             self.assertEqual("prepared", result["status"], json.dumps(result))
+            if lifecycle:
+                build = result["items"][0]["lifecycle_build"]
+                self.assertEqual("built", build["status"], json.dumps(result))
+                self.assertEqual(["generated"], build["generated"])
+                self.assertEqual("built", (root / "generated/ok.txt").read_text())
+                self.assertFalse(escape.exists())
+                self.assertEqual("", git("status", "--porcelain"))
             # Run actual dependency lookup inside the same native sandbox.
             settings = root / "verification-settings.json"
             command = ["node", "-e", "if (!require('is-number')(42)) process.exit(1)"]
@@ -76,3 +96,9 @@ class NativeCampaign(unittest.TestCase):
 
     def test_codex(self):
         self.campaign("codex")
+
+    def test_claude_lifecycle_build(self):
+        self.campaign("claude", lifecycle=True)
+
+    def test_codex_lifecycle_build(self):
+        self.campaign("codex", lifecycle=True)
