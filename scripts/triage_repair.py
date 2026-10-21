@@ -165,6 +165,6 @@ def execute_approved(proposal: RepairProposal, approval: str,
         if updated is None or updated != proposal.repaired:
             return "approved", "failed"
         validate_triage_comment(updated)
-    except (ContractError, Exception):
+    except Exception:
         return "approved", "unverified"
     return "approved", "applied"

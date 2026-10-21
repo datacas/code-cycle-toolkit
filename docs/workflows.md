@@ -330,6 +330,8 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --detach
 
 Every check that can refuse the run happens before it detaches, so a mistake is still printed where you launched it. The detached run's report and any error go to the log. The cursor file is seeded before the worker starts. Reuse the printed command at each scheduled wake-up; it advances the cursor only after its output is flushed. A missing cursor starts with current unfinished cycles, while a corrupt cursor exits with an error and is left untouched. An empty result means no status changed since the cursor. Stop it with `kill <pid>`: like any other stop request, that is recorded.
 
+**Approved comment repair:** when a trusted GitHub comment has one uniquely provable malformed triage line, the runtime report may include a repair proposal with its original and proposed content plus a SHA-256 digest. Review the proposal, then resume with `--repair-approval COMMENT_ID:SHA256` using the exact comment ID and digest shown in the report. The driver re-reads the comment before editing and verifies it afterward; if its content changed or the history needed to prove the repair is unavailable, it leaves the comment for manual repair.
+
 **Interrupted runs:** SIGTERM, SIGHUP, or Ctrl-C during a stage stops the executor the driver started, records that stage with the outcome `interrupted`, closes the cycle with the stop reason `interrupted`, marks its status file finished, and leaves the checkout exactly as it was. Only a `SIGKILL` still ends a run without a record.
 
 An interrupted review or resolution resumes with `--from` as above. An interrupted implementation has no change request to resume yet, so continue it from its checkout instead:

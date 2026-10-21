@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import triage_repair  # noqa: E402
+import run_cycle  # noqa: E402
 from cycle_history import CycleHistoryStore  # noqa: E402
 from telemetry import Telemetry  # noqa: E402
 
@@ -129,6 +131,22 @@ class ApprovalTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_missing_or_unmatched_attempt_history_stays_on_manual_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = CycleHistoryStore(Path(directory) / "history.sqlite")
+
+            self.assertIsNone(run_cycle._safe_repair_start_head(
+                store, "attempt-abc123", REPO, REQUEST))
+            store.record_attempt_start(
+                "attempt-abc123", REPO, REQUEST, "resolve", START_SHA)
+            self.assertIsNone(run_cycle._safe_repair_start_head(
+                store, "invalid", REPO, REQUEST))
+            with mock.patch.object(
+                    store, "attempt_start_head",
+                    side_effect=sqlite3.OperationalError("history unavailable")):
+                self.assertIsNone(run_cycle._safe_repair_start_head(
+                    store, "attempt-abc123", REPO, REQUEST))
+
     def test_attempt_start_head_is_bound_to_exact_request_and_resolve_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CycleHistoryStore(Path(directory) / "history.sqlite")

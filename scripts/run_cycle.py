@@ -2147,6 +2147,15 @@ def _work_item_scope(
     return provider, repository
 
 
+def _safe_repair_start_head(history_store: CycleHistoryStore, attempt_id: str, repo_id: str,
+                            request: str) -> str | None:
+    """Treat unavailable or unmatched attempt history as no repair proof."""
+    try:
+        return history_store.attempt_start_head(attempt_id, repo_id, request)
+    except (sqlite3.Error, HistoryError):
+        return None
+
+
 def run_cycle(
     repo_id: str,
     task_id: str,
@@ -2409,8 +2418,8 @@ def run_cycle(
             receipt = receipts[0]
             if receipt.get("repo") != repo_id or receipt.get("stage") != "resolve":
                 continue
-            start_sha = history_store.attempt_start_head(
-                receipt["attempt_id"], repo_id, request)
+            start_sha = _safe_repair_start_head(
+                history_store, receipt["attempt_id"], repo_id, request)
             proposal = triage_repair.propose_with_start(
                 repo_id, comment.id, comment.body, start_sha)
             if proposal is None:
