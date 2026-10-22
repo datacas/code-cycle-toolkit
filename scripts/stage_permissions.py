@@ -123,6 +123,8 @@ class StagePolicy:
     change_request_id: str | None = None
     work_item_id: str | None = None
     base_branch: str | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
     test_command: str | None = None
     verify_prefixes: tuple[str, ...] = ()
     code_host: str | None = "github"
@@ -586,6 +588,10 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
         if not rest or rest[0] != "origin" or any(word.startswith("-") for word in rest):
             raise PolicyError("a review may only run git fetch origin [<ref>...]")
         return
+    if (subcommand == "merge" and policy.code_host == "github"
+            and policy.role == "resolve"):
+        _check_merge(rest, policy, cwd=cwd, run=run)
+        return
     if subcommand not in allowed:
         raise PolicyError(f"git {subcommand} is not in the {policy.role} stage's command table")
     for word in rest:
@@ -606,10 +612,52 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
             raise PolicyError("git --output may write only into $TMPDIR")
     if subcommand == "push":
         _check_push(rest, policy, cwd=cwd, run=run)
+    elif subcommand == "pull" and policy.code_host == "github":
+        _check_pull(rest, policy)
     elif subcommand in {"fetch", "pull"}:
         remotes = [word for word in rest if not word.startswith("-")]
         if remotes and remotes[0] != "origin":
             raise PolicyError(f"git {subcommand} may use only the origin remote")
+
+
+_PLAIN_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+
+
+def _check_pull(args: list[str], policy: StagePolicy) -> None:
+    """Bind pulls to the live PR refs and neutralize pull.rebase config."""
+    if not policy.change_request_id or not policy.base_ref or not policy.head_ref:
+        raise PolicyError("git pull needs a verified open GitHub change request")
+    if len(args) != 3 or args[0] != "--no-rebase" or args[1] != "origin":
+        raise PolicyError("GitHub git pull is allowed only as git pull --no-rebase origin <PR-ref>")
+    ref = args[2]
+    if (not _PLAIN_BRANCH.fullmatch(policy.base_ref)
+            or not _PLAIN_BRANCH.fullmatch(policy.head_ref)
+            or ref not in {policy.base_ref, policy.head_ref}):
+        raise PolicyError("git pull may name only the verified PR head or base branch")
+
+
+def _check_merge(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> None:
+    """Allow a resolver to merge only the live PR base, or finish that merge."""
+    if not policy.change_request_id or not policy.base_ref:
+        raise PolicyError("git merge needs a verified open GitHub change request")
+    if not _PLAIN_BRANCH.fullmatch(policy.base_ref):
+        raise PolicyError("the verified pull request base is not a plain branch name")
+    if args in (["--abort"], ["--continue"]):
+        try:
+            result = run(["git", "rev-parse", "--quiet", "--verify", "MERGE_HEAD"],
+                         cwd=cwd, capture_output=True, text=True, timeout=10,
+                         stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PolicyError(f"could not check merge state ({type(error).__name__})") from error
+        if result.returncode:
+            raise PolicyError("git merge --abort/--continue is allowed only during a merge")
+        return
+    options = [word for word in args if word.startswith("-")]
+    refs = [word for word in args if not word.startswith("-")]
+    if (len(options) != len(set(options))
+            or any(option not in {"--no-edit", "--no-ff"} for option in options)
+            or refs != [f"origin/{policy.base_ref}"]):
+        raise PolicyError("git merge may merge only origin/<PR-base> with --no-edit/--no-ff")
 
 
 def _names_git_option(word: str, option: str) -> bool:

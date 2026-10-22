@@ -2749,6 +2749,134 @@ class Scripted(Talker):
         return self.reviews.pop(0) if self.reviews else APPROVED
 
 
+class MergeabilityCycleTests(RunCycleTestCase):
+    def test_both_ci_policies_resolve_a_conflict_then_rereview(self) -> None:
+        old_head, new_head = "a" * 40, "b" * 40
+
+        class Checks:
+            def __init__(self) -> None:
+                self.pulls = [
+                    rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", True, "clean"),
+                    rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", False, "dirty"),
+                    rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", False, "dirty"),
+                    rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", True, "clean"),
+                    rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", True, "clean"),
+                ]
+
+            def pull(self, *_):
+                return self.pulls.pop(0) if len(self.pulls) > 1 else self.pulls[0]
+
+            def required(self, *_):
+                return ()
+
+            def checks(self, *_):
+                return ()
+
+        class Remote:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def probe(self, *_):
+                return None
+
+            def comments(self, repo_id, *_args, **_kwargs):
+                evidence = []
+                rows = self.store.rows(repo_id)
+                for dispatch in rows:
+                    payload = dispatch["payload"]
+                    if payload.get("record_kind") != "dispatch" \
+                            or dispatch["role"] not in {"review", "rereview"}:
+                        continue
+                    verdict = next((row for row in rows
+                                    if row["role"] == dispatch["role"]
+                                    and row["payload"].get("record_kind") == "verdict"
+                                    and row["payload"].get("stage_seq") == payload.get("stage_seq")),
+                                   None)
+                    head = verdict["payload"].get("reviewed_head_sha") if verdict else None
+                    if not isinstance(head, str):
+                        continue
+                    attempt = payload.get("dispatch_attempt_id")
+                    value = {"schema": 2, "repo": repo_id, "change_request_id": "74",
+                             "stage": dispatch["role"], "attempt_id": attempt,
+                             "head_sha": head, "status": verdict["status"],
+                             "finding_outcomes": []}
+                    evidence.append(contract.ProviderComment(
+                        author="reviewer", id=str(dispatch["id"]),
+                        body="<!-- code-cycle-stage " + json.dumps(value) + " -->"))
+                return evidence
+
+        class CapturingScripted(Scripted):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.received = []
+
+            def dispatch(self, target, task, **kwargs):
+                self.received.append(kwargs)
+                return super().dispatch(target, task, **kwargs)
+
+        for policy in ("strict", "parallel"):
+            with self.subTest(policy=policy):
+                implementer = CapturingScripted(
+                    "codex", resolutions=[block("RESOLVED", head_sha=new_head)])
+                reviewer = Scripted("claude", reviews=[
+                    block("APPROVED", head_sha=old_head, reviewed_head_sha=old_head,
+                          blocking_findings=[], findings=[]),
+                    block("APPROVED", head_sha=new_head, reviewed_head_sha=new_head,
+                          blocking_findings=[], findings=[]),
+                ])
+                report = self.run_cycle(
+                    implementer, reviewer, start_from="review", change_request_id="74",
+                    history_remote=Remote(self.store), ci_checks=Checks(), ci_policy=policy,
+                    code_host="github", trusted_authors=("reviewer",),
+                    ci_timeout=1, ci_poll_interval=1)
+
+                resolution_prompts = [task for task in implementer.dispatched
+                                      if "cc-resolve-comments" in task]
+                self.assertTrue(resolution_prompts,
+                                f"{report.stopped_because}; dispatches={self.rows()}")
+                self.assertIn("GitHub reports that this change request conflicts",
+                              resolution_prompts[0])
+                self.assertIn("do not rebase or force-push", resolution_prompts[0])
+                self.assertNotIn("Required checks failed on head", resolution_prompts[0])
+                resolution_policy = implementer.received[0]["command_policy"]
+                self.assertEqual("main", resolution_policy.base_ref)
+                self.assertEqual("issue-305", resolution_policy.head_ref)
+                self.assertTrue(any("cc-rereview" in task for task in reviewer.dispatched))
+                self.assertEqual(1, report.iterations)
+                if policy == "strict":
+                    self.assertEqual(rc.APPROVED_END, report.status)
+                else:
+                    # The post-merge head has no checks; the cycle still leaves
+                    # that result to the normal CI gate.
+                    self.assertEqual(rc.UNRESOLVED_END, report.status)
+
+        budget_checks = Checks()
+        budget_checks.pulls = [
+            rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", False, "dirty"),
+        ]
+        budget_store = tm.Telemetry(self.home / "budget.sqlite")
+        implementer = CapturingScripted(
+            "codex", resolutions=[block("RESOLVED", head_sha=new_head)])
+        reviewer = Scripted("claude", reviews=[
+            block("CHANGES_REQUESTED", head_sha=old_head, reviewed_head_sha=old_head),
+            block("APPROVED", head_sha=new_head, reviewed_head_sha=new_head,
+                  blocking_findings=[], findings=[]),
+        ])
+
+        report = self.run_cycle(
+            implementer, reviewer, telemetry=budget_store, start_from="review",
+            change_request_id="74", history_remote=Remote(budget_store),
+            ci_checks=budget_checks, ci_policy="strict", code_host="github",
+            trusted_authors=("reviewer",), max_iterations=1)
+
+        self.assertEqual("APPROVED", report.verdict)
+        self.assertNotEqual(rc.APPROVED_END, report.status)
+        self.assertIn("still conflicts with its base", report.stopped_because)
+
+
 def _run_line(kind: str, number: int) -> str:
     if kind == "review":
         return (f"#### [CCR-20260920-{number:03d}] · senior_reviewer · "

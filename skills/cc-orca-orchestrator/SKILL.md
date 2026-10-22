@@ -414,6 +414,17 @@ Look for it at exactly these paths, in order:
 repository, `<repository>/scripts/ci_gate.py`. On another code host, or when
 none exists, stop with `BLOCKED` before implementation and say why.
 
+For GitHub change requests, check mergeability before waiting for CI under
+`parallel` and before an `APPROVED` ending under `strict`. Treat
+`mergeable: false` with `mergeable_state: dirty` as `CI_CONFLICTING`; treat
+`mergeable: null` as unknown, reread it a bounded number of times, then stop
+`BLOCKED` as `CI_MERGEABILITY_UNKNOWN`. A conflict starts a resolution round
+even when the review has no findings or checks. Tell resolution to merge the
+verified base into the change request branch without rebasing or force-pushing,
+then rereview. The round counts toward `max_iterations`. Check mergeability
+again after rereview; an unchanged head or a conflict that remains is no
+progress. Other code hosts keep their existing flow.
+
 Under `parallel`:
 
 - tell `cc-implement-issue`, `cc-resolve-comments`, `cc-initial-review` and
@@ -444,6 +455,8 @@ Under `parallel`:
 |---|---|
 | `CI_PASSED` | Read the receipt again. Finish as `READY_FOR_MANUAL_MERGE` when it still holds with nothing published after it; otherwise stop with `BLOCKED`. |
 | `CI_FAILED` | Open an iteration with a `cc-resolve-comments` Task told the SHA and the number of failed checks, never their names. When it leaves the head unchanged, stop with `HUMAN_INTERVENTION`. |
+| `CI_CONFLICTING` | Open a resolution iteration with the verified-base merge directive, then rereview. If the head is unchanged or the conflict remains after that round, stop for no progress. |
+| `CI_MERGEABILITY_UNKNOWN` | Stop with `BLOCKED`; GitHub did not establish mergeability after bounded rereads. |
 | `CI_HEAD_MOVED` | Do not reuse the clean review: spend one iteration on a fresh `cc-rereview` of the new head. A second move stops with `HUMAN_INTERVENTION`. |
 | `CI_SKIPPED`, `NO_CI_CHECKS_FOUND` | Stop with `HUMAN_INTERVENTION`: the checks cannot pass on that head. |
 | `CI_TIMEOUT` | Stop with `BLOCKED`. The clean review stays valid for that head, and a resume waits again without another review. |

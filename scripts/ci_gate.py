@@ -50,7 +50,9 @@ from urllib.parse import quote
 # means the change request's head is no longer the SHA asked about.
 from telemetry import (  # noqa: F401  (re-exported for callers)
     CI_FAILED,
+    CI_CONFLICTING,
     CI_HEAD_MOVED,
+    CI_MERGEABILITY_UNKNOWN,
     CI_PASSED,
     CI_PENDING,
     CI_SKIPPED,
@@ -129,6 +131,9 @@ class PullState:
     state: str
     head_sha: str
     base_ref: str
+    head_ref: str | None = None
+    mergeable: bool | None = True
+    mergeable_state: str | None = None
 
 
 class CheckProvider(Protocol):
@@ -293,18 +298,29 @@ def wait_for_checks(provider: CheckProvider, repo: str, change_request_id: str, 
                        reason=reason, **fields)
 
     def read_pull() -> PullState | GateResult:
-        try:
-            pull = provider.pull(repo, change_request_id)
-        except CheckReadError as error:
-            return unreadable(f"the change request could not be read: {error}")
-        if pull.state != "OPEN":
-            return unreadable(f"the change request is {pull.state.lower()}, not open",
-                              pr_head_sha=pull.head_sha)
-        if pull.head_sha != sha:
-            return _result(CI_HEAD_MOVED, sha, polls=polls, waited_seconds=elapsed(),
-                           pr_head_sha=pull.head_sha,
-                           reason="the change request's head is no longer this SHA")
-        return pull
+        for attempt in range(3):
+            try:
+                pull = provider.pull(repo, change_request_id)
+            except CheckReadError as error:
+                return unreadable(f"the change request could not be read: {error}")
+            if pull.state != "OPEN":
+                return unreadable(f"the change request is {pull.state.lower()}, not open",
+                                  pr_head_sha=pull.head_sha)
+            if pull.head_sha != sha:
+                return _result(CI_HEAD_MOVED, sha, polls=polls, waited_seconds=elapsed(),
+                               pr_head_sha=pull.head_sha,
+                               reason="the change request's head is no longer this SHA")
+            if pull.mergeable is True:
+                return pull
+            if pull.mergeable is False and pull.mergeable_state == "dirty":
+                return _result(CI_CONFLICTING, sha, polls=polls,
+                               waited_seconds=elapsed(), pr_head_sha=pull.head_sha,
+                               reason="the change request conflicts with its base branch")
+            if attempt < 2:
+                sleep(min(poll_interval, 5))
+        return _result(CI_MERGEABILITY_UNKNOWN, sha, polls=polls,
+                       waited_seconds=elapsed(), pr_head_sha=sha,
+                       reason="GitHub could not determine whether the change request is mergeable")
 
     pull = read_pull()
     if isinstance(pull, GateResult):
@@ -404,12 +420,18 @@ class GitHubChecks:
         data = self._api(f"repos/{repo}/pulls/{change_request_id}")
         try:
             head, base = data["head"]["sha"], data["base"]["ref"]
+            head_ref = data["head"]["ref"]
             state = "MERGED" if data.get("merged") else str(data["state"]).upper()
+            mergeable, mergeable_state = data["mergeable"], data["mergeable_state"]
         except (KeyError, TypeError) as error:
             raise CheckReadError("the pull request came back in an unknown shape") from error
-        if not isinstance(head, str) or not isinstance(base, str) or not base:
+        if (not isinstance(head, str) or not isinstance(base, str) or not base
+                or not isinstance(head_ref, str) or not head_ref
+                or mergeable not in (True, False, None)
+                or not isinstance(mergeable_state, str)):
             raise CheckReadError("the pull request names no head SHA or base branch")
-        return PullState(state=state, head_sha=head, base_ref=base)
+        return PullState(state=state, head_sha=head, base_ref=base, head_ref=head_ref,
+                         mergeable=mergeable, mergeable_state=mergeable_state)
 
     def required(self, repo: str, base_ref: str) -> tuple[RequiredCheck, ...]:
         branch = quote(base_ref, safe="")
