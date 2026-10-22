@@ -3498,7 +3498,7 @@ def run_cycle(
                     snapshot = read_ci(reviewed, role, once=True)
                     if snapshot.status == ci_gate.CI_FAILED:
                         failed_checks = snapshot
-            if failed_checks is not None:
+            if failed_checks is not None and failed_checks.status == ci_gate.CI_FAILED:
                 instruction += " " + CI_FAILURE_DIRECTIVE.format(
                     head=failed_checks.head_sha, count=len(failed_checks.failed))
             open_findings = (history[-1].statuses if history
@@ -3541,6 +3541,11 @@ def run_cycle(
         # The last stage's own account travels with every ending, not only the bad
         # ones: a run that finished still said something about how. Under the
         # parallel policy only the CI gate above approves.
+        if ci_failure is not None and ci_failure.status == ci_gate.CI_CONFLICTING:
+            return stop(
+                f"the change request still conflicts with its base after the "
+                f"resolution budget of {max_iterations} round(s) is spent",
+                reported=reported, stop_reason="iteration_limit")
         if not parallel and verdict == "APPROVED":
             return stop("", APPROVED_END, reported=reported, stop_reason="approved")
         if ci_failure is not None:

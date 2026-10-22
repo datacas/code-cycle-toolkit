@@ -2837,6 +2837,7 @@ class MergeabilityCycleTests(RunCycleTestCase):
                 self.assertIn("GitHub reports that this change request conflicts",
                               resolution_prompts[0])
                 self.assertIn("do not rebase or force-push", resolution_prompts[0])
+                self.assertNotIn("Required checks failed on head", resolution_prompts[0])
                 resolution_policy = implementer.received[0]["command_policy"]
                 self.assertEqual("main", resolution_policy.base_ref)
                 self.assertEqual("issue-305", resolution_policy.head_ref)
@@ -2848,6 +2849,32 @@ class MergeabilityCycleTests(RunCycleTestCase):
                     # The post-merge head has no checks; the cycle still leaves
                     # that result to the normal CI gate.
                     self.assertEqual(rc.UNRESOLVED_END, report.status)
+
+        budget_checks = Checks()
+        budget_checks.pulls = [
+            rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", old_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", True, "clean"),
+            rc.ci_gate.PullState("OPEN", new_head, "main", "issue-305", False, "dirty"),
+        ]
+        budget_store = tm.Telemetry(self.home / "budget.sqlite")
+        implementer = CapturingScripted(
+            "codex", resolutions=[block("RESOLVED", head_sha=new_head)])
+        reviewer = Scripted("claude", reviews=[
+            block("CHANGES_REQUESTED", head_sha=old_head, reviewed_head_sha=old_head),
+            block("APPROVED", head_sha=new_head, reviewed_head_sha=new_head,
+                  blocking_findings=[], findings=[]),
+        ])
+
+        report = self.run_cycle(
+            implementer, reviewer, telemetry=budget_store, start_from="review",
+            change_request_id="74", history_remote=Remote(budget_store),
+            ci_checks=budget_checks, ci_policy="strict", code_host="github",
+            trusted_authors=("reviewer",), max_iterations=1)
+
+        self.assertEqual("APPROVED", report.verdict)
+        self.assertNotEqual(rc.APPROVED_END, report.status)
+        self.assertIn("still conflicts with its base", report.stopped_because)
 
 
 def _run_line(kind: str, number: int) -> str:
