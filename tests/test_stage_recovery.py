@@ -80,6 +80,13 @@ class StageRecoveryTests(RunCycleTestCase):
         return "Work published; structured result omitted."
 
     def execute(self, coder, reviewer=None, **kwargs):
+        class Checks:
+            def pull(self, *_):
+                return rc.ci_gate.PullState(
+                    "OPEN", self_outer.head, "main", "task-174", True, "clean")
+
+        self_outer = self
+        kwargs.setdefault("ci_checks", Checks())
         return self.run_cycle(Worker("codex", coder), Worker("claude", reviewer or (
             lambda task: block("APPROVED", head_sha=self.head, verified_findings=[]))),
             cwd=str(self.checkout), code_host="github", trusted_authors=("trusted",), **kwargs)

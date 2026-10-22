@@ -43,12 +43,15 @@ class Clock:
 class FakeCI:
     """A controlled code host: each read of the checks returns the next script entry."""
 
-    def __init__(self, reads, *, required=(), head=SHA, state="OPEN", heads=None) -> None:
+    def __init__(self, reads, *, required=(), head=SHA, state="OPEN", heads=None,
+                 mergeable=True, mergeable_state="clean") -> None:
         self.reads = list(reads)
         self.required_checks = tuple(required)
         self.head = head
         self.state = state
         self.heads = list(heads or [])
+        self.mergeable = mergeable
+        self.mergeable_state = mergeable_state
         self.pulls = 0
         self.check_reads = 0
         self.failure: dict[str, str] = {}
@@ -59,7 +62,8 @@ class FakeCI:
             raise gate.CheckReadError(self.failure["pull"])
         if self.heads:
             self.head = self.heads.pop(0)
-        return gate.PullState(self.state, self.head, "main")
+        return gate.PullState(self.state, self.head, "main", "issue-4",
+                              self.mergeable, self.mergeable_state)
 
     def required(self, repo, base_ref):
         if "required" in self.failure:
@@ -223,6 +227,25 @@ class BarrierTests(unittest.TestCase):
 
 
 class HeadAndReadTests(unittest.TestCase):
+    def test_a_conflicting_pull_request_is_returned_before_waiting_for_checks(self) -> None:
+        ci = FakeCI([() for _ in range(3)], mergeable=False, mergeable_state="dirty")
+
+        result = wait(ci)
+
+        self.assertEqual(gate.CI_CONFLICTING, result.status)
+        self.assertEqual(0, ci.check_reads)
+        self.assertEqual("the change request conflicts with its base branch", result.reason)
+
+    def test_unknown_mergeability_is_retried_a_bounded_number_of_times(self) -> None:
+        ci = FakeCI([()], mergeable=None, mergeable_state="unknown")
+        clock = Clock()
+
+        result = wait(ci, clock=clock)
+
+        self.assertEqual(gate.CI_MERGEABILITY_UNKNOWN, result.status)
+        self.assertEqual(3, ci.pulls)
+        self.assertEqual(0, ci.check_reads)
+
     def test_a_head_that_already_moved_is_reported_without_reading_checks(self) -> None:
         ci = FakeCI([(run("build"),)], head=OTHER)
 
@@ -319,12 +342,28 @@ class GitHubChecksTests(unittest.TestCase):
 
     def test_the_pull_request_state_head_and_base_are_read(self) -> None:
         respond, calls = self.responder({"repos/owner/api/pulls/4": {
-            "state": "open", "merged": False, "head": {"sha": SHA}, "base": {"ref": "main"}}})
+            "state": "open", "merged": False,
+            "head": {"sha": SHA, "ref": "issue-4"}, "base": {"ref": "main"},
+            "mergeable": True, "mergeable_state": "clean"}})
 
         pull = gate.GitHubChecks(run=respond).pull("owner/api", "4")
 
-        self.assertEqual(gate.PullState("OPEN", SHA, "main"), pull)
+        self.assertEqual(gate.PullState("OPEN", SHA, "main", "issue-4", True, "clean"), pull)
         self.assertEqual(["gh", "api", "repos/owner/api/pulls/4"], calls[0])
+
+    def test_conflicting_and_unknown_mergeability_values_are_preserved(self) -> None:
+        for mergeable, state in ((False, "dirty"), (None, "unknown")):
+            with self.subTest(mergeable=mergeable, state=state):
+                respond, _ = self.responder({"repos/owner/api/pulls/4": {
+                    "state": "open", "merged": False,
+                    "head": {"sha": SHA, "ref": "issue-4"}, "base": {"ref": "main"},
+                    "mergeable": mergeable, "mergeable_state": state}})
+
+                pull = gate.GitHubChecks(run=respond).pull("owner/api", "4")
+
+                self.assertEqual(mergeable, pull.mergeable)
+                self.assertEqual(state, pull.mergeable_state)
+                self.assertEqual("issue-4", pull.head_ref)
 
     def test_required_checks_merge_classic_protection_and_rulesets(self) -> None:
         respond, calls = self.responder({

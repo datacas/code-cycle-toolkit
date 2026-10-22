@@ -520,6 +520,16 @@ resolve, replace, or hide one. When nothing in the change can fix it, leave the
 head unchanged and say why: the cycle then stops rather than reviewing the same
 head again.
 
+When the runtime reports a GitHub base-branch conflict, treat it as a resolution
+round even when the review has no findings and CI has no checks. Merge the
+verified base branch into the change request branch with `git merge origin/<base>`
+and resolve the conflicts; do not rebase or force-push. The runtime allows merge only for this
+resolution role and only against the change request's verified base ref. After
+the merge, review the conflict resolutions against the prior head. Do not treat
+the merged base changes as changes made by this round. If GitHub cannot
+determine mergeability after bounded retries, stop as `BLOCKED`; after a
+resolution and rereview, a conflict that remains is no progress.
+
 ## Verify each fix
 
 After applying a valid fix, run the narrowest related test and reproduce the

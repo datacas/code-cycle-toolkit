@@ -51,7 +51,8 @@ class PolicyTestCase(unittest.TestCase):
 
     def policy(self, role: str, **fields) -> sp.StagePolicy:
         defaults = dict(role=role, repo=REPO, change_request_id="7", work_item_id="142",
-                        base_branch="main", tmpdir=str(self.tmpdir))
+                        base_branch="main", base_ref="main", head_ref="issue-142",
+                        tmpdir=str(self.tmpdir))
         return sp.StagePolicy(**{**defaults, **fields})
 
     def allowed(self, command: str, policy: sp.StagePolicy, *, branch: str = "issue-142"):
@@ -173,7 +174,7 @@ class GitTests(PolicyTestCase):
             for command in ("git add scripts/x.py", "git commit -m 'feat: x'",
                             "git push -u origin issue-142", "git push origin HEAD",
                             "git push origin HEAD:issue-142", "git push --set-upstream origin x",
-                            "git fetch origin", "git pull origin issue-142",
+                            "git fetch origin", "git pull --no-rebase origin issue-142",
                             "git checkout issue-142", "git switch issue-142", "git rm old.py",
                             "git mv a.py b.py", "git worktree list",
                             "git worktree list --porcelain",
@@ -182,6 +183,60 @@ class GitTests(PolicyTestCase):
                             f"git diff main...HEAD --output='{self.tmpdir}/d.diff'"):
                 with self.subTest(role=role, command=command):
                     self.allowed(command, policy)
+
+    def test_github_pulls_are_bound_to_the_live_pr_refs_and_disable_rebase(self) -> None:
+        for role in ("implement", "resolve"):
+            policy = self.policy(role)
+            for command in ("git pull --no-rebase origin issue-142",
+                            "git pull --no-rebase origin main"):
+                with self.subTest(role=role, command=command):
+                    self.allowed(command, policy)
+            for command in (
+                "git pull origin issue-142", "git pull --rebase origin issue-142",
+                "git pull -r origin issue-142", "git pull --no-rebase origin other",
+                "git pull --no-rebase upstream main", "git pull --no-rebase origin main extra",
+                "git pull --no-rebase --ff-only origin main",
+                "git pull --no-rebase --config pull.rebase=true origin main",
+                "git pull --no-rebase origin refs/heads/main",
+            ):
+                with self.subTest(role=role, command=command):
+                    self.denied(command, policy)
+        no_request = self.policy("implement", change_request_id=None,
+                                 base_ref=None, head_ref=None)
+        self.denied("git pull --no-rebase origin main", no_request)
+
+    def test_only_resolve_can_merge_the_verified_pr_base(self) -> None:
+        policy = self.policy("resolve")
+        for command in ("git merge origin/main", "git merge --no-edit origin/main",
+                        "git merge --no-ff origin/main",
+                        "git merge --no-edit --no-ff origin/main"):
+            with self.subTest(command=command):
+                self.allowed(command, policy)
+        for role in ("implement", "review", "rereview"):
+            with self.subTest(role=role):
+                self.denied("git merge origin/main", self.policy(role))
+        for command in (
+            "git merge origin/other", "git merge --no-commit origin/main",
+            "git merge --squash origin/main", "git merge --no-verify origin/main",
+            "git merge -s ours origin/main", "git merge -Xours origin/main",
+            "git merge --no-ff origin/main other", "git merge main",
+        ):
+            with self.subTest(command=command):
+                self.denied(command, policy)
+
+        def not_merging(argv, **_):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+        for command in ("git merge --abort", "git merge --continue"):
+            self.assertFalse(sp.check(command, policy, run=not_merging).allowed)
+
+        def merging(argv, **_):
+            return subprocess.CompletedProcess(argv, 0, stdout="abc\n", stderr="")
+
+        for command in ("git merge --abort", "git merge --continue"):
+            self.assertTrue(sp.check(command, policy, run=merging).allowed)
+        non_github = self.policy("resolve", code_host="bitbucket")
+        self.denied("git merge origin/main", non_github)
 
     def test_every_force_push_variant_is_refused(self) -> None:
         policy = self.policy("implement")

@@ -288,6 +288,13 @@ CI_FAILURE_DIRECTIVE = (
     "nor hides the other."
 )
 
+CONFLICT_DIRECTIVE = (
+    "GitHub reports that this change request conflicts with its base branch. "
+    "Merge the verified base branch into this change request branch and resolve "
+    "the resulting conflicts. Preserve the branch history: do not rebase or "
+    "force-push. Review only the conflict resolutions, not the merged base changes."
+)
+
 #: What the re-review is told when the head moved after a clean review.
 HEAD_MOVED_REREVIEW = (
     "The change request's head moved from {old} to {new} after the clean review "
@@ -2373,9 +2380,23 @@ def run_cycle(
 
     def stage_policy(role: str, request: str | None) -> StagePolicy:
         """The closed command table this stage receives (#142)."""
+        base_ref = head_ref = None
+        if policy_host == "github" and request:
+            number = StagePolicy(role=role, change_request_id=request).pr_number
+            if number:
+                try:
+                    pull = checks_provider.pull(repo_id, number)
+                except ci_gate.CheckReadError:
+                    # Failing closed here denies ref-sensitive Git commands;
+                    # it does not prevent the stage from doing other work.
+                    pass
+                else:
+                    if pull.state == "OPEN":
+                        base_ref, head_ref = pull.base_ref, pull.head_ref
         return StagePolicy(
             role=role, repo=repo_id, change_request_id=request,
             work_item_id=task_id, base_branch=base_branch,
+            base_ref=base_ref, head_ref=head_ref,
             test_command=allowed_test_command,
             verify_prefixes=tuple(allowed_verify_commands),
             code_host=policy_host, issue_provider=policy_provider,
@@ -3113,6 +3134,13 @@ def run_cycle(
             return "approved", result
         if result.status == ci_gate.CI_HEAD_MOVED:
             return "moved", result
+        if result.status == ci_gate.CI_CONFLICTING:
+            return "conflicting", result
+        if result.status == ci_gate.CI_MERGEABILITY_UNKNOWN:
+            return stop(
+                f"GitHub could not determine whether the change request at {head[:12]} "
+                f"can merge with its base after bounded retries: {_ci_detail(result)}",
+                "BLOCKED", reported=reported, stop_reason="ci_unreadable")
         if result.status == ci_gate.CI_FAILED:
             return "failed", result
         detail = _ci_detail(result)
@@ -3131,6 +3159,40 @@ def run_cycle(
                 UNRESOLVED_END, reported=reported, stop_reason="ci_not_passing")
         return stop(f"the checks of {head[:12]} could not be read: {detail}",
                     "BLOCKED", reported=reported, stop_reason="ci_unreadable")
+
+    def check_strict_mergeability(head: str) -> ci_gate.GateResult | CycleReport | None:
+        """Check GitHub mergeability before a sequential-policy approval."""
+        if code_host != "github":
+            return None
+        number = pull_number()
+        if number is None:
+            return stop("the reviewed change request has no GitHub pull request number",
+                        "BLOCKED", stop_reason="ci_unreadable")
+        for attempt in range(3):
+            try:
+                pull = checks_provider.pull(repo_id, number)
+            except ci_gate.CheckReadError as error:
+                return stop(f"the change request mergeability could not be read: {error}",
+                            "BLOCKED", stop_reason="ci_unreadable")
+            if pull.state != "OPEN":
+                return stop(f"the change request is {pull.state.lower()}, not open",
+                            "BLOCKED", stop_reason="ci_unreadable")
+            if pull.head_sha != head:
+                return stop(
+                    f"the change request head moved from {head[:12]} to "
+                    f"{pull.head_sha[:12]} before mergeability was checked",
+                    "BLOCKED", stop_reason="head_moved")
+            if pull.mergeable is True:
+                return None
+            if pull.mergeable is False and pull.mergeable_state == "dirty":
+                return ci_gate.GateResult(
+                    status=ci_gate.CI_CONFLICTING, head_sha=head, pr_head_sha=head,
+                    reason="the change request conflicts with its base branch")
+            if attempt < 2:
+                (ci_sleep or time.sleep)(min(ci_poll_interval, 5))
+        return ci_gate.GateResult(
+            status=ci_gate.CI_MERGEABILITY_UNKNOWN, head_sha=head, pr_head_sha=head,
+            reason="GitHub could not determine whether the change request is mergeable")
 
     def reusable_review():
         """The clean review a resumed change request already has, when it holds.
@@ -3326,6 +3388,7 @@ def run_cycle(
 
         moved = False
         ci_failure: ci_gate.GateResult | None = None
+        conflicting_round_done = False
         while True:
             if parallel and verdict in CLEAN_REVIEW_STATUSES:
                 # A clean review is no approval yet: the gate waits for its checks.
@@ -3371,7 +3434,25 @@ def run_cycle(
                 # The checks failed: their diagnosis is the next resolution's.
                 ci_failure = result
             elif verdict != "CHANGES_REQUESTED":
-                break
+                if verdict not in CLEAN_REVIEW_STATUSES:
+                    break
+                reviewed_head = _reviewed_head(
+                    reported.payload, role).get("reviewed_head_sha")
+                if reviewed_head is None and reported.payload:
+                    candidate = reported.payload.get("head_sha")
+                    reviewed_head = candidate if isinstance(candidate, str) else ""
+                mergeability = check_strict_mergeability(reviewed_head or "")
+                if isinstance(mergeability, CycleReport):
+                    return mergeability
+                if mergeability is None:
+                    break
+                if mergeability.status == ci_gate.CI_MERGEABILITY_UNKNOWN:
+                    return stop(
+                        f"GitHub could not determine whether the reviewed head can merge "
+                        f"with its base after bounded retries: {_ci_detail(mergeability)}",
+                        "BLOCKED", reported=reported,
+                        stop_reason="ci_unreadable")
+                ci_failure = mergeability
 
             # One resolution round: for the review's blocking findings, for the
             # failed checks of a clean review's head, or for both.
@@ -3384,6 +3465,11 @@ def run_cycle(
                     f"{', '.join(repeated)} survived {SURVIVALS_BEFORE_STOP} claimed "
                     "fixes; stopping before another resolution",
                     reported=reported, stop_reason="repeated_findings")
+            if (ci_failure is not None and ci_failure.status == ci_gate.CI_CONFLICTING
+                    and conflicting_round_done):
+                return stop(
+                    "the change request still conflicts with its base after the "
+                    "resolution round", reported=reported, stop_reason="no_progress")
             if len(progress) >= 2 and progress[-1] is not None and progress[-1] == progress[-2]:
                 return stop(
                     "the re-review found the same head and the same open findings "
@@ -3393,9 +3479,11 @@ def run_cycle(
                 break
             recorder.next_iteration()
 
-            instruction = ("Resolve the failed checks of the reviewed head."
-                           if ci_failure is not None
-                           else "Resolve the findings from the review.")
+            instruction = (
+                CONFLICT_DIRECTIVE if ci_failure is not None
+                and ci_failure.status == ci_gate.CI_CONFLICTING else
+                "Resolve the failed checks of the reviewed head."
+                if ci_failure is not None else "Resolve the findings from the review.")
             contested = sorted(finding for finding, count in survivals.items()
                                if count >= SURVIVALS_BEFORE_DIRECTIVE)
             if contested:
@@ -3429,6 +3517,8 @@ def run_cycle(
                 escalation_finding_ids=escalation_ids)
             if stopped is not None:
                 return stopped
+            if ci_failure is not None and ci_failure.status == ci_gate.CI_CONFLICTING:
+                conflicting_round_done = True
             if ci_failure is not None:
                 after = (resolved.payload or {}).get("head_sha")
                 if after == ci_failure.head_sha:
