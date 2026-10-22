@@ -85,6 +85,27 @@ class SetupTests(unittest.TestCase):
                 (root / lock).write_text("fixture")
                 self.assertEqual(manager, ds.projects(root)[0][1])
 
+    def test_ignored_generated_manifest_does_not_block_preparation(self):
+        (self.root / ".gitignore").write_text("node_modules/\n.output/\n")
+        self.git("add", ".gitignore")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "-qm", "ignore generated output")
+        generated = self.root / ".output/server/package.json"
+        generated.parent.mkdir(parents=True)
+        generated.write_text(json.dumps({"name": "generated", "dependencies": {"is-number": "7.0.0"}}))
+        staged_manifest_present = []
+
+        def runner(argv, **options):
+            if argv[-1] != "--version":
+                staged_manifest_present.append(
+                    (Path(options["cwd"]) / ".output/server/package.json").exists())
+            return self.runner(argv, **options)
+
+        result = ds.prepare(str(self.root), "codex", "codex", runner=runner,
+                            evidence_root=self.evidence, sleep=lambda _: None)
+        self.assertEqual("prepared", result["status"], result)
+        self.assertEqual([False], staged_manifest_present)
+
     def test_retries_transient_failure_records_head_logs_and_package_outputs(self):
         self.failures = ["ECONNRESET"]
         before = self.git("status", "--porcelain")

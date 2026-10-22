@@ -54,14 +54,15 @@ def projects(root: Path) -> list[tuple[Path, str, Path]]:
 
 
 def manifests(root: Path) -> list[Path]:
-    result = []
-    for directory, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name not in
-                   {"node_modules", ".git", ".yarn", ".worktree"}
-                   and not (Path(directory) / name).is_symlink()]
-        if "package.json" in files:
-            result.append(Path(directory) / "package.json")
-    return sorted(result)
+    """Return existing package manifests tracked by Git below ``root``."""
+    result = subprocess.run(["git", "ls-files", "-z", "--cached"], cwd=root,
+                            capture_output=True, timeout=30)
+    if result.returncode:
+        error = result.stderr.decode(errors="replace").strip()
+        raise ValueError(f"git ls-files failed with exit {result.returncode}: {error}")
+    paths = (root / os.fsdecode(name) for name in result.stdout.split(b"\0") if name)
+    return sorted(path for path in paths
+                  if path.name == "package.json" and (path.is_file() or path.is_symlink()))
 
 
 def install_command(manager: str, version: str, cache: Path) -> list[str]:
