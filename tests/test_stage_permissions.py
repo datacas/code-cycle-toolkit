@@ -1,6 +1,7 @@
 """The closed command table of each stage, and the hook that enforces it (#142)."""
 from __future__ import annotations
 
+import fnmatch
 import io
 import json
 import os
@@ -706,9 +707,16 @@ class AllowedToolsTests(PolicyTestCase):
             roots = {Path(policy.tmpdir), Path(policy.tmpdir).resolve(strict=False)}
             for root in roots:
                 direct = shlex.quote(str(root / "pr-comment.md"))
-                nested_pattern = shlex.quote(str(root / "claude-*" / "pr-comment.md"))
+                nested_pattern = f"{shlex.quote(str(root))}/claude-*/pr-comment.md"
+                quoted_pattern = shlex.quote(str(root / "claude-*" / "pr-comment.md"))
                 self.assertIn(f"Bash(python3 {validator} {direct}:*)", patterns)
                 self.assertIn(f"Bash(python3 {validator} {nested_pattern})", patterns)
+                self.assertIn(f"Bash(python3 {validator} {quoted_pattern})", patterns)
+                # The pattern must match the nested command as typed, unquoted.
+                typed = f"python3 {validator} {shlex.quote(str(root / 'claude-1000' / 'pr-comment.md'))}"
+                if shlex.quote(str(root)) == str(root):
+                    self.assertTrue(fnmatch.fnmatchcase(
+                        typed, f"python3 {validator} {nested_pattern}"))
             self.assertIn(f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
                           sp.prompt_note(policy))
             if role in {"review", "rereview"}:

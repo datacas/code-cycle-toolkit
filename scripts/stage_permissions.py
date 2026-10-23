@@ -1400,9 +1400,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             root = Path(tmpdir)
             prefixes.append(
                 f'python3 {validator} {shlex.quote(str(root / "pr-comment.md"))}')
-            wildcards.append(
-                f'python3 {validator} '
-                f'{shlex.quote(str(root / "claude-*" / "pr-comment.md"))}')
+            # shlex.quote would wrap a path holding `*` in literal quotes that
+            # an unquoted command never matches, so quote only the root. The
+            # whole-path quoted form covers an agent that quotes the argument.
+            for nested in (f'{shlex.quote(str(root))}/claude-*/pr-comment.md',
+                           shlex.quote(str(root / "claude-*" / "pr-comment.md"))):
+                wildcards.append(f'python3 {validator} {nested}')
     prefixes += sorted(READ_SHELL)
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))
