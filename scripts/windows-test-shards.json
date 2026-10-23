@@ -43,6 +43,8 @@
       "test_work_item_outcomes": 46.5
     },
     "unmeasured_modules": [
+      "test_ci_failure_access",
+      "test_cycle_journal",
       "test_dependency_setup",
       "test_host_permissions",
       "test_stage_dispatch",
@@ -74,6 +76,8 @@
       "test_validate_workflow"
     ],
     "windows-3": [
+      "test_ci_failure_access",
+      "test_cycle_journal",
       "test_ci_policy",
       "test_cycle_history",
       "test_cycle_progress",

@@ -1146,6 +1146,9 @@ class NativeAdapter(Adapter):
         `command_policy` is the stage's command table (#142). An inactive one,
         for a non-GitHub cycle, changes nothing and is only reported.
         """
+        if command_policy is not None and dispatch_attempt_id is not None:
+            # The hook records its own denials under this attempt (#306).
+            command_policy = replace(command_policy, attempt_id=dispatch_attempt_id)
         policy = command_policy if command_policy is not None and command_policy.active else None
         policy_note: dict[str, object] = ({} if command_policy is None else {"command_policy": (
             "active" if policy is not None
@@ -1157,7 +1160,8 @@ class NativeAdapter(Adapter):
                 detail=failure_excerpt(f"BLOCKED: {refused}", 600),
                 error_code="precondition", start_state="not_started",
                 lifecycle_state="failed",
-                artifacts={"command_policy": f"blocked: {failure_excerpt(refused, 300)}"},
+                artifacts={"command_policy": f"blocked: {failure_excerpt(refused, 300)}",
+                           "policy_preflight_refusal": failure_excerpt(refused, 600)},
             )
         try:
             policy_note = {**policy_note, **self.policy_notice(policy, cwd)}
@@ -2514,6 +2518,9 @@ class ClaudeAdapter(NativeAdapter):
             )
             script = directory / "stage_permissions.py"
             shutil.copyfile(Path(__file__).with_name("stage_permissions.py"), script)
+            # The hook records its denials with this module beside it (#306).
+            journal_module = directory / "cycle_journal.py"
+            shutil.copyfile(Path(__file__).with_name("cycle_journal.py"), journal_module)
             policy_file = directory / "policy.json"
             policy_file.write_text(runtime_policy.to_json(), encoding="utf-8")
             parts = [sys.executable, str(script), "hook", str(policy_file)]
@@ -2537,7 +2544,7 @@ class ClaudeAdapter(NativeAdapter):
                 settings.update(sp.review_sandbox_settings(
                     tuple(writable), runtime_policy.registry_domains))
             if os.name != "nt":
-                for path in (script, policy_file):
+                for path in (script, journal_module, policy_file):
                     os.chmod(path, 0o400)
                 os.chmod(directory, 0o500)
             if runtime_policy.active:
@@ -2562,6 +2569,9 @@ class ClaudeAdapter(NativeAdapter):
         authorize it once (#142).
         """
         denied: list[str] = []
+        # The permission layer's own list, every tool, for the cycle journal
+        # (#306). The hook records its denials itself, so it is kept apart.
+        layer: list[dict[str, object]] = []
 
         def add(command) -> None:
             if isinstance(command, str) and command.strip():
@@ -2574,8 +2584,21 @@ class ClaudeAdapter(NativeAdapter):
             kind = event.get("type")
             if kind == "result":
                 for denial in event.get("permission_denials") or []:
-                    if isinstance(denial, dict) and denial.get("tool_name") == "Bash":
-                        add((denial.get("tool_input") or {}).get("command"))
+                    if not isinstance(denial, dict):
+                        continue
+                    tool = denial.get("tool_name")
+                    tool_input = denial.get("tool_input")
+                    tool_input = tool_input if isinstance(tool_input, dict) else {}
+                    if tool == "Bash":
+                        add(tool_input.get("command"))
+                    target = (tool_input.get("command") or tool_input.get("file_path")
+                              or tool_input.get("notebook_path") or tool_input.get("url"))
+                    entry: dict[str, object] = {"tool": str(tool or "unknown")[:80],
+                             "command": failure_excerpt(target, 300) if isinstance(target, str) else None,
+                             "tool_use_id": denial.get("tool_use_id")
+                             if isinstance(denial.get("tool_use_id"), str) else None}
+                    if entry not in layer:
+                        layer.append(entry)
                 continue
             message = event.get("message")
             content = message.get("content") if isinstance(message, dict) else None
@@ -2590,7 +2613,9 @@ class ClaudeAdapter(NativeAdapter):
                         and block.get("is_error")
                         and sp.HOOK_DENIAL_MARKER in _tool_result_text(block.get("content"))):
                     add(bash_calls.get(str(block.get("tool_use_id"))))
-        artifacts = {"permission_denials": denied} if denied else {}
+        artifacts: dict[str, object] = {"permission_denials": denied} if denied else {}
+        if layer:
+            artifacts["claude_permission_denials"] = layer
         pending = self.pending_background_evidence(stdout)
         if pending:
             artifacts["background_command"] = pending

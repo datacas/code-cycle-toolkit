@@ -438,7 +438,11 @@ class StoreFailureTests(unittest.TestCase):
         attempts = self.store.dispatch_attempts("repo")
         self.assertEqual(("executor_error", "started"), (attempts[0]["error_code"], attempts[0]["start_state"]))
         with closing(sqlite3.connect(self.path)) as conn:
-            database = "\n".join(conn.iterdump())
+            dump = list(conn.iterdump())
+            database = "\n".join(line for line in dump
+                                 if not line.startswith('INSERT INTO "journal_'))
+        for secret in ("sk-secret123", "ghp_secret456"):
+            self.assertNotIn(secret, "\n".join(dump))
         for forbidden in ("sk-secret123", "ghp_secret456", "future_code", "failure sk", "[redacted]"):
             self.assertNotIn(forbidden, database)
 

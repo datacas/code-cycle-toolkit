@@ -766,6 +766,8 @@ class AllowedToolsTests(PolicyTestCase):
                         self.assertTrue(sp.check_file_edit(
                             "Write", {"file_path": str(self.tmpdir / name)}, policy).allowed)
                     continue
+                if not pattern.endswith(":*)"):
+                    continue  # argument wildcards have concrete coverage in test_ci_failure_access
                 prefix = pattern[len("Bash("):-len(":*)")]
                 words = prefix.split()
                 if words[-2:] in (["api", "graphql"],) or words[-1] in {"push", "comment",
@@ -823,7 +825,8 @@ class SkillCoverageTests(PolicyTestCase):
         return command
 
     def test_documented_commands_are_in_their_stage_table(self) -> None:
-        with patch.object(sp, "THREAD_OWNER", lambda thread, **_: (REPO, "7")):
+        with patch.object(sp, "THREAD_OWNER", lambda thread, **_: (REPO, "7")), \
+                patch.object(sp, "GITHUB_FIELD", return_value="a" * 40):
             for role, skills in self.STAGES.items():
                 policy = self.policy(role, rtk=False)
                 for skill in skills:

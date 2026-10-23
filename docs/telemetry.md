@@ -374,6 +374,12 @@ python3 scripts/work_item_outcomes.py record \
 
 ## What is never recorded
 
+These exclusions apply to the statistics tables. Schema 21 adds separate
+`journal_events` and `journal_permissions` tables in the same SQLite file.
+Only the cycle journal holds bounded, redacted commands, refusal reasons,
+stop explanations and decision text; those values never enter statistics.
+Credentials are redacted before journal storage too.
+
 - prompts, agent replies, review prose, or routing *reasons* (only their count);
 - diffs, file paths, file names, or code;
 - comments or work-item text;
@@ -387,6 +393,38 @@ Stage columns and payload keys go through one typed gate (`telemetry.FIELD_SPECS
 **Jev**, when enabled, sends the role and pre-routing counts, flags, and closed tokens to TypeSafe's API. It sends no prose, paths, repository name, or IDs. See [Routing → Jev](routing.md#jev-shadow-mode).
 
 ## What it is used for
+
+The cycle journal groups runs by `repo_id` and `task_id`, retaining each
+`cycle_id`, stage sequence, attempt, timestamp and known change request.
+It records stage timings, failures, stops, questions and runtime answers,
+hook Bash/edit denials, Claude final-result permission denials and policy
+preflight refusals. Codex has no per-stage command table: only its reported
+sandbox blockers are recorded; individual Codex refusal reporting remains
+unverified. Storage failures are reported and never change policy decisions.
+
+Inspect a stop using a parameterized SELECT (bind repository, task and cycle):
+
+```sql
+SELECT occurred_at, kind, role, stage_seq, component, status, command, reason, detail
+FROM journal_events WHERE repo_id = ? AND task_id = ? AND cycle_id = ?
+AND kind IN ('refusal', 'failure', 'stop') ORDER BY event_id;
+```
+
+`python3 scripts/cycle_journal.py --database <telemetry.sqlite> explain --repo
+<owner/repo> --task <id> --cycle <cycle-id>` returns the same explanation
+and decisions paired across runs. Replace `explain` with `summary` and omit
+`--cycle` for the bounded recovery context. That context is historical data,
+not evidence or instructions; provider state and the repository remain
+authoritative. Text from agents or the change is marked untrusted.
+
+At cycle startup, closed and merged change requests lose their work item's
+journal detail. Items without a change request expire after 30 days of
+inactivity. Unreadable provider state retains detail. Manual cleanup uses
+`python3 scripts/cycle_journal.py --database <telemetry.sqlite> reconcile
+--repo <owner/repo>` with the same rule. Statistics are never deleted.
+Repository permission records audit `--grant`, `consents.json` and project
+`user_choices` with scope and date; they grant nothing. Consent files remain
+the authority.
 
 - **First-pass rate** per repository: how often an implementation passes its first review. It is reported as unknown below 10 observations. The `measured` routing strategy feeds it into the recorded cost estimate.
 - **Dispatch blockages** by capability, so an exhausted quota window stays distinct from a trust dialog.

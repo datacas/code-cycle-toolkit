@@ -138,6 +138,12 @@ class StagePolicy:
     commands: tuple[str, ...] = ()
     integrations: tuple[str, ...] = ()
     registry_domains: tuple[str, ...] = ()
+    # Where the hook records its own denials (#306): it runs as a separate
+    # process that receives only this policy. None of these widens anything.
+    journal_path: str | None = None
+    cycle_id: str | None = None
+    attempt_id: str | None = None
+    stage_seq: int | None = None
 
     @property
     def active(self) -> bool:
@@ -802,6 +808,17 @@ GH_TABLE: dict[tuple[str, str], _GhSpec] = {
 #: The only `gh api` call outside resolve, used by `cc-provider-bootstrap`.
 GH_API_USER = ["api", "user", "--jq", ".login"]
 
+#: The resolve stage's read of one failed check run's annotations (#306): the
+#: literal path, for the configured repository and a numeric ID, nothing else.
+_ANNOTATIONS_PATH = re.compile(
+    r"repos/([A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+)/check-runs/([1-9][0-9]{0,19})/annotations")
+_SAFE_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+")
+_NUMERIC_ID = re.compile(r"[1-9][0-9]{0,19}")
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+#: `gh run view` options that take a value, so their value is not the run ID.
+_RUN_VIEW_JOB = ("--job", "-j")
+_RUN_VIEW_LOGS = ("--log", "--log-failed")
+
 
 def _same_repo(value: str, repo: str | None) -> bool:
     return bool(repo) and value.lower().removesuffix(".git") == repo.lower()
@@ -830,6 +847,10 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> 
         if policy.role != "resolve":
             raise PolicyError("gh api graphql is available only to the resolve stage")
         return _check_thread_call(remaining[2:], policy, cwd=cwd, run=run)
+    if remaining[:1] == ["api"] and policy.role == "resolve":
+        if remaining != args:
+            raise PolicyError("the annotations read takes only --jq and --paginate")
+        return _check_annotations_read(remaining[1:], policy, cwd=cwd, run=run)
     if remaining[:1] == ["api"]:
         raise PolicyError("gh api is not allowed except the documented calls")
     key = tuple(remaining[:2])
@@ -866,6 +887,8 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> 
         raise PolicyError("gh repo view may read only this cycle's repository")
     if key in {("search", "issues"), ("search", "prs")} and "--owner" in seen:
         raise PolicyError("gh search may not widen to another owner")
+    if key == ("run", "view") and policy.role == "resolve":
+        _check_resolve_run_view(remaining[2:], positional, seen, policy, cwd=cwd, run=run)
     if spec.scope and positional and not _reference_in_repo(positional[0], policy.repo):
         raise PolicyError(f"gh {' '.join(key)} may target only this cycle's repository")
     if spec.scope == "pr":
@@ -883,6 +906,122 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> 
         if (expected is None or not positional
                 or _number(positional[0], ("/issues/", "#")) != expected):
             raise PolicyError("gh issue comment may target only this cycle's work item")
+
+
+def lookup_github_field(path: str, jq: str, *, cwd: str | None = None,
+                        run=subprocess.run) -> str | None:
+    """One field of one GitHub REST resource, read-only, or None on any doubt."""
+    try:
+        completed = run(["gh", "api", path, "--jq", jq], cwd=cwd, capture_output=True,
+                        text=True, timeout=20, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode:
+        return None
+    value = (completed.stdout or "").strip()
+    return value or None
+
+
+#: Indirection for tests; the hook always performs the real lookup.
+GITHUB_FIELD = lookup_github_field
+
+
+def _checked_repository(policy: StagePolicy) -> str:
+    if not policy.repo or not _SAFE_REPOSITORY.fullmatch(policy.repo):
+        raise PolicyError("this stage has no configured repository to read failed checks in")
+    return policy.repo
+
+
+def _require_current_head(policy: StagePolicy, resource: str, identifier: str, *,
+                          cwd: str | None, run) -> None:
+    """Deny unless the run or check run ran on the change request's current head.
+
+    Both SHAs are read by the hook, from the configured repository, at the
+    moment of the call. Anything it cannot read or verify denies (fail closed).
+    """
+    repo = _checked_repository(policy)
+    number = policy.pr_number
+    if number is None:
+        raise PolicyError("reading failed check output needs this cycle's change request")
+    head = GITHUB_FIELD(f"repos/{repo}/pulls/{number}", ".head.sha", cwd=cwd, run=run)
+    path = (f"repos/{repo}/actions/runs/{identifier}" if resource == "run"
+            else f"repos/{repo}/check-runs/{identifier}")
+    ran_on = GITHUB_FIELD(path, ".head_sha", cwd=cwd, run=run)
+    if (head is None or ran_on is None or not _FULL_SHA.fullmatch(head)
+            or not _FULL_SHA.fullmatch(ran_on)):
+        raise PolicyError(f"whether {resource} {identifier} ran on change request {number}'s "
+                          "current head could not be verified, so its output stays closed")
+    if head != ran_on:
+        raise PolicyError(f"{resource} {identifier} ran on {ran_on[:12]}, not on change request "
+                          f"{number}'s current head {head[:12]}")
+
+
+def _check_annotations_read(args: list[str], policy: StagePolicy, *, cwd: str | None,
+                            run) -> None:
+    """`gh api repos/<repo>/check-runs/<id>/annotations`, GET, for the current head.
+
+    Only `--jq` and `--paginate` may accompany the literal path. Every option
+    that would send a body, choose a method or read a file stays denied, and
+    no other `gh api` path is opened by this.
+    """
+    path = None
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if word == "--paginate":
+            pass
+        elif word == "--jq":
+            index += 1
+            if index >= len(args):
+                raise PolicyError("gh api --jq needs a filter")
+        elif word.startswith("--jq="):
+            pass
+        elif word.startswith("-") and word != "-":
+            raise PolicyError(f"gh api option {word.split('=', 1)[0]} is not allowed; the "
+                              "annotations read takes only --jq and --paginate")
+        elif path is not None:
+            raise PolicyError("gh api reads exactly one path")
+        else:
+            path = word
+        index += 1
+    match = _ANNOTATIONS_PATH.fullmatch(path or "")
+    if match is None:
+        raise PolicyError("gh api is not allowed except the documented calls; the resolve "
+                          "stage may read repos/<owner>/<repo>/check-runs/<id>/annotations")
+    if not _same_repo(match.group(1), _checked_repository(policy)):
+        raise PolicyError("gh api may read check-run annotations only in this cycle's repository")
+    _require_current_head(policy, "check run", match.group(2), cwd=cwd, run=run)
+
+
+def _check_resolve_run_view(args: list[str], positional: list[str], seen: set[str],
+                            policy: StagePolicy, *, cwd: str | None, run) -> None:
+    """`gh run view` in resolve: a numeric run, its own jobs, logs of the current head."""
+    if len(positional) != 1 or not _NUMERIC_ID.fullmatch(positional[0]):
+        raise PolicyError("gh run view in the resolve stage needs a numeric run ID")
+    run_id = positional[0]
+    repo = _checked_repository(policy)
+    jobs: list[str] = []
+    index = 0
+    while index < len(args):
+        name, has_value, value = args[index].partition("=")
+        if name in _RUN_VIEW_JOB:
+            if not has_value:
+                index += 1
+                value = args[index] if index < len(args) else ""
+            jobs.append(value)
+        elif name in {"--json", "--jq", "-q", "--template", "-t", "--attempt", "-a"} and not has_value:
+            index += 1
+        index += 1
+    for job in jobs:
+        if not _NUMERIC_ID.fullmatch(job):
+            raise PolicyError("gh run view --job needs a numeric job ID")
+        owner = GITHUB_FIELD(f"repos/{repo}/actions/jobs/{job}", ".run_id", cwd=cwd, run=run)
+        if owner is None:
+            raise PolicyError(f"whether job {job} belongs to run {run_id} could not be verified")
+        if owner != run_id:
+            raise PolicyError(f"job {job} does not belong to run {run_id}")
+    if seen.intersection(_RUN_VIEW_LOGS):
+        _require_current_head(policy, "run", run_id, cwd=cwd, run=run)
 
 
 def _reference_in_repo(reference: str, repo: str | None) -> bool:
@@ -1209,6 +1348,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     The patterns are prefixes; the hook validates the arguments behind them.
     """
     prefixes = [f"git {sub}" for sub in sorted(GIT_COMMON_READ)]
+    wildcards: list[str] = []
     prefixes.append("git branch --show-current")
     if policy.role in GIT_SEARCH_ROLES:
         prefixes += [f"git {sub}" for sub in sorted(GIT_REVIEW_READ)]
@@ -1222,6 +1362,11 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     prefixes.append("gh api user --jq .login")
     if policy.role == "resolve":
         prefixes.append("gh api graphql")
+        if policy.repo and _SAFE_REPOSITORY.fullmatch(policy.repo):
+            # The annotations path ends in an ID, so it is matched with a
+            # wildcard rather than a word prefix; the hook checks the rest.
+            wildcards += [f"gh api repos/{policy.repo}/check-runs/*",
+                          f"gh api * repos/{policy.repo}/check-runs/*"]
         if policy.tmpdir:
             prefixes.append(
                 f'python3 {shlex.quote(_triage_validator_path())} '
@@ -1241,6 +1386,10 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         patterns.append(f"Bash({prefix}:*)")
         if policy.rtk:
             patterns += [f"Bash(rtk {prefix}:*)", f"Bash(rtk proxy {prefix}:*)"]
+    for pattern in wildcards:
+        patterns.append(f"Bash({pattern})")
+        if policy.rtk:
+            patterns += [f"Bash(rtk {pattern})", f"Bash(rtk proxy {pattern})"]
     for command in policy.verification_commands:
         exact = command == policy.test_command
         patterns.append(f"Bash({command})" if exact else f"Bash({command}:*)")
@@ -1638,6 +1787,7 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+    policy = None
     try:
         policy = StagePolicy.from_json(Path(arguments[0]).read_text(encoding="utf-8"))
         event = json.loads(stdin.read())
@@ -1653,15 +1803,54 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
             decision = check_bash_tool_input(event.get("tool_input") or {}, policy,
                                              cwd=event.get("cwd"))
     except Exception as error:
-        print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: the stage policy "
-                                   f"could not run ({type(error).__name__}). {DENY_ADVICE}"),
-              file=stdout)
+        reason = f"the stage policy could not run ({type(error).__name__})"
+        note = _journal_denial(policy, None, "hook_bash", None, reason) if policy else None
+        print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: {reason}"
+                                   f"{_journal_note(note)}. {DENY_ADVICE}"), file=stdout)
         return 0
     if not decision.allowed:
-        advice = EDIT_DENY_ADVICE if tool in FILE_EDIT_TOOLS else DENY_ADVICE
+        editing = tool in FILE_EDIT_TOOLS
+        advice = EDIT_DENY_ADVICE if editing else DENY_ADVICE
+        tool_input = event.get("tool_input") or {}
+        if editing:
+            target = tool_input.get(FILE_EDIT_TOOLS[tool]) if isinstance(tool_input, dict) else None
+            command = f"{tool} {target}" if isinstance(target, str) else tool
+        else:
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
+                               command, decision.reason)
         print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
-                                   f"{decision.reason}. {advice}"), file=stdout)
+                                   f"{decision.reason}{_journal_note(note)}. {advice}"),
+              file=stdout)
     return 0
+
+
+def _journal_denial(policy: StagePolicy, event: dict[str, object] | None, component: str,
+                    command, reason: str) -> str | None:
+    """Record a denial in the cycle journal; a failure is returned, never raised.
+
+    The decision is already made and stays made: this only writes it down.
+    """
+    try:
+        from cycle_journal import record_hook_denial
+    except Exception as error:
+        return f"the cycle journal is unavailable ({type(error).__name__})"
+    event = event if isinstance(event, dict) else {}
+    try:
+        return record_hook_denial(
+            policy, component=component,
+            command=command if isinstance(command, str) else None, reason=reason,
+            correlation={"tool_use_id": event.get("tool_use_id"),
+                         "session_id": event.get("session_id")})
+    except Exception as error:
+        return f"the cycle journal could not record this denial ({type(error).__name__})"
+
+
+def _journal_note(note: str | None) -> str:
+    # Only a dispatch that has a journal reports that it could not write to it.
+    if not note or note == "the cycle journal is not configured for this dispatch":
+        return ""
+    return f" ({note})"
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through the hook tests

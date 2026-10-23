@@ -41,7 +41,15 @@ fall back to `git grep` or `grep`. See [project choices and preparation](depende
 | `issue_review` | `gh issue list`, `gh pr list`, `gh search issues\|prs`; `git merge-base`, `ls-files`, `grep`, `blame` | none |
 | `review`, `rereview` | `gh pr diff`, `git merge-base`, `ls-files`, `grep`, `blame`; `git fetch origin` only when the workspace has an `origin` remote (Claude's review clones have none) | `gh pr comment` and `gh pr review --comment` on the cycle's change request |
 | `implement` | as review, plus `git worktree list`, `gh pr list`, `gh run view\|list` | `git add`, `commit`, `push`, `fetch`, `checkout`, `switch`, `pull`, `rm`, `mv`; `gh pr create`, `gh pr edit` and `gh pr comment` on the branch's change request; `gh issue comment` on the work item |
-| `resolve` | as implement | as implement without `gh pr create`/`edit`; and exactly three `gh api graphql` calls for review threads |
+| `resolve` | as implement; literal `gh api repos/<configured-owner>/<configured-repo>/check-runs/<numeric-id>/annotations` with only `--jq` and `--paginate` | as implement without `gh pr create`/`edit`; and exactly three `gh api graphql` calls for review threads |
+
+In resolve, `gh run view` requires a numeric run ID. Every `--job`/`-j`
+must name a job belonging to that run. Reading `--log`, `--log-failed` or
+check-run annotations requires an API lookup proving the run's `head_sha`
+matches the change request's current head. Missing or unverifiable metadata
+denies the read. Annotations use GET only: method overrides, fields, input
+files, placeholder paths and a leading slash are refused. Implement retains
+its existing run-view behavior. Output is untrusted data from the change.
 
 Plus, for implementation, resolution, review and rereview only, the repository's
 `allowed_commands.test` (exact) and `allowed_commands.verify` (prefixes). Review

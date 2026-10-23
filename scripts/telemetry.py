@@ -44,6 +44,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from cycle_journal import JOURNAL_SCHEMA
+except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
+    from .cycle_journal import JOURNAL_SCHEMA
+
 #: 1: the original stage row. 2: adds the pre-routing signals below, all in
 #: `payload`, so a version-1 row is still read as it was written; the version
 #: only tells a reader which signals the writer could have supplied. 3: adds the
@@ -89,7 +94,11 @@ from pathlib import Path
 #: 20: sensitive sandbox grants (#239). A cycle may stop with
 #: `permission_required`, and a stage's reroute reason may be
 #: `permission_required` or `permission_answered`. All payload-only.
-SCHEMA_VERSION = 20
+#: 21: the cycle journal (#306), `cycle_journal.JOURNAL_SCHEMA`. Separate
+#: tables in the same file, holding the bounded, redacted text the tables
+#: above never hold, deleted when the work item's change request closes.
+#: Nothing above changes; an older store simply has no journal.
+SCHEMA_VERSION = 21
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -1250,6 +1259,7 @@ class Telemetry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
+            connection.executescript(JOURNAL_SCHEMA)
             self._migrate_dispatch_attempts(connection)
             connection.commit()
 

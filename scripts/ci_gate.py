@@ -39,7 +39,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote
 
 # Every result the gate can return; telemetry stores them as `ci_status`, so
@@ -82,6 +82,9 @@ _NOT_RUN = frozenset({"skipped", "neutral"})
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+")
 _NUMBER = re.compile(r"[1-9][0-9]{0,9}")
+#: An Actions job's `details_url`: `https://github.com/<repo>/actions/runs/<run>/...`.
+_ACTIONS_RUN = re.compile(
+    r"\Ahttps://github\.com/([A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+)/actions/runs/([1-9][0-9]{0,19})(?:/|\Z)")
 
 
 class CheckReadError(RuntimeError):
@@ -114,6 +117,10 @@ class Check:
     state: str
     order: int = 0
     app_id: int | None = None
+    #: The check run's own ID, and its workflow run's when it is an Actions
+    #: job (#306). A commit status has neither.
+    check_run_id: int | None = None
+    run_id: int | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -172,6 +179,8 @@ class GateResult:
     waited_seconds: float = 0.0
     pr_head_sha: str | None = None
     reason: str | None = None
+    #: The failed checks themselves, with the IDs a resolution reads them by.
+    failed_checks: tuple[Check, ...] = ()
 
     @property
     def passed_gate(self) -> bool:
@@ -198,6 +207,9 @@ class GateResult:
             "polls": self.polls,
             "waited_seconds": round(self.waited_seconds, 3),
             "reason": self.reason,
+            "failed_ids": [{"name": check.name, "source": check.source,
+                            "check_run_id": check.check_run_id, "run_id": check.run_id}
+                           for check in self.failed_checks],
         }
 
 
@@ -210,10 +222,13 @@ class _Buckets:
     missing: list[str] = field(default_factory=list)
     source: str = "reported"
     empty: bool = False
+    failed_checks: list[Check] = field(default_factory=list)
 
     def put(self, check: Check) -> None:
         {SUCCESS: self.passed, FAILED: self.failed, SKIPPED: self.skipped,
          PENDING: self.pending}[check.state].append(check.label)
+        if check.state == FAILED:
+            self.failed_checks.append(check)
 
 
 def latest_runs(checks) -> list[Check]:
@@ -252,12 +267,12 @@ def evaluate(checks, required: tuple[RequiredCheck, ...]) -> _Buckets:
     return buckets
 
 
-def _result(status: str, sha: str, buckets: _Buckets | None = None, **fields) -> GateResult:
+def _result(status: str, sha: str, buckets: _Buckets | None = None, **fields: Any) -> GateResult:
     if buckets is not None:
         fields = {"required_source": buckets.source, "passed": tuple(buckets.passed),
                   "failed": tuple(buckets.failed), "skipped": tuple(buckets.skipped),
                   "pending": tuple(buckets.pending), "missing": tuple(buckets.missing),
-                  **fields}
+                  "failed_checks": tuple(buckets.failed_checks), **fields}
     return GateResult(status=status, head_sha=sha, **fields)
 
 
@@ -472,8 +487,37 @@ class GitHubChecks:
             app_id = None
         return RequiredCheck(context, app_id)
 
+    def _workflow_run(self, repo: str, run: dict[str, Any],
+                      suites: dict[int, int | None]) -> int | None:
+        """The Actions workflow run a check run belongs to, or None (#306).
+
+        Read from its `details_url` first; otherwise from its check suite, for
+        a GitHub Actions check only. Any doubt is None: the resolution then
+        sees the check run's own ID, never a guessed run.
+        """
+        app = run.get("app") if isinstance(run.get("app"), dict) else {}
+        if app.get("slug") != "github-actions":
+            return None
+        match = _ACTIONS_RUN.search(str(run.get("details_url") or ""))
+        if match and match.group(1).lower() == repo.lower():
+            return int(match.group(2))
+        suite = run.get("check_suite") if isinstance(run.get("check_suite"), dict) else {}
+        suite_id = suite.get("id")
+        if app.get("slug") != "github-actions" or not isinstance(suite_id, int):
+            return None
+        if suite_id not in suites:
+            try:
+                data = self._api(f"repos/{repo}/actions/runs?check_suite_id={suite_id}")
+                runs = data.get("workflow_runs") if isinstance(data, dict) else None
+                ids = [item.get("id") for item in runs or [] if isinstance(item, dict)]
+                suites[suite_id] = ids[0] if len(ids) == 1 and isinstance(ids[0], int) else None
+            except CheckReadError:
+                suites[suite_id] = None
+        return suites[suite_id]
+
     def checks(self, repo: str, sha: str) -> tuple[Check, ...]:
         found: list[Check] = []
+        suites: dict[int, int | None] = {}
         for run in self._pages(self._api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
                                          paginate=True), "check_runs"):
             if not isinstance(run, dict) or not isinstance(run.get("name"), str):
@@ -492,7 +536,9 @@ class GitHubChecks:
             else:
                 state = FAILED
             order = run.get("id") if isinstance(run.get("id"), int) else 0
-            found.append(Check(run["name"], str(source), state, order, app_id))
+            run_id = self._workflow_run(repo, run, suites) if state == FAILED else None
+            found.append(Check(run["name"], str(source), state, order, app_id,
+                               check_run_id=order or None, run_id=run_id))
         for status in self._pages(self._api(f"repos/{repo}/commits/{sha}/status?per_page=100",
                                             paginate=True), "statuses"):
             if not isinstance(status, dict) or not isinstance(status.get("context"), str):
