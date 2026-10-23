@@ -2567,6 +2567,8 @@ class WorktreeSynchronizationTests(unittest.TestCase):
         self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
         subprocess.run(["git", "clone", "--branch", "main", str(bare), str(checkout)],
                        capture_output=True, text=True, check=True)
+        self.git(checkout, "config", "user.name", "Cycle Test")
+        self.git(checkout, "config", "user.email", "cycle-test@example.invalid")
         return bare, seed, checkout
 
     def test_fast_forwards_clean_worktree_and_reports_full_shas(self) -> None:
