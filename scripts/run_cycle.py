@@ -1369,15 +1369,15 @@ def synchronize_worktree(change_request_id: str, cwd: str, *,
     current = git(["rev-parse", "--verify", "HEAD"]).stdout.strip()
     if not FULL_SHA.fullmatch(current):
         raise CycleDriverError("worktree synchronization could not read the current HEAD")
-    dirty = git(["status", "--porcelain", "--untracked-files=normal"]).stdout.strip()
-    if dirty:
-        raise WorktreeSyncError(
-            "local worktree has modifications; no files were changed", "worktree_dirty")
     if target_head is not None:
         if not FULL_SHA.fullmatch(target_head):
             raise CycleDriverError("worktree synchronization received an invalid PR head SHA")
         if current == target_head:
             return None
+    dirty = git(["status", "--porcelain", "--untracked-files=normal"]).stdout.strip()
+    if dirty:
+        raise WorktreeSyncError(
+            "local worktree has modifications; no files were changed", "worktree_dirty")
 
     ref = f"refs/code-cycle/pulls/{number}/head"
     git(["fetch", "origin", f"+refs/pull/{number}/head:{ref}"])
@@ -3052,7 +3052,7 @@ def run_cycle(
                 old_head, new_head = synchronized
                 report.note(f"worktree fast-forwarded: {old_head} -> {new_head}")
                 journal.record(
-                    "stage_result", role=role, stage_seq=recorder.stage_seq,
+                    "stage_result", role=role, stage_seq=recorder.stage_seq + 1,
                     component="runtime", status="worktree_synchronized",
                     reason="clean worktree fast-forwarded to the open pull request head",
                     correlation={"old_head_sha": old_head, "new_head_sha": new_head})
@@ -3090,7 +3090,7 @@ def run_cycle(
                         old_head, new_head = synchronized
                         report.note(f"worktree fast-forwarded for recovery: {old_head} -> {new_head}")
                         journal.record(
-                            "stage_result", role=role, stage_seq=recorder.stage_seq,
+                            "stage_result", role=role, stage_seq=recorder.stage_seq + 1,
                             component="runtime", status="worktree_synchronized",
                             reason="clean worktree fast-forwarded before review recovery",
                             correlation={"old_head_sha": old_head, "new_head_sha": new_head})

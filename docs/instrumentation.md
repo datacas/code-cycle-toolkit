@@ -455,6 +455,15 @@ should be looking at.
 every repository, holding references, statuses and counts — no diffs and no
 prose. It never enters Git.
 
+Before GitHub `resolve`/`rereview` dispatches, and before recovery of a published
+`review`, the runtime may record a `stage_result` event with
+`status=worktree_synchronized`. Its `stage_seq` is the upcoming stage's sequence,
+and `correlation.old_head_sha` / `correlation.new_head_sha` record the full
+before and after SHAs. No event is written when the checkout is already at the
+open pull request head. Failure to read that head blocks the stage with
+`stage_not_completed`; a dirty checkout or non-fast-forward uses
+`worktree_dirty` or `worktree_diverged`.
+
 That boundary is enforced rather than asserted, by one typed table covering
 **every** field — columns included. `FIELD_SPECS` is the only gate, and there
 are no exempt fields.

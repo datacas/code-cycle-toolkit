@@ -122,6 +122,14 @@ Under `parallel` a review never turns a check's state into a finding; the CI gat
 
 Before a resolution that follows `CHANGES_REQUESTED`, the runtime reads the reviewed head's checks once, without waiting: a failure already reported there reaches that resolution beside the findings. Review findings and CI failures stay separate, and neither resolves, replaces nor hides the other. Under `strict`, resolution keeps its own wait for the head it pushes. Under `parallel`, it reads that head's checks once, reports them, and returns; the CI gate owns the wait.
 
+Before GitHub `resolve` or `rereview`, and before recovery of a published
+`review`, the runtime checks the open pull request head and fast-forwards the
+clean linked worktree when needed. Failure to query the pull request blocks the
+stage with `stage_not_completed`; a dirty worktree or diverged checkout blocks
+with `worktree_dirty` or `worktree_diverged`. Successful moves are recorded as
+`worktree_synchronized` stage events with the old and new full SHAs; the event
+is attributed to the stage about to run.
+
 ### Resume while awaiting CI
 
 `run_cycle.py --from rereview --pr <n> --ci-policy parallel` reads the change request's trusted comments first. When the latest receipt is a clean `review` or `rereview` of the PR's current head and the published findings block nothing, no review is dispatched: the cycle only runs the gate. A moved head, a later receipt from another stage, a malformed receipt, or a blocking finding reviews the current head instead, and a change request whose state cannot be read stops as `BLOCKED`. `--from review` always runs a fresh initial review.

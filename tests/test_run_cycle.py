@@ -2578,9 +2578,19 @@ class WorktreeSynchronizationTests(unittest.TestCase):
             self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
             new = self.git(seed, "rev-parse", "HEAD")
 
-            self.assertEqual((old, new), rc.synchronize_worktree("7", str(checkout)))
+            self.assertEqual((old, new), getattr(rc, "synchronize_worktree")("7", str(checkout)))
             self.assertEqual(new, self.git(checkout, "rev-parse", "HEAD"))
-            self.assertIsNone(rc.synchronize_worktree("7", str(checkout)))
+            self.assertIsNone(getattr(rc, "synchronize_worktree")("7", str(checkout)))
+
+    def test_dirty_worktree_is_allowed_when_target_head_is_already_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, checkout = self.checkout_pair(Path(temporary))
+            current = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+            self.assertIsNone(getattr(rc, "synchronize_worktree")("7", str(checkout), target_head=current))
+            self.assertEqual(current, self.git(checkout, "rev-parse", "HEAD"))
+            self.assertEqual("keep me\n", (checkout / "local.txt").read_text(encoding="utf-8"))
 
     def test_dirty_worktree_stops_without_changing_head_or_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2591,8 +2601,8 @@ class WorktreeSynchronizationTests(unittest.TestCase):
             self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
             (checkout / "local.txt").write_text("keep me\n", encoding="utf-8")
 
-            with self.assertRaises(rc.WorktreeSyncError) as raised:
-                rc.synchronize_worktree("7", str(checkout))
+            with self.assertRaises(getattr(rc, "WorktreeSyncError")) as raised:
+                getattr(rc, "synchronize_worktree")("7", str(checkout))
 
             self.assertEqual("worktree_dirty", raised.exception.stop_reason)
             self.assertEqual(old, self.git(checkout, "rev-parse", "HEAD"))
@@ -2609,8 +2619,8 @@ class WorktreeSynchronizationTests(unittest.TestCase):
             self.git(checkout, "commit", "-am", "local")
             local_head = self.git(checkout, "rev-parse", "HEAD")
 
-            with self.assertRaises(rc.WorktreeSyncError) as raised:
-                rc.synchronize_worktree("7", str(checkout))
+            with self.assertRaises(getattr(rc, "WorktreeSyncError")) as raised:
+                getattr(rc, "synchronize_worktree")("7", str(checkout))
 
             self.assertEqual("worktree_diverged", raised.exception.stop_reason)
             self.assertEqual(local_head, self.git(checkout, "rev-parse", "HEAD"))
@@ -2622,7 +2632,7 @@ class WorktreeSynchronizationStopTests(RunCycleTestCase):
         for reason in ("worktree_dirty", "worktree_diverged"):
             with self.subTest(stop_reason=reason), mock.patch.object(
                     rc, "synchronize_worktree",
-                    side_effect=rc.WorktreeSyncError(reason, reason)), mock.patch.object(
+                    side_effect=getattr(rc, "WorktreeSyncError")(reason, reason)), mock.patch.object(
                         rc, "probe_change_request",
                         return_value=mock.Mock(head_sha="a" * 40)):
                 report = self.run_cycle(
@@ -2633,8 +2643,21 @@ class WorktreeSynchronizationStopTests(RunCycleTestCase):
 
             self.assertEqual("BLOCKED", report.status)
             self.assertEqual(reason, report.stop_reason)
-            self.assertIn(reason, report.stopped_because)
+            self.assertIn(reason, report.stopped_because or "")
             self.assertEqual([], report.stages)
+
+    def test_change_request_probe_failure_is_blocked_with_stage_stop_reason(self) -> None:
+        with mock.patch.object(rc, "probe_change_request",
+                               side_effect=rc.CycleDriverError("gh unavailable")):
+            report = self.run_cycle(
+                Talker("codex"), Talker("claude"), start_from="resolve",
+                change_request_id="7", code_host="github", cwd=str(self.home),
+            )
+
+        self.assertEqual("BLOCKED", report.status)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("gh unavailable", report.stopped_because or "")
+        self.assertEqual([], report.stages)
 
 
 class ChangeRequestCheckTests(unittest.TestCase):

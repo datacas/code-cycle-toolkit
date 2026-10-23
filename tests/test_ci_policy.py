@@ -509,6 +509,9 @@ class HeadMovedTests(ParallelTestCase):
         } for event in sync_events))
         self.assertEqual(rc.APPROVED_END, report.status)
 
+        self.assertTrue(any(event["role"] == "rereview" and event["stage_seq"] == 3
+                            for event in sync_events))
+
     def test_a_second_move_stops_for_a_person(self) -> None:
         self.stages()
         heads = iter([OTHER, LATER])
