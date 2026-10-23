@@ -144,6 +144,22 @@ class StagePolicy:
     cycle_id: str | None = None
     attempt_id: str | None = None
     stage_seq: int | None = None
+    #: The branch of the run's checkout, which `permissions_command` queries.
+    checkout_branch: str | None = None
+
+    @property
+    def permissions_command(self) -> tuple[str, ...]:
+        """The one read-only command that lists the permissions in force (#311).
+
+        The runtime fixes the database, repository and branch; a stage appends
+        nothing, so it cannot read another repository's or branch's decisions.
+        Empty when the dispatch has no journal or no branch to query.
+        """
+        if not (self.journal_path and self.repo and self.checkout_branch):
+            return ()
+        script = Path(__file__).resolve().with_name("cycle_journal.py").as_posix()
+        return ("python3", script, "--database", self.journal_path, "permissions",
+                "--repo", self.repo, "--branch", self.checkout_branch)
 
     @property
     def active(self) -> bool:
@@ -538,6 +554,12 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
     if guarded_program == "docker":
         return _check_docker(words[1:], policy)
     if words[0] in policy.tools:
+        return
+    # The permission view (#311): exactly the runtime's command, no arguments
+    # of the stage's own, so the repository and branch are never its choice.
+    if policy.permissions_command and tuple(words) == policy.permissions_command:
+        if parsed.redirects:
+            raise PolicyError("the permissions command may not redirect its output")
         return
     if (policy.role == "resolve" and policy.tmpdir and len(words) == 3
             and words[:2] == ["python3", _triage_validator_path()]
@@ -1372,6 +1394,8 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
                 f'python3 {shlex.quote(_triage_validator_path())} '
                 '"$TMPDIR/pr-comment.md"')
     prefixes += sorted(READ_SHELL)
+    if policy.permissions_command:
+        prefixes.append(shlex.join(policy.permissions_command))
     prefixes += list(policy.tools) + list(policy.commands)
     if policy.docker:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
@@ -1464,6 +1488,11 @@ def prompt_note(policy: StagePolicy) -> str:
                if getattr(policy, key)}
     if choices:
         tmpdir_note += " Effective project choices: " + json.dumps(choices) + "."
+    if policy.permissions_command:
+        tmpdir_note += (
+            " The permission decisions in force for this repository and branch are "
+            f"listed by `{shlex.join(policy.permissions_command)}`; it is read-only "
+            "and grants nothing, and takes no other arguments.")
     if policy.role == "resolve":
         tmpdir_note += (
             " The staged-comment validator is installed with the runtime at "

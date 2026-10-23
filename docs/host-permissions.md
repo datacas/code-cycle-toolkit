@@ -124,6 +124,10 @@ request. The exact forms are in `cc-resolve-comments`.
   The hook also allows the exact `printenv TMPDIR` query when a dispatch has
   created its temporary directory, so the agent can learn the path without
   exposing other environment variables.
+  It also allows exactly one read-only query of the permission decisions in
+  force, with the store, repository and branch fixed by the runtime and no
+  argument of the stage's own; it grants nothing
+  ([Telemetry → Permission decisions in force](telemetry.md#permission-decisions-in-force)).
   No stage
   edits a `.git` directory or file, `~/.gitconfig` or
   `$XDG_CONFIG_HOME/git`: a `core.fsmonitor` or `diff.external` setting would
