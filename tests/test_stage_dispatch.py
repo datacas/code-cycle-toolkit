@@ -128,8 +128,9 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                     self.assertIn('"status": "incomplete"', prompt)
                     self.assertIn("fixture setup unavailable", prompt)
                     return completed('{"type":"turn.completed"}')
-                with mock.patch.object(ex.dependency_setup, "prepare",
-                                       side_effect=OSError("fixture setup unavailable")):
+                with (mock.patch.object(ex.dependency_setup, "prepare",
+                                        side_effect=OSError("fixture setup unavailable")),
+                      mock.patch.object(ex.shutil, "which", return_value=None)):
                     result = adapter.dispatch(target, "inspect fixture", cwd=str(self.repo),
                                               writes=True, command_policy=self.policy(), runner=runner)
                 self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
@@ -137,6 +138,9 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                 self.assertEqual({"status": "incomplete", "items": [],
                                   "error": "fixture setup unavailable"},
                                  result.artifacts["dependency_preparation"])
+                preflight = result.artifacts["native_sandbox_preflight"]
+                self.assertEqual("unverified", preflight["status"])
+                self.assertTrue(preflight["missing"])
 
     def test_codex_nonpublishing_dispatches_do_not_get_default_code_host_domains(self) -> None:
         # Includes local-only implement/resolve and inactive command policies.

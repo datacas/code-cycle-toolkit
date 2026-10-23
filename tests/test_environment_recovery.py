@@ -92,11 +92,12 @@ class SandboxReportTests(unittest.TestCase):
             "BLOCKED", environment_blocker=BLOCKER, questions=[{"prompt": "Allow?"}])))
 
     def test_guidance_names_the_nested_codex_limit_without_a_grant(self):
-        """#268: a Codex stage cannot start Codex; the guidance must not widen anything."""
+        """#268: report a nested sandbox limitation without widening it."""
         guidance = recovery.ENVIRONMENT_RECOVERY_GUIDANCE
         self.assertIn("/tmp/codex-daemon-<uid>", guidance)
-        self.assertIn("cannot start inside a Codex stage", guidance)
-        self.assertIn("without retrying variants", guidance)
+        self.assertIn("known nested", guidance)
+        self.assertIn("not_verified", guidance)
+        self.assertIn("codex sandbox`, `codex exec` or `srt`", guidance)
         self.assertNotIn("unix_sockets", guidance)
 
 
