@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
@@ -90,7 +91,7 @@ class JournalTests(unittest.TestCase):
             cj.record_event(self.path, repo_id="owner/repo", task_id=str(index),
                             cycle_id="legacy", kind="stop", change_request_id="4")
             # Simulate legacy rows written before reference validation.
-            with sqlite3.connect(self.path) as connection:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
                 connection.execute("UPDATE journal_events SET change_request_id=? WHERE task_id=?",
                                    (request, str(index)))
         reader = mock.Mock(return_value="CLOSED")
@@ -108,7 +109,7 @@ class JournalTests(unittest.TestCase):
                 self.assertTrue(journal.record("stop"))
                 self.assertEqual("4", cj.events(self.path, "owner/repo")[0]["change_request_id"])
                 # Also normalize valid legacy references before calling the provider.
-                with sqlite3.connect(self.path) as connection:
+                with closing(sqlite3.connect(self.path)) as connection, connection:
                     connection.execute("UPDATE journal_events SET change_request_id=?", (reference,))
                 reader = mock.Mock(return_value="CLOSED")
                 self.assertEqual(1, cj.cleanup(self.path, "owner/repo", reader)["deleted_rows"])
@@ -210,7 +211,7 @@ class JournalTests(unittest.TestCase):
                             change_request_id=request, occurred_at=now-timedelta(days=age))
         cj.record_event(self.path, repo_id="other/repo", task_id="old", cycle_id="other",
                         kind="stop", occurred_at=now-timedelta(days=31))
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             before = {name: db.execute(f'SELECT * FROM "{name}"').fetchall()
                       for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
                       if not name.startswith("journal_") and name != "sqlite_sequence"}
@@ -221,7 +222,7 @@ class JournalTests(unittest.TestCase):
                          {r["task_id"] for r in cj.events(self.path, "owner/repo")})
         self.assertEqual(1, len(cj.events(self.path, "other/repo")))
         self.assertEqual(0, cj.cleanup(self.path, "owner/repo", states.get, now=now)["deleted_rows"])
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             for name, rows in before.items():
                 self.assertEqual(rows, db.execute(f'SELECT * FROM "{name}"').fetchall())
                 self.assertNotIn("journal-only-text", str(rows))
@@ -244,7 +245,7 @@ class JournalTests(unittest.TestCase):
         broker = grants.ConsentBroker("owner/repo", platform="linux", store=store,
                                       observer=resumed.consent_event)
         self.assertEqual(grants.ALLOW_PERSISTENT, broker.request(grant, "codex", role="resolve"))
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             rows = db.execute("SELECT source, scope, decision, occurred_at FROM journal_permissions").fetchall()
         self.assertEqual({"--grant", "consents.json"}, {r[0] for r in rows})
         self.assertTrue(all(r[1] and r[3] for r in rows))
