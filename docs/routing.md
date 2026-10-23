@@ -152,12 +152,26 @@ directory must be a user-owned directory with mode 0700". The runtime's
 profile and per-dispatch `TMPDIR` do not cause this, and no `TMPDIR`,
 `CODEX_HOME` or `--no-daemon` change avoids it; the stage itself still starts
 and runs. The guidance tells the stage to report it once as
-`sandbox_filesystem_access`. The runtime's own pre-dispatch Codex probes run
-where the runtime runs, outside the stage's sandbox, and are unaffected unless
-the runtime itself was started inside a Codex sandbox. Nothing widens the
-sandbox for it: the Unix socket grant stays person-only (#239), and a check
-that needs the installed Codex sandbox runs on the host or on an executor that
-is not itself inside Codex.
+`sandbox_filesystem_access`. This is a known limitation of a Codex sandbox
+hosting another Codex sandbox, not a host socket-directory prerequisite. The
+runtime records affected checks as `not_verified` with evidence and keeps the
+selected executor. Nothing widens the sandbox for it: the Unix socket grant
+stays person-only (#239).
+
+Nested executor behavior depends on the sandbox hosting the runtime, and is not
+assumed compatible without a successful functional probe. A probe failure is
+recorded as unverified; it does not establish that another executor will work.
+
+| Host sandbox running the runtime | Nested Codex CLI | Nested Claude CLI |
+|---|---|---|
+| Codex | Known-limited: its app-server socket is masked | Unverified |
+| Claude | Unverified | Unverified |
+| Other sandboxed host | Unverified | Unverified |
+| Unsandboxed host | Unverified until probed | Unverified until probed |
+
+Do not launch `codex sandbox`, `codex exec` or `srt` inside a stage when its
+native sandbox cannot support the nested check. Keep checks that cannot run as
+`not_verified`; never disable confinement or count missing evidence as a pass.
 
 ## Workspace policy
 

@@ -1153,6 +1153,47 @@ class NativeAdapter(Adapter):
         policy_note: dict[str, object] = ({} if command_policy is None else {"command_policy": (
             "active" if policy is not None
             else f"inactive: {command_policy.inactive_reason}")})
+        # Record native-sandbox prerequisites before dependency setup or agent
+        # dispatch. This evidence is attached to the stage attempt; a missing
+        # capability must not silently turn an unrun check into a pass.
+        if command_policy is not None:
+            required = ("rg", "bwrap", "socat") if sys.platform.startswith("linux") else ("rg",)
+            if self.name == "claude":
+                required = (*required, "srt")
+            probes = {name: shutil.which(name) for name in ("srt", "rg", "bwrap", "socat")}
+            missing = [name for name in required if probes[name] is None]
+            sandbox_evidence = {
+                "platform": sys.platform,
+                "validated_platform": sys.platform.startswith("linux"),
+                "probes": [{"name": name, "observed": probes[name],
+                            "outcome": "available" if probes[name] else "missing"}
+                           for name in required],
+                "functional_check": "not_run",
+                "status": "unverified",
+                "missing": missing,
+            }
+            if missing and sys.platform.startswith("linux"):
+                sandbox_evidence["action"] = (
+                    "install the missing sandbox prerequisite user-locally, then rerun the isolated check"
+                )
+            if self.name == "codex" and command_policy.role in sp.REVIEW_ROLES:
+                # Codex masks its own app-server socket inside its native
+                # sandbox. Never probe or try to repair the host directory.
+                sandbox_evidence["codex_socket"] = {
+                    "outcome": "known_limited",
+                    "reason": "the native sandbox masks /tmp/codex-daemon-<uid> for nested Codex commands",
+                }
+            policy_note["native_sandbox_preflight"] = sandbox_evidence
+            if missing or "codex_socket" in sandbox_evidence:
+                task += (
+                    "\n\nNative sandbox preflight evidence (runtime observed): "
+                    f"{json.dumps(sandbox_evidence, sort_keys=True)}. Keep the selected executor. "
+                    "Do not launch a nested sandbox or weaken confinement. Continue independent "
+                    "work that is safe to perform; identify each affected check as not_verified "
+                    "with its cause and evidence, never as passed. For reviews, continue static "
+                    "analysis only if the existing read-only boundary remains safe; otherwise "
+                    "report the specific remaining blocker."
+                )
         refused = self.policy_preflight(policy, cwd)
         if refused is not None:
             return DispatchResult(

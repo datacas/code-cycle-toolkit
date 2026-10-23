@@ -1017,6 +1017,15 @@ class CycleRecorder:
             return
         executor = result.executor
         artifacts = result.artifacts or {}
+        command_policy = artifacts.get("command_policy")
+        preflight = (command_policy.get("native_sandbox_preflight")
+                     if isinstance(command_policy, dict) else None)
+        if isinstance(preflight, dict):
+            # The cycle journal is the existing durable per-attempt evidence
+            # store; keep only the explicit probes and their observed outcome.
+            self._journal("sandbox_preflight", role=role, attempt_id=attempt_id,
+                          component=executor, status=preflight.get("status"),
+                          detail=preflight)
         self._journal("stage_end", role=role, attempt_id=attempt_id, component=executor,
                       status=result.outcome.value, reason=result.failure_code,
                       duration_ms=result.duration_ms,

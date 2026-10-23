@@ -42,8 +42,13 @@ prove isolation.
 Codex's Linux sandbox hides its own app-server socket directory
 (/tmp/codex-daemon-<uid>, a read-only mode-000 mount) from the commands it
 runs, so `codex sandbox` or `codex exec` cannot start inside a Codex stage. No
-TMPDIR, CODEX_HOME or --no-daemon change recovers it: report it once as
-sandbox_filesystem_access with that command, without retrying variants.
+TMPDIR, CODEX_HOME or --no-daemon change recovers it. This is the known nested
+Codex limitation; do not launch `codex sandbox`, `codex exec` or `srt` from
+inside a stage whose native sandbox cannot support it. Record affected checks
+as `not_verified` with evidence and continue independent stage work when the
+implementation is complete. Never disable isolation or report a check that did
+not run as passed. Do not treat every nested executor pair as compatible: use
+the host-by-nested-executor table in `docs/routing.md`.
 Do not use this report for a genuinely unavailable service, missing credentials,
 login/trust prompts, an approval denial, or an action requiring a human. Those
 remain ordinary blockers. Forward a delegated verifier's environment_blocker

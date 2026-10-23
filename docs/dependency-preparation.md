@@ -35,9 +35,12 @@ into scratch and credential environment variables are not inherited. Registry
 authentication that is not available in this environment is a concrete setup
 failure, not a successful install or a model failure.
 
-The host must supply the selected native sandbox and package manager. On Linux,
-`srt` refuses to start without `rg` (ripgrep) on the `PATH`. Missing
-binaries and sandbox startup failures are recorded. The runtime tries transient
+The host must supply the selected native sandbox and package manager. The
+Anthropic Sandbox Runtime documents macOS support via Seatbelt (with `rg`),
+Linux support via bubblewrap and socat (with `rg`), and Windows support as
+alpha. The runtime records which prerequisites it observes before dispatch;
+presence alone does not prove that isolation works. Missing binaries and
+sandbox startup failures are recorded. The runtime tries transient
 failures/timeouts at most twice, reaps timed-out process groups before retrying,
 and continues the stage with the setup evidence when preparation is exhausted.
 The agent can continue source inspection and read CI for the exact HEAD. Pending
@@ -172,9 +175,11 @@ inside that same sandbox. A second fixture per executor adds a project
 generates an ignored output, which must reach the checkout, and tries to write
 the checkout directly, which the sandbox must deny. Preserve its report/log evidence and exit statuses.
 Do not replace native failures with the subprocess fixture's passing result.
-When invoked inside a Codex stage, the nested Codex app-server socket may be
-masked; report that observed restriction once and use the cycle's configured
-alternative executor rather than retrying sandbox variants.
+When invoked inside a Codex stage, the nested Codex app-server socket is masked
+by the sandbox; classify affected checks as `not_verified` with evidence. Do not
+retry sandbox variants, launch nested Codex or `srt` commands, or reroute for
+this known limitation. Other nested host/executor combinations remain
+unverified until a functional probe succeeds.
 
 The native campaign is a required release-validation item for #279. Its result
 must be attached to the PR; the ordinary unit suite does not imply it ran.
