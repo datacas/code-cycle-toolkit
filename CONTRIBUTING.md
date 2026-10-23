@@ -27,6 +27,58 @@ Documentation lives in `docs/`, indexed by [docs/README.md](docs/README.md).
 Each concept has one main page. `README.md` summarises and links rather than
 repeating. When a change alters behaviour, update the page that owns that topic.
 
+## Non-code changes take a fast path
+
+`Validate package` has two required checks, `Skills, manifests, and Bash
+installer` and `PowerShell installer`, and a pull request cannot merge while
+either is missing. So neither is ever skipped by a path filter. Instead each job,
+and each of the four Windows test shards, classifies the change first with
+`scripts/fast_path.py`, comparing a pull request with its merge base and a push
+with `before..after`. A change that touches only the allowlist below reports both
+checks green after a scan and a few mapped tests; anything else runs everything
+as before.
+
+**The allowlist** is exactly these paths:
+
+- `.code-cycle.yml`;
+- Markdown at the repository root, except `README.md`, which the validator reads
+  (`AGENTS.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`);
+- everything under `docs/`;
+- everything under `.github/ISSUE_TEMPLATE/`.
+
+Every other path runs in full, including `skills/`, `scripts/`, `tests/`,
+`README.md`, `opencode.jsonc`, the installers and every other workflow. These
+always run in full even if a later edit widened the list: both plugin manifests,
+`release.yml`, `validate.yml`, `scripts/fast_path.py` and
+`scripts/fast-path-tests.json`. A change to a `## ` heading of `CHANGELOG.md`
+also runs in full, because `release.yml` cuts a release from those headings.
+
+**The fast path** runs the privacy and metadata-sidecar scan
+(`python3 scripts/validate-package.py --scan-only`, the same scan the full
+validator runs) and the tests mapped to the changed files. The Windows shards
+skip their other tests but still finish successfully. The job summary says
+whether a job was `SKIPPED_NON_CODE` or `TESTS_PASSED`, which validations ran and
+which were skipped, and which paths caused a full run. Runner queueing is outside
+this repository's control; the fast path covers the jobs' own work.
+
+**Classification fails closed.** An error, an empty or unreadable diff, an event
+other than a pull request or a push, a diff that cannot be computed, a test
+mapping that cannot be read, or a failing dependency guard all run the full
+validation. So does a classification step that does not run at all, because
+every other step runs unless the classification reports `fast`.
+
+**Tests that read an allowlisted file.** A few tests read `.code-cycle.yml`,
+`docs/telemetry.md`, `docs/configuration.md` or `docs/spikes/**`. They are listed
+in `scripts/fast-path-tests.json`, and the fast path runs the ones mapped to the
+changed files. A static guard, `tests/test_fast_path.py`, parses every test
+module and fails when one builds a path from the repository root that is or may
+be allowlisted and is not registered. When you add such a test, register it
+under the group that covers the path, as a module, a class, or one test method,
+in the same pull request. A path the guard cannot see, such as one assembled from
+a string, is not detected, so write the path with `/` or `joinpath` from the
+root. If a dependency cannot be registered simply, remove the path from the
+allowlist instead.
+
 ## Skill-authoring rules
 
 **Portability first.** A skill may not require the target repository to have a

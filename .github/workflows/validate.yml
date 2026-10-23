@@ -31,6 +31,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # The classification diffs against the base of a pull request or the
+          # previous commit of a push, which a shallow checkout lacks.
+          fetch-depth: 0
 
       - name: Set up Python
         # The self-hosted runner uses its system python3: the tool-cache
@@ -42,7 +46,18 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
+      - name: Classify the change
+        # Every step below that is not the fast path runs unless this step
+        # reports `fast`, so a step that fails to run classifies as `full`.
+        id: classify
+        continue-on-error: true
+        run: python3 scripts/fast_path.py classify
+        env:
+          FAST_PATH_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FAST_PATH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Show the interpreter and environment
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: bash
         run: |
           python3 --version
@@ -57,17 +72,28 @@ jobs:
         # path is exercised rather than skipped.
         run: python3 -m pip install --quiet pyyaml
 
+      - name: Run the fast path for a non-code change
+        # The privacy and metadata-sidecar scan, plus the tests that read an
+        # allowlisted file. Every other validation is skipped.
+        if: ${{ steps.classify.outputs.mode == 'fast' }}
+        run: python3 scripts/fast_path.py run-fast --job validate --scan
+        env:
+          FAST_PATH_TESTS: ${{ steps.classify.outputs.tests }}
+
       - name: Validate skills and package metadata
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           python3 scripts/validate-package.py
           python3 -m unittest discover -s tests -v
 
       - name: Set up Node.js for skills CLI discovery
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Discover every skill through the recommended CLI
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -euo pipefail
           output="$(npx --yes skills@1.5.23 add . --list)"
@@ -80,16 +106,19 @@ jobs:
           done
 
       - name: Validate JSON manifests
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           python3 -m json.tool .claude-plugin/plugin.json >/dev/null
           python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 
       - name: Check Bash installer syntax
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           bash -n scripts/install.sh
           sh -n scripts/get.sh
 
       - name: Lint Bash installer
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         # System tools are preinstalled on the self-hosted runner; the workflow
         # only runs them and needs no root.
         run: |
@@ -97,6 +126,7 @@ jobs:
           shellcheck scripts/install.sh scripts/get.sh
 
       - name: Install through the one-command installer
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/get-home"
@@ -119,6 +149,7 @@ jobs:
           fi
 
       - name: Test project installation for all hosts
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -euo pipefail
           project="$RUNNER_TEMP/install-target"
@@ -136,6 +167,7 @@ jobs:
           done
 
       - name: Install Codex skills to .agents/skills only
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/codex-home"
@@ -161,6 +193,7 @@ jobs:
             || { echo "The installer removed a skill that is not its own" >&2; exit 1; }
 
       - name: Refuse to overwrite without --force
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -uo pipefail
           project="$RUNNER_TEMP/install-target"
@@ -171,6 +204,7 @@ jobs:
           bash scripts/install.sh --agent claude --scope project --project-dir "$project" --force
 
       - name: Reject a missing project directory
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: |
           set -uo pipefail
           if bash scripts/install.sh --agent claude --scope project \
@@ -178,6 +212,10 @@ jobs:
             echo "Installer accepted a nonexistent project directory" >&2
             exit 1
           fi
+
+      - name: Record the validation outcome
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
+        run: python3 scripts/fast_path.py summary --job validate
 
   windows-test-shards:
     name: Windows test shard (${{ matrix.shard }})
@@ -189,17 +227,41 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
+      - name: Classify the change
+        # Each shard classifies the change itself: there is no job-level skip,
+        # so a shard that skips its tests still finishes successfully.
+        id: classify
+        continue-on-error: true
+        run: py -3 scripts/fast_path.py classify
+        env:
+          FAST_PATH_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FAST_PATH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Install the Windows test dependencies
         run: py -3 -m pip install --quiet pyyaml
 
+      - name: Run the fast path for a non-code change
+        # Only the tests mapped to the change that belong to this shard.
+        if: ${{ steps.classify.outputs.mode == 'fast' }}
+        run: py -3 scripts/fast_path.py run-fast --job windows-shard --shard ${{ matrix.shard }}
+        env:
+          FAST_PATH_TESTS: ${{ steps.classify.outputs.tests }}
+
       - name: Validate shard assignments and run tests
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: py -3 scripts/run_windows_test_shard.py ${{ matrix.shard }}
+
+      - name: Record the validation outcome
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
+        run: py -3 scripts/fast_path.py summary --job windows-shard --shard ${{ matrix.shard }}
 
   powershell-installer:
     name: PowerShell installer
@@ -213,19 +275,39 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
+      - name: Classify the change
+        id: classify
+        continue-on-error: true
+        run: py -3 scripts/fast_path.py classify
+        env:
+          FAST_PATH_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FAST_PATH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+
       - name: Install the Windows test dependencies
         run: py -3 -m pip install --quiet pyyaml
 
+      - name: Run the fast path for a non-code change
+        # Only the privacy and metadata-sidecar scan: this job's other work is
+        # the Windows installer scenarios, which a non-code change cannot reach.
+        if: ${{ steps.classify.outputs.mode == 'fast' }}
+        run: py -3 scripts/fast_path.py run-fast --job powershell-installer --scan
+        env:
+          FAST_PATH_TESTS: ''
+
       - name: Validate package with Windows Python
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         run: py -3 scripts/validate-package.py
 
       - name: Test project installation for all hosts
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
@@ -256,6 +338,7 @@ jobs:
           }
 
       - name: Install through the one-command installer
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-get-target'
@@ -278,6 +361,7 @@ jobs:
           }
 
       - name: Run a stage from the installed runtime
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
@@ -292,6 +376,7 @@ jobs:
           }
 
       - name: Leave an existing ignore file alone and refuse a linked one
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-link-target'
@@ -328,6 +413,7 @@ jobs:
           }
 
       - name: Install Codex skills to .agents/skills only
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           # A global install writes to the runner's own profile, which is
@@ -366,6 +452,7 @@ jobs:
           }
 
       - name: Refuse to overwrite without -Force
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-install-target'
@@ -381,6 +468,7 @@ jobs:
           & .\scripts\install.ps1 -Agent claude -Scope project -ProjectDir $project -Force
 
       - name: Reject a missing project directory
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
         shell: pwsh
         run: |
           $project = Join-Path $env:RUNNER_TEMP 'code-cycle-toolkit-does-not-exist'
@@ -396,3 +484,7 @@ jobs:
           if ($accepted) {
               throw 'Installer accepted a nonexistent project directory'
           }
+
+      - name: Record the validation outcome
+        if: ${{ steps.classify.outputs.mode != 'fast' }}
+        run: py -3 scripts/fast_path.py summary --job powershell-installer
