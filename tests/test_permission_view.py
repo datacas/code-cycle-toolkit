@@ -1,4 +1,6 @@
 """The permission decisions in force are readable from the SQLite store alone (#311)."""
+import contextlib
+import io
 import json
 import os
 import shlex
@@ -10,11 +12,13 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import cycle_journal as cj
 import grants
 import router
+import run_cycle as rc
 import stage_permissions as sp
 from test_run_cycle import RunCycleTestCase, Talker, block
 
@@ -258,6 +262,75 @@ class ReconcileTests(PermissionViewCase):
         broker.request(DOCKER, "codex", role="implement")
         self.assertEqual({"--grant", "consents.json"}, {r[0] for r in self.rows()})
         self.assertEqual(grants.ALLOW_PERSISTENT, next(r[2] for r in self.rows() if r[0] == "--grant"))
+
+
+class IgnoredConfigurationTests(RunCycleTestCase):
+    """A run that could not read the configuration withdraws nothing (#314)."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.store.path).parent
+        repository = self.root / "repository"
+        repository.mkdir()
+        git(repository, "init", "-q", "-b", "base")
+        git(repository, "commit", "-q", "--allow-empty", "-m", "initial")
+        # --local-only needs a linked worktree; the view is keyed by its branch.
+        self.checkout = self.root / "checkout"
+        git(repository, "worktree", "add", "-q", "-b", "main", str(self.checkout))
+
+    def scopes(self):
+        return [d["scope"] for d in cj.permissions_in_force(
+            self.store.path, "owner/api", "main", now=datetime.now(timezone.utc))["decisions"]]
+
+    def stored(self):
+        with closing(sqlite3.connect(self.store.path)) as db:
+            return db.execute("SELECT source, scope, decision, branch FROM journal_permissions "
+                              "WHERE source = 'user_choices' ORDER BY permission_id").fetchall()
+
+    def cycle(self, choices):
+        self.run_cycle(Talker("claude"), Talker("codex"), cwd=str(self.checkout),
+                       local_only=True, user_tool_choices=choices)
+
+    def passed_choices(self, *argv, config=None):
+        if config is not None:
+            (self.checkout / ".code-cycle.yml").write_text(config, encoding="utf-8")
+        report = rc.CycleReport(repo_id="owner/api", task_id="API-7",
+                                status=rc.APPROVED_END, verdict="APPROVED")
+        with mock.patch.object(rc, "run_cycle", return_value=report) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc.main(["--repo", "owner/api", "--task", "API-7", "--workspace", "current",
+                     "--cwd", str(self.checkout), "--database", str(self.root / "cli.sqlite"),
+                     *argv])
+        return run.call_args.kwargs["user_tool_choices"]
+
+    def test_the_cli_supplies_no_choices_when_the_configuration_was_not_read(self):
+        self.assertIsNone(self.passed_choices("--no-config"))
+        self.assertIsNone(self.passed_choices())  # no configuration file beside the work
+        # With a file it supplies what the file says, even when that is nothing.
+        self.assertEqual(("rg",), self.passed_choices(
+            config="code_cycle:\n  user_choices:\n    tools: [rg]\n")["tools"])
+        self.assertEqual({"tools": (), "commands": (), "integrations": (), "registry_domains": ()},
+                         self.passed_choices(config="code_cycle: {}\n"))
+        self.assertIsNone(self.passed_choices("--no-config"))
+
+    def test_a_no_config_run_leaves_recorded_choices_in_force(self):
+        self.cycle({"tools": ("rg", "jq")})
+        recorded = self.stored()
+        self.assertEqual(["tools: jq", "tools: rg"], sorted(self.scopes()))
+        self.cycle(None)  # what `--no-config` and an absent configuration pass
+        self.assertEqual(recorded, self.stored())
+        self.assertEqual(["tools: jq", "tools: rg"], sorted(self.scopes()))
+        # The next normal run finds them held and records nothing new.
+        self.cycle({"tools": ("rg", "jq")})
+        self.assertEqual(recorded, self.stored())
+
+    def test_a_normal_run_still_records_a_removal(self):
+        self.cycle({"tools": ("rg", "jq")})
+        self.cycle(None)
+        self.cycle({"tools": ("rg",)})
+        self.assertEqual(["tools: rg"], self.scopes())
+        self.assertEqual([("user_choices", "tools: jq", cj.WITHDRAWN, "main")],
+                         [row for row in self.stored() if row[2] == cj.WITHDRAWN])
 
 
 class StageAndWorktreeTests(PermissionViewCase):

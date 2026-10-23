@@ -4348,6 +4348,19 @@ def resolve_config(args, report=None) -> dict:
     return {}
 
 
+def configuration_read(args) -> bool:
+    """Whether `resolve_config` read a file, so its empty result means "nothing configured".
+
+    `--no-config` and a run with no configuration file return `{}` without
+    reading anything; that is not the same as a file that lists nothing.
+    """
+    if args.no_config:
+        return False
+    if args.config:
+        return True
+    return resolve_config_path(Path(args.cwd or ".").resolve()) is not None
+
+
 #: The requests to stop that end a cycle early: a host ending its task at a
 #: time limit, a closed terminal, Ctrl-C. Windows has no SIGHUP.
 INTERRUPT_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGHUP", "SIGINT")
@@ -4617,7 +4630,10 @@ def main(argv: list[str] | None = None) -> int:
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),
                 allowed_test_command=allowed_test_command(config),
                 allowed_verify_commands=allowed_verify_commands(config),
-                user_tool_choices=user_choices.load(config),
+                # None, not empty tuples, when no file was read: the permission
+                # view infers a withdrawal only from a source it could read (#314).
+                user_tool_choices=(user_choices.load(config) if configuration_read(args)
+                                   else None),
                 base_branch=base_branch_of(config, args.cwd),
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
