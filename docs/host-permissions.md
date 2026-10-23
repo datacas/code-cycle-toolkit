@@ -125,7 +125,10 @@ request. The exact forms are in `cc-resolve-comments`.
   `validate-triage-comment.py` only for `pr-comment.md` directly in the
   dispatch's `$TMPDIR` or its `claude-<uid>` child. The hook checks the script,
   argument count, helper name and resolved path; other scripts and paths stay
-  denied. Review and rereview validate the staged comment before publishing.
+  denied. The runtime resolves the validator and the permission view's script
+  once, from the installed runtime, and writes that directory into `policy.json`
+  as `runtime_dir`; the hook runs a copy of its module in a temporary directory
+  and never derives these paths from its own location. Review and rereview validate the staged comment before publishing.
   The hook also allows the exact `printenv TMPDIR` query when a dispatch has
   created its temporary directory, so the agent can learn the path without
   exposing other environment variables.

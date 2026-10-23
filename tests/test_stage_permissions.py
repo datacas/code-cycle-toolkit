@@ -687,7 +687,7 @@ class AllowedToolsTests(PolicyTestCase):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
     def test_review_resolve_and_rereview_get_only_the_staged_triage_validator(self) -> None:
-        validator = sp._triage_validator_path()
+        validator = sp.StagePolicy("review").triage_validator_path
         for role in ("review", "rereview", "resolve"):
             policy = self.policy(role)
             variable_command = f'python3 {validator} "$TMPDIR/pr-comment.md"'
@@ -1145,6 +1145,53 @@ class HookTests(PolicyTestCase):
         usage = subprocess.run([sys.executable, str(copy)], capture_output=True, text=True,
                                timeout=60, check=False)
         self.assertEqual(2, usage.returncode)
+
+    def test_a_copied_hook_allows_the_commands_the_runtime_advertises(self) -> None:
+        # `policy_files` runs the hook from a copy in a temporary directory, so
+        # the runtime paths must come from `policy.json`, not from `__file__` (#319).
+        copy = Path(self.directory.name) / "code-cycle-policy-x" / "stage_permissions.py"
+        copy.parent.mkdir()
+        copy.write_bytes((ROOT / "scripts" / "stage_permissions.py").read_bytes())
+        for role in ("review", "rereview", "resolve"):
+            policy = self.policy(role, journal_path=str(Path(self.directory.name) / "t.sqlite"),
+                                 checkout_branch="task-319")
+            policy_path = copy.parent / "policy.json"
+            policy_path.write_text(policy.to_json(), encoding="utf-8")
+            validator = policy.triage_validator_path
+            self.assertEqual(ROOT.joinpath("scripts").resolve().as_posix(),
+                             Path(validator).parent.as_posix())
+            self.assertNotEqual(copy.parent.as_posix(), Path(validator).parent.as_posix())
+            staged = shlex.quote(str(self.tmpdir / "pr-comment.md"))
+            elsewhere = shlex.quote(str(self.tmpdir / "reply.md"))
+            fake = (copy.parent / "validate-triage-comment.py").as_posix()
+            commands = [
+                (f'python3 {shlex.quote(validator)} "$TMPDIR/pr-comment.md"', False),
+                (f"python3 {shlex.quote(validator)} {staged}", False),
+                (shlex.join(policy.permissions_command), False),
+                (f"python3 {shlex.quote(validator)} {elsewhere}", True),
+                (f"python3 {shlex.quote(fake)} {staged}", True),
+                (f"python3 /elsewhere/validate-triage-comment.py {staged}", True),
+                (shlex.join(policy.permissions_command).replace(
+                    policy.runtime_dir, copy.parent.as_posix()), True),
+            ]
+            for command, denied in commands:
+                with self.subTest(role=role, command=command):
+                    completed = subprocess.run(
+                        [sys.executable, str(copy), "hook", str(policy_path)],
+                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command},
+                                          "cwd": self.directory.name}),
+                        capture_output=True, text=True, timeout=60, check=False,
+                        env={**os.environ, "TMPDIR": str(self.tmpdir)})
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertEqual(denied, '"deny"' in completed.stdout, completed.stdout)
+
+    def test_the_runtime_paths_survive_the_policy_file(self) -> None:
+        policy = self.policy("review", journal_path="/db.sqlite", checkout_branch="b",
+                             runtime_dir="/installed/runtime")
+        again = sp.StagePolicy.from_json(policy.to_json())
+        self.assertEqual("/installed/runtime/validate-triage-comment.py",
+                         again.triage_validator_path)
+        self.assertEqual("/installed/runtime/cycle_journal.py", again.permissions_command[1])
 
 
 class ClaudeConfigurationTests(unittest.TestCase):

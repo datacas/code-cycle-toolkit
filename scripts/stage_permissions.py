@@ -109,6 +109,11 @@ class PolicyError(ValueError):
     """A command, or a configured command, the policy refuses."""
 
 
+def _runtime_directory() -> str:
+    """The directory this module is installed in, in POSIX form."""
+    return Path(__file__).resolve().parent.as_posix()
+
+
 @dataclass(frozen=True)
 class StagePolicy:
     """What one dispatched stage may run through Bash, and in which context.
@@ -146,6 +151,16 @@ class StagePolicy:
     stage_seq: int | None = None
     #: The branch of the run's checkout, which `permissions_command` queries.
     checkout_branch: str | None = None
+    #: The installed runtime's directory, fixed when the policy is built in the
+    #: runtime process (#319). The hook runs a copy of this module in a
+    #: temporary directory, so it must read the directory from `policy.json`
+    #: instead of deriving it from its own `__file__`.
+    runtime_dir: str = field(default_factory=lambda: _runtime_directory())
+
+    @property
+    def triage_validator_path(self) -> str:
+        """The staged-comment validator installed with the runtime, in shell-safe form."""
+        return (Path(self.runtime_dir) / "validate-triage-comment.py").as_posix()
 
     @property
     def permissions_command(self) -> tuple[str, ...]:
@@ -157,7 +172,7 @@ class StagePolicy:
         """
         if not (self.journal_path and self.repo and self.checkout_branch):
             return ()
-        script = Path(__file__).resolve().with_name("cycle_journal.py").as_posix()
+        script = (Path(self.runtime_dir) / "cycle_journal.py").as_posix()
         return ("python3", script, "--database", self.journal_path, "permissions",
                 "--repo", self.repo, "--branch", self.checkout_branch)
 
@@ -563,7 +578,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         return
     if (policy.role in {"review", "rereview", "resolve"} and policy.tmpdir
             and len(words) == 3
-            and words[:2] == ["python3", _triage_validator_path()]
+            and words[:2] == ["python3", policy.triage_validator_path]
             and Path(words[2]).name == "pr-comment.md"
             and is_tmpdir_helper(words[2], policy.tmpdir)):
         return
@@ -1392,7 +1407,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             wildcards += [f"gh api repos/{policy.repo}/check-runs/*",
                           f"gh api * repos/{policy.repo}/check-runs/*"]
     if policy.role in {"review", "rereview", "resolve"} and policy.tmpdir:
-        validator = shlex.quote(_triage_validator_path())
+        validator = shlex.quote(policy.triage_validator_path)
         tmpdirs = dict.fromkeys((policy.tmpdir,
                                  str(Path(policy.tmpdir).resolve(strict=False))))
         prefixes.append(f'python3 {validator} "$TMPDIR/pr-comment.md"')
@@ -1441,11 +1456,6 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
         patterns += [pattern.replace("Edit(", "Write(") for pattern in list(patterns)
                      if pattern.startswith("Edit(")]
     return list(dict.fromkeys(patterns))
-
-
-def _triage_validator_path() -> str:
-    """Return the validator beside the installed runtime, in shell-safe path form."""
-    return Path(__file__).resolve().with_name("validate-triage-comment.py").as_posix()
 
 
 def _absolute_rule_path(path: str) -> str:
@@ -1509,8 +1519,8 @@ def prompt_note(policy: StagePolicy) -> str:
     if policy.role in {"review", "rereview", "resolve"}:
         tmpdir_note += (
             " The staged-comment validator is installed with the runtime at "
-            f"`{_triage_validator_path()}`; run "
-            f'`python3 {shlex.quote(_triage_validator_path())} '
+            f"`{policy.triage_validator_path}`; run "
+            f'`python3 {shlex.quote(policy.triage_validator_path)} '
             '"$TMPDIR/pr-comment.md"`. '
         )
         if policy.role in {"review", "rereview"}:
