@@ -476,7 +476,10 @@ decides:
   own branch's `user_choices` was removed. It is recorded once per change, never
   repeated by a later run, and an unreadable or invalid `consents.json` records
   nothing. `user_choices` come from the configuration of the checkout that
-  runs, so a removal on one branch never changes another branch's decisions.
+  runs, so a removal on one branch never changes another branch's decisions. A
+  run whose configuration was ignored (`--no-config`) or is absent reads no
+  `user_choices` and records no withdrawal: the recorded entries stay in force
+  until a run that reads the configuration removes them.
 - **Replaced.** A decision for the same source and scope replaces the previous
   one; a changed `consents.json` scope is a new scope, and the old one is
   withdrawn.
