@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -692,16 +693,22 @@ class AllowedToolsTests(PolicyTestCase):
             absolute = Path(policy.tmpdir) / "pr-comment.md"
             nested = Path(policy.tmpdir) / "claude-123" / "pr-comment.md"
             self.allowed(variable_command, policy)
-            self.allowed(f"python3 {validator} {absolute}", policy)
-            self.allowed(f"python3 {validator} {nested}", policy)
-            self.denied(f"python3 {validator} {Path(policy.tmpdir) / 'reply.md'}", policy)
-            self.denied(f"python3 {validator} {self.sibling / 'pr-comment.md'}", policy)
-            self.denied(f"python3 {validator} {absolute} extra", policy)
+            self.allowed(f"python3 {validator} {shlex.quote(str(absolute))}", policy)
+            self.allowed(f"python3 {validator} {shlex.quote(str(nested))}", policy)
+            reply = shlex.quote(str(Path(policy.tmpdir) / "reply.md"))
+            sibling = shlex.quote(str(self.sibling / "pr-comment.md"))
+            self.denied(f"python3 {validator} {reply}", policy)
+            self.denied(f"python3 {validator} {sibling}", policy)
+            self.denied(f"python3 {validator} {shlex.quote(str(absolute))} extra", policy)
             self.denied("python3 -m unittest", policy)
             patterns = self.patterns(role, tmpdir=policy.tmpdir)
             self.assertIn(f"Bash({variable_command}:*)", patterns)
-            self.assertIn(f"Bash(python3 {validator} {absolute}:*)", patterns)
-            self.assertTrue(any("claude-*/pr-comment.md" in pattern for pattern in patterns))
+            roots = {Path(policy.tmpdir), Path(policy.tmpdir).resolve(strict=False)}
+            for root in roots:
+                direct = shlex.quote(str(root / "pr-comment.md"))
+                nested_pattern = shlex.quote(str(root / "claude-*" / "pr-comment.md"))
+                self.assertIn(f"Bash(python3 {validator} {direct}:*)", patterns)
+                self.assertIn(f"Bash(python3 {validator} {nested_pattern})", patterns)
             self.assertIn(f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
                           sp.prompt_note(policy))
             if role in {"review", "rereview"}:
@@ -711,6 +718,14 @@ class AllowedToolsTests(PolicyTestCase):
             self.patterns("implement"))
         self.assertNotIn("python3 scripts/validate-triage-comment.py", " ".join(
             self.patterns("resolve")))
+
+    def test_review_skills_scope_comment_validation_to_native_dispatches(self) -> None:
+        for skill in ("cc-initial-review", "cc-rereview"):
+            content = (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("For a native dispatch", content)
+            self.assertIn("$TMPDIR/pr-comment.md", content)
+            self.assertIn("validate-triage-comment.py", content)
+            self.assertIn("before publishing", content)
 
     def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
         # #270: the hook allowed `git grep` for issue_review while these

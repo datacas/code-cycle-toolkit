@@ -1393,13 +1393,16 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
                           f"gh api * repos/{policy.repo}/check-runs/*"]
     if policy.role in {"review", "rereview", "resolve"} and policy.tmpdir:
         validator = shlex.quote(_triage_validator_path())
-        tmpdir = str(Path(policy.tmpdir).resolve(strict=False))
-        prefixes += [
-            f'python3 {validator} "$TMPDIR/pr-comment.md"',
-            f'python3 {validator} {shlex.quote(str(Path(tmpdir) / "pr-comment.md"))}',
-        ]
-        wildcards.append(
-            f'python3 {validator} {_absolute_rule_path(tmpdir)}/claude-*/pr-comment.md')
+        tmpdirs = dict.fromkeys((policy.tmpdir,
+                                 str(Path(policy.tmpdir).resolve(strict=False))))
+        prefixes.append(f'python3 {validator} "$TMPDIR/pr-comment.md"')
+        for tmpdir in tmpdirs:
+            root = Path(tmpdir)
+            prefixes.append(
+                f'python3 {validator} {shlex.quote(str(root / "pr-comment.md"))}')
+            wildcards.append(
+                f'python3 {validator} '
+                f'{shlex.quote(str(root / "claude-*" / "pr-comment.md"))}')
     prefixes += sorted(READ_SHELL)
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))

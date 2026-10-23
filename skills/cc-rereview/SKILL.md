@@ -510,9 +510,11 @@ intermediate reviews.
 10. Inspect current checks with the configured code-host tooling, preserving
     non-zero output as evidence of pending or failed checks. For GitHub, the
     equivalent is `gh pr view ...statusCheckRollup` and `gh pr checks <n>`.
-11. Write the updated comment to `$TMPDIR/pr-comment.md` and run the installed
+11. For a native dispatch, the runtime supplies the absolute path. Write the
+    updated comment to `$TMPDIR/pr-comment.md` and run the installed
     `validate-triage-comment.py` on that file. If validation fails, fix the
-    comment and validate it again before publishing.
+    comment and validate it again before publishing. Manual and Orca runs use
+    their host-provided temporary-file workflow.
 12. Always publish an updated change-request comment.
 
 Use these functional statuses:
