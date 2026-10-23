@@ -124,11 +124,13 @@ Before a resolution that follows `CHANGES_REQUESTED`, the runtime reads the revi
 
 Before GitHub `resolve` or `rereview`, and before recovery of a published
 `review`, the runtime checks the open pull request head and fast-forwards the
-clean linked worktree when needed. Failure to query the pull request blocks the
-stage with `stage_not_completed`; a dirty worktree or diverged checkout blocks
-with `worktree_dirty` or `worktree_diverged`. Successful moves are recorded as
-`worktree_synchronized` stage events with the old and new full SHAs; the event
-is attributed to the stage about to run.
+clean linked worktree when needed. If the checkout is already at that head, no
+move is needed and the existing dispatch path is preserved, including for a
+dirty checkout. Failure to query the pull request blocks the stage with
+`stage_not_completed`; when a move is needed, a dirty worktree or diverged
+checkout blocks with `worktree_dirty` or `worktree_diverged`. Successful moves
+are recorded as `worktree_synchronized` stage events with the old and new full
+SHAs; the event is attributed to the stage about to run.
 
 ### Resume while awaiting CI
 

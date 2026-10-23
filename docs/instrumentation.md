@@ -460,9 +460,10 @@ Before GitHub `resolve`/`rereview` dispatches, and before recovery of a publishe
 `status=worktree_synchronized`. Its `stage_seq` is the upcoming stage's sequence,
 and `correlation.old_head_sha` / `correlation.new_head_sha` record the full
 before and after SHAs. No event is written when the checkout is already at the
-open pull request head. Failure to read that head blocks the stage with
-`stage_not_completed`; a dirty checkout or non-fast-forward uses
-`worktree_dirty` or `worktree_diverged`.
+open pull request head, which preserves the existing dispatch path even if the
+checkout is dirty. Failure to read that head blocks the stage with
+`stage_not_completed`; a dirty checkout blocks with `worktree_dirty` when a
+move is needed, and a non-fast-forward uses `worktree_diverged`.
 
 That boundary is enforced rather than asserted, by one typed table covering
 **every** field — columns included. `FIELD_SPECS` is the only gate, and there
