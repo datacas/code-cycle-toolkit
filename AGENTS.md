@@ -31,3 +31,9 @@
 3. Current vendor or product documentation not covered by Context7 → official documentation or authoritative web sources.
 4. Stable, generic programming knowledge → model knowledge is acceptable.
 5. If a preferred tool is unavailable → use the next best source and continue; never block the task.
+
+## Documentation
+
+- A change that alters visible behaviour, a command, a stored schema or a configuration key updates the page in `docs/` that owns that concept in the same pull request. `README.md` only changes when a skill or an entry point is added or removed; otherwise it links.
+- A review treats a visible change without its `docs/` page as a finding.
+- Before closing a work item, check whether its behaviour is already documented, and say so in the pull request description.
