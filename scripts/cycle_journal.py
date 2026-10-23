@@ -20,6 +20,10 @@ journal rows correlate with them through `cycle_id`, `stage_seq` and
 stop before a change request exists, and lets a resumed run see what the
 earlier runs did, asked and were answered.
 
+**Permissions in force (#311).** `journal_permissions` keeps the permission
+decisions as they change, and `permissions_in_force` reads the state back from
+the newest row per source and scope, read-only. It is a view, not an authority.
+
 **Never a policy input.** Recording is best effort: a write that fails returns
 `False` and leaves an error message behind, and the caller's decision stands
 unchanged. A denial is still a denial when it cannot be stored, and nothing
@@ -36,7 +40,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,11 +81,31 @@ CREATE TABLE IF NOT EXISTS journal_permissions (
     source TEXT NOT NULL,
     scope TEXT NOT NULL,
     decision TEXT NOT NULL,
-    occurred_at TEXT NOT NULL
+    occurred_at TEXT NOT NULL,
+    branch TEXT,
+    level TEXT
 );
+CREATE INDEX IF NOT EXISTS journal_permissions_repo ON journal_permissions (repo_id, permission_id);
 """
 
+#: Columns #311 added to `journal_permissions`, for a store #310 created.
+PERMISSION_COLUMNS = ("branch", "level")
+
 JOURNAL_SCHEMA_VERSION = 1
+
+#: How far a permission decision reaches (#311). `repository` and `branch`
+#: persist until withdrawn; `cycle` and `run` end with their cycle.
+LEVELS = ("repository", "branch", "cycle", "run")
+#: The decision a run records when a persistent allow is gone from its source.
+WITHDRAWN = "withdrawn"
+#: The marker a run leaves for its cycle-scoped decisions when it ends.
+ENDED = "ended"
+#: The source of that marker, which is not a permission decision.
+CYCLE_SOURCE = "cycle"
+#: A cycle that never recorded its end (a crash) stops showing after this long.
+CYCLE_LIVE_HOURS = 24
+#: Answers that grant something; everything else in force is a denial.
+_ALLOWING = frozenset({"allow", "cycle", "persistent"})
 
 KINDS = frozenset({"stage_start", "stage_end", "stage_result", "failure", "stop",
                    "decision_asked", "decision_answered", "refusal"})
@@ -161,7 +185,21 @@ def connect(path) -> sqlite3.Connection:
     connection = sqlite3.connect(str(path), timeout=10)
     connection.row_factory = sqlite3.Row
     connection.executescript(JOURNAL_SCHEMA)
+    _migrate_permissions(connection)
     return connection
+
+
+def _migrate_permissions(connection: sqlite3.Connection) -> None:
+    """Add the columns #311 needs to a `journal_permissions` table #310 made."""
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(journal_permissions)")}
+    for column in PERMISSION_COLUMNS:
+        if column not in columns:
+            try:
+                connection.execute(f"ALTER TABLE journal_permissions ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                # A concurrent run added it first.
+                pass
+    connection.commit()
 
 
 def _identifier(value, limit: int = 200) -> str | None:
@@ -274,20 +312,80 @@ class Journal:
             return []
         return [row for row in rows if stage_seq is None or row["stage_seq"] == stage_seq]
 
-    def permission(self, source: str, scope: str, decision: str) -> None:
-        """Repository-scoped audit only; consent files remain authoritative."""
+    def permission(self, source: str, scope: str, decision: str, *, branch: str | None = None,
+                   level: str | None = None, occurred_at: datetime | None = None) -> None:
+        """Repository-scoped audit only; consent files remain authoritative.
+
+        Appends only an effective change: a persistent decision the journal
+        already holds, or a cycle-scoped one this cycle already recorded, is
+        not written twice, so the table stays a history of changes and
+        `permissions_in_force` reads the state from its newest rows.
+        """
         if self.path is None:
             return
         try:
+            source, scope, decision = (redact(source) or "", redact(scope) or "",
+                                       redact(decision) or "")
+            level = level or permission_level(source, decision)
+            branch = _identifier(branch) if branch else None
             with closing(connect(self.path)) as connection:
+                last = connection.execute(
+                    "SELECT decision, cycle_id FROM journal_permissions WHERE repo_id = ? "
+                    "AND source = ? AND scope = ? AND COALESCE(branch, '') = ? "
+                    "ORDER BY permission_id DESC LIMIT 1",
+                    (self.repo_id, source, scope, branch or "")).fetchone()
+                if (last is not None and last["decision"] == decision
+                        and (level in ("repository", "branch") or last["cycle_id"] == self.cycle_id)):
+                    return
                 connection.execute(
-                    "INSERT INTO journal_permissions "
-                    "(repo_id, cycle_id, source, scope, decision, occurred_at) VALUES (?,?,?,?,?,?)",
-                    (self.repo_id, self.cycle_id, redact(source), redact(scope),
-                     redact(decision), _now(self.clock() if self.clock else None)))
+                    "INSERT INTO journal_permissions (repo_id, cycle_id, source, scope, decision, "
+                    "occurred_at, branch, level) VALUES (?,?,?,?,?,?,?,?)",
+                    (self.repo_id, self.cycle_id, source, scope, decision,
+                     _now(occurred_at or (self.clock() if self.clock else None)), branch, level))
                 connection.commit()
         except Exception as error:
             self.errors.append(f"the permission record could not be stored ({type(error).__name__})")
+
+    def reconcile_permissions(self, *, consents: Mapping[str, str | None] | None = None,
+                              user_choices: Mapping[str, Iterable[str]] | None = None,
+                              branch: str | None = None) -> None:
+        """Record what the persistent sources hold now against what the journal last saw.
+
+        `consents` maps each scope `consents.json` currently allows to the time
+        it was decided; None means the file could not be read or validated, and
+        then nothing is inferred. `user_choices` is the configuration of the
+        checkout that runs, on `branch`; None means it was not supplied. An
+        allow that is gone from its source is recorded once as `withdrawn`.
+        """
+        if self.path is None:
+            return
+        wanted: list[tuple[str, str | None, dict[str, str | None]]] = []
+        if consents is not None:
+            wanted.append(("consents.json", None, dict(consents)))
+        if user_choices is not None and branch:
+            wanted.append(("user_choices", branch, {
+                f"{choice}: {value}": None
+                for choice, values in user_choices.items() for value in values}))
+        for source, where, scopes in wanted:
+            try:
+                newest, _ = _fold_permissions(_permission_rows(self.path, self.repo_id))
+                held = {redact(row["scope"]) or "" for row in newest.values()
+                        if row["source"] == source and (row.get("branch") or None) == where
+                        and row["decision"] in _ALLOWING}
+                current = {redact(scope) or "": since for scope, since in scopes.items()}
+                for scope, since in sorted(current.items()):
+                    if scope not in held:
+                        self.permission(source, scope, "allow", branch=where,
+                                        occurred_at=_parse_time(since))
+                for scope in sorted(held - set(current)):
+                    self.permission(source, scope, WITHDRAWN, branch=where)
+            except Exception as error:
+                self.errors.append(
+                    f"the {source} permissions could not be reconciled ({type(error).__name__})")
+
+    def end_cycle(self) -> None:
+        """Mark this cycle over, so its cycle and run decisions stop showing."""
+        self.permission(CYCLE_SOURCE, "end", ENDED, level="cycle")
 
     def consent_event(self, kind: str, grant, scope, role: str, answer=None,
                       source=None) -> None:
@@ -296,7 +394,13 @@ class Journal:
                     correlation={"executor": scope.executor, "platform": scope.platform,
                                  "source": source})
         if answer is not None:
-            self.permission(source or "consent", f"{grant.id}: {scope.effective}", answer)
+            label = f"{grant.id}: {scope.effective}"
+            # `consents.json` only ever holds an allow, whatever the answer was called.
+            self.permission(source or "consent", label,
+                            "allow" if source == "consents.json" else answer)
+            if answer == "persistent" and source in ("--grant", "interactive"):
+                # The broker stored it in `consents.json` right now.
+                self.permission("consents.json", label, "allow")
 
     def summary(self, limit: int = SUMMARY_LIMIT) -> str:
         try:
@@ -403,6 +507,111 @@ def decisions(path, repo_id: str, task_id: str) -> list[dict[str, Any]]:
                            "answer": answer["status"], "answered_in": answer["cycle_id"],
                            "answered": True})
     return paired
+
+
+def permission_level(source: str, decision: str) -> str:
+    """How far a decision from `source` reaches, for a row that names no level."""
+    if source == "consents.json":
+        return "repository"
+    if source == "user_choices":
+        return "branch"
+    return "cycle" if decision == "cycle" else "run"
+
+
+def _parse_time(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _permission_rows(path, repo_id: str) -> list[dict[str, Any]]:
+    """The repository's permission rows, oldest first, from a read-only handle.
+
+    The store is opened `mode=ro`: nothing is created, migrated or locked for
+    writing, so a sandboxed stage that can only read the file can read this.
+    A store with no journal yet, or a #310 one without the newer columns,
+    reads as far as it goes. A path with no file behind it holds nothing.
+    """
+    if path is None or not Path(path).is_file():
+        return []
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=10)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM journal_permissions WHERE repo_id = ? ORDER BY permission_id",
+                (repo_id,)).fetchall()
+    except sqlite3.OperationalError as error:
+        if "no such table" in str(error):
+            return []
+        raise
+    return [dict(row) for row in rows]
+
+
+def _fold_permissions(rows: Iterable[dict[str, Any]]
+                      ) -> tuple[dict[tuple[str, str, str], dict[str, Any]], set[str]]:
+    """The newest row per source, scope and branch, and the cycles that ended."""
+    newest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    ended: set[str] = set()
+    for row in rows:
+        if row["source"] == CYCLE_SOURCE:
+            if row["decision"] == ENDED:
+                ended.add(row["cycle_id"])
+            continue
+        newest[(row["source"], row["scope"], row.get("branch") or "")] = row
+    return newest, ended
+
+
+def permissions_in_force(path, repo_id: str, branch: str | None = None, *,
+                         now: datetime | None = None) -> dict[str, Any]:
+    """The permission decisions in force for a repository, from the store alone.
+
+    Shows the repository-wide decisions (`consents.json`) and those of
+    `branch` (`user_choices`), each with its level, plus the decisions of a
+    cycle that is still running. The newest decision per source and scope
+    decides: a withdrawn or replaced one is not listed, and neither is a
+    cycle's decision once the cycle ended. Read-only, and it grants nothing:
+    consent files and the project configuration stay what the stages read.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    newest, ended = _fold_permissions(_permission_rows(path, repo_id))
+    found = []
+    for row in newest.values():
+        level = row.get("level") or permission_level(row["source"], row["decision"])
+        if level == "branch" and (not branch or row.get("branch") != branch):
+            continue
+        if level in ("cycle", "run"):
+            since = _parse_time(row["occurred_at"])
+            if (row["cycle_id"] in ended or since is None
+                    or now - since >= timedelta(hours=CYCLE_LIVE_HOURS)):
+                continue
+        if row["decision"] not in _ALLOWING and not (
+                row["decision"] == "deny" and level in ("cycle", "run")):
+            continue
+        found.append({
+            "source": redact(row["source"]), "scope": redact(row["scope"]),
+            "decision": redact(row["decision"]), "level": level,
+            "branch": row.get("branch") if level == "branch" else None,
+            "cycle_id": row["cycle_id"] if level in ("cycle", "run") else None,
+            "since": row["occurred_at"],
+        })
+    found.sort(key=lambda item: (LEVELS.index(item["level"]) if item["level"] in LEVELS
+                                 else len(LEVELS), item["source"], item["scope"]))
+    return {"repo": repo_id, "branch": branch, "decisions": found}
+
+
+def render_permissions(result: dict[str, Any]) -> str:
+    """`permissions_in_force` as plain lines for a person or a stage."""
+    where = f" (branch {result['branch']})" if result.get("branch") else ""
+    if not result["decisions"]:
+        return f"No permission decisions are recorded as in force for {result['repo']}{where}."
+    lines = [f"Permission decisions in force for {result['repo']}{where}:"]
+    for item in result["decisions"]:
+        reach = item["level"] + (f" {item['branch']}" if item["branch"] else "")
+        lines.append(f"  {reach} | {item['source']} | {item['scope']} | "
+                     f"{item['decision']} | since {item['since']}")
+    return "\n".join(lines)
 
 
 def _line(row: dict[str, Any]) -> str | None:
@@ -566,10 +775,21 @@ def record_hook_denial(policy, *, component: str, command: str | None, reason: s
     return None
 
 
+def _checkout_branch(cwd) -> str | None:
+    """The branch checked out in `cwd`, or None (detached HEAD, not a checkout)."""
+    try:
+        completed = subprocess.run(["git", "branch", "--show-current"], cwd=cwd,
+                                   capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() or None if completed.returncode == 0 else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cycle_journal",
-        description="Explain a cycle from its journal, or summarise a work item's runs.")
+        description="Explain a cycle from its journal, summarise a work item's runs, "
+                    "or list the permission decisions in force.")
     parser.add_argument("--database", required=True, help="the telemetry database")
     sub = parser.add_subparsers(dest="command", required=True)
     stop = sub.add_parser("explain", help="why one cycle stopped, as JSON")
@@ -581,10 +801,22 @@ def main(argv: list[str] | None = None) -> int:
     summary.add_argument("--task", required=True)
     reconcile = sub.add_parser("reconcile", help="delete closed or expired work-item detail")
     reconcile.add_argument("--repo", required=True)
+    permissions = sub.add_parser(
+        "permissions", help="the permission decisions in force for a repository (read-only)")
+    permissions.add_argument("--repo", required=True)
+    permissions.add_argument("--branch", help="default: the branch checked out in --cwd")
+    permissions.add_argument("--cwd", default=".", help="the checkout whose branch is queried")
+    permissions.add_argument("--json", action="store_true", help="print JSON instead of lines")
     args = parser.parse_args(argv)
     if not Path(args.database).is_file():
         print(f"cycle_journal: no database at {args.database}", file=sys.stderr)
         return 2
+    if args.command == "permissions":
+        branch = args.branch or _checkout_branch(args.cwd)
+        result = permissions_in_force(args.database, args.repo, branch)
+        print(json.dumps(result, indent=2, ensure_ascii=False) if args.json
+              else render_permissions(result))
+        return 0
     if args.command == "explain":
         print(json.dumps(explain(args.database, args.repo, args.task, args.cycle),
                          indent=2, ensure_ascii=False))

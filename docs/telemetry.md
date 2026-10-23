@@ -422,9 +422,78 @@ journal detail. Items without a change request expire after 30 days of
 inactivity. Unreadable provider state retains detail. Manual cleanup uses
 `python3 scripts/cycle_journal.py --database <telemetry.sqlite> reconcile
 --repo <owner/repo>` with the same rule. Statistics are never deleted.
-Repository permission records audit `--grant`, `consents.json` and project
-`user_choices` with scope and date; they grant nothing. Consent files remain
-the authority.
+
+### Permission decisions in force
+
+`journal_permissions` records the permission decisions of a repository as they
+change: `--grant` answers, `consents.json` entries and project `user_choices`,
+each with its scope and date. It is the audit trail; it grants nothing. Consent
+files and the project configuration stay the authority the stages read.
+
+Show what applies now, from the store alone:
+
+```bash
+python3 scripts/cycle_journal.py --database <telemetry.sqlite> permissions \
+  --repo <owner/repo> [--branch <branch> | --cwd <checkout>] [--json]
+```
+
+Without `--branch` it uses the branch checked out in `--cwd` (default: the
+current directory), so the same command answers from any branch, linked
+worktree or clone that shares the store. Two worktrees on one branch share one
+identity. The command opens the file read-only and creates, migrates and
+changes nothing.
+
+The equivalent query, binding the repository, and the branch for the `branch`
+level (the command also drops cycle decisions that ended):
+
+```sql
+SELECT p.source, p.scope, p.decision, p.level, p.branch, p.occurred_at
+FROM journal_permissions p
+WHERE p.repo_id = ?
+  AND p.permission_id = (SELECT MAX(q.permission_id) FROM journal_permissions q
+                         WHERE q.repo_id = p.repo_id AND q.source = p.source
+                           AND q.scope = p.scope
+                           AND COALESCE(q.branch, '') = COALESCE(p.branch, ''))
+  AND p.decision IN ('allow', 'cycle', 'persistent')
+  AND (p.level IN ('repository', 'cycle', 'run') OR p.branch = ?);
+```
+
+(The SQL covers rows this version wrote; the command also reads rows from
+before the `level` column.)
+
+Each decision has a **level**, and the newest decision per source and scope
+decides:
+
+| Level | Source | Applies to | Ends when |
+|---|---|---|---|
+| `repository` | `consents.json` | the repository, for the user | the entry is removed or its scope changed |
+| `branch` | `user_choices` | the repository's branch; the queried branch only | the entry is removed from that branch's configuration |
+| `cycle` | `--grant …=cycle` | one cycle | the cycle ends |
+| `run` | `--grant …=persistent\|deny`, interactive answers | one run | the run's cycle ends |
+
+- **Withdrawal.** A run records an explicit `withdrawn` decision when a
+  `consents.json` entry has gone or its scope changed, and when an entry of its
+  own branch's `user_choices` was removed. It is recorded once per change, never
+  repeated by a later run, and an unreadable or invalid `consents.json` records
+  nothing. `user_choices` come from the configuration of the checkout that
+  runs, so a removal on one branch never changes another branch's decisions.
+- **Replaced.** A decision for the same source and scope replaces the previous
+  one; a changed `consents.json` scope is a new scope, and the old one is
+  withdrawn.
+- **Denials.** `--grant …=deny` holds for its own run and is listed only while
+  that run lasts; it never revokes a persistent allow. `cycle` expiry is not a
+  withdrawal: the decision just stops being listed when its cycle ends, or a
+  day after its last row if the cycle never recorded an end.
+- **Older stores.** Rows written before the `branch` and `level` columns carry
+  no branch; their `user_choices` are not listed until a run re-records them.
+  The first write adds the columns.
+
+Stages get the same view. A Claude stage's command table allows exactly one
+command, `python3 …/cycle_journal.py --database <store> permissions --repo
+<repository> --branch <branch>`, with the store, repository and branch fixed by
+the runtime and no argument of the stage's own. It is announced in the stage's
+prompt. Codex stages have no command table and can run the same command.
+Stored values and the output go through the journal's redaction.
 
 - **First-pass rate** per repository: how often an implementation passes its first review. It is reported as unknown below 10 observations. The `measured` routing strategy feeds it into the recorded cost estimate.
 - **Dispatch blockages** by capability, so an exhausted quota window stays distinct from a trust dialog.

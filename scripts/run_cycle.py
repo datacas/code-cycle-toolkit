@@ -2388,10 +2388,17 @@ def run_cycle(
         for grant_id, answer in consent.answers.items():
             journal.record("decision_answered", component="--grant",
                            decision_key=f"grant:{grant_id}", status=answer)
-            journal.permission("--grant", grant_id, answer)
-    for choice, values in (user_tool_choices or {}).items():
-        for value in values:
-            journal.permission("user_choices", f"{choice}: {value}", "allow")
+    # The permission view (#311): what the persistent sources hold now, against
+    # what the journal last saw. An unreadable `consents.json` withdraws nothing.
+    checkout_branch = _git_line(cwd, ["branch", "--show-current"], 30)
+    consent_scopes = None
+    if consent is not None and consent.store is not None:
+        try:
+            consent_scopes = consent.store.allowed_scopes(repo_id)
+        except GrantError:
+            pass
+    journal.reconcile_permissions(consents=consent_scopes, user_choices=user_tool_choices,
+                                  branch=checkout_branch)
     status_writer = CycleStatusWriter(
         telemetry.path, recorder.cycle_id, repo_id, task_id,
         progress_interval=progress_interval, verbose=verbose,
@@ -2454,7 +2461,7 @@ def run_cycle(
             # The hook records its denials in the journal of this stage, the
             # next one the recorder numbers (#306).
             journal_path=str(telemetry.path), cycle_id=recorder.cycle_id,
-            stage_seq=recorder.stage_seq + 1,
+            stage_seq=recorder.stage_seq + 1, checkout_branch=checkout_branch,
             **(user_tool_choices or {}),
         )
 
@@ -3695,6 +3702,7 @@ def run_cycle(
     except CycleInterrupted as interruption:
         return interrupted(interruption)
     finally:
+        journal.end_cycle()
         if consent is not None:
             consent.observer = previous_consent_observer
         release_lock()

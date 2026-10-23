@@ -187,6 +187,24 @@ class ConsentStore:
             return None
         return entry["decision"]
 
+    def allowed_scopes(self, repo_id: str) -> dict[str, str | None]:
+        """Each scope the store allows for the repository now, with when it was decided.
+
+        An entry counts only while its fingerprint still matches the real
+        scope of its grant, the rule `load` applies. Raises `GrantError` when
+        the file cannot be read or validated, so a caller infers nothing from it.
+        """
+        allowed: dict[str, str | None] = {}
+        for grant_id, entry in (self._read()["repos"].get(repo_id) or {}).items():
+            grant = GRANTS.get(grant_id)
+            if grant is None or not isinstance(entry, dict) or entry.get("decision") != "allow":
+                continue
+            scope = grant.scope_for(str(entry.get("executor")), str(entry.get("platform")))
+            if scope is not None and entry.get("fingerprint") == grant.fingerprint(scope):
+                decided = entry.get("decided_at")
+                allowed[f"{grant.id}: {scope.effective}"] = decided if isinstance(decided, str) else None
+        return allowed
+
     def save(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope,
              decision: str) -> None:
         if decision != "allow":
