@@ -514,13 +514,16 @@ class ScanOnlyTests(unittest.TestCase):
             (package / "docs" / "guide.md").write_text(
                 "see " + "/ho" + "me/someone/project\n", encoding="utf-8"
             )
-            (package / "docs" / "guide.md:Zone.Identifier").write_text("x", encoding="utf-8")
+            (package / "docs" / "guide.md.Zone.Identifier").write_text("x", encoding="utf-8")
 
             errors = module.scan_for_private_data(package)
 
+        normalized_errors = [error.replace("\\", "/") for error in errors]
         self.assertEqual(2, len(errors), errors)
-        self.assertTrue(any("possible private data in docs/guide.md" in error for error in errors))
-        self.assertTrue(any("metadata sidecar" in error for error in errors))
+        self.assertTrue(
+            any("possible private data in docs/guide.md" in error for error in normalized_errors)
+        )
+        self.assertTrue(any("metadata sidecar" in error for error in normalized_errors))
         self.assertEqual([], module.scan_for_private_data(ROOT))
 
 
