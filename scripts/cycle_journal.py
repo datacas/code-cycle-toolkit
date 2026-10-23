@@ -124,6 +124,8 @@ _FLAG = re.compile(rf"(?i)((?<!\S)--?{_SECRET_NAME}(?:=|\s+))(\"[^\"]*\"|'[^']*'
 #: `https://user:secret@host/...`.
 _URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# Reference tokens need a boundary: `sk-` inside `flask-sqlalchemy` is a name.
+_REFERENCE_TOKEN = re.compile(r"(?<![A-Za-z0-9])" + _TOKENS.pattern)
 
 
 def redact(text, limit: int = TEXT_LIMIT) -> str | None:
@@ -163,12 +165,31 @@ def connect(path) -> sqlite3.Connection:
 
 
 def _identifier(value, limit: int = 200) -> str | None:
+    """Keep reference keys intact; never redact or truncate a lookup key."""
     if value is None:
         return None
-    value = str(value).strip()
-    if not value:
+    value = str(value)
+    if (not value or len(value) > limit
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/#@:+-]*", value) is None
+            or _REFERENCE_TOKEN.search(value) or _URL_CREDENTIALS.search(value)):
+        raise ValueError("journal identifiers must be bounded references without credentials")
+    return value
+
+
+def _change_request_identifier(value, repo_id: str) -> str | None:
+    """Canonical PR number for supported runtime references, never a REST path."""
+    if value is None:
         return None
-    return redact(value, limit)
+    reference = str(value)
+    match = re.fullmatch(r"#?([1-9][0-9]{0,9})", reference)
+    if match is None:
+        match = re.fullmatch(
+            rf"https://(?:github\.com/{re.escape(repo_id)}/pull|"
+            rf"bitbucket\.org/{re.escape(repo_id)}/pull-requests)/([1-9][0-9]{{0,9}})/?",
+            reference, re.IGNORECASE)
+    if match is None:
+        raise ValueError("journal change requests must identify a PR in this repository")
+    return match.group(1)
 
 
 def record_event(path, *, repo_id, task_id, cycle_id, kind: str,
@@ -178,8 +199,8 @@ def record_event(path, *, repo_id, task_id, cycle_id, kind: str,
                  correlation: dict[str, Any] | None = None, occurred_at: datetime | None = None) -> None:
     """Append one journal row. Raises on a refused value or a storage error.
 
-    Every text is redacted and bounded here, whoever the caller is, so no path
-    into the table skips it.
+    Free text is redacted and bounded here, whoever the caller is. Reference
+    keys are validated and preserved verbatim so readers can find them.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown journal event kind {kind!r}")
@@ -200,9 +221,9 @@ def record_event(path, *, repo_id, task_id, cycle_id, kind: str,
             "decision_key, command, reason, detail, duration_ms, correlation, occurred_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (JOURNAL_SCHEMA_VERSION, _identifier(repo_id), _identifier(task_id),
-             _identifier(cycle_id), _identifier(change_request_id), stage_seq,
-             _identifier(role, 40), _identifier(attempt_id), kind, _identifier(component, 60),
-             _identifier(status, 80), _identifier(decision_key), redact(command),
+             _identifier(cycle_id), _change_request_identifier(change_request_id, repo_id), stage_seq,
+             redact(role, 40), _identifier(attempt_id), kind, redact(component, 60),
+             redact(status, 80), redact(decision_key, 200), redact(command),
              redact(reason), redact(detail), duration_ms,
              json.dumps(links, sort_keys=True), _now(occurred_at)),
         )
@@ -487,8 +508,17 @@ def cleanup(path, repo_id: str, read_state: Callable[[str], str | None] | None, 
                 "AND change_request_id IS NOT NULL ORDER BY event_id DESC LIMIT 1",
                 (repo_id, item["task_id"])).fetchone()
             if latest is not None:
+                # Both supported code hosts use numeric PR IDs. Treat unsafe
+                # legacy rows as unreadable, without constructing a provider path.
                 try:
-                    state = read_state(latest["change_request_id"]) if read_state else None
+                    request = _change_request_identifier(latest["change_request_id"], repo_id)
+                    if request is None:
+                        raise ValueError("cleanup needs a known PR number")
+                except ValueError:
+                    result["unreadable"] += 1
+                    continue
+                try:
+                    state = read_state(request) if read_state else None
                 except Exception:
                     state = None
                 if state is None:

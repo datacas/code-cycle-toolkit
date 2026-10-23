@@ -2795,9 +2795,10 @@ def run_cycle(
 
     def journal_result(role, outcome, reported, attempt_id) -> None:
         payload = reported.payload or {}
-        request = payload.get("change_request_id") or payload.get("pr_number")
-        if isinstance(request, (str, int)) and not isinstance(request, bool):
-            journal.change_request_id = str(request)
+        # A stage's report cannot redirect attribution or retention. The driver
+        # owns this reference and accepts a new implementation's validated ID
+        # only after its existing continuation and publication checks below.
+        journal.change_request_id = change_request_id
         journal.record("stage_result", role=role, stage_seq=recorder.stage_seq,
                        attempt_id=attempt_id, component="runtime", status=reported.status,
                        detail=reported.reason, correlation={"head_sha": payload.get("head_sha")})
@@ -3454,6 +3455,7 @@ def run_cycle(
                     "stopping before review",
                     reported=reported,
                 )
+            journal.change_request_id = change_request_id
             if tracking:
                 stopped = lock_change_request(change_request_id)
                 if stopped is not None:

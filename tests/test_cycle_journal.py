@@ -64,6 +64,73 @@ class JournalTests(unittest.TestCase):
             self.assertNotIn(secret, data)
         self.assertIn("REDACTED", data)
 
+    def test_identifier_keys_round_trip_and_cleanup_without_redaction(self):
+        for repo in ("owner/flask-sqlalchemy", "acme/task-scheduler"):
+            with self.subTest(repo=repo):
+                journal = cj.Journal(self.path, repo, "task-scheduler", "cycle-task-scheduler",
+                                     change_request_id="4")
+                self.assertTrue(journal.record("refusal", component="hook_bash",
+                                               attempt_id="attempt-task-scheduler",
+                                               command="git push origin main"))
+                self.assertTrue(journal.record("stop", status="BLOCKED", reason="denied"))
+                rows = cj.events(self.path, repo, task_id="task-scheduler")
+                self.assertEqual(2, len(rows))
+                self.assertEqual("attempt-task-scheduler", rows[0]["attempt_id"])
+                self.assertEqual("denied", cj.explain(
+                    self.path, repo, "task-scheduler", "cycle-task-scheduler")["stop"]["reason"])
+                resumed = cj.Journal(self.path, repo, "task-scheduler", "resumed")
+                self.assertTrue(resumed.has_history())
+                self.assertEqual(1, len(journal.refusals()))
+                self.assertIn("BLOCKED", resumed.summary())
+                self.assertEqual(2, cj.cleanup(self.path, repo, lambda _: "CLOSED")["deleted_rows"])
+                self.assertEqual([], cj.events(self.path, repo))
+
+    def test_cleanup_never_sends_unsafe_references_to_provider(self):
+        for index, request in enumerate(("?", "4/../../issues/1", "4 extra", "#4/path", "0")):
+            cj.record_event(self.path, repo_id="owner/repo", task_id=str(index),
+                            cycle_id="legacy", kind="stop", change_request_id="4")
+            # Simulate legacy rows written before reference validation.
+            with sqlite3.connect(self.path) as connection:
+                connection.execute("UPDATE journal_events SET change_request_id=? WHERE task_id=?",
+                                   (request, str(index)))
+        reader = mock.Mock(return_value="CLOSED")
+        result = cj.cleanup(self.path, "owner/repo", reader)
+        reader.assert_not_called()
+        self.assertEqual(5, result["unreadable"])
+        self.assertEqual(5, len(cj.events(self.path, "owner/repo")))
+
+    def test_supported_pr_aliases_use_numeric_storage_and_cleanup(self):
+        for reference in ("#4", "https://github.com/owner/repo/pull/4",
+                          "https://bitbucket.org/owner/repo/pull-requests/4"):
+            with self.subTest(reference=reference):
+                journal = cj.Journal(self.path, "owner/repo", "306", "first",
+                                     change_request_id=reference)
+                self.assertTrue(journal.record("stop"))
+                self.assertEqual("4", cj.events(self.path, "owner/repo")[0]["change_request_id"])
+                # Also normalize valid legacy references before calling the provider.
+                with sqlite3.connect(self.path) as connection:
+                    connection.execute("UPDATE journal_events SET change_request_id=?", (reference,))
+                reader = mock.Mock(return_value="CLOSED")
+                self.assertEqual(1, cj.cleanup(self.path, "owner/repo", reader)["deleted_rows"])
+                reader.assert_called_once_with("4")
+        foreign = cj.Journal(self.path, "owner/repo", "306", "first",
+                             change_request_id="https://github.com/other/repo/pull/4")
+        self.assertFalse(foreign.record("stop"))
+
+    def test_preserved_keys_reject_credentials_and_nonkeys_remain_redacted(self):
+        for repo in ("https://user:password@host/repo", "owner/ghp_abcdefghijklmnopqrst"):
+            journal = cj.Journal(self.path, repo, "306", "first")
+            self.assertFalse(journal.record("stop"))
+        self.assertFalse(self.journal.record("stop", attempt_id="attempt:ghp_abcdefghijklmnopqrst"))
+        self.assertFalse(self.journal.record("stop", attempt_id="a" * 201))
+        self.assertFalse(self.journal.record("stop", attempt_id="with whitespace"))
+        secret = "ghp_abcdefghijklmnopqrst"
+        self.assertTrue(self.journal.record("decision_asked", decision_key=f"attempt:{secret}",
+                                           component=f"source:{secret}", status=f"status:{secret}"))
+        rows = cj.events(self.path, "owner/repo")
+        self.assertEqual(1, len(rows))
+        self.assertNotIn(secret, json.dumps(rows))
+
     def test_hook_process_persists_bash_and_file_denials(self):
         policy = sp.StagePolicy("review", repo="owner/repo", work_item_id="306",
                                 change_request_id="4", journal_path=str(self.path),
@@ -188,6 +255,36 @@ class JournalTests(unittest.TestCase):
 
 
 class JournalRuntimeTests(RunCycleTestCase):
+    def test_runtime_pr_aliases_remain_journaled(self):
+        for reference in ("#74", "https://github.com/owner/api/pull/74"):
+            with self.subTest(reference=reference):
+                report = self.run_cycle(Talker("codex", block("BLOCKED")),
+                                        Talker("claude", block("BLOCKED")),
+                                        start_from="review", change_request_id=reference)
+                explanation = getattr(report, "journal_explanation", None)
+                assert explanation is not None
+                self.assertIsNotNone(explanation["stop"])
+                rows = cj.events(self.store.path, "owner/api", task_id="API-7")
+                self.assertEqual({"74"}, {row["change_request_id"] for row in rows})
+
+    def test_stage_payload_cannot_replace_runtime_change_request(self):
+        for role, start in (("review", "review"), ("resolve", "resolve")):
+            for request in ("?", "4/../../issues/1", "99", 99):
+                with self.subTest(role=role, request=request):
+                    payload = block("BLOCKED", change_request_id=request, pr_number=99,
+                                    reason="retain this stop")
+                    implementer = Talker("codex", payload)
+                    reviewer = Talker("claude", payload)
+                    report = self.run_cycle(implementer, reviewer, start_from=start,
+                                            change_request_id="74")
+                    explanation = getattr(report, "journal_explanation", None)
+                    assert explanation is not None
+                    rows = cj.events(self.store.path, "owner/api", task_id="API-7",
+                                     cycle_id=explanation["cycle_id"])
+                    self.assertTrue(any(row["kind"] == "stage_result" for row in rows))
+                    self.assertTrue(any(row["kind"] == "stop" for row in rows))
+                    self.assertEqual({"74"}, {row["change_request_id"] for row in rows})
+
     def test_hook_denials_are_correlated_with_runtime_stop(self):
         for tool, tool_input, component in (
             ("Bash", {"command": "git push origin main"}, "hook_bash"),
