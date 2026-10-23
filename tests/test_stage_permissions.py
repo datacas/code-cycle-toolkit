@@ -1,10 +1,12 @@
 """The closed command table of each stage, and the hook that enforces it (#142)."""
 from __future__ import annotations
 
+import fnmatch
 import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -684,19 +686,54 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "review", "rereview", "issue_review"):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
-    def test_only_the_resolver_gets_the_staged_triage_validator(self) -> None:
-        resolve = self.policy("resolve")
+    def test_review_resolve_and_rereview_get_only_the_staged_triage_validator(self) -> None:
         validator = sp._triage_validator_path()
-        variable_command = f'python3 {validator} "$TMPDIR/pr-comment.md"'
-        self.allowed(variable_command, resolve)
-        self.denied("python3 -m unittest", resolve)
-        self.assertIn(f"Bash({variable_command}:*)", self.patterns("resolve"))
-        self.assertNotIn(f"Bash({variable_command}:*)", self.patterns("review"))
+        for role in ("review", "rereview", "resolve"):
+            policy = self.policy(role)
+            variable_command = f'python3 {validator} "$TMPDIR/pr-comment.md"'
+            absolute = Path(policy.tmpdir) / "pr-comment.md"
+            nested = Path(policy.tmpdir) / "claude-123" / "pr-comment.md"
+            self.allowed(variable_command, policy)
+            self.allowed(f"python3 {validator} {shlex.quote(str(absolute))}", policy)
+            self.allowed(f"python3 {validator} {shlex.quote(str(nested))}", policy)
+            reply = shlex.quote(str(Path(policy.tmpdir) / "reply.md"))
+            sibling = shlex.quote(str(self.sibling / "pr-comment.md"))
+            self.denied(f"python3 {validator} {reply}", policy)
+            self.denied(f"python3 {validator} {sibling}", policy)
+            self.denied(f"python3 {validator} {shlex.quote(str(absolute))} extra", policy)
+            self.denied("python3 -m unittest", policy)
+            patterns = self.patterns(role, tmpdir=policy.tmpdir)
+            self.assertIn(f"Bash({variable_command}:*)", patterns)
+            roots = {Path(policy.tmpdir), Path(policy.tmpdir).resolve(strict=False)}
+            for root in roots:
+                direct = shlex.quote(str(root / "pr-comment.md"))
+                nested_pattern = f"{shlex.quote(str(root))}/claude-*/pr-comment.md"
+                quoted_pattern = shlex.quote(str(root / "claude-*" / "pr-comment.md"))
+                self.assertIn(f"Bash(python3 {validator} {direct}:*)", patterns)
+                self.assertIn(f"Bash(python3 {validator} {nested_pattern})", patterns)
+                self.assertIn(f"Bash(python3 {validator} {quoted_pattern})", patterns)
+                # The pattern must match the nested command as typed, unquoted.
+                typed = f"python3 {validator} {shlex.quote(str(root / 'claude-1000' / 'pr-comment.md'))}"
+                if shlex.quote(str(root)) == str(root):
+                    self.assertTrue(fnmatch.fnmatchcase(
+                        typed, f"python3 {validator} {nested_pattern}"))
+            self.assertIn(f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
+                          sp.prompt_note(policy))
+            if role in {"review", "rereview"}:
+                self.assertIn("before publishing", sp.prompt_note(policy))
+        self.assertNotIn(
+            f'Bash(python3 {validator} "$TMPDIR/pr-comment.md":*)',
+            self.patterns("implement"))
         self.assertNotIn("python3 scripts/validate-triage-comment.py", " ".join(
             self.patterns("resolve")))
-        self.assertIn(
-            f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
-            sp.prompt_note(resolve))
+
+    def test_review_skills_scope_comment_validation_to_native_dispatches(self) -> None:
+        for skill in ("cc-initial-review", "cc-rereview"):
+            content = (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("For a native dispatch", content)
+            self.assertIn("$TMPDIR/pr-comment.md", content)
+            self.assertIn("validate-triage-comment.py", content)
+            self.assertIn("before publishing", content)
 
     def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
         # #270: the hook allowed `git grep` for issue_review while these

@@ -121,6 +121,11 @@ request. The exact forms are in `cc-resolve-comments`.
   `claude-<uid>` subdirectory, which the executor may provide. The hook checks
   both names and resolved paths, and refuses a helper that resolves outside
   that subdirectory or the dispatch's `$TMPDIR`.
+- The `review`, `rereview` and `resolve` command tables allow the installed
+  `validate-triage-comment.py` only for `pr-comment.md` directly in the
+  dispatch's `$TMPDIR` or its `claude-<uid>` child. The hook checks the script,
+  argument count, helper name and resolved path; other scripts and paths stay
+  denied. Review and rereview validate the staged comment before publishing.
   The hook also allows the exact `printenv TMPDIR` query when a dispatch has
   created its temporary directory, so the agent can learn the path without
   exposing other environment variables.
