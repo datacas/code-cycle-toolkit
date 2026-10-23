@@ -284,6 +284,15 @@ class ConsentBroker:
     denied_ids: set[str] = field(default_factory=set)
     pending: list[PermissionRequest] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Best-effort audit observer; never used to authorize a grant.
+    observer: Callable[..., None] | None = None
+
+    def _observe(self, kind, grant, scope, role, answer=None, source=None) -> None:
+        if self.observer is not None:
+            try:
+                self.observer(kind, grant, scope, role, answer, source)
+            except Exception as error:
+                self.notes.append(f"consent audit failed ({type(error).__name__})")
 
     def grant_for(self, blocker: dict) -> SensitiveGrant | None:
         return next((grant for grant in GRANTS.values() if grant.matches(blocker)), None)
@@ -324,8 +333,10 @@ class ConsentBroker:
         if grant.id in self.granted_ids:
             return ALLOW_CYCLE
         answer = self.answers.get(grant.id)
+        source = "--grant"
         persist = True
         if answer is None and grant.id in self.preauthorized:
+            source = "project configuration"
             answer, persist = ALLOW_PERSISTENT, False
             self.notes.append(f"{grant.id} granted by the project configuration")
         if answer is None and self.store is not None:
@@ -336,11 +347,15 @@ class ConsentBroker:
                 stored = None
                 self.notes.append(f"{error}; asking instead")
             if stored == "allow":
+                source = "consents.json"
                 answer, persist = ALLOW_PERSISTENT, False
                 self.notes.append(f"{grant.id} granted by a stored answer ({self.store.path})")
         if answer is None and self.prompt is not None:
+            self._observe("decision_asked", grant, scope, role)
+            source = "interactive"
             answer = self.prompt(question(grant, scope, role=role))
         if answer is None:
+            self._observe("decision_asked", grant, scope, role)
             self.pending.append(PermissionRequest(
                 grant, scope, role,
                 question(grant, scope, role=role,
@@ -349,6 +364,7 @@ class ConsentBroker:
         if answer not in ANSWERS:
             raise GrantError(f"{grant.id}: {answer!r} is not one of {', '.join(ANSWERS)}")
         answer = self.apply_answer(grant, scope, answer, persist=persist)
+        self._observe("decision_answered", grant, scope, role, answer, source)
         if answer == DENY:
             self.notes.append(f"{grant.id} denied: only the operations that need it "
                               "are skipped")

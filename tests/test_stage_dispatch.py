@@ -444,9 +444,22 @@ class ClaudePolicyTests(DispatchTestCase):
                 {"tool_name": "Write", "tool_input": {"file_path": "/x"}},
                 {"tool_name": "Bash", "tool_input": {"command": "python3 -m unittest"}}]},
         ))
-        self.assertEqual({"permission_denials": ["python3 -m unittest", "docker compose up -d"]},
-                         ex.ClaudeAdapter().extra_artifacts(stream))
+        artifacts = ex.ClaudeAdapter().extra_artifacts(stream)
+        self.assertEqual(["python3 -m unittest", "docker compose up -d"],
+                         artifacts["permission_denials"])
+        self.assertEqual(["Bash", "Write", "Bash"],
+                         [item["tool"] for item in artifacts["claude_permission_denials"]])
+        self.assertEqual("/x", artifacts["claude_permission_denials"][1]["command"])
         self.assertEqual({}, ex.ClaudeAdapter().extra_artifacts('{"type": "result"}'))
+
+    def test_preflight_refusal_is_exposed_for_the_cycle_journal(self) -> None:
+        adapter = ex.ClaudeAdapter()
+        with mock.patch.object(adapter, "policy_preflight", return_value="unsafe tool.check mod"):
+            result = adapter.dispatch(CLAUDE, "implement it", cwd=str(self.repo), writes=True,
+                                      command_policy=self.policy(),
+                                      runner=lambda *a, **k: self.fail("preflight must stop dispatch"))
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertEqual("unsafe tool.check mod", result.artifacts["policy_preflight_refusal"])
 
     def test_the_docker_grant_opens_compose_in_the_table(self) -> None:
         seen = {}

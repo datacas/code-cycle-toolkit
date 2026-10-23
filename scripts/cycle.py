@@ -35,7 +35,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from typing import Any, cast
 
+from cycle_journal import Journal
 from executors import (
     Availability,
     DispatchOutcome,
@@ -277,13 +279,17 @@ class CycleRecorder:
         resolve_effort: str | None = None,
         ci_policy: str = "strict",
         consent: ConsentBroker | None = None,
+        journal: Journal | None = None,
     ) -> None:
         self.telemetry = telemetry
+        # The cycle journal (#306): stage timings, failures and refusals as they
+        # happen. Best effort; nothing here reads it back to decide anything.
+        self.journal = journal
         # One per run, so two runs of the same work item stay apart. Checked
         # now rather than on the first row: a refused id found after a paid
         # dispatch leaves a stage nobody can record.
-        self.cycle_id = validate_reference(
-            "cycle_id", cycle_id or f"cycle-{uuid.uuid4().hex}")
+        self.cycle_id = cast(str, validate_reference(
+            "cycle_id", cycle_id or f"cycle-{uuid.uuid4().hex}"))
         self.repo_id = repo_id
         self.task_id = task_id
         if (work_item_provider is None) != (work_item_repository is None):
@@ -629,6 +635,9 @@ class CycleRecorder:
                 primary_decision = decision
             if decision.blocked:
                 outcome.decision = decision
+                self._journal("failure", role=role, component="router",
+                              status="blocked", reason="routing found no dispatchable target",
+                              detail="; ".join(decision.reasons))
                 outcome.rows.append(self._record(role, decision, None, signals))
                 self.failed_attempts += 1
                 self.stages.append(outcome)
@@ -678,6 +687,12 @@ class CycleRecorder:
                         attempt_id, {"lifecycle_state": "running"},
                         update_id=f"update-{uuid.uuid4().hex}", source="runtime",
                     )
+                target = decision.target
+                self._journal("stage_start", role=role, attempt_id=attempt_id,
+                              component=target.executor, status=decision.profile,
+                              detail=f"{target.provider}/{target.model} {target.effort}",
+                              correlation={"parent_attempt_id": parent_attempt_id,
+                                           "relationship": relationship})
                 return attempt_id
 
             tool_activity = False
@@ -742,6 +757,7 @@ class CycleRecorder:
                 ))
                 self.failed_attempts += 1
                 self.stages.append(outcome)
+                self._journal_attempt(role, result, attempt_id, None, signals)
                 interruption.outcome = outcome
                 raise
             if tool_activity:
@@ -972,6 +988,7 @@ class CycleRecorder:
             ))
             if result.outcome is not DispatchOutcome.SUCCEEDED:
                 self.failed_attempts += 1
+            self._journal_attempt(role, result, attempt_id, blocker, signals)
 
             if not retry:
                 break
@@ -981,6 +998,52 @@ class CycleRecorder:
         self.stages.append(outcome)
         self._observe_shadow(role, *first)
         return outcome
+
+    def _journal(self, kind: str, **fields) -> None:
+        if self.journal is not None:
+            fields.setdefault("stage_seq", self.stage_seq)
+            self.journal.record(kind, **fields)
+
+    def _journal_attempt(self, role: str, result: DispatchResult, attempt_id: str | None,
+                         blocker: dict[str, Any] | None, signals: dict[str, Any]) -> None:
+        """One attempt's end, its failure and every refusal its result reports.
+
+        The stage hook records its own denials as they happen; these are the
+        refusals only the result shows: Claude's permission layer, the
+        runtime's preflight of the Claude configuration, and an executor's
+        sandbox report (Codex reports no individual command).
+        """
+        if self.journal is None:
+            return
+        executor = result.executor
+        artifacts = result.artifacts or {}
+        self._journal("stage_end", role=role, attempt_id=attempt_id, component=executor,
+                      status=result.outcome.value, reason=result.failure_code,
+                      duration_ms=result.duration_ms,
+                      correlation={"reroute_action": signals.get("reroute_action"),
+                                   "reroute_reason": signals.get("reroute_reason")})
+        if result.outcome is not DispatchOutcome.SUCCEEDED:
+            self._journal("failure", role=role, attempt_id=attempt_id, component=executor,
+                          status=result.outcome.value,
+                          reason=result.failure_code or result.outcome.value,
+                          detail=result.detail)
+        preflight = artifacts.get("policy_preflight_refusal")
+        if isinstance(preflight, str):
+            self._journal("refusal", role=role, attempt_id=attempt_id,
+                          component="policy_preflight", status="refused", reason=preflight)
+        for denial in artifacts.get("claude_permission_denials") or []:
+            if isinstance(denial, dict):
+                self._journal("refusal", role=role, attempt_id=attempt_id,
+                              component="claude_permission", status="denied",
+                              command=denial.get("command") or denial.get("tool"),
+                              reason=f"Claude's permission layer denied {denial.get('tool')}",
+                              correlation={"tool_use_id": denial.get("tool_use_id")})
+        if blocker is not None:
+            self._journal("refusal", role=role, attempt_id=attempt_id,
+                          component=f"{executor}_sandbox", status=str(blocker.get("kind")),
+                          command=blocker.get("command"),
+                          reason=f"the agent reported {blocker.get('kind')}: "
+                                 f"{blocker.get('error')}")
 
     def _observe_shadow(self, role: str, decision: RoutingDecision,
                         signals: dict) -> None:
