@@ -455,6 +455,16 @@ should be looking at.
 every repository, holding references, statuses and counts — no diffs and no
 prose. It never enters Git.
 
+Before GitHub `resolve`/`rereview` dispatches, and before recovery of a published
+`review`, the runtime may record a `stage_result` event with
+`status=worktree_synchronized`. Its `stage_seq` is the upcoming stage's sequence,
+and `correlation.old_head_sha` / `correlation.new_head_sha` record the full
+before and after SHAs. No event is written when the checkout is already at the
+open pull request head, which preserves the existing dispatch path even if the
+checkout is dirty. Failure to read that head blocks the stage with
+`stage_not_completed`; a dirty checkout blocks with `worktree_dirty` when a
+move is needed, and a non-fast-forward uses `worktree_diverged`.
+
 That boundary is enforced rather than asserted, by one typed table covering
 **every** field — columns included. `FIELD_SPECS` is the only gate, and there
 are no exempt fields.
@@ -632,7 +642,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19 |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19; `worktree_dirty` and `worktree_diverged` when safe synchronization to an open pull request head is impossible |
 | `cycle` | `issue_review` | the cycle started at `implement` and was not continued: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `continued` | the cycle continued an interrupted implementation with `--continue`; always `true` when present (schema 12) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
@@ -692,9 +702,11 @@ never written. Check names stay in the published comment.
 `telemetry.STOP_REASONS`: `approved`, `iteration_limit`, `no_progress`,
 `repeated_findings`, `stage_not_completed` (a stage reported something other
 than a completion, or only started work that finishes elsewhere),
-`dispatch_failed`, `local_only`, or `permission_required` (schema 20: a stage
+`dispatch_failed`, `local_only`, `permission_required` (schema 20: a stage
 needs a sensitive sandbox grant nobody answered; see *Sensitive sandbox grants*
-in `routing.md`). A closing row from an earlier version has none, and
+in `routing.md`), `worktree_dirty`, or `worktree_diverged`. The last two stop
+before changing files when a dirty tree or non-fast-forward prevents syncing an
+open pull request head. A closing row from an earlier version has none, and
 `cc-stats` reads it as unknown. A stage row's `reroute_reason` may then be
 `permission_required` or `permission_answered`.
 

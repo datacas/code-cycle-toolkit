@@ -138,6 +138,8 @@ STOP_REASONS = frozenset({
     "needs_refinement", "readiness_unconfirmed", "interrupted",
     # The CI gate of the parallel policy (schema 19).
     "ci_timeout", "ci_unreadable", "ci_not_passing", "head_moved",
+    # A change-request head cannot be synchronized without losing work.
+    "worktree_dirty", "worktree_diverged",
     # A stage needs a sensitive sandbox grant nobody has answered (schema 20).
     "permission_required",
 })

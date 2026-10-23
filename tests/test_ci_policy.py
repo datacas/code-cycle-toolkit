@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import ci_gate as gate  # noqa: E402
 import cycle_history as ch  # noqa: E402
+import cycle_journal as cj  # noqa: E402
 import review_contract as contract  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
@@ -483,6 +484,33 @@ class HeadMovedTests(ParallelTestCase):
         self.assertEqual(1, report.iterations)
         # The finding history of the old head stays available: nothing was reset.
         self.assertEqual(2, len(self.github.items))
+
+    def test_the_new_head_is_synchronized_and_recorded_before_rereview(self) -> None:
+        self.stages()
+        self.github.set_checks(HEAD, PENDING)
+        self.github.set_checks(OTHER, PASSED)
+
+        def push(now):
+            self.github.head = OTHER
+
+        self.clock.on_sleep = push
+        with mock.patch.object(rc, "probe_change_request",
+                               return_value=mock.Mock(head_sha=OTHER)), mock.patch.object(
+                rc, "synchronize_worktree", return_value=(HEAD, OTHER)) as sync:
+            report = self.parallel(cwd=str(ROOT))
+
+        self.assertTrue(sync.called, report.explain())
+        sync.assert_called_once_with("4", str(ROOT), target_head=OTHER)
+        self.assertTrue(any(HEAD in line and OTHER in line for _, line in report.notes))
+        sync_events = cj.events(self.store.path, "owner/api", task_id="API-7",
+                                kinds=("stage_result",))
+        self.assertTrue(any(event["correlation"] == {
+            "old_head_sha": HEAD, "new_head_sha": OTHER,
+        } for event in sync_events))
+        self.assertEqual(rc.APPROVED_END, report.status)
+
+        self.assertTrue(any(event["role"] == "rereview" and event["stage_seq"] == 3
+                            for event in sync_events))
 
     def test_a_second_move_stops_for_a_person(self) -> None:
         self.stages()

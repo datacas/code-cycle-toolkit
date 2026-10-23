@@ -385,6 +385,14 @@ class CycleDriverError(RuntimeError):
     """The driver was asked for something it cannot honestly do."""
 
 
+class WorktreeSyncError(CycleDriverError):
+    """A change-request head cannot be synchronized without losing work."""
+
+    def __init__(self, message: str, stop_reason: str | None = None):
+        super().__init__(message)
+        self.stop_reason = stop_reason
+
+
 def load_config(path: Path) -> dict:
     """Read `.code-cycle.yml`, or say exactly why it could not be read.
 
@@ -1332,6 +1340,74 @@ def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
         return None
     value = completed.stdout.strip()
     return value if completed.returncode == 0 and value else None
+
+
+def synchronize_worktree(change_request_id: str, cwd: str, *,
+                         target_head: str | None = None,
+                         run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+                         ) -> tuple[str, str] | None:
+    """Fast-forward a clean linked checkout to its open GitHub PR head.
+
+    Return the old and new full SHAs when the checkout moved, or None when it
+    was already current. Never reset, discard, or switch the working branch.
+    """
+    number = str(change_request_id).lstrip("#")
+    if not re.fullmatch(r"[1-9][0-9]*", number):
+        raise CycleDriverError("worktree synchronization requires a numeric GitHub PR")
+
+    def git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        try:
+            result = run(["git", *args], cwd=cwd, capture_output=True,
+                         text=True, encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CycleDriverError(f"worktree synchronization Git command failed: {error}") from error
+        if check and result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+            raise CycleDriverError(f"worktree synchronization Git command failed: {detail}")
+        return result
+
+    current = git(["rev-parse", "--verify", "HEAD"]).stdout.strip()
+    if not FULL_SHA.fullmatch(current):
+        raise CycleDriverError("worktree synchronization could not read the current HEAD")
+    if target_head is not None:
+        if not FULL_SHA.fullmatch(target_head):
+            raise CycleDriverError("worktree synchronization received an invalid PR head SHA")
+        if current == target_head:
+            return None
+    dirty = git(["status", "--porcelain", "--untracked-files=normal"]).stdout.strip()
+    if dirty:
+        raise WorktreeSyncError(
+            "local worktree has modifications; no files were changed", "worktree_dirty")
+
+    ref = f"refs/code-cycle/pulls/{number}/head"
+    git(["fetch", "origin", f"+refs/pull/{number}/head:{ref}"])
+    target = git(["rev-parse", "--verify", ref]).stdout.strip()
+    if not FULL_SHA.fullmatch(target):
+        raise CycleDriverError("worktree synchronization could not read the fetched PR head")
+    if current == target:
+        return None
+
+    ancestor = git(["merge-base", "--is-ancestor", current, target], check=False)
+    if ancestor.returncode == 1:
+        raise WorktreeSyncError(
+            f"change request head {target} is not a fast-forward from local HEAD {current}; no files were changed",
+            "worktree_diverged")
+    if ancestor.returncode:
+        raise CycleDriverError("worktree synchronization could not compare the two heads")
+
+    merged = git(["merge", "--ff-only", "--no-edit", target], check=False)
+    if merged.returncode:
+        dirty = git(["status", "--porcelain", "--untracked-files=normal"]).stdout.strip()
+        if dirty:
+            raise WorktreeSyncError(
+                "local worktree became dirty before synchronization; no files were changed",
+                "worktree_dirty")
+        detail = merged.stderr.strip() or merged.stdout.strip() or f"exit {merged.returncode}"
+        raise CycleDriverError(f"worktree fast-forward failed: {detail}")
+    synchronized = git(["rev-parse", "--verify", "HEAD"]).stdout.strip()
+    if synchronized != target:
+        raise CycleDriverError("worktree fast-forward did not reach the fetched PR head")
+    return current, synchronized
 
 WORKSPACE_MODES = ("task", "current")
 
@@ -2961,6 +3037,25 @@ def run_cycle(
             )
         if recover:
             instruction += retry_directive(role, change_request_id)
+        if (role in {"resolve", "rereview"} and code_host == "github"
+                and change_request_id is not None and cwd is not None):
+            try:
+                target_head = probe_change_request(repo_id, change_request_id, cwd).head_sha
+                synchronized = synchronize_worktree(
+                    change_request_id, cwd, target_head=target_head)
+            except WorktreeSyncError as error:
+                return Reported(), stop(str(error), "BLOCKED",
+                                        stop_reason=error.stop_reason or "stage_not_completed")
+            except CycleDriverError as error:
+                return Reported(), stop(str(error), "BLOCKED")
+            if synchronized is not None:
+                old_head, new_head = synchronized
+                report.note(f"worktree fast-forwarded: {old_head} -> {new_head}")
+                journal.record(
+                    "stage_result", role=role, stage_seq=recorder.stage_seq + 1,
+                    component="runtime", status="worktree_synchronized",
+                    reason="clean worktree fast-forwarded to the open pull request head",
+                    correlation={"old_head_sha": old_head, "new_head_sha": new_head})
         outcome, reported, tampered, findings = run(
             role, instruction, change_request_id=change_request_id,
             resolve_target=resolve_target,
@@ -2986,6 +3081,19 @@ def run_cycle(
             try:
                 if not attempt_id:
                     raise CycleDriverError("recovery requires a recorded dispatch attempt")
+                if (role == "review" and code_host == "github"
+                        and change_request_id is not None and cwd is not None):
+                    target_head = probe_change_request(repo_id, change_request_id, cwd).head_sha
+                    synchronized = synchronize_worktree(
+                        change_request_id, cwd, target_head=target_head)
+                    if synchronized is not None:
+                        old_head, new_head = synchronized
+                        report.note(f"worktree fast-forwarded for recovery: {old_head} -> {new_head}")
+                        journal.record(
+                            "stage_result", role=role, stage_seq=recorder.stage_seq + 1,
+                            component="runtime", status="worktree_synchronized",
+                            reason="clean worktree fast-forwarded before review recovery",
+                            correlation={"old_head_sha": old_head, "new_head_sha": new_head})
                 receipt = recovery_evidence(
                     repo_id, role, attempt_id, change_request_id=change_request_id,
                     cwd=cwd, trusted_authors=trusted_authors, awaiting_ci=parallel)
@@ -2993,6 +3101,10 @@ def run_cycle(
                     attempt_id, change_request_id=receipt["change_request_id"],
                     head_sha=receipt["head_sha"], comment_id=receipt["comment_id"])
             except (CycleDriverError, TelemetryError) as error:
+                if isinstance(error, WorktreeSyncError):
+                    return reported, stop(f"{role} recovery rejected: {error}", "BLOCKED",
+                                          reported=reported,
+                                          stop_reason=error.stop_reason or "stage_not_completed")
                 return reported, stop(f"{role} recovery rejected: {error}", reported=reported)
             pending_recovery = receipt
             report.stage_details[-1].status = "recovered_pending_verification"

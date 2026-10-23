@@ -136,10 +136,24 @@ class StageRecoveryTests(RunCycleTestCase):
             if len(calls) == 1:
                 return self.publish(task, "review", status="APPROVED")
             return block("APPROVED", head_sha=self.head)
-        report = self.execute(lambda task: block("IMPLEMENTED"), review)
+        with mock.patch.object(rc, "synchronize_worktree", return_value=None) as sync:
+            report = self.execute(lambda task: block("IMPLEMENTED"), review)
         self.assertEqual(rc.APPROVED_END, report.status)
         self.assertEqual(2, len(calls))
         self.assertIn("Obtain a structured verdict", calls[1])
+        sync.assert_called_once_with("4", str(self.checkout), target_head=self.head)
+
+    def test_recovery_sync_failure_keeps_its_blocked_stop_reason(self):
+        calls = []
+        def review(task):
+            calls.append(task)
+            return self.publish(task, "review", status="APPROVED")
+        error = getattr(rc, "WorktreeSyncError")("local worktree has modifications", "worktree_dirty")
+        with mock.patch.object(rc, "synchronize_worktree", side_effect=error):
+            report = self.execute(lambda task: block("IMPLEMENTED"), review)
+        self.assertEqual("BLOCKED", report.status)
+        self.assertEqual("worktree_dirty", report.stop_reason)
+        self.assertEqual(1, len(calls))
 
     def test_the_verdict_retry_of_a_recovered_review_expects_no_publication(self):
         calls = []
