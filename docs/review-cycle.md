@@ -115,7 +115,7 @@ Under `parallel` a review never turns a check's state into a finding; the CI gat
 |---|---|
 | `CI_PASSED` | `READY_FOR_MANUAL_MERGE`, once the receipt still holds |
 | `CI_FAILED` | one resolution round, told the SHA and the number of failed checks, never their names, which the change under review writes; a resolution that leaves the head unchanged stops as `no_progress` |
-| `CI_HEAD_MOVED` | the clean review is not reused: one fresh rereview of the new head, as one round; a second move stops as `head_moved` |
+| `CI_HEAD_MOVED` | the clean review is not reused: the runtime fast-forwards a clean worktree to the open pull request head and starts one fresh rereview; a dirty worktree stops as `BLOCKED` with `worktree_dirty`, a diverged branch stops as `BLOCKED` with `worktree_diverged`, and a second head move stops as `head_moved` |
 | `CI_SKIPPED`, `NO_CI_CHECKS_FOUND` | `HUMAN_INTERVENTION`, recorded as `ci_not_passing` |
 | `CI_TIMEOUT`, after `ci.timeout` (default 900 s) | `BLOCKED`, recorded as `ci_timeout`; the clean review stays valid for that SHA |
 | `CI_UNREADABLE` | `BLOCKED`, recorded as `ci_unreadable` |

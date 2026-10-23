@@ -2540,6 +2540,103 @@ class WorkspaceSelectionTests(unittest.TestCase):
             self.assertFalse(dispatched.called)
 
 
+class WorktreeSynchronizationTests(unittest.TestCase):
+    def git(self, cwd: Path, *args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                                 text=True, check=True)
+        return result.stdout.strip()
+
+    def checkout_pair(self, root: Path) -> tuple[Path, Path, Path]:
+        bare = root / "remote.git"
+        seed = root / "seed"
+        checkout = root / "checkout"
+        bare.mkdir()
+        subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True,
+                       text=True, check=True)
+        seed.mkdir()
+        subprocess.run(["git", "init", str(seed)], capture_output=True,
+                       text=True, check=True)
+        self.git(seed, "config", "user.name", "Cycle Test")
+        self.git(seed, "config", "user.email", "cycle-test@example.invalid")
+        (seed / "file.txt").write_text("base\n", encoding="utf-8")
+        self.git(seed, "add", "file.txt")
+        self.git(seed, "commit", "-m", "base")
+        self.git(seed, "branch", "-M", "main")
+        self.git(seed, "remote", "add", "origin", str(bare))
+        self.git(seed, "push", "origin", "main")
+        self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
+        subprocess.run(["git", "clone", "--branch", "main", str(bare), str(checkout)],
+                       capture_output=True, text=True, check=True)
+        return bare, seed, checkout
+
+    def test_fast_forwards_clean_worktree_and_reports_full_shas(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, seed, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (seed / "file.txt").write_text("updated\n", encoding="utf-8")
+            self.git(seed, "commit", "-am", "updated")
+            self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
+            new = self.git(seed, "rev-parse", "HEAD")
+
+            self.assertEqual((old, new), rc.synchronize_worktree("7", str(checkout)))
+            self.assertEqual(new, self.git(checkout, "rev-parse", "HEAD"))
+            self.assertIsNone(rc.synchronize_worktree("7", str(checkout)))
+
+    def test_dirty_worktree_stops_without_changing_head_or_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, seed, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (seed / "file.txt").write_text("updated\n", encoding="utf-8")
+            self.git(seed, "commit", "-am", "updated")
+            self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
+            (checkout / "local.txt").write_text("keep me\n", encoding="utf-8")
+
+            with self.assertRaises(rc.WorktreeSyncError) as raised:
+                rc.synchronize_worktree("7", str(checkout))
+
+            self.assertEqual("worktree_dirty", raised.exception.stop_reason)
+            self.assertEqual(old, self.git(checkout, "rev-parse", "HEAD"))
+            self.assertEqual("keep me\n", (checkout / "local.txt").read_text(encoding="utf-8"))
+
+    def test_diverged_worktree_stops_without_moving_either_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, seed, checkout = self.checkout_pair(Path(temporary))
+            (seed / "file.txt").write_text("remote\n", encoding="utf-8")
+            self.git(seed, "commit", "-am", "remote")
+            self.git(seed, "push", "origin", "HEAD:refs/pull/7/head")
+            remote_head = self.git(seed, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("local\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "local")
+            local_head = self.git(checkout, "rev-parse", "HEAD")
+
+            with self.assertRaises(rc.WorktreeSyncError) as raised:
+                rc.synchronize_worktree("7", str(checkout))
+
+            self.assertEqual("worktree_diverged", raised.exception.stop_reason)
+            self.assertEqual(local_head, self.git(checkout, "rev-parse", "HEAD"))
+            self.assertEqual(remote_head, self.git(seed, "rev-parse", "HEAD"))
+
+
+class WorktreeSynchronizationStopTests(RunCycleTestCase):
+    def test_dirty_and_diverged_sync_failures_are_blocked_with_exact_reasons(self) -> None:
+        for reason in ("worktree_dirty", "worktree_diverged"):
+            with self.subTest(stop_reason=reason), mock.patch.object(
+                    rc, "synchronize_worktree",
+                    side_effect=rc.WorktreeSyncError(reason, reason)), mock.patch.object(
+                        rc, "probe_change_request",
+                        return_value=mock.Mock(head_sha="a" * 40)):
+                report = self.run_cycle(
+                    Talker("codex"), Talker("claude"),
+                    start_from="resolve", change_request_id="7", code_host="github",
+                    cwd=str(self.home),
+                )
+
+            self.assertEqual("BLOCKED", report.status)
+            self.assertEqual(reason, report.stop_reason)
+            self.assertIn(reason, report.stopped_because)
+            self.assertEqual([], report.stages)
+
+
 class ChangeRequestCheckTests(unittest.TestCase):
     """The pull request is read, not assumed, before a resume dispatches."""
 
