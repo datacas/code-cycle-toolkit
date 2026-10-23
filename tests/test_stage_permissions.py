@@ -684,19 +684,33 @@ class AllowedToolsTests(PolicyTestCase):
         for role in ("implement", "review", "rereview", "issue_review"):
             self.assertNotIn("Bash(gh api graphql:*)", self.patterns(role))
 
-    def test_only_the_resolver_gets_the_staged_triage_validator(self) -> None:
-        resolve = self.policy("resolve")
+    def test_review_resolve_and_rereview_get_only_the_staged_triage_validator(self) -> None:
         validator = sp._triage_validator_path()
-        variable_command = f'python3 {validator} "$TMPDIR/pr-comment.md"'
-        self.allowed(variable_command, resolve)
-        self.denied("python3 -m unittest", resolve)
-        self.assertIn(f"Bash({variable_command}:*)", self.patterns("resolve"))
-        self.assertNotIn(f"Bash({variable_command}:*)", self.patterns("review"))
+        for role in ("review", "rereview", "resolve"):
+            policy = self.policy(role)
+            variable_command = f'python3 {validator} "$TMPDIR/pr-comment.md"'
+            absolute = Path(policy.tmpdir) / "pr-comment.md"
+            nested = Path(policy.tmpdir) / "claude-123" / "pr-comment.md"
+            self.allowed(variable_command, policy)
+            self.allowed(f"python3 {validator} {absolute}", policy)
+            self.allowed(f"python3 {validator} {nested}", policy)
+            self.denied(f"python3 {validator} {Path(policy.tmpdir) / 'reply.md'}", policy)
+            self.denied(f"python3 {validator} {self.sibling / 'pr-comment.md'}", policy)
+            self.denied(f"python3 {validator} {absolute} extra", policy)
+            self.denied("python3 -m unittest", policy)
+            patterns = self.patterns(role, tmpdir=policy.tmpdir)
+            self.assertIn(f"Bash({variable_command}:*)", patterns)
+            self.assertIn(f"Bash(python3 {validator} {absolute}:*)", patterns)
+            self.assertTrue(any("claude-*/pr-comment.md" in pattern for pattern in patterns))
+            self.assertIn(f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
+                          sp.prompt_note(policy))
+            if role in {"review", "rereview"}:
+                self.assertIn("before publishing", sp.prompt_note(policy))
+        self.assertNotIn(
+            f'Bash(python3 {validator} "$TMPDIR/pr-comment.md":*)',
+            self.patterns("implement"))
         self.assertNotIn("python3 scripts/validate-triage-comment.py", " ".join(
             self.patterns("resolve")))
-        self.assertIn(
-            f'run `python3 {validator} "$TMPDIR/pr-comment.md"`',
-            sp.prompt_note(resolve))
 
     def test_every_searching_stage_gets_the_git_search_prefixes(self) -> None:
         # #270: the hook allowed `git grep` for issue_review while these

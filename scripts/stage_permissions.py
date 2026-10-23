@@ -561,9 +561,11 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if parsed.redirects:
             raise PolicyError("the permissions command may not redirect its output")
         return
-    if (policy.role == "resolve" and policy.tmpdir and len(words) == 3
+    if (policy.role in {"review", "rereview", "resolve"} and policy.tmpdir
+            and len(words) == 3
             and words[:2] == ["python3", _triage_validator_path()]
-            and Path(words[2]) == Path(policy.tmpdir) / "pr-comment.md"):
+            and Path(words[2]).name == "pr-comment.md"
+            and is_tmpdir_helper(words[2], policy.tmpdir)):
         return
     for command in policy.commands:
         expected = parse_command(command, None).words
@@ -1389,10 +1391,15 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             # wildcard rather than a word prefix; the hook checks the rest.
             wildcards += [f"gh api repos/{policy.repo}/check-runs/*",
                           f"gh api * repos/{policy.repo}/check-runs/*"]
-        if policy.tmpdir:
-            prefixes.append(
-                f'python3 {shlex.quote(_triage_validator_path())} '
-                '"$TMPDIR/pr-comment.md"')
+    if policy.role in {"review", "rereview", "resolve"} and policy.tmpdir:
+        validator = shlex.quote(_triage_validator_path())
+        tmpdir = str(Path(policy.tmpdir).resolve(strict=False))
+        prefixes += [
+            f'python3 {validator} "$TMPDIR/pr-comment.md"',
+            f'python3 {validator} {shlex.quote(str(Path(tmpdir) / "pr-comment.md"))}',
+        ]
+        wildcards.append(
+            f'python3 {validator} {_absolute_rule_path(tmpdir)}/claude-*/pr-comment.md')
     prefixes += sorted(READ_SHELL)
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))
@@ -1493,13 +1500,18 @@ def prompt_note(policy: StagePolicy) -> str:
             " The permission decisions in force for this repository and branch are "
             f"listed by `{shlex.join(policy.permissions_command)}`; it is read-only "
             "and grants nothing, and takes no other arguments.")
-    if policy.role == "resolve":
+    if policy.role in {"review", "rereview", "resolve"}:
         tmpdir_note += (
             " The staged-comment validator is installed with the runtime at "
             f"`{_triage_validator_path()}`; run "
             f'`python3 {shlex.quote(_triage_validator_path())} '
             '"$TMPDIR/pr-comment.md"`. '
         )
+        if policy.role in {"review", "rereview"}:
+            tmpdir_note += (
+                " Validate the staged comment with this command before publishing; "
+                "if validation fails, fix the comment and validate it again."
+            )
     return (
         foreground +
         f" Command policy for this {policy.role} stage: a runtime hook validates "

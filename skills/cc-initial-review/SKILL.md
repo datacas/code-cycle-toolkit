@@ -491,8 +491,11 @@ intermediate reviews.
 7. Validate actionable findings by execution when the verification preflight
    succeeds.
 8. Inspect the current CI state.
-9. Publish one complete comment on the change request through the configured
-   code host.
+9. Write the complete comment to `$TMPDIR/pr-comment.md` and run the installed
+   `validate-triage-comment.py` on that file. If validation fails, fix the
+   comment and validate it again before publishing.
+10. Publish one complete comment on the change request through the configured
+    code host.
 
 Use these functional statuses:
 
