@@ -17,6 +17,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import native_prerequisites
+
 REGISTRIES = ("registry.npmjs.org", "registry.yarnpkg.com")
 LOCKS = {"pnpm-lock.yaml": "pnpm", "package-lock.json": "npm",
          "npm-shrinkwrap.json": "npm", "yarn.lock": "yarn"}
@@ -99,6 +101,9 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
                     writable: list[Path], protected: list[Path], domains: tuple[str, ...],
                     settings: Path) -> list[str]:
     if executor == "codex":
+        if native_prerequisites.nested_codex():
+            raise OSError("known nested Codex limitation (#268): app-server socket directory must be "
+                          "a user-owned directory with mode 0700; check not_verified without probing")
         profile = "code_cycle_prepare"
         rules = {str(path): "write" for path in writable}
         # :read-only already protects the rest of the checkout. Serialising
@@ -119,7 +124,7 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
                 "-c", f"permissions.{profile}.filesystem={filesystem}", "--", *command]
     # This is the same sandbox runtime Claude Code uses for Bash. No npx
     # bootstrap or unsandboxed fallback when the host has not installed it.
-    srt = shutil.which("srt")
+    srt = native_prerequisites.executable("srt")
     if not srt:
         raise OSError("Claude dependency preparation needs the installed srt sandbox runtime")
     settings.write_text(json.dumps({

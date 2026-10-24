@@ -47,9 +47,11 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Any
 
 import stage_permissions as sp
 import dependency_setup
+import native_prerequisites as native
 from router import Availability, RoutingDecision, RoutingMode, Target
 from stage_permissions import StagePolicy
 from usage import normalize_executor_output
@@ -1150,41 +1152,39 @@ class NativeAdapter(Adapter):
             # The hook records its own denials under this attempt (#306).
             command_policy = replace(command_policy, attempt_id=dispatch_attempt_id)
         policy = command_policy if command_policy is not None and command_policy.active else None
-        policy_note: dict[str, object] = ({} if command_policy is None else {"command_policy": (
+        requested_verification = command_policy.verification_commands if command_policy is not None else ()
+        policy_note: dict[str, Any] = ({} if command_policy is None else {"command_policy": (
             "active" if policy is not None
             else f"inactive: {command_policy.inactive_reason}")})
         # Record native-sandbox prerequisites before dependency setup or agent
         # dispatch. This evidence is attached to the stage attempt; a missing
         # capability must not silently turn an unrun check into a pass.
         if command_policy is not None:
-            required = ("rg", "bwrap", "socat") if sys.platform.startswith("linux") else ("rg",)
-            if self.name == "claude":
-                required = (*required, "srt")
-            probes = {name: shutil.which(name) for name in ("srt", "rg", "bwrap", "socat")}
-            missing = [name for name in required if probes[name] is None]
-            sandbox_evidence = {
-                "platform": sys.platform,
-                "validated_platform": sys.platform.startswith("linux"),
-                "probes": [{"name": name, "observed": probes[name],
-                            "outcome": "available" if probes[name] else "missing"}
-                           for name in required],
-                "functional_check": "not_run",
-                "status": "unverified",
-                "missing": missing,
-            }
-            if missing and sys.platform.startswith("linux"):
-                sandbox_evidence["action"] = (
-                    "install the missing sandbox prerequisite user-locally, then rerun the isolated check"
-                )
-            if self.name == "codex" and command_policy.role in sp.REVIEW_ROLES:
-                # Codex masks its own app-server socket inside its native
-                # sandbox. Never probe or try to repair the host directory.
-                sandbox_evidence["codex_socket"] = {
-                    "outcome": "known_limited",
-                    "reason": "the native sandbox masks /tmp/codex-daemon-<uid> for nested Codex commands",
-                }
+            sandbox_evidence = native.observe(self.name, recover=runner is _run)
+            missing = sandbox_evidence["missing"]
+            needs_bash_sandbox = (self.name == "claude" and policy is not None
+                                  and (policy.requires_confined_verification or policy.registry_domains))
+            if needs_bash_sandbox and sys.platform.startswith("linux") and runner is _run:
+                ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe)
+                sandbox_evidence["functional_check"] = {"probe": "bwrap", "passed": ready,
+                                                          "evidence": detail}
+                sandbox_evidence["status"] = "verified" if ready else "unverified"
+                if not ready or any(tool in missing for tool in ("bwrap", "socat")):
+                    # The existing hook + disposable clone remains the static
+                    # boundary. Remove code execution grants, never run tests
+                    # outside a sandbox. Writing stages may still edit/publish.
+                    command_policy = replace(command_policy, static_only=True)
+                    policy = command_policy
+                    sandbox_evidence["mode"] = "static_only"
+                    sandbox_evidence["status"] = "unverified"
+            if (self.name == "claude" and sys.platform.startswith("linux")
+                    and runner is _run and "srt" not in missing):
+                ready, detail = native.isolation_probe("srt", runner=_run_sandbox_probe)
+                sandbox_evidence["preparation_isolation"] = {"passed": ready, "evidence": detail}
+                if not ready:
+                    sandbox_evidence["status"] = "unverified"
             policy_note["native_sandbox_preflight"] = sandbox_evidence
-            if missing or "codex_socket" in sandbox_evidence:
+            if sandbox_evidence["status"] == "unverified":
                 task += (
                     "\n\nNative sandbox preflight evidence (runtime observed): "
                     f"{json.dumps(sandbox_evidence, sort_keys=True)}. Keep the selected executor. "
@@ -1192,7 +1192,10 @@ class NativeAdapter(Adapter):
                     "work that is safe to perform; identify each affected check as not_verified "
                     "with its cause and evidence, never as passed. For reviews, continue static "
                     "analysis only if the existing read-only boundary remains safe; otherwise "
-                    "report the specific remaining blocker."
+                    "report the specific remaining blocker. When main work is complete, return "
+                    "its completed functional status with tests.conclusion=not_verified; a known "
+                    "prerequisite alone is not BLOCKED. Never describe an incomplete implementation "
+                    "as complete."
                 )
         refused = self.policy_preflight(policy, cwd)
         if refused is not None:
@@ -1201,7 +1204,7 @@ class NativeAdapter(Adapter):
                 detail=failure_excerpt(f"BLOCKED: {refused}", 600),
                 error_code="precondition", start_state="not_started",
                 lifecycle_state="failed",
-                artifacts={"command_policy": f"blocked: {failure_excerpt(refused, 300)}",
+                artifacts={**policy_note, "command_policy": f"blocked: {failure_excerpt(refused, 300)}",
                            "policy_preflight_refusal": failure_excerpt(refused, 600)},
             )
         try:
@@ -1212,8 +1215,15 @@ class NativeAdapter(Adapter):
         preparation = {"status": "not_required", "items": []}
         if command_policy is not None and command_policy.role in sp.WRITING_ROLES | sp.REVIEW_ROLES:
             try:
-                preparation = dependency_setup.prepare(
-                    worker_cwd, self.name, self.binary, domains=command_policy.registry_domains)
+                preflight = policy_note.get("native_sandbox_preflight", {})
+                if (preflight.get("codex_socket") or command_policy.static_only
+                        or preflight.get("preparation_isolation", {}).get("passed") is False):
+                    preparation = {"status": "incomplete", "items": [],
+                                   "error": "native preparation isolation unavailable",
+                                   "prerequisite_evidence": preflight}
+                else:
+                    preparation = dependency_setup.prepare(
+                        worker_cwd, self.name, self.binary, domains=command_policy.registry_domains)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 preparation = {"status": "incomplete", "items": [], "error": str(error)}
             if preparation["status"] != "not_required":
@@ -1282,6 +1292,14 @@ class NativeAdapter(Adapter):
         environment = self.dispatch_environment(
             writes=writes, publishes=publishes, writable_dirs=writable_dirs,
         )
+        environment = dict(os.environ if environment is None else environment)
+        environment["CODE_CYCLE_STAGE_EXECUTOR"] = self.name
+        # Managed tools need no shell-profile edits or globally changed PATH.
+        managed = [str(Path(probe["path"]).parent) for probe in
+                   policy_note.get("native_sandbox_preflight", {}).get("probes", [])
+                   if probe.get("path") and probe.get("outcome") in {"installed", "reused"}]
+        if managed:
+            environment["PATH"] = os.pathsep.join((*managed, environment.get("PATH", "")))
         if preparation["status"] != "not_required":
             # Preparation precedes terminal publication and model execution.
             # Failed setup does not cancel useful source inspection or CI reads.
@@ -1332,13 +1350,15 @@ class NativeAdapter(Adapter):
                 lifecycle_state="timed_out",
                 error_code="timeout", start_state=observed_start(_events(partial_stdout)),
                 process_exited=getattr(timeout_error, "process_exited", False),
+                artifacts=policy_note,
             )
         except Exception as exc:
             not_launched = isinstance(exc, OSError)
             return DispatchResult(DispatchOutcome.FAILED, self.name, target,
                                   detail=failure_excerpt(str(exc)), lifecycle_state="failed",
                                   error_code="precondition" if not_launched else "executor_error",
-                                  start_state="not_started" if not_launched else "unknown")
+                                  start_state="not_started" if not_launched else "unknown",
+                                  artifacts=policy_note)
 
         if on_workspace is not None:
             on_workspace(worker_cwd)
@@ -1370,6 +1390,10 @@ class NativeAdapter(Adapter):
                     "process_exited": getattr(completed, "process_exited", False)}
         annotations = {**policy_note, **self.extra_artifacts(stdout)}
         result = self._classify_completed(target, completed, argv, stdout, signal, evidence)
+        if policy is not None and policy.static_only:
+            result = replace(result, agent_output=native.static_result(
+                result.agent_output, requested_verification,
+                policy_note.get("native_sandbox_preflight", {})))
         if annotations:
             # A classification's own note, such as a sandbox that did not
             # start, outranks the policy's general one.
@@ -2572,7 +2596,7 @@ class ClaudeAdapter(NativeAdapter):
                 "BASH_DEFAULT_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
                 "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
             })
-            if runtime_policy.active and (runtime_policy.requires_confined_verification
+            if runtime_policy.active and not runtime_policy.static_only and (runtime_policy.requires_confined_verification
                                           or runtime_policy.registry_domains):
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
@@ -3320,14 +3344,23 @@ def dispatch(
             # Codex reviewers verify in a disposable clone too (#142), under a
             # profile whose only writable paths are that clone and TMPDIR.
             if active_policy.requires_confined_verification:
-                confined, detail = adapter.probe_review_confinement()
+                if native.nested_codex():
+                    confined, detail = False, (
+                        "known nested Codex limitation (#268): app-server socket directory must be "
+                        "a user-owned directory with mode 0700; no host directory probe")
+                else:
+                    confined, detail = adapter.probe_review_confinement()
                 if not confined:
                     return DispatchResult(
                         DispatchOutcome.FAILED, target.executor, target,
                         detail=failure_excerpt(f"BLOCKED: {detail}", 600),
                         error_code="environment_restricted", start_state="not_started",
                         lifecycle_state="failed", process_exited=True,
-                        artifacts={"command_policy": "blocked: review sandbox unverified"},
+                        artifacts={"command_policy": "blocked: review sandbox unverified",
+                                   "native_sandbox_preflight": {
+                                       "status": "unverified", "functional_check": {
+                                           "probe": "codex review confinement", "passed": False,
+                                           "evidence": detail}}},
                     )
             return _isolated_review_dispatch(
                 adapter, target, task, cwd=kw.get("cwd"),

@@ -35,12 +35,44 @@ into scratch and credential environment variables are not inherited. Registry
 authentication that is not available in this environment is a concrete setup
 failure, not a successful install or a model failure.
 
-The host must supply the selected native sandbox and package manager. The
-Anthropic Sandbox Runtime documents macOS support via Seatbelt (with `rg`),
-Linux support via bubblewrap and socat (with `rg`), and Windows support as
-alpha. The runtime records which prerequisites it observes before dispatch;
-presence alone does not prove that isolation works. Missing binaries and
-sandbox startup failures are recorded. The runtime tries transient
+The host supplies the native executor and package manager. Before native stage
+dispatch, Linux/WSL2 recovery reuses working `srt` and `rg` binaries. Missing or
+unusable tools are installed in immutable bundles below
+`~/.local/lib/code-cycle-tools/`; the stage receives their executable directories
+on its own `PATH`, without editing shell profiles. Existing managed bundles
+are reused without resolving a newer version. The bundle's `receipt.json`
+records version, source and integrity; stage observations also enter the existing
+cycle journal, rather than a new telemetry store.
+
+`srt` comes only from the official `@anthropic-ai/sandbox-runtime` npm package.
+Recovery selects the newest stable published version whose Node engine range
+matches the host, checks npm SHA-512 integrity before installation, and invokes
+npm with `--ignore-scripts` and `--engine-strict`. No project scripts or project
+npm configuration participate. Missing Node/npm, unsupported engine syntax,
+integrity errors and failed installs leave the check unverified. `rg` comes
+from the official ripgrep GitHub release for Linux x86_64 or aarch64, with its
+published SHA-256 checksum checked before extracting the regular executable.
+Both tools must run before their scratch bundle is atomically renamed into
+place. Recovery uses no `sudo`, never auto-updates, and never falls back to an
+unconfined dependency install. A failed replacement leaves existing bundles
+untouched.
+
+The [upstream srt documentation](https://github.com/anthropics/sandbox-runtime#how-it-works)
+describes macOS Seatbelt, Linux bubblewrap and Windows isolation. Automatic
+recovery here is validated only on Linux/WSL2; other platforms keep their
+existing native sandbox behavior. An unvalidated platform by itself does not
+make a concrete check fail or become unverified.
+
+Presence alone does not prove isolation. Claude stages needing confined Bash
+verification run a fixed host-owned probe of allowed writes, denied reads and
+writes, and denied local network access. Preparation separately probes `srt`.
+These probes run no repository code. If the required Bash boundary cannot
+start, the command hook removes verification and arbitrary-code grants; the
+stage continues source work with checks recorded as `not_verified`. Reviews
+retain the disposable clone and publication guards and cover static findings
+only. Missing `bwrap`/`socat` need host installation; the runtime never installs
+system packages. An unavailable preparation boundary skips preparation and
+carries the cause into the stage. The runtime tries transient
 failures/timeouts at most twice, reaps timed-out process groups before retrying,
 and continues the stage with the setup evidence when preparation is exhausted.
 The agent can continue source inspection and read CI for the exact HEAD. Pending

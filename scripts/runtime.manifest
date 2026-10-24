@@ -16,6 +16,7 @@ ci_gate.py
 reroute.py
 environment_recovery.py
 dependency_setup.py
+native_prerequisites.py
 user_choices.py
 grants.py
 stage_permissions.py

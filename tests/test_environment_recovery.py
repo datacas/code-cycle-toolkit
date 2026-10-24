@@ -6,7 +6,7 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -102,6 +102,78 @@ class SandboxReportTests(unittest.TestCase):
 
 
 class SandboxRerouteTests(CycleTestCase):
+    def test_runtime_observed_native_probe_failure_does_not_reroute(self):
+        class ProbeFailure(ScriptedAdapter):
+            def dispatch(self, target, task, **kwargs):
+                self.dispatched.append(task)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    error_code="environment_restricted", start_state="not_started", process_exited=True,
+                    detail="native probe timed out", artifacts={"native_sandbox_preflight": {
+                        "status": "unverified", "functional_check": {"passed": False}}})
+        _, primary, fallback, outcome = self.execute(primary=ProbeFailure("codex"))
+        self.assertEqual(1, len(primary.dispatched))
+        self.assertFalse(fallback.dispatched)
+        self.assertFalse(outcome.rerouted)
+        self.assertFalse(outcome.succeeded)
+
+    def test_top_level_preflight_is_persisted_in_existing_journal(self):
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter])
+        recorder.journal = Mock()
+        evidence = {"status": "unverified", "missing": ["rg"], "probes": [
+            {"name": "rg", "outcome": "missing", "observed": None}]}
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex",
+                                   router.parse_target("codex:openai/gpt-6-luna high"),
+                                   artifacts={"command_policy": "active",
+                                              "native_sandbox_preflight": evidence})
+        recorder._journal_attempt("implement", result, "attempt-test", None, {})
+        recorded = [call for call in recorder.journal.record.call_args_list
+                    if call.args[0] == "sandbox_preflight"]
+        self.assertEqual(1, len(recorded))
+        self.assertEqual(evidence, recorded[0].kwargs["detail"])
+        self.assertEqual("attempt-test", recorded[0].kwargs["attempt_id"])
+
+    def test_completed_work_with_known_pending_checks_continues_to_review(self):
+        for absent in ({"srt", "rg"}, {"srt"}, {"rg"}, set()):
+            class CompletedAdapter(ScriptedAdapter):
+                def dispatch(self, target, task, **kwargs):
+                    self.dispatched.append(task)
+                    return ex.DispatchResult(
+                        ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                        process_exited=True, start_state="started",
+                        agent_output=block("IMPLEMENTED" if kwargs.get("writes") else "CHANGES_REQUESTED",
+                                           tests={"conclusion": "not_verified", "ran": False},
+                                           native_sandbox_preflight={"missing": sorted(absent)}))
+            with self.subTest(absent=absent):
+                primary = CompletedAdapter("codex")
+                fallback = ScriptedAdapter("claude")
+                recorder = self.recorder([primary, fallback])
+                implemented = recorder.stage("implement", "complete main work")
+                reviewed = recorder.stage("review", "review statically")
+                self.assertTrue(implemented.succeeded)
+                self.assertTrue(reviewed.succeeded)
+                self.assertFalse(implemented.rerouted)
+                self.assertFalse(reviewed.rerouted)
+                self.assertFalse(fallback.dispatched)
+
+    def test_known_prerequisites_never_reroute_but_incomplete_work_stays_blocked(self):
+        for command, error in (
+            ("codex sandbox -- true", "app-server socket directory must be a user-owned directory with mode 0700"),
+            ("srt -- npm ci", "srt: not found"),
+            ("rg x", "rg: command not found"),
+            ("bwrap -- true", "bwrap: Creating new namespace failed: Operation not permitted"),
+            ("socat -V", "socat: not installed"),
+        ):
+            with self.subTest(command=command):
+                blocker = {**BLOCKER, "command": command, "error": error}
+                _, primary, fallback, outcome = self.execute(primary=RestrictedAdapter(blocker=blocker))
+                self.assertFalse(outcome.rerouted)
+                self.assertEqual(1, len(primary.dispatched))
+                self.assertFalse(fallback.dispatched)
+                self.assertFalse(outcome.succeeded)
+                self.assertIn("not_verified", outcome.result.detail)
+
     def execute(self, primary=None, fallback=None, **kwargs):
         primary = primary or RestrictedAdapter()
         fallback = fallback or ScriptedAdapter("claude")
