@@ -395,12 +395,12 @@ class Journal:
                                  "source": source})
         if answer is not None:
             label = f"{grant.id}: {scope.effective}"
-            # `consents.json` only ever holds an allow, whatever the answer was called.
             self.permission(source or "consent", label,
-                            "allow" if source == "consents.json" else answer)
-            if answer == "persistent" and source in ("--grant", "interactive"):
+                            ("deny" if answer == "deny" else "allow")
+                            if source == "consents.json" else answer)
+            if answer in ("persistent", "deny") and source in ("--grant", "interactive"):
                 # The broker stored it in `consents.json` right now.
-                self.permission("consents.json", label, "allow")
+                self.permission("consents.json", label, "deny" if answer == "deny" else "allow")
 
     def summary(self, limit: int = SUMMARY_LIMIT) -> str:
         try:

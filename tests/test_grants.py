@@ -75,7 +75,7 @@ class QuestionTests(unittest.TestCase):
         self.assertTrue(all(len(option) <= 200 for option in asked["options"]))
         self.assertEqual(len(asked["options"]), len(set(asked["options"])))
         self.assertIsNone(asked["recommended"])
-        self.assertEqual(["cycle", "persistent", "deny"],
+        self.assertEqual(["cycle", "persistent", "deny", "deny"],
                          [grants.answer_from_option(option) for option in asked["options"]])
 
     def test_the_question_says_which_later_stages_the_grant_reaches(self) -> None:
@@ -91,7 +91,7 @@ class QuestionTests(unittest.TestCase):
     def test_a_temporary_answer_is_not_offered_when_it_cannot_stay_isolated(self) -> None:
         shared = grants.GrantScope("codex", "linux", "x", "y", isolated_per_dispatch=False)
         asked = grants.question(grants.DOCKER_HOST, shared, role="review")
-        self.assertEqual(["persistent", "deny"],
+        self.assertEqual(["persistent", "deny", "deny"],
                          [grants.answer_from_option(option) for option in asked["options"]])
         broker = grants.ConsentBroker("owner/api", platform="linux")
         with self.assertRaises(grants.GrantError):
@@ -128,9 +128,9 @@ class ConsentStoreTests(unittest.TestCase):
 
         self.assertIsNone(self.store.load("owner/api", grants.DOCKER_HOST, wider))
 
-    def test_only_an_allow_is_stored_and_an_unreadable_store_is_refused(self) -> None:
+    def test_only_decisions_are_stored_and_an_unreadable_store_is_refused(self) -> None:
         with self.assertRaises(grants.GrantError):
-            self.store.save("owner/api", grants.DOCKER_HOST, LINUX, "deny")
+            self.store.save("owner/api", grants.DOCKER_HOST, LINUX, "unknown")
         self.path.parent.mkdir(parents=True)
         self.path.write_text(json.dumps({"schema": 99, "repos": {}}), encoding="utf-8")
         with self.assertRaises(grants.GrantError):
@@ -145,7 +145,52 @@ class ConsentStoreTests(unittest.TestCase):
 
 
 class BrokerTests(unittest.TestCase):
-    def test_a_denial_holds_for_the_run_and_is_never_stored(self) -> None:
+    def test_stored_grants_refresh_before_dispatch_and_revocation_is_immediate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = grants.ConsentStore(Path(temporary) / "consents.json")
+            store.save("owner/api", grants.DOCKER_HOST, LINUX, "allow")
+            broker = grants.ConsentBroker("owner/api", platform="linux", store=store)
+            self.assertEqual(("docker_host",), broker.granted("codex"))
+            store.revoke("owner/api", grants.DOCKER_HOST, LINUX)
+            self.assertEqual((), broker.granted("codex"))
+            self.assertEqual("pending", broker.request(grants.DOCKER_HOST, "codex", role="review"))
+
+    def test_explicit_persistent_answer_does_not_restore_a_revoked_grant(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = grants.ConsentStore(Path(temporary) / "consents.json")
+            broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                          answers={"docker_host": "persistent"})
+            self.assertEqual(("docker_host",), broker.granted("codex"))
+            store.revoke("owner/api", grants.DOCKER_HOST, LINUX)
+            self.assertEqual((), broker.granted("codex"))
+
+    def test_executor_scopes_coexist_and_configuration_remains_visible_after_revoke(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = grants.ConsentStore(Path(temporary) / "consents.json")
+            claude = grants.DOCKER_HOST.scope_for("claude", "linux")
+            store.save("owner/api", grants.DOCKER_HOST, LINUX, "allow")
+            store.save("owner/api", grants.DOCKER_HOST, claude, "deny")
+            self.assertEqual(2, len(store.list("owner/api")))
+            store.revoke("owner/api", grants.DOCKER_HOST, LINUX)
+            self.assertEqual("deny", store.load("owner/api", grants.DOCKER_HOST, claude))
+            broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                          preauthorized=frozenset({"docker_host"}))
+            effective = [entry for entry in broker.listing("codex") if entry.get("effective")]
+            self.assertEqual("project configuration", effective[0]["source"])
+            self.assertEqual("GRANTED", effective[0]["status"])
+
+    def test_schema_one_grants_migrate_without_widening_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "consents.json"
+            path.write_text(json.dumps({"schema": 1, "repos": {"owner/api": {"docker_host": {
+                "decision": "allow", "fingerprint": grants.DOCKER_HOST.fingerprint(LINUX),
+                "executor": "codex", "platform": "linux"}}}}))
+            store = grants.ConsentStore(path)
+            self.assertEqual("allow", store.load("owner/api", grants.DOCKER_HOST, LINUX))
+            self.assertIsNone(store.load("owner/api", grants.DOCKER_HOST,
+                                         grants.DOCKER_HOST.scope_for("claude", "linux")))
+
+    def test_a_denial_is_persistent_until_revoked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = grants.ConsentStore(Path(temporary) / "consents.json")
             broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
@@ -153,7 +198,14 @@ class BrokerTests(unittest.TestCase):
             self.assertEqual("deny", broker.request(grants.DOCKER_HOST, "codex", role="implement"))
             self.assertEqual((), broker.granted("codex"))
             self.assertEqual("deny", broker.request(grants.DOCKER_HOST, "codex", role="review"))
-            self.assertFalse(store.path.exists())
+            self.assertEqual("deny", store.load("owner/api", grants.DOCKER_HOST, LINUX))
+            fresh = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                         prompt=lambda q: self.fail("asked twice"))
+            self.assertEqual("deny", fresh.request(grants.DOCKER_HOST, "codex", role="review"))
+            self.assertEqual("DENIED", store.list("owner/api")[0]["status"])
+            self.assertTrue(store.revoke("owner/api", grants.DOCKER_HOST, LINUX))
+            self.assertIsNone(store.load("owner/api", grants.DOCKER_HOST, LINUX))
+            self.assertEqual("deny", json.loads(store.path.read_text())["revocations"][0]["decision"])
 
     def test_a_grant_reaches_only_executors_with_a_scope(self) -> None:
         broker = grants.ConsentBroker("owner/api", platform="linux",
@@ -161,6 +213,7 @@ class BrokerTests(unittest.TestCase):
         broker.request(grants.DOCKER_HOST, "codex", role="implement")
 
         self.assertEqual(("docker_host",), broker.granted("codex"))
+        # An explicit cycle answer authorizes each registered executor scope.
         self.assertEqual(("docker_host",), broker.granted("claude"))
         self.assertEqual((), broker.granted("orca"))
 

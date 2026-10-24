@@ -1,13 +1,14 @@
 """Agent-reported sandbox restrictions and guidance for recovering a stage.
 
-The report is a routing hint, never permission to widen a sandbox. The caller
-still proves process exit, reconciles effects and uses its configured fallback.
+The report is a recovery hint, never permission to widen a sandbox. The caller
+still proves process exit and reconciles effects before a same-executor rerun.
 """
 from __future__ import annotations
 
 import json
 import re
 import tempfile
+from typing import Any
 
 from stage_permissions import StagePolicy, check
 
@@ -60,8 +61,9 @@ the host-by-nested-executor table in `docs/routing.md`.
 Do not use this report for a genuinely unavailable service, missing credentials,
 login/trust prompts, an approval denial, or an action requiring a human. Those
 remain ordinary blockers. Forward a delegated verifier's environment_blocker
-unchanged into the stage result. The runtime can try a configured alternative
-executor once after proving exit and checking for effects. A retry must inspect
+unchanged into the stage result. The runtime requests a registered grant on the
+selected executor; a sandbox restriction never selects another executor.
+Checks that remain impossible stay not_verified. A guarded full rerun must inspect
 the current workspace and change request, reuse them, and execute the original
 checks rather than creating duplicate work or weakening verification.
 """
@@ -113,6 +115,77 @@ def _final_status(spoken: str) -> str | None:
     except ValueError:
         return None
     return payload.get("status") if isinstance(payload, dict) else None
+
+
+def needs_sandbox_evidence(spoken: str) -> bool:
+    return _final_status(spoken) == "BLOCKED"
+
+
+def denied_result(spoken: str, denied: list[str]) -> str:
+    """A denial cannot be reported as successful verification by a stage."""
+    end = spoken.rfind("END_ORCHESTRATION_RESULT")
+    begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
+    if begin < 0:
+        return spoken
+    try:
+        payload = json.loads(spoken[begin + len("ORCHESTRATION_RESULT"):end].strip())
+    except ValueError:
+        return spoken
+    if not isinstance(payload, dict):
+        return spoken
+    reported = payload.get("tests")
+    tests: dict[str, Any] = dict(reported) if isinstance(reported, dict) else {"ran": False}
+    tests.pop("passed", None)
+    tests.update(conclusion="not_verified", denied_permissions=denied)
+    payload["tests"] = tests
+    return (spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n"
+            + spoken[end:])
+
+
+def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read command/result pairs, never assistant prose, from this run's rollout.
+
+    Only sandbox-specific diagnostics count. Ordinary EACCES, refused
+    connections, missing executables and authentication errors prove no sandbox.
+    This evidence can request consent; it can never authorize access.
+    """
+    calls, denials = {}, []
+    for event in events:
+        # executors._events flattens rollout payloads; also accept raw records.
+        item = (event if event.get("type") in ("function_call", "function_call_output")
+                else event.get("payload") if event.get("type") == "response_item"
+                else event.get("item"))
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).split(".")[-1]
+        if item.get("type") == "function_call" and name in ("exec_command", "shell", "shell_command"):
+            try:
+                args = json.loads(item.get("arguments", "{}"))
+            except (ValueError, TypeError):
+                continue
+            command = args.get("cmd", args.get("command")) if isinstance(args, dict) else None
+            if isinstance(command, list) and all(isinstance(part, str) for part in command):
+                command = " ".join(command)
+            if isinstance(command, str):
+                calls[item.get("call_id")] = command
+        elif item.get("type") == "function_call_output":
+            command, output = calls.get(item.get("call_id")), item.get("output")
+            if not command or not isinstance(output, str):
+                continue
+            if not re.search(r"SandboxDenied|sandbox denied access|domain is not on the allowlist|"
+                             r"network access .*blocked.*sandbox", output, re.I):
+                continue
+            kind = "sandbox_network_access" if re.search(r"network|domain|allowlist", output, re.I) else "sandbox_local_access"
+            denials.append({"kind": kind, "command": command, "error": output,
+                            "attempted": ["runtime observed this command's sandbox denial"],
+                            "requires_human": False})
+    return denials
+
+
+def observed_sandbox_blocker(spoken: str, denials) -> dict[str, Any] | None:
+    if _final_status(spoken) == "BLOCKED" and isinstance(denials, list) and denials:
+        return denials[0]
+    return None
 
 
 def _never_run(*_args, **_kwargs):

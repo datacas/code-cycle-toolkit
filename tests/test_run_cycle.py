@@ -502,7 +502,8 @@ class NeedsDocker(Talker):
 
     def dispatch(self, target, task, **kw):
         self.calls.append((task, kw))
-        if len(self.calls) == 1 and "cc-implement-issue" in task:
+        if (len(self.calls) == 1 and "cc-implement-issue" in task
+                and not kw.get("sandbox_grants")):
             self.dispatched.append(task)
             spoken = block("BLOCKED", environment_blocker=DOCKER_BLOCKER)
             return ex.DispatchResult(
@@ -559,19 +560,20 @@ class PermissionConsentTests(RunCycleTestCase):
         self.assertIn("--grant docker_host=", report.explain())
         self.assertFalse((self.home / "consents.json").exists())
 
-    def test_an_answer_for_this_cycle_reruns_the_stage_with_the_grant(self) -> None:
+    def test_an_answer_for_this_cycle_reaches_the_first_dispatch(self) -> None:
         implementer, reviewer = NeedsDocker(), Talker("claude")
         consent = self.broker(answers={"docker_host": "cycle"})
 
         report = self.run_cycle(implementer, reviewer, consent=consent)
 
         self.assertEqual(rc.APPROVED_END, report.status)
-        self.assertEqual(2, len(implementer.calls))
-        rerun_task, rerun_kw = implementer.calls[1]
+        self.assertEqual(1, len(implementer.calls))
+        rerun_task, rerun_kw = implementer.calls[0]
         self.assertEqual(("docker_host",), rerun_kw.get("sandbox_grants"))
         self.assertIn("The user granted the host Docker daemon", rerun_task)
-        # A Claude reviewer has no such grant to receive.
+        # The explicit run answer authorizes Claude's registered scope too.
         self.assertTrue(reviewer.dispatched)
+        self.assertIn("The user granted", reviewer.dispatched[0])
         # Nothing about a one-cycle answer is written down.
         self.assertFalse((self.home / "consents.json").exists())
 
@@ -587,7 +589,8 @@ class PermissionConsentTests(RunCycleTestCase):
                                 consent=self.broker(store=store))
 
         self.assertEqual(rc.APPROVED_END, second.status)
-        self.assertEqual(("docker_host",), implementer.calls[1][1].get("sandbox_grants"))
+        self.assertEqual(1, len(implementer.calls))
+        self.assertEqual(("docker_host",), implementer.calls[0][1].get("sandbox_grants"))
 
     def test_a_denial_reruns_the_stage_without_the_grant(self) -> None:
         implementer, reviewer = NeedsDocker(), Talker("claude")
@@ -600,7 +603,8 @@ class PermissionConsentTests(RunCycleTestCase):
         self.assertNotIn("sandbox_grants", rerun_kw)
         self.assertIn("The user denied the host Docker daemon", rerun_task)
         self.assertIn("not verified", rerun_task)
-        self.assertFalse((self.home / "consents.json").exists())
+        self.assertEqual("deny", grants.ConsentStore(self.home / "consents.json").load(
+            "owner/api", grants.DOCKER_HOST, grants.DOCKER_HOST.scope_for("codex", "linux")))
 
     def test_a_terminal_answer_is_asked_once_for_the_whole_cycle(self) -> None:
         asked = []
@@ -626,7 +630,7 @@ class PermissionConsentTests(RunCycleTestCase):
                                 prompt=lambda question: self.fail("asked anyway")))
 
         self.assertEqual(rc.APPROVED_END, report.status)
-        self.assertEqual(("docker_host",), implementer.calls[1][1].get("sandbox_grants"))
+        self.assertEqual(("docker_host",), implementer.calls[0][1].get("sandbox_grants"))
         self.assertFalse((self.home / "consents.json").exists())
 
     def test_a_platform_without_a_scope_never_widens(self) -> None:

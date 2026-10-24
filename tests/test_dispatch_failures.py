@@ -279,6 +279,30 @@ class ExecutorFailureTests(unittest.TestCase):
             logs.assert_not_called()
             self.assertEqual(1, fingerprints.call_count)
 
+    def test_functional_blocker_on_zero_exit_reads_its_correlated_sandbox_denial(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            sessions = home / "sessions"
+            sessions.mkdir()
+            error = "tool failed: SandboxDenied: sandbox denied access to /var/run/docker.sock"
+            (sessions / "rollout-consent-session.jsonl").write_text(stream(
+                {"type": "session_meta", "payload": {"id": "consent-session"}},
+                {"type": "response_item", "payload": {"type": "function_call", "call_id": "C1",
+                    "name": "functions.exec_command", "arguments": json.dumps({"cmd": "docker compose ps"})}},
+                {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "C1",
+                    "output": error}}), encoding="utf-8")
+            spoken = "ORCHESTRATION_RESULT\n" + json.dumps({"status": "BLOCKED"}) + "\nEND_ORCHESTRATION_RESULT"
+            output = stream({"type": "thread.started", "thread_id": "consent-session"},
+                            {"type": "item.completed", "item": {"type": "agent_message", "text": spoken}},
+                            {"type": "turn.completed"})
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                result = ex.CodexAdapter().dispatch(TARGET, "work", cwd=temporary,
+                    runner=lambda *a, **k: subprocess.CompletedProcess([], 0, output, ""))
+            self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+            [denial] = result.artifacts["sandbox_denials"]
+            self.assertEqual("docker compose ps", denial["command"])
+            self.assertEqual(error, denial["error"])
+
     def test_missing_result_still_reads_correlated_session_on_zero_exit(self):
         with patch.object(ex.CodexAdapter, "_session_events", return_value=[failed("server_overloaded")]) as logs:
             result = ex.CodexAdapter().dispatch(TARGET, "work", cwd=tempfile.gettempdir(),

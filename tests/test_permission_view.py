@@ -220,7 +220,8 @@ class ReconcileTests(PermissionViewCase):
         # A stored entry whose scope no longer matches stops applying (the
         # fingerprint is what the runtime compares), and the view follows.
         payload = json.loads((self.root / "consents.json").read_text())
-        payload["repos"][REPO]["docker_host"]["fingerprint"] = "changed"
+        entry = next(iter(payload["repos"][REPO]["docker_host"].values()))
+        entry["fingerprint"] = "changed"
         (self.root / "consents.json").write_text(json.dumps(payload))
         self.journal("two").reconcile_permissions(consents=store.allowed_scopes(REPO))
         self.assertEqual([], self.rows())
@@ -246,13 +247,14 @@ class ReconcileTests(PermissionViewCase):
         self.assertEqual(1, len(self.rows()))
         self.assertEqual(["allow"], [row[2] for row in self.stored()])
 
-    def test_a_replaced_scope_shows_only_the_current_one(self):
+    def test_executor_scopes_are_listed_without_replacing_each_other(self):
         store = grants.ConsentStore(self.root / "consents.json")
         store.save(REPO, DOCKER, CODEX, "allow")
         self.journal("one").reconcile_permissions(consents=store.allowed_scopes(REPO))
         store.save(REPO, DOCKER, CLAUDE, "allow")
         self.journal("two").reconcile_permissions(consents=store.allowed_scopes(REPO))
-        self.assertEqual([f"docker_host: {CLAUDE.effective}"], [r[1] for r in self.rows()])
+        self.assertEqual({f"docker_host: {CODEX.effective}", f"docker_host: {CLAUDE.effective}"},
+                         {r[1] for r in self.rows()})
 
     def test_a_persistent_answer_shows_as_a_consent_the_moment_it_is_stored(self):
         store = grants.ConsentStore(self.root / "consents.json")
@@ -497,7 +499,7 @@ class RuntimeRecordingTests(RunCycleTestCase):
                 return super().dispatch(target, task, **kw)
 
         self.run_in_linked(Watching("claude", block("BLOCKED")), consent=broker)
-        self.assertEqual(["cycle"], [d["level"] for d in seen[0]])
+        self.assertEqual(["cycle", "cycle"], [d["level"] for d in seen[0]])
         self.assertEqual([], self.view())
 
     def test_the_stage_policy_carries_the_checkout_branch(self):

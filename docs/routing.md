@@ -134,15 +134,22 @@ an `environment_blocker`: `kind` (`sandbox_local_access`,
 the stage result. Ordinary blockers, missing credentials, approval denials,
 and reports containing human questions do not qualify.
 
-For other restrictions, the runtime records the attempt as `environment_restricted` and can use the
-profile's configured fallback on a different executor. It passes the diagnosis
-to that executor and retains the same workspace and publication contracts.
-This shares the existing one-reroute budget and requires process exit proof
-and unchanged, clean effect snapshots for stages that can write or publish.
-It never rewrites project configuration, grants additional permissions,
-disables the sandbox, substitutes an unconfigured model, or repeats the same
-sandbox with a different model. Missing fallback, unknown or changed effects,
-calibration mode, or a second failure still stops with a recorded reason.
+For other restrictions, the runtime records `environment_restricted` and keeps
+the selected executor. A registered resource requests consent on that executor;
+there is no sandbox-driven fallback. Only real executor unavailability
+(`capacity`, `transport`, `timeout`, `quota`) uses the availability reroute gate.
+Checks that remain impossible are `not_verified`; independent completed work
+can continue. An essential blocked operation still stops the cycle. A grant
+permits a full guarded new attempt, never replaying published or changed work.
+
+Detection preserves the command and observed error. Claude hook denials and
+Codex rollout command/result pairs provide runtime-observed evidence; Codex
+reads only the session identified by this invocation, including successful CLI
+exits whose functional result is `BLOCKED`. Assistant prose alone is not that
+signal. Sandbox-specific diagnostics (such as `SandboxDenied` or a proxy's
+domain allowlist denial) qualify; missing binaries, invalid credentials,
+ordinary filesystem ownership errors and connection refused alone do not.
+Agent-reported structured blockers remain diagnostic hints, never grants.
 
 A Codex stage cannot run the installed Codex CLI's own sandbox (#268). Codex's
 Linux sandbox overmounts its app-server socket directory,
@@ -236,14 +243,47 @@ Before a publishing dispatch, the runtime checks readiness: for a GitHub `origin
 Some checks need a resource the sandbox blocks on purpose, such as the host Docker daemon. A stage never widens its own sandbox. It reports the restriction as an `environment_blocker`, with `"resource": "docker_host"` for Docker, and a person decides. The registry in `scripts/grants.py` holds each grant, and new resources reuse the same flow.
 
 - **The real scope is what the person is asked about.** Codex on Linux cannot allow the Docker socket alone. Its sandbox blocks every new `AF_UNIX` socket unless all of them are allowed, through the network proxy (`network.dangerously_allow_all_unix_sockets`), so the question says the grant also opens ssh-agent, D-Bus and every other local socket. Docker itself acts as root on the host. A filesystem rule on the socket path would not help: Codex's Linux helper refuses to start with one. Verified with Codex CLI 0.162.1 and `codex sandbox`.
-- **Least privilege.** A configured fallback executor that can recover the stage without a wider sandbox is tried first, as for any sandbox restriction; a person is asked only when none can. When the fallback hits the same restriction, the question goes back to the primary, which reruns with the answer; an answer given in advance, by `--grant`, a stored answer, or the project setting, applies the same way. The grant goes only to an executor with a scope for it, and only on platforms where its reach was verified: Linux today; macOS and Windows have no scope, so nothing is widened there. Codex's scope opens every local Unix socket. Claude's scope (#142) has its own text: it adds only `docker compose up`, `down`, `ps`, `logs` and `build` to the stage's command table for that dispatch, while `docker run`, `docker exec`, `docker compose run` and every other subcommand stay denied by the stage hook. A `docker compose` the hook denied in a Claude stage that then reports `BLOCKED` is the `docker_host` blocker that starts this flow. Without the command table, on a non-GitHub cycle, Claude's grant changes nothing. Publishing stages keep their GitHub and Bitbucket allowlist and review stages keep their read-only checkout. A non-publishing writer moves to a `:workspace` profile whose proxy allows no domain by default, so the Docker grant itself gives it no internet access. Separately selected registry domains remain available through that proxy.
+- **Chosen executor.** Request the missing resource on the selected executor. An answer given in advance, a stored answer, or project configuration is loaded before its first dispatch. The grant goes only to an executor with a registered scope: Linux today; macOS and Windows have none. Codex's scope opens every local Unix socket. Claude adds only `docker compose up`, `down`, `ps`, `logs` and `build` to the dispatch's stage table; `docker run`, `exec`, `compose run` and other subcommands remain denied. On a non-GitHub cycle without the command table, Claude's grant changes nothing. Publication domains, review read-only checkouts and separately selected registry domains retain their own policies. The Docker grant supplies no internet access by itself.
 - **Three answers.**
-  - *This cycle*: the grant lives only in the running process and applies to the cycle's remaining Codex dispatches. It is never written down, so another session never sees it. It is offered only where the executor applies the grant per dispatch.
-  - *Persistent*: kept per user, outside every checkout, in `$XDG_CONFIG_HOME/code-cycle/consents.json` (or `CODE_CYCLE_CONSENT_FILE`), for this repository and this exact scope. When the scope changes, the stored answer no longer applies.
-  - *Deny*: holds for this run only. The stage reruns without the grant, told to finish every check that does not need it and to report the rest as unverified.
+  - *This cycle*: lives only in the process, for the authorized executor/platform scope. It is offered only where the executor applies the grant per dispatch. An explicit `--grant` answer applies to each registered executor scope the run uses.
+  - *Persistent*: kept per user outside checkouts in `$XDG_CONFIG_HOME/code-cycle/consents.json` (or `CODE_CYCLE_CONSENT_FILE`), per repository and exact executor/platform/scope fingerprint. It reaches retries, resumes and later issues before dispatch. A changed scope is UNKNOWN and needs a new answer. Schema 2 keeps separate fingerprints so executor scopes cannot overwrite each other; schema-1 allows are read without widening and migrate on the next write. Older runtimes cannot read schema 2 and fail closed.
+  - *Deny*: stored as DENIED for that exact scope until revoked. No repeat request while it stands. The stage runs without the permission, with a reason and the exact-HEAD CI alternative; local checks needing it remain `not_verified`. The runtime prevents a denial from becoming a reported verification pass. Independent work continues; an essential denied operation returns `BLOCKED` and the cycle stops with `HUMAN_INTERVENTION`.
 - **Asking.** On a terminal, `run_cycle.py` asks once and continues. A run nobody watches, detached or driven by an orchestrator, never widens without an answer given in advance. It stops with `HUMAN_INTERVENTION` and `stop_reason=permission_required`, and the decisions record carries the question in the `questions` shape plus the full scope and risks. Answer by rerunning the stopped stage with `--grant docker_host=cycle|persistent|deny`.
 - **Safe reruns.** Every full rerun after an answer (`cycle`, `persistent` or `deny`) passes the same exit and effect guard as an executor fallback, even on the same executor. Publication, remote or workspace changes, any dirty workspace (including one already dirty before the attempt), unavailable evidence, an unproven exit or a human-action requirement stop the rerun. The answer does not authorize repeating a stage that already had effects. `permission_answered` records an allowed rerun; a stopped rerun records the guard's closed reconciliation reason instead. Continuing only the pending operation is a separate capability.
 - **Authorization in advance.** `code_cycle.docker.host_socket_access: true` in `.code-cycle.yml` authorizes `docker_host`, in both its Codex and Claude scopes, for every run of the project without asking. The default is `false`.
+
+**Control and revocation.** `ConsentStore.list()` reports current GRANTED and
+DENIED decisions with scope and source. `revoke()` removes the stored decision
+to UNKNOWN and appends a separate revocation audit record in the same file;
+revoking a denial never grants access. The broker rereads the store before
+every dispatch, even within a running cycle; operations already started are
+not interrupted. No stored GRANTED cache survives between dispatches. Explicit
+run answers are consumed once per scope, so revocation does not reapply them.
+Configuration is an independent source: revoke it by editing configuration.
+The effective listing shows it even after a stored consent is revoked.
+
+```bash
+python3 scripts/consent_control.py list --repo owner/repo --executor codex
+python3 scripts/consent_control.py revoke --repo owner/repo --executor codex --grant-id docker_host
+```
+
+Use `--executor claude` for its scope, `--platform linux` to manage a different
+platform, and `--config path/to/.code-cycle.yml` for explicit configuration.
+The CLI changes only this user's consent store and prints the resulting
+effective decisions. Configuration grants are included only when the configured
+repository matches `--repo`. An unreadable store authorizes nothing.
+
+**Authority limits.** The toolkit can reuse explicit `user_choices` and registered
+grants in its per-dispatch command tables and native sandbox profiles. It cannot
+approve host trust, login or security prompts, create credentials, grant
+unsupported platform scopes, repair nested Codex socket isolation, or run code
+unconfined. Interactive host rules (`cc-host-permissions`, #267) do not authorize
+cycle dispatches. User tool choices and dependency preparation (#279) keep their
+existing configuration mechanism; this is the sensitive-grant lifecycle, not a
+second approval store. Host-run authorization (#291) is separate and binds the
+exact command, repository, commit SHA and isolation context, never a new commit.
+No host-run authority is introduced here, and no global scope is inferred from
+a repository decision.
 
 When the code host is GitHub and `gh` is authenticated, publishing stages use `gh` for every read and write on the change request. A GitHub connector or MCP tool is used only when `gh` is unavailable. If a GitHub publication attempt returns HTTP 403 or 404 through another tool, the stage retries once with `gh` before reporting `BLOCKED` and names the failed tool. Bitbucket continues to use its configured tooling.
 

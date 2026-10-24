@@ -1378,10 +1378,15 @@ class NativeAdapter(Adapter):
             and event["item"]["text"].strip()
             for event in events
         )
+        from environment_recovery import codex_sandbox_denials, needs_sandbox_evidence
+        needs_failure_log = (signal is None and (completed.returncode != 0
+                             or (not terminal_success and not has_agent_result)))
+        session_events = (self._session_events(events) if self.name == "codex"
+                          and (needs_failure_log or needs_sandbox_evidence(self.agent_output(stdout)))
+                          else [])
         if (self.name == "codex" and signal is None
                 and (completed.returncode != 0
                      or (not terminal_success and not has_agent_result))):
-            session_events = self._session_events(events)
             events += session_events
             signal = _error_signal(session_events)
         start_state = observed_start(events)
@@ -1389,6 +1394,10 @@ class NativeAdapter(Adapter):
                     "start_state": start_state,
                     "process_exited": getattr(completed, "process_exited", False)}
         annotations = {**policy_note, **self.extra_artifacts(stdout)}
+        if self.name == "codex":
+            denials = codex_sandbox_denials(session_events)
+            if denials:
+                annotations["sandbox_denials"] = denials
         result = self._classify_completed(target, completed, argv, stdout, signal, evidence)
         if policy is not None and policy.static_only:
             result = replace(result, agent_output=native.static_result(
