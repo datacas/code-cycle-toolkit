@@ -175,6 +175,11 @@ verification cannot establish `READY_FOR_MANUAL_MERGE`. This does not remove
 the general `environment_restricted` reroute (#289), or change the #268 guard
 against blindly redispatching a stage that already published.
 
+Interception matches missing executable diagnostics and named sandbox startup
+failures. Tool-name substrings in unrelated paths (`target`, `cargo`,
+`org.gradle`), or a working tool's permission error on project data, retain
+the existing general reroute behavior.
+
 Nested executor behavior depends on the sandbox hosting the runtime, and is not
 assumed compatible without a successful functional probe. A probe failure is
 recorded as unverified; it does not establish that another executor will work.

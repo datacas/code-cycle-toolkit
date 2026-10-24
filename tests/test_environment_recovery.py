@@ -6,7 +6,7 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -15,6 +15,7 @@ import environment_recovery as recovery
 import grants
 import executors as ex
 import router
+import cycle_journal as journal
 from test_cycle import CycleTestCase, ScriptedAdapter
 from test_run_cycle import RunCycleTestCase, Talker, block
 
@@ -120,19 +121,52 @@ class SandboxRerouteTests(CycleTestCase):
     def test_top_level_preflight_is_persisted_in_existing_journal(self):
         adapter = ScriptedAdapter("codex")
         recorder = self.recorder([adapter])
-        recorder.journal = Mock()
+        recorder.journal = journal.Journal(self.store.path, "owner/repo", "API-055", recorder.cycle_id)
+        # A full observation exceeds the journal's per-field limit. Every tool
+        # and functional probe must survive, even when an earlier error is long.
         evidence = {"status": "unverified", "missing": ["rg"], "probes": [
-            {"name": "rg", "outcome": "missing", "observed": None}]}
+            {"name": "rg", "outcome": "not_verified", "observed": None, "error": "x" * 900},
+            {"name": "srt", "outcome": "reused", "observed": "/tools/srt", "version": "1.0.0"}],
+            "functional_check": {"probe": "bwrap", "passed": False, "evidence": "namespace denied"},
+            "preparation_isolation": {"passed": True, "evidence": "isolation verified"}}
         result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex",
                                    router.parse_target("codex:openai/gpt-6-luna high"),
                                    artifacts={"command_policy": "active",
                                               "native_sandbox_preflight": evidence})
         recorder._journal_attempt("implement", result, "attempt-test", None, {})
-        recorded = [call for call in recorder.journal.record.call_args_list
-                    if call.args[0] == "sandbox_preflight"]
-        self.assertEqual(1, len(recorded))
-        self.assertEqual(evidence, recorded[0].kwargs["detail"])
-        self.assertEqual("attempt-test", recorded[0].kwargs["attempt_id"])
+        # Read through a fresh SQLite connection, not a mocked record method.
+        recorded = [row for row in journal.events(self.store.path, "owner/repo")
+                    if row["component"] == "sandbox_preflight"]
+        self.assertFalse(recorder.journal.errors)
+        by_probe = {row["reason"]: row for row in recorded}
+        self.assertEqual({"summary", "rg", "srt", "functional_check", "preparation_isolation"}, set(by_probe))
+        self.assertEqual("not_verified", by_probe["rg"]["status"])
+        self.assertEqual("/tools/srt", by_probe["srt"]["command"])
+        self.assertEqual("reused", by_probe["srt"]["status"])
+        self.assertEqual("unverified", by_probe["functional_check"]["status"])
+        self.assertIn("namespace denied", by_probe["functional_check"]["detail"])
+        self.assertEqual("verified", by_probe["preparation_isolation"]["status"])
+        self.assertTrue(all(row["attempt_id"] == "attempt-test" for row in recorded))
+        self.assertTrue(all(len(row["detail"] or "") <= journal.TEXT_LIMIT + 1 for row in recorded))
+        summary = recorder.journal.summary()
+        self.assertIn("preflight implement #0 rg: not_verified", summary)
+        self.assertIn("preflight implement #0 preparation_isolation: verified", summary)
+        self.assertNotIn("stage implement #0: reused", summary)
+
+    def test_unrelated_tool_substrings_keep_the_existing_reroute(self):
+        for command, error in (
+            ("cargo test", "open /work/target/debug/.cargo-lock: Operation not permitted"),
+            ("gradle test", "/cache/.gradle/caches/org.gradle: No such file or directory"),
+            ("python3 check.py", "large argv merge: operation not permitted"),
+            ("rg needle /private", "rg: /private: Operation not permitted"),
+        ):
+            with self.subTest(command=command):
+                blocker = {**BLOCKER, "kind": "sandbox_filesystem_access",
+                           "command": command, "error": error}
+                _, primary, fallback, outcome = self.execute(primary=RestrictedAdapter(blocker=blocker))
+                self.assertTrue(outcome.rerouted)
+                self.assertEqual(1, len(primary.dispatched))
+                self.assertEqual(1, len(fallback.dispatched))
 
     def test_completed_work_with_known_pending_checks_continues_to_review(self):
         for absent in ({"srt", "rg"}, {"srt"}, {"rg"}, set()):

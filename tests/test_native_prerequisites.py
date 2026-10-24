@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -110,6 +112,29 @@ class RecoveryTests(unittest.TestCase):
             download.assert_not_called()
         self.assertFalse(self.root.exists())
 
+    def test_concurrent_publication_reuses_verified_winner(self):
+        for code in (errno.EEXIST, errno.ENOTEMPTY):
+            with self.subTest(errno=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "tools"
+                def lost_publication(directory, target):
+                    shutil.copytree(directory, target)
+                    raise OSError(code, "concurrent publication")
+                with patch.object(Path, "rename", lost_publication), patch.object(
+                        native.platform, "machine", return_value="x86_64"):
+                    result = native.ensure("rg", root=root, which=lambda _: None,
+                                           download=self.rg_source(), run=self.run)
+                self.assertEqual("reused", result["outcome"], result)
+                self.assertTrue(Path(result["path"]).is_file())
+                self.assertEqual([result["path"], "--version"], self.run.call_args.args[0])
+
+    def test_publication_permission_error_does_not_become_reuse(self):
+        with patch.object(Path, "rename", side_effect=PermissionError(errno.EACCES, "denied")), patch.object(
+                native.platform, "machine", return_value="x86_64"):
+            result = native.ensure("rg", root=self.root, which=lambda _: None,
+                                   download=self.rg_source(), run=self.run)
+        self.assertEqual("not_verified", result["outcome"])
+        self.assertFalse((self.root / "rg").exists())
+
     def rg_source(self, *, corrupt=False, link=False):
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode="w:gz") as archive:
@@ -186,6 +211,100 @@ class RecoveryTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_codex_does_not_attempt_srt_recovery(self):
+        for executor in ("codex", "claude"):
+            with self.subTest(executor=executor), patch.object(native.sys, "platform", "linux"), patch.object(
+                    native, "ensure", return_value={"path": None, "outcome": "not_verified"}) as ensure:
+                native.observe(executor)
+                self.assertEqual(["rg"] if executor == "codex" else ["srt", "rg"],
+                                 [call.args[0] for call in ensure.call_args_list])
+
+    def test_known_failure_rejects_unrelated_restrictions(self):
+        for command, error in (
+            ("cargo test", "open /work/target/debug/.cargo-lock: Operation not permitted"),
+            ("gradle test", "/cache/.gradle/caches/org.gradle: No such file or directory"),
+            ("rg needle /private", "rg: /private: Operation not permitted"),
+            ("srt -- npm ci", "srt: project file /work/package.json: No such file or directory"),
+            ("python3 check.py", "large argv merge: operation not permitted"),
+        ):
+            with self.subTest(error=error):
+                self.assertFalse(native.known_failure(command, error))
+
+    def test_known_failure_accepts_only_named_prerequisite_diagnostics(self):
+        for command, error in (
+            ("npm ci", "Sandbox dependencies not available: ripgrep (rg) not found"),
+            ("srt -- true", "[Errno 2] No such file or directory: '/tools/srt'"),
+            ("npm ci", "spawn rg ENOENT"),
+            ("npm ci", "Claude dependency preparation needs the installed srt sandbox runtime"),
+            ("claude", "Sandbox required but unavailable"),
+            ("bwrap -- true", "bwrap: Creating new namespace failed: Operation not permitted"),
+        ):
+            with self.subTest(error=error):
+                self.assertTrue(native.known_failure(command, error))
+
+    def test_recovered_rg_precedes_system_srt_directory_with_broken_rg(self):
+        for outcome in ("installed", "reused"):
+            with self.subTest(outcome=outcome):
+                path = native.tool_path("/system/bin", probes=[
+                    {"name": "srt", "path": "/system/bin/srt", "outcome": "reused"},
+                    {"name": "rg", "path": "/managed/rg/rg", "outcome": outcome, "executable": "rg"}])
+                self.assertEqual(str(Path("/managed/rg/rg").parent), path.split(os.pathsep)[0])
+
+    @unittest.skipIf(os.name == "nt", "the fake sandbox executable is POSIX")
+    def test_srt_probe_gets_managed_rg_at_the_process_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            tools = home / ".local/lib/code-cycle-tools"
+            for tool in ("rg", "srt"):
+                bundle = tools / tool
+                bundle.mkdir(parents=True)
+                (bundle / "receipt.json").write_text(json.dumps({"executable": tool}))
+            rg = tools / "rg/rg"
+            rg.write_text("#!/bin/sh\necho ripgrep\n")
+            rg.chmod(0o755)
+            srt = tools / "srt/srt"
+            # This fixture checks PATH and process wiring; it is not an OS
+            # confinement implementation and must not be counted as one.
+            srt.write_text(f"#!{sys.executable}\nimport pathlib,shutil,sys\n"
+                           "if not shutil.which('rg'): sys.exit('rg: not found')\n"
+                           "pathlib.Path('ok').write_text('fixture')\n")
+            srt.chmod(0o755)
+            with patch.object(Path, "home", return_value=home), patch.dict(os.environ, {"PATH": ""}):
+                ok, evidence = native.isolation_probe("srt", runner=subprocess.run)
+                self.assertTrue(ok, evidence)
+                self.assertEqual("", os.environ["PATH"])
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX")
+    def test_selected_system_rg_is_not_shadowed_by_stale_managed_rg(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            tools = home / ".local/lib/code-cycle-tools"
+            system = home / "bin"
+            system.mkdir()
+            for tool in ("srt", "rg"):
+                bundle = tools / tool
+                bundle.mkdir(parents=True)
+                (bundle / "receipt.json").write_text(json.dumps({"executable": tool}))
+            system_rg = system / "rg"
+            system_rg.write_text(f"#!{sys.executable}\nprint('ripgrep 1.0.0')\n")
+            system_rg.chmod(0o755)
+            stale = tools / "rg/rg"
+            stale.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n")
+            stale.chmod(0o755)
+            srt = tools / "srt/srt"
+            srt.write_text(f"#!{sys.executable}\nimport pathlib,shutil,sys\n"
+                           "if '--version' in sys.argv: print('1.0.0'); sys.exit(0)\n"
+                           f"if shutil.which('rg') != {str(system_rg)!r}: sys.exit('stale rg selected')\n"
+                           "pathlib.Path('ok').write_text('fixture')\n")
+            srt.chmod(0o755)
+            with patch.object(Path, "home", return_value=home), patch.dict(os.environ, {"PATH": str(system)}):
+                probes = [{"name": tool, **native.ensure(tool, root=tools,
+                           which=lambda name: str(system_rg) if name == "rg" else None)}
+                          for tool in ("srt", "rg")]
+                path = native.tool_path(str(system), probes=probes)
+                self.assertEqual(str(system_rg), shutil.which("rg", path=path))
+                self.assertTrue(native.isolation_probe("srt", runner=subprocess.run, path=path)[0])
+
     def test_nested_preparation_is_classified_without_a_socket_or_process_probe(self):
         with patch.dict(os.environ, {"CODE_CYCLE_STAGE_EXECUTOR": "codex"}), patch.object(
                 native.subprocess, "run", side_effect=AssertionError("launched nested process")):

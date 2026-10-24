@@ -618,6 +618,11 @@ def _line(row: dict[str, Any]) -> str | None:
     role = f" {row['role']}" if row.get("role") else ""
     kind = row["kind"]
     if kind == "stage_end":
+        if row.get("component") == "sandbox_preflight":
+            text = f"preflight{role} #{row.get('stage_seq')} {row.get('reason')}: {row.get('status') or 'unknown'}"
+            if row.get("detail"):
+                text += f" (untrusted evidence: {redact(row['detail'], 200)})"
+            return text
         took = (f" in {round(row['duration_ms'] / 1000)}s"
                 if isinstance(row.get("duration_ms"), int) else "")
         return f"stage{role} #{row.get('stage_seq')}: {row.get('status') or 'unknown'}{took}"

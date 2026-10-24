@@ -1045,11 +1045,31 @@ class CycleRecorder:
             command_policy.get("native_sandbox_preflight")
             if isinstance(command_policy, dict) else None)
         if isinstance(preflight, dict):
-            # The cycle journal is the existing durable per-attempt evidence
-            # store; keep only the explicit probes and their observed outcome.
-            self._journal("sandbox_preflight", role=role, attempt_id=attempt_id,
-                          component=executor, status=preflight.get("status"),
-                          detail=preflight)
+            # Reuse the existing event schema. Each probe gets its own bounded,
+            # redacted row so one long error cannot truncate later observations.
+            def observation(name, status, observed=None, detail=None):
+                self._journal("stage_end", role=role, attempt_id=attempt_id,
+                              component="sandbox_preflight", reason=name,
+                              status=status, command=observed, detail=detail,
+                              correlation={"executor": executor})
+
+            checks = ("functional_check", "preparation_isolation", "codex_socket")
+            summary = {key: value for key, value in preflight.items()
+                       if key not in ("probes", *checks)}
+            observation("summary", preflight.get("status"), detail=summary)
+            for probe in preflight.get("probes", []):
+                if isinstance(probe, dict):
+                    observation(probe.get("name"), probe.get("outcome"),
+                                probe.get("observed") or probe.get("path"),
+                                probe.get("error") or probe.get("version"))
+            for name in checks:
+                check = preflight.get(name)
+                if isinstance(check, dict):
+                    status = ("verified" if check["passed"] else "unverified") if "passed" in check else check.get("outcome")
+                    observation(name, status, check.get("probe"),
+                                check.get("evidence") or check.get("reason"))
+                elif check is not None:
+                    observation(name, check)
         self._journal("stage_end", role=role, attempt_id=attempt_id, component=executor,
                       status=result.outcome.value, reason=result.failure_code,
                       duration_ms=result.duration_ms,

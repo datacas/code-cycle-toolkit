@@ -1159,13 +1159,15 @@ class NativeAdapter(Adapter):
         # Record native-sandbox prerequisites before dependency setup or agent
         # dispatch. This evidence is attached to the stage attempt; a missing
         # capability must not silently turn an unrun check into a pass.
+        prerequisite_path = os.environ.get("PATH", "")
         if command_policy is not None:
             sandbox_evidence = native.observe(self.name, recover=runner is _run)
+            prerequisite_path = native.tool_path(prerequisite_path, probes=sandbox_evidence.get("probes", []))
             missing = sandbox_evidence["missing"]
             needs_bash_sandbox = (self.name == "claude" and policy is not None
                                   and (policy.requires_confined_verification or policy.registry_domains))
             if needs_bash_sandbox and sys.platform.startswith("linux") and runner is _run:
-                ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe)
+                ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe, path=prerequisite_path)
                 sandbox_evidence["functional_check"] = {"probe": "bwrap", "passed": ready,
                                                           "evidence": detail}
                 sandbox_evidence["status"] = "verified" if ready else "unverified"
@@ -1179,7 +1181,7 @@ class NativeAdapter(Adapter):
                     sandbox_evidence["status"] = "unverified"
             if (self.name == "claude" and sys.platform.startswith("linux")
                     and runner is _run and "srt" not in missing):
-                ready, detail = native.isolation_probe("srt", runner=_run_sandbox_probe)
+                ready, detail = native.isolation_probe("srt", runner=_run_sandbox_probe, path=prerequisite_path)
                 sandbox_evidence["preparation_isolation"] = {"passed": ready, "evidence": detail}
                 if not ready:
                     sandbox_evidence["status"] = "unverified"
@@ -1223,7 +1225,8 @@ class NativeAdapter(Adapter):
                                    "prerequisite_evidence": preflight}
                 else:
                     preparation = dependency_setup.prepare(
-                        worker_cwd, self.name, self.binary, domains=command_policy.registry_domains)
+                        worker_cwd, self.name, self.binary, domains=command_policy.registry_domains,
+                        prerequisite_path=prerequisite_path)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 preparation = {"status": "incomplete", "items": [], "error": str(error)}
             if preparation["status"] != "not_required":
@@ -1295,11 +1298,8 @@ class NativeAdapter(Adapter):
         environment = dict(os.environ if environment is None else environment)
         environment["CODE_CYCLE_STAGE_EXECUTOR"] = self.name
         # Managed tools need no shell-profile edits or globally changed PATH.
-        managed = [str(Path(probe["path"]).parent) for probe in
-                   policy_note.get("native_sandbox_preflight", {}).get("probes", [])
-                   if probe.get("path") and probe.get("outcome") in {"installed", "reused"}]
-        if managed:
-            environment["PATH"] = os.pathsep.join((*managed, environment.get("PATH", "")))
+        environment["PATH"] = native.tool_path(environment.get("PATH", ""), probes=
+            policy_note.get("native_sandbox_preflight", {}).get("probes", []))
         if preparation["status"] != "not_required":
             # Preparation precedes terminal publication and model execution.
             # Failed setup does not cancel useful source inspection or CI reads.

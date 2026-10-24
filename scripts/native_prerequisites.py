@@ -6,6 +6,7 @@ managed installs are immutable, integrity checked, and never auto-updated.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import io
 import json
@@ -189,14 +190,18 @@ def ensure(tool: str, *, root: Path | None = None, run=_run, download=_download,
                        else _rg(directory, download=download))
             run([str(directory / receipt["executable"]), "--version"])
             (directory / "receipt.json").write_text(json.dumps(receipt))
+            outcome = "installed"
             try:
                 directory.rename(target)
-            except FileExistsError:
+            except OSError as error:
+                if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
                 # Another cycle won publication. Reuse its committed bundle.
                 receipt = json.loads((target / "receipt.json").read_text())
+                outcome = "reused"
         executable = target / receipt["executable"]
         run([str(executable), "--version"])
-        return {**receipt, "outcome": "installed", "path": str(executable)}
+        return {**receipt, "outcome": outcome, "path": str(executable)}
     except (OSError, ValueError, KeyError, TypeError, IndexError,
             subprocess.SubprocessError, tarfile.TarError) as error:
         return {"outcome": "not_verified", "path": None, "error": str(error)}
@@ -207,20 +212,39 @@ def nested_codex() -> bool:
     return os.environ.get("CODE_CYCLE_STAGE_EXECUTOR") == "codex"
 
 
-def executable(tool: str) -> str | None:
+def executable(tool: str, *, path: str | None = None) -> str | None:
     """Find a committed managed bundle even if ~/.local/bin is not on PATH."""
+    if path is not None and (selected := shutil.which(tool, path=path)):
+        return selected
     bundle = Path.home() / ".local" / "lib" / "code-cycle-tools" / tool
     try:
         receipt = json.loads((bundle / "receipt.json").read_text())
-        path = bundle / receipt["executable"]
-        if path.is_file() and path.resolve().is_relative_to(bundle.resolve()):
-            return str(path)
+        managed_path = bundle / receipt["executable"]
+        if managed_path.is_file() and managed_path.resolve().is_relative_to(bundle.resolve()):
+            return str(managed_path)
     except (OSError, ValueError, KeyError):
         pass
     return shutil.which(tool)
 
 
-def isolation_probe(kind: str, *, runner) -> tuple[bool, str]:
+def tool_path(path: str, *, probes: list[dict[str, Any]] | None = None) -> str:
+    """Expose recovered tools to their consumers without changing host PATH."""
+    if probes is None:
+        binaries = [shutil.which(tool, path=path) or executable(tool) for tool in ("srt", "rg")]
+    else:
+        # Preflight has already selected and executed these tools. Rediscovery
+        # could shadow a working PATH tool with a stale managed installation.
+        selected = [probe for probe in probes if probe.get("name") in {"srt", "rg"}
+                    and probe.get("path") and probe.get("outcome") in {"installed", "reused", "available"}]
+        # Put immutable recovery bundles first. A working system srt can share
+        # its directory with the broken system rg that preflight replaced.
+        selected.sort(key=lambda probe: not (probe.get("executable") or probe.get("outcome") == "installed"))
+        binaries = [probe["path"] for probe in selected]
+    directories = [str(Path(binary).parent) for binary in binaries if binary]
+    return os.pathsep.join((*dict.fromkeys(directories), path)) if directories else path
+
+
+def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool, str]:
     """Try allowed and denied writes/reads and a denied local connection.
 
     Only the host runs this fixed program; no repository code is evaluated.
@@ -228,6 +252,7 @@ def isolation_probe(kind: str, *, runner) -> tuple[bool, str]:
     that falsely returns success cannot establish confinement.
     """
     import socket
+    probe_path = tool_path(os.environ.get("PATH", "")) if path is None else path
     with tempfile.TemporaryDirectory(prefix="code-cycle-isolation-") as temporary:
         base = Path(temporary)
         allowed = base / "allowed"
@@ -262,7 +287,7 @@ def isolation_probe(kind: str, *, runner) -> tuple[bool, str]:
                 mask.chmod(0o000)
                 argv[argv.index(os.devnull)] = str(mask)
             else:
-                binary = executable("srt")
+                binary = executable("srt", path=probe_path)
                 if not binary:
                     return False, "srt not found"
                 settings = base / "settings.json"
@@ -274,7 +299,8 @@ def isolation_probe(kind: str, *, runner) -> tuple[bool, str]:
                 argv = [binary, "--settings", str(settings), "--", sys.executable, "-c", script]
             try:
                 result = runner(argv, cwd=str(allowed), capture_output=True, text=True,
-                                timeout=30, stdin=subprocess.DEVNULL)
+                                timeout=30, stdin=subprocess.DEVNULL,
+                                env={**os.environ, "PATH": probe_path})
                 ok = result.returncode == 0 and (allowed / "ok").exists() and not denied.exists()
                 detail = (result.stderr or result.stdout or "").strip()[:600]
                 return ok, ("allowed writes, denied reads/writes/network verified" if ok
@@ -286,7 +312,7 @@ def isolation_probe(kind: str, *, runner) -> tuple[bool, str]:
 def observe(executor: str, *, recover: bool = True) -> dict[str, Any]:
     probes = []
     for tool in TOOLS:
-        if tool in {"srt", "rg"} and recover and sys.platform.startswith("linux"):
+        if (tool == "rg" or tool == "srt" and executor == "claude") and recover and sys.platform.startswith("linux"):
             record = ensure(tool)
         else:
             path = shutil.which(tool)
@@ -317,17 +343,26 @@ def known_failure(command: str, error: str) -> bool:
     lower = error.lower()
     if any(word in lower for word in ("approval denied", "credential", "authentication")):
         return False
-    if "codex" in command and "app-server socket directory must be" in lower:
+    if re.search(r"(?:^|\s|/)codex(?:\s|$)", command) and "app-server socket directory must be" in lower:
         return True
     if any(marker in lower for marker in ("sandbox required but unavailable",
                                           "refusing to start without a working sandbox")):
         return True
-    if any(tool in lower for tool in ("srt", "rg", "ripgrep", "bwrap", "bubblewrap", "socat")):
-        return any(marker in lower for marker in (
-            "not found", "not installed", "no such file", "needs the installed",
-            "cannot create namespace", "creating new namespace failed",
-            "no permissions to create new namespace", "operation not permitted"))
-    return False
+    # Match a missing executable, not a tool-shaped substring in a project path
+    # or a permission error on data that a working tool is trying to access.
+    tool = r"(?:srt|rg|ripgrep(?:\s+\(rg\))?|bwrap|bubblewrap|socat)"
+    missing = (
+        rf"(?<![\w.-]){tool}['\"]?(?::\s*|\s+)(?:command\s+)?(?:not found|not installed)",
+        rf"needs the installed\s+{tool}\b",
+        rf"no such file or directory:\s*['\"](?:[^'\"]*/)?{tool}['\"]",
+        rf"\bspawn\s+{tool}\s+enoent\b",
+    )
+    if any(re.search(pattern, lower) for pattern in missing):
+        return True
+    return bool(re.search(
+        r"\b(?:bwrap|bubblewrap|srt):\s*(?:error:\s*)?"
+        r"(?:cannot create namespace|creating new namespace failed|no permissions to create new namespace)",
+        lower))
 
 
 def static_result(spoken: str, commands, evidence: dict[str, Any]) -> str:

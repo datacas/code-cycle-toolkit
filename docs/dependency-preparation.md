@@ -38,11 +38,20 @@ failure, not a successful install or a model failure.
 The host supplies the native executor and package manager. Before native stage
 dispatch, Linux/WSL2 recovery reuses working `srt` and `rg` binaries. Missing or
 unusable tools are installed in immutable bundles below
-`~/.local/lib/code-cycle-tools/`; the stage receives their executable directories
-on its own `PATH`, without editing shell profiles. Existing managed bundles
+`~/.local/lib/code-cycle-tools/`; `srt` recovery runs only for Claude stages.
+The stage, host isolation probe and Claude preparation process receive their
+selected executable directories on their own `PATH`, without changing the runtime's
+environment or editing shell profiles. Preparation still omits host credentials.
+Existing managed bundles
 are reused without resolving a newer version. The bundle's `receipt.json`
 records version, source and integrity; stage observations also enter the existing
-cycle journal, rather than a new telemetry store.
+cycle journal, rather than a new telemetry store. Observations use the existing
+`stage_end` kind with component `sandbox_preflight`: one summary row, one row
+per tool and one per functional check, correlated by stage and attempt. Each
+row keeps its probe identity, observed path, outcome and bounded, redacted
+diagnostic separately, so a long diagnostic cannot truncate later probes.
+Journal summaries label these rows as preflight observations with the probe
+name, keeping them distinct from the stage's actual end.
 
 `srt` comes only from the official `@anthropic-ai/sandbox-runtime` npm package.
 Recovery selects the newest stable published version whose Node engine range
@@ -55,7 +64,8 @@ published SHA-256 checksum checked before extracting the regular executable.
 Both tools must run before their scratch bundle is atomically renamed into
 place. Recovery uses no `sudo`, never auto-updates, and never falls back to an
 unconfined dependency install. A failed replacement leaves existing bundles
-untouched.
+untouched. Concurrent installers reuse the winning committed bundle after
+checking its receipt and executable; other publication errors stay unverified.
 
 The [upstream srt documentation](https://github.com/anthropics/sandbox-runtime#how-it-works)
 describes macOS Seatbelt, Linux bubblewrap and Windows isolation. Automatic

@@ -89,6 +89,31 @@ class DispatchTestCase(unittest.TestCase):
 
 
 class DependencyPreparationDispatchTests(DispatchTestCase):
+    def test_claude_selected_prerequisites_reach_all_consumers(self):
+        evidence = {"missing": [], "status": "observed", "probes": [
+            {"name": "srt", "path": "/tools/srt", "outcome": "reused"},
+            {"name": "rg", "path": "/managed/rg/rg", "outcome": "installed"}]}
+        paths = []
+        def runner(argv, **kw):
+            paths.append(kw["env"]["PATH"])
+            return completed('{"type":"result","result":"done"}')
+        with (mock.patch.object(ex, "_run", side_effect=runner) as launch,
+              mock.patch.object(ex.native, "observe", return_value=evidence),
+              mock.patch.object(ex.native, "isolation_probe", return_value=(True, "fixture")) as probe,
+              mock.patch.object(ex.dependency_setup, "prepare", return_value={
+                  "status": "not_required", "items": []}) as prepare,
+              mock.patch.object(ex.sys, "platform", "linux")):
+            result = ex.ClaudeAdapter().dispatch(
+                CLAUDE, "implement", cwd=str(self.repo), writes=True,
+                command_policy=self.policy(test_command="pytest", registry_domains=("registry.npmjs.org",)),
+                runner=launch)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        expected = ex.native.tool_path(os.environ.get("PATH", ""), probes=evidence["probes"])
+        self.assertEqual([expected], paths)
+        self.assertEqual(expected, prepare.call_args.kwargs["prerequisite_path"])
+        self.assertEqual(["bwrap", "srt"], [call.args[0] for call in probe.call_args_list])
+        self.assertTrue(all(call.kwargs["path"] == expected for call in probe.call_args_list))
+
     def test_claude_unavailable_isolation_keeps_static_guards_and_pending_tests(self):
         evidence = {"missing": ["bwrap", "socat"], "probes": [], "status": "unverified"}
         payload = {"status": "IMPLEMENTED", "tests": {"passed": True, "conclusion": "verified"}}
@@ -144,7 +169,8 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                     self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
                     if expected:
                         prepare.assert_called_once_with(str(self.repo), executor, executor,
-                                                        domains=("packages.example.org",))
+                                                        domains=("packages.example.org",),
+                                                        prerequisite_path=os.environ.get("PATH", ""))
                         self.assertEqual(report, result.artifacts["dependency_preparation"])
                     else:
                         prepare.assert_not_called()
