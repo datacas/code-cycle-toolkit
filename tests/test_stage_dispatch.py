@@ -92,7 +92,7 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
     def test_claude_selected_prerequisites_reach_all_consumers(self):
         evidence = {"missing": [], "status": "observed", "probes": [
             {"name": "srt", "path": "/tools/srt", "outcome": "reused"},
-            {"name": "rg", "path": "/managed/rg/rg", "outcome": "installed"}]}
+            {"name": "rg", "path": "/managed/rg/rg", "outcome": "installed", "executable": "rg"}]}
         paths = []
         def runner(argv, **kw):
             paths.append(kw["env"]["PATH"])
@@ -108,7 +108,7 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                 command_policy=self.policy(test_command="pytest", registry_domains=("registry.npmjs.org",)),
                 runner=launch)
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
-        expected = ex.native.tool_path(os.environ.get("PATH", ""), probes=evidence["probes"])
+        expected = os.pathsep.join((str(Path("/managed/rg/rg").parent), os.environ.get("PATH", "")))
         self.assertEqual([expected], paths)
         self.assertEqual(expected, prepare.call_args.kwargs["prerequisite_path"])
         self.assertEqual(["bwrap", "srt"], [call.args[0] for call in probe.call_args_list])

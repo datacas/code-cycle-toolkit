@@ -150,7 +150,7 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertTrue(all(len(row["detail"] or "") <= journal.TEXT_LIMIT + 1 for row in recorded))
         summary = recorder.journal.summary()
         self.assertIn("preflight implement #0 rg: not_verified", summary)
-        self.assertIn("preflight implement #0 preparation_isolation: verified", summary)
+        self.assertNotIn("preflight implement #0 preparation_isolation: verified", summary)
         self.assertNotIn("stage implement #0: reused", summary)
 
     def test_unrelated_tool_substrings_keep_the_existing_reroute(self):

@@ -211,6 +211,34 @@ class RecoveryTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_host_tools_preserve_path_order(self):
+        original = os.pathsep.join(("/venv/bin", "/local/bin", "/system/bin"))
+        for outcome in ("reused", "available"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(original, native.tool_path(original, probes=[
+                    {"name": tool, "path": f"/system/bin/{tool}", "outcome": outcome}
+                    for tool in ("srt", "rg")]))
+        with patch.object(native.shutil, "which", side_effect=lambda tool, **kw: f"/system/bin/{tool}"):
+            self.assertEqual(original, native.tool_path(original))
+
+    @unittest.skipIf(os.name == "nt", "the fake executables are POSIX")
+    def test_host_rg_does_not_switch_verification_python_at_process_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv, system = root / "venv/bin", root / "system/bin"
+            for directory, marker in ((venv, "venv"), (system, "system")):
+                directory.mkdir(parents=True)
+                binary = directory / "python3"
+                binary.write_text(f"#!{sys.executable}\nprint({marker!r})\n")
+                binary.chmod(0o755)
+            original = os.pathsep.join((str(venv), str(system)))
+            selected = native.tool_path(original, probes=[
+                {"name": "rg", "path": str(system / "rg"), "outcome": "reused"}])
+            result = subprocess.run(["python3"], env={**os.environ, "PATH": selected},
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("venv", result.stdout.strip())
+
     def test_codex_does_not_attempt_srt_recovery(self):
         for executor in ("codex", "claude"):
             with self.subTest(executor=executor), patch.object(native.sys, "platform", "linux"), patch.object(

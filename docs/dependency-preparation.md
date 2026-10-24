@@ -40,8 +40,10 @@ dispatch, Linux/WSL2 recovery reuses working `srt` and `rg` binaries. Missing or
 unusable tools are installed in immutable bundles below
 `~/.local/lib/code-cycle-tools/`; `srt` recovery runs only for Claude stages.
 The stage, host isolation probe and Claude preparation process receive their
-selected executable directories on their own `PATH`, without changing the runtime's
-environment or editing shell profiles. Preparation still omits host credentials.
+managed executable directories prepended to their own `PATH`, preserving the
+original host directories in their existing order. Tools already selected from
+the host `PATH` do not promote their directories. This does not change the runtime's
+environment or edit shell profiles. Preparation still omits host credentials.
 Existing managed bundles
 are reused without resolving a newer version. The bundle's `receipt.json`
 records version, source and integrity; stage observations also enter the existing
@@ -50,8 +52,11 @@ cycle journal, rather than a new telemetry store. Observations use the existing
 per tool and one per functional check, correlated by stage and attempt. Each
 row keeps its probe identity, observed path, outcome and bounded, redacted
 diagnostic separately, so a long diagnostic cannot truncate later probes.
-Journal summaries label these rows as preflight observations with the probe
-name, keeping them distinct from the stage's actual end.
+Journal summaries keep one summary row for successful preflight and show
+individual probes only for other outcomes. When space is limited, preflight
+lines are omitted before stage results, stops, failures and refusals; the full
+per-probe rows remain queryable. Preflight labels keep these observations
+distinct from the stage's actual end.
 
 `srt` comes only from the official `@anthropic-ai/sandbox-runtime` npm package.
 Recovery selects the newest stable published version whose Node engine range

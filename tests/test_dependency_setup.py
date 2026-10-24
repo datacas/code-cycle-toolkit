@@ -111,7 +111,7 @@ class SetupTests(unittest.TestCase):
         with patch.object(Path, "home", return_value=home), patch.dict(
                 os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}):
             selected_path = ds.native_prerequisites.tool_path(os.environ.get("PATH", ""), probes=[
-                {"name": tool, "path": str(tools / tool / tool), "outcome": "reused"}
+                {"name": tool, "path": str(tools / tool / tool), "outcome": "reused", "executable": tool}
                 for tool in ("srt", "rg")])
             result = ds.prepare(str(self.root), "claude", "claude", runner=subprocess.run,
                                 evidence_root=self.evidence, sleep=lambda _: None,

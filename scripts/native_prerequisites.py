@@ -228,17 +228,24 @@ def executable(tool: str, *, path: str | None = None) -> str | None:
 
 
 def tool_path(path: str, *, probes: list[dict[str, Any]] | None = None) -> str:
-    """Expose recovered tools to their consumers without changing host PATH."""
+    """Prepend only managed bundles, preserving the host toolchain's order."""
     if probes is None:
-        binaries = [shutil.which(tool, path=path) or executable(tool) for tool in ("srt", "rg")]
+        binaries = []
+        for tool in ("srt", "rg"):
+            if shutil.which(tool, path=path):
+                continue
+            managed_binary = executable(tool)
+            bundle = Path.home() / ".local" / "lib" / "code-cycle-tools" / tool
+            if managed_binary and Path(managed_binary).is_relative_to(bundle):
+                binaries.append(managed_binary)
     else:
         # Preflight has already selected and executed these tools. Rediscovery
         # could shadow a working PATH tool with a stale managed installation.
         selected = [probe for probe in probes if probe.get("name") in {"srt", "rg"}
-                    and probe.get("path") and probe.get("outcome") in {"installed", "reused", "available"}]
-        # Put immutable recovery bundles first. A working system srt can share
-        # its directory with the broken system rg that preflight replaced.
-        selected.sort(key=lambda probe: not (probe.get("executable") or probe.get("outcome") == "installed"))
+                    and probe.get("path") and probe.get("executable")
+                    and probe.get("outcome") in {"installed", "reused"}]
+        # Host PATH tools need no promotion. Only immutable recovery bundles
+        # must precede a broken system tool without reordering the host PATH.
         binaries = [probe["path"] for probe in selected]
     directories = [str(Path(binary).parent) for binary in binaries if binary]
     return os.pathsep.join((*dict.fromkeys(directories), path)) if directories else path
