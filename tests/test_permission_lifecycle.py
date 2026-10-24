@@ -24,20 +24,33 @@ class AcrossIssuesTests(RunCycleTestCase):
         store = grants.ConsentStore(self.home / "consents.json")
         profiles = router.load_profiles({"code_cycle": {"profiles": {
             "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}}}})
-        for issue in ("API-289", "API-290"):
+
+        def run(issue, **broker_kw):
+            writer, reviewer = NeedsDocker(), Talker("claude")
+            broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                          **broker_kw)
+            report = rc.run_cycle("owner/api", issue, router.TaskSignals(), self.store,
+                registry=ex.Registry([writer, reviewer]),
+                availability={"codex": ex.Availability.READY, "claude": ex.Availability.READY},
+                profiles=profiles, issue_review="off", consent=broker)
+            return report, writer, reviewer
+
+        # The first issue asks about Codex's scope, then the person answers it.
+        asked, _, _ = run("API-289")
+        self.assertEqual("permission_required", asked.stop_reason)
+        for issue, answers in (("API-289", {"docker_host": "persistent"}), ("API-290", {})):
             with self.subTest(issue=issue):
-                writer, reviewer = NeedsDocker(), Talker("claude")
-                broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
-                    answers={"docker_host": "persistent"} if issue == "API-289" else {},
+                report, writer, reviewer = run(
+                    issue, answers=answers,
                     prompt=lambda q: self.fail("asked for an existing scope"))
-                report = rc.run_cycle("owner/api", issue, router.TaskSignals(), self.store,
-                    registry=ex.Registry([writer, reviewer]),
-                    availability={"codex": ex.Availability.READY, "claude": ex.Availability.READY},
-                    profiles=profiles, issue_review="off", consent=broker)
                 self.assertEqual(rc.APPROVED_END, report.status)
                 self.assertEqual(1, len(writer.calls))
                 self.assertEqual(("docker_host",), writer.calls[0][1]["sandbox_grants"])
-                self.assertIn("The user granted", reviewer.dispatched[0])
+                # Claude's scope was never asked about, so only the answering
+                # run's reviewer receives it.
+                self.assertEqual(issue == "API-289",
+                                 "The user granted" in reviewer.dispatched[0])
+        self.assertEqual(["codex"], [entry["executor"] for entry in store.list("owner/api")])
 
 
 class PermissionCLITests(unittest.TestCase):

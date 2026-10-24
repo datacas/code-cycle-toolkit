@@ -723,6 +723,10 @@ class CycleRecorder:
             assert decision.target is not None
             granted = (self.consent.granted(decision.target.executor)
                        if self.consent is not None else ())
+            # This dispatch already ran with these denials; rerunning it with
+            # the same denial context cannot change its outcome.
+            denied_before = (frozenset(self.consent.denied_ids)
+                             if self.consent is not None else frozenset())
             permission_context = ""
             if self.consent is not None:
                 for grant_id in granted:
@@ -934,6 +938,10 @@ class CycleRecorder:
             # Consent never selects a different target, even when an availability
             # fallback was selected earlier in this stage.
             consent_decision = decision
+            if grant is not None and grant.id in denied_before:
+                result = replace(result, detail=f"{result.detail}; {grant.id} was denied "
+                                                "before this dispatch: no rerun")
+                grant = None
             if (grant is not None and not retry and not consent_requested
                     and grant.id not in self.consent.granted(consent_decision.target.executor)):
                 consent_requested = True

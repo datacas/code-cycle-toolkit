@@ -42,6 +42,9 @@ UNSUPPORTED = "unsupported"
 
 STORE_SCHEMA = 2
 
+#: The source of a `--grant` answer kept for this run only, never stored.
+RUN_ONLY_SOURCE = "--grant (this run)"
+
 
 class GrantError(ValueError):
     """A grant request, answer, or stored decision the runtime refuses."""
@@ -353,8 +356,12 @@ class ConsentBroker:
     notes: list[str] = field(default_factory=list)
     #: Best-effort audit observer; never used to authorize a grant.
     observer: Callable[..., None] | None = None
+    #: Scope fingerprints of the questions a person was shown for this work
+    #: item. Only those scopes keep a `--grant` answer beyond the run.
+    asked: frozenset[str] = frozenset()
     _cycle_answers: dict[str, str] = field(default_factory=dict)
     _consumed_answers: set[str] = field(default_factory=set)
+    _observed: dict[str, str | None] = field(default_factory=dict)
 
     def _observe(self, kind, grant, scope, role, answer=None, source=None) -> None:
         if self.observer is not None:
@@ -378,8 +385,12 @@ class ConsentBroker:
                 granted.add(grant.id)
             elif answer == DENY:
                 denied.add(grant.id)
-            if answer is not None:
-                self._observe("decision_answered", grant, scope, "dispatch", answer, source)
+            # Audit a change of the effective decision, not every revalidation.
+            key = grant.fingerprint(scope)
+            if self._observed.get(key) != answer:
+                self._observed[key] = answer
+                if answer is not None:
+                    self._observe("decision_answered", grant, scope, "dispatch", answer, source)
         self.granted_ids, self.denied_ids = granted, denied
         return tuple(sorted(granted))
 
@@ -387,9 +398,17 @@ class ConsentBroker:
         key = grant.fingerprint(scope)
         if grant.id in self.answers and key not in self._consumed_answers:
             answer = self.answers[grant.id]
-            self.apply_answer(grant, scope, answer)
+            # The answer persists only for the scope its question showed; every
+            # other registered scope receives it for this run alone.
+            persist = key in self.asked
+            self.apply_answer(grant, scope, answer, persist=persist)
             self._consumed_answers.add(key)
-            return answer, "--grant"
+            if persist or answer == ALLOW_CYCLE:
+                return answer, "--grant"
+            self.notes.append(f"{grant.id}={answer} kept for this run only on "
+                              f"{scope.executor}/{scope.platform}: no earlier question "
+                              "showed this scope")
+            return answer, RUN_ONLY_SOURCE
         # Configuration remains a separate explicit source of authorization.
         if grant.id in self.preauthorized:
             return ALLOW_PERSISTENT, "project configuration"
@@ -435,7 +454,7 @@ class ConsentBroker:
             return answer
         self.granted_ids.add(grant.id)
         self.denied_ids.discard(grant.id)
-        if answer == ALLOW_CYCLE:
+        if answer == ALLOW_CYCLE or (answer == ALLOW_PERSISTENT and not persist):
             self._cycle_answers[grant.fingerprint(scope)] = answer
         if answer == ALLOW_PERSISTENT and persist:
             if self.store is None:
@@ -453,6 +472,7 @@ class ConsentBroker:
             return UNSUPPORTED
         answer, source = self._resolve(grant, scope)
         if answer is not None:
+            self._observed[grant.fingerprint(scope)] = answer
             self._observe("decision_answered", grant, scope, role, answer, source)
             return answer
         if answer is None and self.prompt is not None:
@@ -469,6 +489,7 @@ class ConsentBroker:
         if answer not in ANSWERS:
             raise GrantError(f"{grant.id}: {answer!r} is not one of {', '.join(ANSWERS)}")
         answer = self.apply_answer(grant, scope, answer)
+        self._observed[grant.fingerprint(scope)] = answer
         self._observe("decision_answered", grant, scope, role, answer, source)
         if answer == DENY:
             self.notes.append(f"{grant.id} denied: only the operations that need it "

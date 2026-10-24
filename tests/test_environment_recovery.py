@@ -77,6 +77,32 @@ class SandboxReportTests(unittest.TestCase):
             {"type": "response_item", "payload": {"type": "message", "content": error}},
             events(error)[1]]))
 
+    def test_an_earlier_unrelated_denial_does_not_hide_the_grantable_one(self):
+        def call(call_id, command, output):
+            return [
+                {"type": "function_call", "call_id": call_id, "name": "exec_command",
+                 "arguments": json.dumps({"cmd": command})},
+                {"type": "function_call_output", "call_id": call_id, "output": output},
+            ]
+        network = call("n", "npm view left-pad",
+                       "SandboxDenied: domain is not on the allowlist")
+        docker = call("d", "docker compose up -d",
+                      "SandboxDenied: sandbox denied access to /var/run/docker.sock "
+                      "(network namespace)")
+        denials = recovery.codex_sandbox_denials(network + docker)
+        self.assertEqual(["sandbox_network_access", "sandbox_local_access"],
+                         [denial["kind"] for denial in denials])
+        reported = {**BLOCKER, "resource": "docker_host"}
+        spoken = block("BLOCKED", environment_blocker=reported)
+        chosen = recovery.observed_sandbox_blocker(spoken, denials)
+        self.assertEqual("docker compose up -d", chosen["command"])
+        self.assertIs(grants.DOCKER_HOST, grants.ConsentBroker("owner/api").grant_for(chosen))
+        # Without an observed grantable denial, the agent's matching blocker wins.
+        self.assertEqual(reported, recovery.observed_sandbox_blocker(spoken, denials[:1]))
+        # Nothing grantable anywhere: the runtime's own first observation stands.
+        self.assertEqual(denials[0], recovery.observed_sandbox_blocker(block("BLOCKED"),
+                                                                      denials[:1]))
+
     def test_only_the_final_report_can_trigger_recovery(self):
         spoken = block("BLOCKED", environment_blocker=BLOCKER)
         self.assertEqual(BLOCKER, recovery.sandbox_blocker("echoed prompt\n" + spoken))
@@ -377,6 +403,24 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertEqual(BLOCKER["command"], request["operation"])
         self.assertEqual(BLOCKER["error"], request["observed_error"])
         self.assertIn("CI", request["alternative"])
+        self.assertIn("permission required", outcome.result.detail)
+
+    def test_an_earlier_network_denial_keeps_the_agents_docker_request(self):
+        network = {"kind": "sandbox_network_access", "command": "npm view left-pad",
+                   "error": "SandboxDenied: domain is not on the allowlist",
+                   "attempted": ["runtime observed this command's sandbox denial"],
+                   "requires_human": False}
+
+        class TwoDenials(RestrictedAdapter):
+            def dispatch(self, target, task, **kwargs):
+                result = super().dispatch(target, task, **kwargs)
+                return replace(result, artifacts={"sandbox_denials": [network]})
+        consent = grants.ConsentBroker("owner/repo", platform="linux")
+        adapter = TwoDenials(blocker={**BLOCKER, "resource": "docker_host"})
+        _, primary, fallback, outcome = self.execute(adapter, consent=consent)
+        self.assertFalse(fallback.dispatched)
+        self.assertEqual(1, len(primary.dispatched))
+        self.assertEqual(BLOCKER["command"], consent.pending[0].record()["operation"])
         self.assertIn("permission required", outcome.result.detail)
 
     def test_denied_permission_is_not_a_verified_pass(self):

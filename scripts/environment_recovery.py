@@ -10,6 +10,7 @@ import re
 import tempfile
 from typing import Any
 
+from grants import GRANTS
 from stage_permissions import StagePolicy, check
 
 
@@ -175,7 +176,11 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not re.search(r"SandboxDenied|sandbox denied access|domain is not on the allowlist|"
                              r"network access .*blocked.*sandbox", output, re.I):
                 continue
-            kind = "sandbox_network_access" if re.search(r"network|domain|allowlist", output, re.I) else "sandbox_local_access"
+            # A denied local socket is local access even when the message says "network".
+            local = re.search(r"\.sock\b|unix socket|AF_UNIX", output, re.I)
+            kind = ("sandbox_network_access"
+                    if not local and re.search(r"network|domain|allowlist", output, re.I)
+                    else "sandbox_local_access")
             denials.append({"kind": kind, "command": command, "error": output,
                             "attempted": ["runtime observed this command's sandbox denial"],
                             "requires_human": False})
@@ -183,9 +188,21 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def observed_sandbox_blocker(spoken: str, denials) -> dict[str, Any] | None:
-    if _final_status(spoken) == "BLOCKED" and isinstance(denials, list) and denials:
-        return denials[0]
-    return None
+    """The restriction a BLOCKED stage stopped on, preferring one a grant can lift.
+
+    An earlier unrelated denial must not hide the one a person can answer: the
+    first observed denial a registered grant matches wins, then the agent's own
+    blocker when a grant matches it, and only then the first observed denial.
+    """
+    if _final_status(spoken) != "BLOCKED" or not isinstance(denials, list) or not denials:
+        return None
+
+    def grantable(blocker):
+        return any(grant.matches(blocker) for grant in GRANTS.values())
+    reported = sandbox_blocker(spoken)
+    return (next((denial for denial in denials if grantable(denial)), None)
+            or (reported if reported is not None and grantable(reported) else None)
+            or denials[0])
 
 
 def _never_run(*_args, **_kwargs):

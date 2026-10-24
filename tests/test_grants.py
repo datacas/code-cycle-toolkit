@@ -15,6 +15,8 @@ import grants  # noqa: E402
 
 
 LINUX = grants.DOCKER_HOST.scope_for("codex", "linux")
+#: The question an earlier run showed: Codex's Linux scope.
+ASKED = frozenset({grants.DOCKER_HOST.fingerprint(LINUX)})
 
 
 class GrantRegistryTests(unittest.TestCase):
@@ -159,10 +161,58 @@ class BrokerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = grants.ConsentStore(Path(temporary) / "consents.json")
             broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
-                                          answers={"docker_host": "persistent"})
+                                          answers={"docker_host": "persistent"}, asked=ASKED)
             self.assertEqual(("docker_host",), broker.granted("codex"))
             store.revoke("owner/api", grants.DOCKER_HOST, LINUX)
             self.assertEqual((), broker.granted("codex"))
+
+    def test_an_explicit_answer_is_stored_only_for_the_scope_it_was_asked_for(self):
+        claude = grants.DOCKER_HOST.scope_for("claude", "linux")
+        for answer, status in (("persistent", "GRANTED"), ("deny", "DENIED")):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as temporary:
+                store = grants.ConsentStore(Path(temporary) / "consents.json")
+                broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                              answers={"docker_host": answer}, asked=ASKED)
+                broker.granted("codex")
+                broker.granted("claude")
+                # Claude's scope was never shown: it has the answer for this run only.
+                self.assertEqual([("codex", status)], [(entry["executor"], entry["status"])
+                                                       for entry in store.list("owner/api")])
+                self.assertIsNone(store.load("owner/api", grants.DOCKER_HOST, claude))
+                self.assertEqual(answer != "deny",
+                                 "docker_host" in broker.granted("claude"))
+                unasked = grants.ConsentBroker("owner/api", platform="linux",
+                                               store=grants.ConsentStore(Path(temporary) / "x.json"),
+                                               answers={"docker_host": answer})
+                unasked.granted("codex")
+                self.assertFalse((Path(temporary) / "x.json").exists())
+                self.assertTrue(any("kept for this run only on codex/linux" in note
+                                    for note in unasked.notes))
+                # A scope that changed since its question was shown counts as unasked.
+                wider = grants.GrantScope("codex", "linux", LINUX.effective + " and more",
+                                          LINUX.risks, isolated_per_dispatch=True)
+                changed = grants.ConsentBroker("owner/api", platform="linux",
+                                               store=grants.ConsentStore(Path(temporary) / "y.json"),
+                                               answers={"docker_host": answer}, asked=ASKED)
+                changed._resolve(grants.DOCKER_HOST, wider)
+                self.assertFalse((Path(temporary) / "y.json").exists())
+
+    def test_revalidation_audits_only_a_changed_decision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = grants.ConsentStore(Path(temporary) / "consents.json")
+            store.save("owner/api", grants.DOCKER_HOST, LINUX, "allow")
+            seen = []
+            broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
+                                          observer=lambda *event: seen.append(event[4]))
+            for _ in range(3):
+                broker.granted("codex")
+            self.assertEqual(["persistent"], seen)
+            store.revoke("owner/api", grants.DOCKER_HOST, LINUX)
+            broker.granted("codex")
+            store.save("owner/api", grants.DOCKER_HOST, LINUX, "deny")
+            broker.granted("codex")
+            broker.granted("codex")
+            self.assertEqual(["persistent", "deny"], seen)
 
     def test_executor_scopes_coexist_and_configuration_remains_visible_after_revoke(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,7 +244,7 @@ class BrokerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = grants.ConsentStore(Path(temporary) / "consents.json")
             broker = grants.ConsentBroker("owner/api", platform="linux", store=store,
-                                          answers={"docker_host": "deny"})
+                                          answers={"docker_host": "deny"}, asked=ASKED)
             self.assertEqual("deny", broker.request(grants.DOCKER_HOST, "codex", role="implement"))
             self.assertEqual((), broker.granted("codex"))
             self.assertEqual("deny", broker.request(grants.DOCKER_HOST, "codex", role="review"))

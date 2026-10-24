@@ -260,10 +260,19 @@ class ReconcileTests(PermissionViewCase):
         store = grants.ConsentStore(self.root / "consents.json")
         broker = grants.ConsentBroker(REPO, platform="linux", store=store,
                                       answers={"docker_host": grants.ALLOW_PERSISTENT},
+                                      asked=frozenset({DOCKER.fingerprint(CODEX)}),
                                       observer=self.journal().consent_event)
         broker.request(DOCKER, "codex", role="implement")
         self.assertEqual({"--grant", "consents.json"}, {r[0] for r in self.rows()})
         self.assertEqual(grants.ALLOW_PERSISTENT, next(r[2] for r in self.rows() if r[0] == "--grant"))
+
+    def test_a_run_only_answer_never_shows_as_a_stored_consent(self):
+        broker = grants.ConsentBroker(REPO, platform="linux",
+                                      store=grants.ConsentStore(self.root / "consents.json"),
+                                      answers={"docker_host": grants.ALLOW_PERSISTENT},
+                                      observer=self.journal().consent_event)
+        broker.request(DOCKER, "codex", role="implement")
+        self.assertEqual({grants.RUN_ONLY_SOURCE}, {r[0] for r in self.rows()})
 
 
 class IgnoredConfigurationTests(RunCycleTestCase):
