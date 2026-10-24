@@ -220,7 +220,8 @@ class ReconcileTests(PermissionViewCase):
         # A stored entry whose scope no longer matches stops applying (the
         # fingerprint is what the runtime compares), and the view follows.
         payload = json.loads((self.root / "consents.json").read_text())
-        payload["repos"][REPO]["docker_host"]["fingerprint"] = "changed"
+        entry = next(iter(payload["repos"][REPO]["docker_host"].values()))
+        entry["fingerprint"] = "changed"
         (self.root / "consents.json").write_text(json.dumps(payload))
         self.journal("two").reconcile_permissions(consents=store.allowed_scopes(REPO))
         self.assertEqual([], self.rows())
@@ -246,22 +247,32 @@ class ReconcileTests(PermissionViewCase):
         self.assertEqual(1, len(self.rows()))
         self.assertEqual(["allow"], [row[2] for row in self.stored()])
 
-    def test_a_replaced_scope_shows_only_the_current_one(self):
+    def test_executor_scopes_are_listed_without_replacing_each_other(self):
         store = grants.ConsentStore(self.root / "consents.json")
         store.save(REPO, DOCKER, CODEX, "allow")
         self.journal("one").reconcile_permissions(consents=store.allowed_scopes(REPO))
         store.save(REPO, DOCKER, CLAUDE, "allow")
         self.journal("two").reconcile_permissions(consents=store.allowed_scopes(REPO))
-        self.assertEqual([f"docker_host: {CLAUDE.effective}"], [r[1] for r in self.rows()])
+        self.assertEqual({f"docker_host: {CODEX.effective}", f"docker_host: {CLAUDE.effective}"},
+                         {r[1] for r in self.rows()})
 
     def test_a_persistent_answer_shows_as_a_consent_the_moment_it_is_stored(self):
         store = grants.ConsentStore(self.root / "consents.json")
         broker = grants.ConsentBroker(REPO, platform="linux", store=store,
                                       answers={"docker_host": grants.ALLOW_PERSISTENT},
+                                      asked=frozenset({DOCKER.fingerprint(CODEX)}),
                                       observer=self.journal().consent_event)
         broker.request(DOCKER, "codex", role="implement")
         self.assertEqual({"--grant", "consents.json"}, {r[0] for r in self.rows()})
         self.assertEqual(grants.ALLOW_PERSISTENT, next(r[2] for r in self.rows() if r[0] == "--grant"))
+
+    def test_a_run_only_answer_never_shows_as_a_stored_consent(self):
+        broker = grants.ConsentBroker(REPO, platform="linux",
+                                      store=grants.ConsentStore(self.root / "consents.json"),
+                                      answers={"docker_host": grants.ALLOW_PERSISTENT},
+                                      observer=self.journal().consent_event)
+        broker.request(DOCKER, "codex", role="implement")
+        self.assertEqual({grants.RUN_ONLY_SOURCE}, {r[0] for r in self.rows()})
 
 
 class IgnoredConfigurationTests(RunCycleTestCase):
@@ -497,7 +508,7 @@ class RuntimeRecordingTests(RunCycleTestCase):
                 return super().dispatch(target, task, **kw)
 
         self.run_in_linked(Watching("claude", block("BLOCKED")), consent=broker)
-        self.assertEqual(["cycle"], [d["level"] for d in seen[0]])
+        self.assertEqual(["cycle", "cycle"], [d["level"] for d in seen[0]])
         self.assertEqual([], self.view())
 
     def test_the_stage_policy_carries_the_checkout_branch(self):

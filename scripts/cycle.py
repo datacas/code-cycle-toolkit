@@ -49,11 +49,12 @@ from executors import (
 )
 from harness import build_harness_snapshot
 from grants import (
-    ALLOW_CYCLE, ALLOW_PERSISTENT, DENY, PENDING, ConsentBroker,
+    ALLOW_CYCLE, ALLOW_PERSISTENT, DENY, PENDING, ConsentBroker, GRANTS,
     denial_context, granted_context,
 )
 from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,
+    observed_sandbox_blocker, denied_result,
 )
 from reroute import effect_snapshot, reconcile
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
@@ -496,6 +497,7 @@ class CycleRecorder:
         environment_context = ""
         primary_decision = None
         consent_requested = False
+        denial_affected: set[str] = set()
         # A primary, its fallback, and one rerun after a permission answer.
         for attempt in range(3):
             signals = {**self._pre_routing(role, change), **stage_signals, **parent_failure}
@@ -718,11 +720,24 @@ class CycleRecorder:
                 if self.on_progress is not None:
                     self.on_progress(**activity)
 
+            assert decision.target is not None
             granted = (self.consent.granted(decision.target.executor)
                        if self.consent is not None else ())
+            # This dispatch already ran with these denials; rerunning it with
+            # the same denial context cannot change its outcome.
+            denied_before = (frozenset(self.consent.denied_ids)
+                             if self.consent is not None else frozenset())
+            permission_context = ""
+            if self.consent is not None:
+                for grant_id in granted:
+                    scope = GRANTS[grant_id].scope_for(decision.target.executor, self.consent.platform)
+                    if scope is not None:
+                        permission_context += "\n\n" + granted_context(GRANTS[grant_id], scope)
+                permission_context += "\n\n" + "\n".join(
+                    denial_context(GRANTS[grant_id]) for grant_id in self.consent.denied_ids)
             grant_kwargs = {"sandbox_grants": granted} if granted else {}
             try:
-                result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{routing_context(decision)}",
+                result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
                                   self.registry,
                                   policy=self.policy, probes=self.probes,
                                   on_progress=observe_progress,
@@ -833,11 +848,20 @@ class CycleRecorder:
                             result,
                             detail=f"{result.detail}; {stopped_reason} for unsupported effort",
                         )
-            blocker = (sandbox_blocker(result.agent_output)
+            blocker = (observed_sandbox_blocker(result.agent_output,
+                                                result.artifacts.get("sandbox_denials"))
+                       or sandbox_blocker(result.agent_output)
                        or denied_docker_blocker(result.agent_output,
                                                 result.artifacts.get("permission_denials"))
                        if result.outcome is DispatchOutcome.SUCCEEDED
                        and not result.asynchronous else None)
+            if self.consent is not None and blocker is not None:
+                denied_grant = self.consent.grant_for(blocker)
+                if denied_grant is not None and denied_grant.id in self.consent.denied_ids:
+                    denial_affected.add(denied_grant.id)
+            if denial_affected:
+                result = replace(result, agent_output=denied_result(
+                    result.agent_output, sorted(denial_affected)))
             known_prerequisite = (
                 known_failure(blocker["command"], blocker["error"]) if blocker is not None
                 else result.failure_code == "environment_restricted"
@@ -868,8 +892,14 @@ class CycleRecorder:
                                process_exited=result.process_exited)
                 result = replace(result, detail=result.detail +
                                  "; known native prerequisite: checks not_verified; no executor reroute")
-            if not known_prerequisite and result.failure_code in {"capacity", "transport", "timeout", "quota",
-                                       "environment_restricted"}:
+            if result.failure_code == "environment_restricted" and not known_prerequisite:
+                signals.update(reroute_action="stop", reroute_reason="same_sandbox",
+                               reroute_error_code="environment_restricted",
+                               reroute_start_state=result.start_state,
+                               process_exited=result.process_exited)
+                result = replace(result, detail=result.detail +
+                                 "; sandbox restriction: keep the selected executor; checks not_verified")
+            if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)
                 if self.mode is RoutingMode.CALIBRATION:
@@ -879,9 +909,6 @@ class CycleRecorder:
                     if action == "reroute":
                         if fallback is None or fallback == decision.target:
                             action, reason = "stop", "no_fallback"
-                        elif (result.failure_code == "environment_restricted"
-                              and fallback.executor == decision.target.executor):
-                            action, reason = "stop", "same_sandbox"
                         elif (fallback.executor not in eligible or not self.availability.get(
                                 fallback.executor, Availability.UNKNOWN).dispatchable):
                             action, reason = "stop", "fallback_unavailable"
@@ -891,8 +918,6 @@ class CycleRecorder:
                                reroute_start_state=result.start_state)
                 retry = action == "reroute"
                 if retry:
-                    if blocker is not None:
-                        environment_context = recovery_context(blocker)
                     fallback_decision = replace(
                         decision, target=fallback, used_fallback=True,
                         reasons=decision.reasons + (f"stage fallback after {result.failure_code}",),
@@ -902,36 +927,26 @@ class CycleRecorder:
                         "reroute_start_state": result.start_state,
                         "reroute_action": action, "reroute_reason": reason,
                     }
-                elif not (blocker is not None and self.consent is not None
-                          and self.consent.grant_for(blocker) is not None
-                          and reason != "calibration"):
-                    diagnostic = ""
-                    if result.failure_code == "environment_restricted" and reason == "publication_changed":
-                        diagnostic = (
-                            "; this attempt already published: preserve that result and "
-                            "reconcile an explicit continuation before another executor runs. "
-                            "An alternative executor has not demonstrated recovery; this is "
-                            "an environment restriction, not model-quality evidence")
-                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}{diagnostic}")
-            # Only when no executor could recover without a wider sandbox does
-            # a person get asked: least privilege first.
+                else:
+                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}")
+            # A restriction requests a grant on the chosen executor, never a fallback.
             grant = (self.consent.grant_for(blocker)
                      if blocker is not None and self.consent is not None
+                     and not known_prerequisite
                      and self.mode is not RoutingMode.CALIBRATION else None)
             answer = None
-            # The grant is for the target that has a scope for it: a fallback
-            # that hit the same wall hands the question back to the primary.
+            # Consent never selects a different target, even when an availability
+            # fallback was selected earlier in this stage.
             consent_decision = decision
-            if (grant is not None and grant.scope_for(
-                    decision.target.executor, self.consent.platform) is None
-                    and primary_decision is not None and primary_decision.target is not None
-                    and grant.scope_for(primary_decision.target.executor,
-                                        self.consent.platform) is not None):
-                consent_decision = primary_decision
+            if grant is not None and grant.id in denied_before:
+                result = replace(result, detail=f"{result.detail}; {grant.id} was denied "
+                                                "before this dispatch: no rerun")
+                grant = None
             if (grant is not None and not retry and not consent_requested
                     and grant.id not in self.consent.granted(consent_decision.target.executor)):
                 consent_requested = True
-                answer = self.consent.request(grant, consent_decision.target.executor, role=role)
+                answer = self.consent.request(grant, consent_decision.target.executor,
+                                              role=role, blocker=blocker)
             if answer == PENDING:
                 # Nobody could answer: the sandbox stays as it is, no other
                 # executor is tried in its place, and the cycle stops to ask.
@@ -941,6 +956,8 @@ class CycleRecorder:
                                reroute_error_code="environment_restricted",
                                reroute_start_state=result.start_state)
             elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
+                if answer == DENY:
+                    denial_affected.add(grant.id)
                 # An answer permits access, not replaying effects. Reconcile
                 # every full rerun, including one on the same executor.
                 action, stop_reason = (("stop", "exit_unproven")
@@ -952,11 +969,7 @@ class CycleRecorder:
                                reroute_error_code="environment_restricted",
                                reroute_start_state=result.start_state)
                 if safe:
-                    scope = grant.scope_for(consent_decision.target.executor,
-                                            self.consent.platform)
-                    environment_context = recovery_context(blocker) + "\n\n" + (
-                        denial_context(grant) if answer == DENY
-                        else granted_context(grant, scope))
+                    environment_context = recovery_context(blocker)
                     fallback_decision = replace(
                         consent_decision, reasons=consent_decision.reasons +
                         (f"rerun after the {grant.id} permission answer: {answer}",),

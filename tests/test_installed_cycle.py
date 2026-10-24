@@ -298,7 +298,7 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual(True, json.loads(first["payload"])["process_exited"])
         self.assertEqual("fallback", json.loads(second["payload"])["dispatch_relationship"])
 
-    def test_sandbox_recovery_works_from_an_installed_runtime(self) -> None:
+    def test_installed_runtime_keeps_the_executor_on_sandbox_restrictions(self) -> None:
         checkout = self.root / "task-checkout"
         subprocess.run(["git", "worktree", "add", "-b", "task-7", str(checkout)],
                        cwd=self.project, capture_output=True, text=True, check=True)
@@ -306,22 +306,18 @@ class InstalledCycleTests(unittest.TestCase):
             "--issue-review", "off", "--local-only", "--workspace", "current",
             "--cwd", str(checkout), FAKE_SANDBOX="codex",
         )
-        # Local-only intentionally ends after implementation; the sandbox
-        # blocker must have recovered rather than becoming that stop reason.
         self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows()
         attempts = [row for row in rows if row["role"] == "implement" and row["outcome"]]
-        self.assertEqual(["codex", "claude"], [row["executor"] for row in attempts])
-        self.assertEqual(["failed", "succeeded"], [row["outcome"] for row in attempts])
+        self.assertEqual(["codex"], [row["executor"] for row in attempts])
+        self.assertEqual(["failed"], [row["outcome"] for row in attempts])
         first = json.loads(attempts[0]["payload"])
-        second = json.loads(attempts[1]["payload"])
         self.assertEqual("environment_restricted", first["reroute_error_code"])
-        self.assertEqual("no_effects", first["reroute_reason"])
+        # The Docker restriction asks for a grant on Codex; Claude never runs.
+        self.assertEqual("permission_required", first["reroute_reason"])
         self.assertTrue(first["process_exited"])
-        self.assertEqual("fallback", second["dispatch_relationship"])
-        self.assertEqual("IMPLEMENTED", next(row["status"] for row in rows
-                                             if row["role"] == "implement" and row["status"]))
-        self.assertEqual("local_only", json.loads(rows[-1]["payload"])["stop_reason"])
+        self.assertEqual("HUMAN_INTERVENTION", rows[-1]["status"])
+        self.assertEqual("permission_required", json.loads(rows[-1]["payload"])["stop_reason"])
 
     def test_a_review_that_reports_no_verdict_stops_the_cycle(self) -> None:
         """An unknown verdict is recorded as unknown, never guessed from a

@@ -267,8 +267,14 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(grants.PENDING, broker.request(grant, "codex", role="implement"))
         self.assertFalse(cj.decisions(self.path, "owner/repo", "306")[0]["answered"])
         resumed = cj.Journal(self.path, "owner/repo", "306", "second")
+        # The journal names the scope the first run showed, and only that one.
+        asked = cj.asked_scopes(self.path, "owner/repo", "306")
+        self.assertEqual(frozenset({grant.fingerprint(grant.scope_for("codex", "linux"))}), asked)
+        self.assertEqual(frozenset(), cj.asked_scopes(self.path, "owner/repo", "307"))
+        self.assertEqual(frozenset(), cj.asked_scopes(Path(self.temp.name) / "missing" / "x.sqlite",
+                                                      "owner/repo", "306"))
         broker = grants.ConsentBroker("owner/repo", platform="linux", store=store,
-                                      answers={"docker_host": grants.DENY},
+                                      answers={"docker_host": grants.DENY}, asked=asked,
                                       observer=resumed.consent_event)
         self.assertEqual(grants.DENY, broker.request(grant, "codex", role="implement"))
         self.assertTrue(cj.decisions(self.path, "owner/repo", "306")[0]["answered"])

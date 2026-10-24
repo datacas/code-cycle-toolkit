@@ -63,7 +63,7 @@ import ci_gate
 import user_choices
 import triage_repair
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
-from cycle_journal import Journal, cleanup as journal_cleanup
+from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup
 from cycle_history import (
     COMMENT_STAGES,
     CycleHistoryStore,
@@ -2461,6 +2461,9 @@ def run_cycle(
     previous_consent_observer = consent.observer if consent is not None else None
     if consent is not None:
         consent.observer = journal.consent_event
+        # Read before this run asks anything: a `--grant` answer is stored only
+        # for a scope an earlier run of the work item showed the person.
+        consent.asked = consent.asked | asked_scopes(telemetry.path, repo_id, task_id)
         for grant_id, answer in consent.answers.items():
             journal.record("decision_answered", component="--grant",
                            decision_key=f"grant:{grant_id}", status=answer)
@@ -4630,7 +4633,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="run on the built-in defaults, ignoring any configuration")
     parser.add_argument("--grant", action="append", default=[], metavar="ID=ANSWER",
                         help="answer a sensitive sandbox permission in advance: "
-                             "docker_host=cycle|persistent|deny (repeatable)")
+                             "docker_host=cycle|persistent|deny (repeatable); persistent "
+                             "and deny are stored only for a scope an earlier run asked about")
     parser.add_argument("--repair-approval", default=None,
                         help="approve exactly one proposed comment repair: COMMENT_ID:SHA256")
     args = parser.parse_args(argv)

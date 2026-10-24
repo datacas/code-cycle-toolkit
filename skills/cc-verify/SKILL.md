@@ -185,10 +185,12 @@ The other restriction kinds are `sandbox_network_access` and
 `sandbox_filesystem_access`. Use them only for observed executor restrictions,
 not a genuinely unavailable service or missing configuration. Connection
 refused alone does not prove sandbox isolation. Free-text values follow the
-selected output language. The runtime may use a configured alternative executor
-after proving process exit and reconciling effects; this report is not a
-permission grant and never marks the check passed. A caller without automatic
-recovery reports the blocker normally.
+selected output language. The runtime requests a registered grant on the
+selected executor; a sandbox restriction never selects another executor.
+After an answer it permits only a full guarded rerun with process exit proven
+and effects reconciled. This report is not a permission grant and never marks
+the check passed. Checks that remain impossible stay `not_verified`; independent
+completed work can continue. An essential blocked operation still stops.
 
 When the restriction is the host Docker daemon, add `"resource": "docker_host"`.
 The runtime then asks the user whether to grant that permission, and says what

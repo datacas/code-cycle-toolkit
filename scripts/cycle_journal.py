@@ -392,15 +392,15 @@ class Journal:
         self.record(kind, role=role, component="consent", decision_key=f"grant:{grant.id}",
                     status=answer or "unanswered", reason=scope.effective,
                     correlation={"executor": scope.executor, "platform": scope.platform,
-                                 "source": source})
+                                 "source": source, "fingerprint": grant.fingerprint(scope)})
         if answer is not None:
             label = f"{grant.id}: {scope.effective}"
-            # `consents.json` only ever holds an allow, whatever the answer was called.
             self.permission(source or "consent", label,
-                            "allow" if source == "consents.json" else answer)
-            if answer == "persistent" and source in ("--grant", "interactive"):
+                            ("deny" if answer == "deny" else "allow")
+                            if source == "consents.json" else answer)
+            if answer in ("persistent", "deny") and source in ("--grant", "interactive"):
                 # The broker stored it in `consents.json` right now.
-                self.permission("consents.json", label, "allow")
+                self.permission("consents.json", label, "deny" if answer == "deny" else "allow")
 
     def summary(self, limit: int = SUMMARY_LIMIT) -> str:
         try:
@@ -472,6 +472,24 @@ def explain(path, repo_id: str, task_id: str, cycle_id: str) -> dict[str, Any]:
         "failures": [row for row in rows if row["kind"] == "failure"],
         "decisions": decisions(path, repo_id, task_id),
     }
+
+
+def asked_scopes(path, repo_id: str, task_id: str) -> frozenset[str]:
+    """The scope fingerprint of every consent question asked under the work item.
+
+    A scope that changed since it was shown has another fingerprint and counts
+    as unasked. An unreadable journal names none, so no explicit answer is
+    stored for a scope nobody can show was asked about.
+    """
+    try:
+        rows = events(path, repo_id, task_id=task_id, kinds=("decision_asked",))
+    except Exception:
+        return frozenset()
+    return frozenset(
+        fingerprint for row in rows
+        if row.get("component") == "consent"
+        and isinstance(fingerprint := (row.get("correlation") or {}).get("fingerprint"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", fingerprint))
 
 
 def decisions(path, repo_id: str, task_id: str) -> list[dict[str, Any]]:
