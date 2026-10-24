@@ -1010,6 +1010,20 @@ def validate_package(root: Path) -> list[str]:
                 f"{adapter_doc_link}"
             )
 
+    errors.extend(scan_for_private_data(root))
+
+    return errors
+
+
+def scan_for_private_data(root: Path) -> list[str]:
+    """Find private data and metadata sidecars in every file under `root`.
+
+    The fast path of the `Validate package` workflow runs only this scan for a
+    change that touches allowlisted paths (scripts/fast_path.py), so it must stay
+    independent of every other check.
+    """
+    root = root.resolve()
+    errors: list[str] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -1029,12 +1043,24 @@ def validate_package(root: Path) -> list[str]:
         text = PUBLIC_REPOSITORY_REFERENCE.sub("", text)
         for pattern, _ in forbidden_content_matches(text, PRIVATE_PATTERNS):
             errors.append(f"possible private data in {path.relative_to(root)}: {pattern.pattern}")
-
     return errors
 
 
 def main() -> int:
-    errors = validate_package(Path(__file__).resolve().parent.parent)
+    root = Path(__file__).resolve().parent.parent
+    if sys.argv[1:] == ["--scan-only"]:
+        errors = scan_for_private_data(root)
+        for error in errors:
+            fail(error)
+        if errors:
+            return 1
+        print("SCANNED: no private data or metadata sidecars")
+        return 0
+    if sys.argv[1:]:
+        fail("usage: validate-package.py [--scan-only]")
+        return 2
+
+    errors = validate_package(root)
     if errors:
         for error in errors:
             fail(error)

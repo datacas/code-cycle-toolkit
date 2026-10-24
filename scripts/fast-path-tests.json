@@ -1,0 +1,28 @@
+{
+  "groups": {
+    "repository-configuration": {
+      "paths": [".code-cycle.yml"],
+      "tests": [
+        "test_run_cycle.KnownKeyTests.test_this_repositorys_own_configuration_loads",
+        "test_run_cycle.ExplicitCalibrationTests.test_a_calibration_block_does_not_put_production_into_calibration",
+        "test_stage_dispatch.RuntimePolicyTests.test_this_repository_declares_its_verification"
+      ]
+    },
+    "telemetry-documentation": {
+      "paths": ["docs/telemetry.md"],
+      "tests": [
+        "test_permission_view.InForceTests.test_the_documented_query_agrees_with_the_command"
+      ]
+    },
+    "configuration-documentation": {
+      "paths": ["docs/configuration.md"],
+      "tests": [
+        "test_validate_package.ValidatePackageTests.test_implementation_workspace_default_and_opt_out_are_documented"
+      ]
+    },
+    "spike-fixtures": {
+      "paths": ["docs/spikes/**"],
+      "tests": ["test_spike_fixture_runner"]
+    }
+  }
+}

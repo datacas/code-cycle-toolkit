@@ -22,6 +22,15 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- **Non-code changes finish the required checks fast (#236).** `Validate
+  package` classifies a change with `scripts/fast_path.py`. A pull request or
+  push that touches only `.code-cycle.yml`, root Markdown other than the README,
+  `docs/` or `.github/ISSUE_TEMPLATE/` runs the privacy and metadata-sidecar
+  scan (`validate-package.py --scan-only`) and the tests mapped to the changed
+  files, and both required checks and the four Windows shards still report
+  success. Anything else, a manifest or `CHANGELOG.md` release heading, either
+  workflow, the classifier, an error or an empty diff runs the full validation.
+  See `CONTRIBUTING.md`.
 - **Native stages no longer keep their executor's full `gh` and `git` access on
   a GitHub cycle (#142).** Each Claude stage receives only its closed command
   table and a `PreToolUse` hook that validates every Bash command and its

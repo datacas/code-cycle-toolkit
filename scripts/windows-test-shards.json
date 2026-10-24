@@ -97,6 +97,7 @@
       "test_cycle_outcomes",
       "test_cycle_status",
       "test_executors",
+      "test_fast_path",
       "test_finding_results",
       "test_grants",
       "test_host_permissions",

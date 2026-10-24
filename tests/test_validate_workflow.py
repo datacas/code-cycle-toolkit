@@ -102,6 +102,80 @@ class ValidateWorkflowTests(unittest.TestCase):
             r"needs\.windows-test-shards\.result != 'success' \}\}$",
         )
 
+    def job_steps(self, job: str) -> dict[str, str]:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        body = re.search(
+            rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
+        )
+        self.assertIsNotNone(body, f"workflow must declare {job}")
+        steps = re.split(r"(?m)^      - name: ", body.group("body"))[1:]
+        return {step.split("\n", 1)[0]: step for step in steps}
+
+    def test_every_job_classifies_the_change_and_fails_closed(self) -> None:
+        # Steps that run whatever the classification: the classification itself,
+        # setup it depends on, and the dependency install the fast path shares.
+        always = {
+            "Check out repository",
+            "Set up Python",
+            "Classify the change",
+            "Install the configuration parser",
+            "Install the Windows test dependencies",
+            "Require all Windows test shards to pass",
+        }
+        for job in ("validate", "windows-test-shards", "powershell-installer"):
+            steps = self.job_steps(job)
+            with self.subTest(job=job):
+                classify = steps["Classify the change"]
+                self.assertIn("id: classify", classify)
+                self.assertIn("continue-on-error: true", classify)
+                self.assertIn("scripts/fast_path.py classify", classify)
+                self.assertIn("github.event.pull_request.base.sha || github.event.before", classify)
+                self.assertIn("github.event.pull_request.head.sha || github.sha", classify)
+                self.assertIn("fetch-depth: 0", steps["Check out repository"])
+                for name, step in steps.items():
+                    if name in always:
+                        continue
+                    # `!= 'fast'`, never `== 'full'`: an unset output runs in full.
+                    self.assertRegex(
+                        step,
+                        r"(?m)^        if: \$\{\{ steps\.classify\.outputs\.mode (!=|==) 'fast' \}\}$",
+                        name,
+                    )
+                self.assertNotIn("== 'full'", WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_the_fast_path_runs_what_the_decisions_require(self) -> None:
+        validate = self.job_steps("validate")["Run the fast path for a non-code change"]
+        shard = self.job_steps("windows-test-shards")["Run the fast path for a non-code change"]
+        installer = self.job_steps("powershell-installer")["Run the fast path for a non-code change"]
+
+        self.assertIn("run-fast --job validate --scan", validate)
+        self.assertIn("run-fast --job windows-shard --shard ${{ matrix.shard }}", shard)
+        self.assertNotIn("--scan", shard)
+        self.assertIn("run-fast --job powershell-installer --scan", installer)
+        for step in (validate, shard):
+            self.assertIn("FAST_PATH_TESTS: ${{ steps.classify.outputs.tests }}", step)
+            self.assertIn("steps.classify.outputs.mode == 'fast'", step)
+
+    def test_the_expensive_validation_is_skipped_only_on_the_fast_path(self) -> None:
+        for job, names in {
+            "validate": ("Validate skills and package metadata", "Check Bash installer syntax",
+                         "Discover every skill through the recommended CLI"),
+            "windows-test-shards": ("Validate shard assignments and run tests",),
+            "powershell-installer": ("Validate package with Windows Python",
+                                     "Test project installation for all hosts"),
+        }.items():
+            steps = self.job_steps(job)
+            for name in names:
+                with self.subTest(job=job, step=name):
+                    self.assertIn("steps.classify.outputs.mode != 'fast'", steps[name])
+
+    def test_full_runs_record_that_the_tests_passed(self) -> None:
+        for job in ("validate", "windows-test-shards", "powershell-installer"):
+            with self.subTest(job=job):
+                step = self.job_steps(job)["Record the validation outcome"]
+                self.assertIn("scripts/fast_path.py summary --job", step)
+                self.assertIn("steps.classify.outputs.mode != 'fast'", step)
+
     def test_windows_shard_manifest_covers_each_test_module_once(self) -> None:
         manifest = json.loads(
             (ROOT / "scripts" / "windows-test-shards.json").read_text(
