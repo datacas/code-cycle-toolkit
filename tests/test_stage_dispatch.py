@@ -89,6 +89,63 @@ class DispatchTestCase(unittest.TestCase):
 
 
 class DependencyPreparationDispatchTests(DispatchTestCase):
+    def test_claude_selected_prerequisites_reach_all_consumers(self):
+        evidence = {"missing": [], "status": "observed", "probes": [
+            {"name": "srt", "path": "/tools/srt", "outcome": "reused"},
+            {"name": "rg", "path": "/managed/rg/rg", "outcome": "installed", "executable": "rg"}]}
+        paths = []
+        def runner(argv, **kw):
+            paths.append(kw["env"]["PATH"])
+            return completed('{"type":"result","result":"done"}')
+        with (mock.patch.object(ex, "_run", side_effect=runner) as launch,
+              mock.patch.object(ex.native, "observe", return_value=evidence),
+              mock.patch.object(ex.native, "isolation_probe", return_value=(True, "fixture")) as probe,
+              mock.patch.object(ex.dependency_setup, "prepare", return_value={
+                  "status": "not_required", "items": []}) as prepare,
+              mock.patch.object(ex.sys, "platform", "linux")):
+            result = ex.ClaudeAdapter().dispatch(
+                CLAUDE, "implement", cwd=str(self.repo), writes=True,
+                command_policy=self.policy(test_command="pytest", registry_domains=("registry.npmjs.org",)),
+                runner=launch)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        expected = os.pathsep.join((str(Path("/managed/rg/rg").parent), os.environ.get("PATH", "")))
+        self.assertEqual([expected], paths)
+        self.assertEqual(expected, prepare.call_args.kwargs["prerequisite_path"])
+        self.assertEqual(["bwrap", "srt"], [call.args[0] for call in probe.call_args_list])
+        self.assertTrue(all(call.kwargs["path"] == expected for call in probe.call_args_list))
+
+    def test_claude_unavailable_isolation_keeps_static_guards_and_pending_tests(self):
+        evidence = {"missing": ["bwrap", "socat"], "probes": [], "status": "unverified"}
+        payload = {"status": "IMPLEMENTED", "tests": {"passed": True, "conclusion": "verified"}}
+        spoken = "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\nEND_ORCHESTRATION_RESULT"
+        stdout = json.dumps({"type": "result", "result": spoken})
+        seen = []
+        def runner(argv, **kw):
+            settings = settings_of(argv)
+            self.assertNotIn("sandbox", settings)
+            prompt = argv[argv.index("-p") + 1]
+            self.assertIn("not_verified", prompt)
+            self.assertEqual("claude", kw["env"]["CODE_CYCLE_STAGE_EXECUTOR"])
+            seen.append(settings)
+            return completed(stdout)
+        with (mock.patch.object(ex, "_run", side_effect=runner) as launch,
+              mock.patch.object(ex.native, "observe", return_value=evidence),
+              mock.patch.object(ex.native, "isolation_probe", return_value=(False, "namespace unavailable")),
+              mock.patch.object(ex.dependency_setup, "prepare") as prepare,
+              mock.patch.object(ex.sys, "platform", "linux")):
+            result = ex.ClaudeAdapter().dispatch(
+                CLAUDE, "implement", cwd=str(self.repo), writes=True,
+                command_policy=self.policy(test_command="pytest", registry_domains=("registry.npmjs.org",)),
+                runner=launch)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertTrue(seen)
+        prepare.assert_not_called()
+        parsed = json.loads(result.agent_output.split("ORCHESTRATION_RESULT\n")[1].split("\nEND_")[0])
+        self.assertEqual("IMPLEMENTED", parsed["status"])
+        self.assertEqual("not_verified", parsed["tests"]["conclusion"])
+        self.assertNotIn("passed", parsed["tests"])
+        self.assertEqual("pytest", parsed["tests"]["evidence"][0]["command"])
+
     def test_preparation_role_gating_and_evidence_reach_each_native_prompt(self) -> None:
         for executor, adapter_type, target in (("codex", ex.CodexAdapter, CODEX),
                                                 ("claude", ex.ClaudeAdapter, CLAUDE)):
@@ -112,7 +169,8 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                     self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
                     if expected:
                         prepare.assert_called_once_with(str(self.repo), executor, executor,
-                                                        domains=("packages.example.org",))
+                                                        domains=("packages.example.org",),
+                                                        prerequisite_path=os.environ.get("PATH", ""))
                         self.assertEqual(report, result.artifacts["dependency_preparation"])
                     else:
                         prepare.assert_not_called()
@@ -128,8 +186,10 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                     self.assertIn('"status": "incomplete"', prompt)
                     self.assertIn("fixture setup unavailable", prompt)
                     return completed('{"type":"turn.completed"}')
-                with mock.patch.object(ex.dependency_setup, "prepare",
-                                       side_effect=OSError("fixture setup unavailable")):
+                with (mock.patch.object(ex.dependency_setup, "prepare",
+                                        side_effect=OSError("fixture setup unavailable")),
+                      mock.patch.object(ex.native, "observe", return_value={
+                          "status": "unverified", "missing": ["rg"], "probes": []})):
                     result = adapter.dispatch(target, "inspect fixture", cwd=str(self.repo),
                                               writes=True, command_policy=self.policy(), runner=runner)
                 self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
@@ -137,6 +197,9 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                 self.assertEqual({"status": "incomplete", "items": [],
                                   "error": "fixture setup unavailable"},
                                  result.artifacts["dependency_preparation"])
+                preflight = result.artifacts["native_sandbox_preflight"]
+                self.assertEqual("unverified", preflight["status"])
+                self.assertTrue(preflight["missing"])
 
     def test_codex_nonpublishing_dispatches_do_not_get_default_code_host_domains(self) -> None:
         # Includes local-only implement/resolve and inactive command policies.

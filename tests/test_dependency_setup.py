@@ -85,6 +85,42 @@ class SetupTests(unittest.TestCase):
                 (root / lock).write_text("fixture")
                 self.assertEqual(manager, ds.projects(root)[0][1])
 
+    @unittest.skipIf(os.name == "nt", "the fake sandbox executable is POSIX")
+    def test_claude_preparation_passes_managed_rg_to_the_process(self):
+        home = Path(self.temp.name) / "home"
+        tools = home / ".local/lib/code-cycle-tools"
+        for tool in ("srt", "rg"):
+            bundle = tools / tool
+            bundle.mkdir(parents=True)
+            (bundle / "receipt.json").write_text(json.dumps({"executable": tool}))
+        rg = tools / "rg/rg"
+        rg.write_text("#!/bin/sh\necho ripgrep\n")
+        rg.chmod(0o755)
+        srt = tools / "srt/srt"
+        # A process fixture, not native confinement: fail unless the sanitized
+        # preparation environment exposes this managed rg and omits secrets.
+        srt.write_text(f"#!{sys.executable}\nimport os,pathlib,shutil,sys\n"
+                       f"if shutil.which('rg') != {str(rg)!r}: sys.exit('managed rg missing')\n"
+                       "if 'TEST_HOST_CREDENTIAL' in os.environ: sys.exit('credential leaked')\n"
+                       "if sys.argv[-1] == '--version': print('9.1.0')\n"
+                       "else:\n"
+                       " for name in ('node_modules', 'apps/web/node_modules'):\n"
+                       "  pathlib.Path(name).mkdir(parents=True, exist_ok=True)\n")
+        srt.chmod(0o755)
+        previous_path = os.environ.get("PATH")
+        with patch.object(Path, "home", return_value=home), patch.dict(
+                os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}):
+            selected_path = ds.native_prerequisites.tool_path(os.environ.get("PATH", ""), probes=[
+                {"name": tool, "path": str(tools / tool / tool), "outcome": "reused", "executable": tool}
+                for tool in ("srt", "rg")])
+            result = ds.prepare(str(self.root), "claude", "claude", runner=subprocess.run,
+                                evidence_root=self.evidence, sleep=lambda _: None,
+                                prerequisite_path=selected_path)
+        self.assertEqual("prepared", result["status"], result)
+        self.assertEqual(2, len(result["items"][0]["attempts"]))
+        self.assertTrue(all(attempt["exit_code"] == 0 for attempt in result["items"][0]["attempts"]))
+        self.assertEqual(previous_path, os.environ.get("PATH"))
+
     def test_ignored_generated_manifest_does_not_block_preparation(self):
         (self.root / ".gitignore").write_text("node_modules/\n.output/\n")
         self.git("add", ".gitignore")

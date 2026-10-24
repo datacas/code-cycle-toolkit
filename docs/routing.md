@@ -134,7 +134,7 @@ an `environment_blocker`: `kind` (`sandbox_local_access`,
 the stage result. Ordinary blockers, missing credentials, approval denials,
 and reports containing human questions do not qualify.
 
-The runtime records the attempt as `environment_restricted` and can use the
+For other restrictions, the runtime records the attempt as `environment_restricted` and can use the
 profile's configured fallback on a different executor. It passes the diagnosis
 to that executor and retains the same workspace and publication contracts.
 This shares the existing one-reroute budget and requires process exit proof
@@ -151,13 +151,49 @@ runs, so a nested `codex sandbox` or `codex exec` fails with "app-server socket
 directory must be a user-owned directory with mode 0700". The runtime's
 profile and per-dispatch `TMPDIR` do not cause this, and no `TMPDIR`,
 `CODEX_HOME` or `--no-daemon` change avoids it; the stage itself still starts
-and runs. The guidance tells the stage to report it once as
-`sandbox_filesystem_access`. The runtime's own pre-dispatch Codex probes run
-where the runtime runs, outside the stage's sandbox, and are unaffected unless
-the runtime itself was started inside a Codex sandbox. Nothing widens the
-sandbox for it: the Unix socket grant stays person-only (#239), and a check
-that needs the installed Codex sandbox runs on the host or on an executor that
-is not itself inside Codex.
+and runs. The guidance tells the stage to record the affected commands as
+`not_verified` and continue independent work. This is a known limitation of a Codex sandbox
+hosting another Codex sandbox, not a host socket-directory prerequisite. The
+runtime records affected checks as `not_verified` with evidence and keeps the
+selected executor. Nothing widens the sandbox for it: the Unix socket grant
+stays person-only (#239).
+
+Native dispatches set `CODE_CYCLE_STAGE_EXECUTOR` for their child process. A
+runtime launched inside a Codex stage uses that marker to classify the nested
+Codex limit deterministically and skips native preparation, without inspecting
+or repairing any host socket directory. A host-side Codex review is not marked
+nested merely because its executor is Codex.
+
+Known missing `srt`, `rg`, `bwrap`, `socat`, the nested socket error and native
+isolation startup errors are intercepted before the general reroute path.
+They keep the selected executor. Completed main work reports its completed
+functional status and `tests.conclusion: not_verified`; independent stages may
+continue. A residual `BLOCKED` is **not** promoted merely because a commit or PR
+exists: incomplete work and a missing safe static boundary still stop. The
+existing conservative closing gate stays unchanged until #290; pending
+verification cannot establish `READY_FOR_MANUAL_MERGE`. This does not remove
+the general `environment_restricted` reroute (#289), or change the #268 guard
+against blindly redispatching a stage that already published.
+
+Interception matches missing executable diagnostics and named sandbox startup
+failures. Tool-name substrings in unrelated paths (`target`, `cargo`,
+`org.gradle`), or a working tool's permission error on project data, retain
+the existing general reroute behavior.
+
+Nested executor behavior depends on the sandbox hosting the runtime, and is not
+assumed compatible without a successful functional probe. A probe failure is
+recorded as unverified; it does not establish that another executor will work.
+
+| Host sandbox running the runtime | Nested Codex CLI | Nested Claude CLI |
+|---|---|---|
+| Codex | Known-limited: its app-server socket is masked | Unverified |
+| Claude | Unverified | Unverified |
+| Other sandboxed host | Unverified | Unverified |
+| Unsandboxed host | Unverified until probed | Unverified until probed |
+
+Do not launch `codex sandbox`, `codex exec` or `srt` inside a stage when its
+native sandbox cannot support the nested check. Keep checks that cannot run as
+`not_verified`; never disable confinement or count missing evidence as a pass.
 
 ## Workspace policy
 

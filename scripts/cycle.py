@@ -69,6 +69,7 @@ from router import (
     rule_selector,
 )
 from stage_signals import CHANGE_OBSERVED_ROLES, RESOLUTION_ROLES, ChangeSignals
+from native_prerequisites import known_failure
 from telemetry import (
     AWAITING_CI_STATUS, CI_PASSED, CI_POLICIES, CYCLE_STARTS, DEFINITIVE_FAILURES,
     Telemetry, TelemetryError, WORK_ITEM_PROVIDERS, routing_decision_fields,
@@ -837,6 +838,17 @@ class CycleRecorder:
                                                 result.artifacts.get("permission_denials"))
                        if result.outcome is DispatchOutcome.SUCCEEDED
                        and not result.asynchronous else None)
+            known_prerequisite = (
+                known_failure(blocker["command"], blocker["error"]) if blocker is not None
+                else result.failure_code == "environment_restricted"
+                and known_failure("codex sandbox" if result.executor == "codex" else "claude",
+                                  result.detail)
+            )
+            preflight = result.artifacts.get("native_sandbox_preflight")
+            if (result.failure_code == "environment_restricted" and isinstance(preflight, dict)
+                    and isinstance(preflight.get("functional_check"), dict)
+                    and preflight["functional_check"].get("passed") is False):
+                known_prerequisite = True
             if blocker is not None:
                 # A completed CLI call is not a completed functional stage.
                 # This claim enables reconciliation, never grants permissions.
@@ -845,7 +857,18 @@ class CycleRecorder:
                     error_code="environment_restricted", lifecycle_state="failed",
                     detail=f"agent reported {blocker['kind']}: {blocker['error']}",
                 )
-            if result.failure_code in {"capacity", "transport", "timeout", "quota",
+            if known_prerequisite:
+                # This selected executor cannot repair native nesting by
+                # redispatching. A residual BLOCKED without independently
+                # proved completion remains conservative; never infer completion
+                # from the mere presence of a draft PR.
+                signals.update(reroute_action="stop", reroute_reason="same_sandbox",
+                               reroute_error_code="environment_restricted",
+                               reroute_start_state=result.start_state,
+                               process_exited=result.process_exited)
+                result = replace(result, detail=result.detail +
+                                 "; known native prerequisite: checks not_verified; no executor reroute")
+            if not known_prerequisite and result.failure_code in {"capacity", "transport", "timeout", "quota",
                                        "environment_restricted"}:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)
@@ -1017,6 +1040,36 @@ class CycleRecorder:
             return
         executor = result.executor
         artifacts = result.artifacts or {}
+        command_policy = artifacts.get("command_policy")
+        preflight = artifacts.get("native_sandbox_preflight") or (
+            command_policy.get("native_sandbox_preflight")
+            if isinstance(command_policy, dict) else None)
+        if isinstance(preflight, dict):
+            # Reuse the existing event schema. Each probe gets its own bounded,
+            # redacted row so one long error cannot truncate later observations.
+            def observation(name, status, observed=None, detail=None):
+                self._journal("stage_end", role=role, attempt_id=attempt_id,
+                              component="sandbox_preflight", reason=name,
+                              status=status, command=observed, detail=detail,
+                              correlation={"executor": executor})
+
+            checks = ("functional_check", "preparation_isolation", "codex_socket")
+            summary = {key: value for key, value in preflight.items()
+                       if key not in ("probes", *checks)}
+            observation("summary", preflight.get("status"), detail=summary)
+            for probe in preflight.get("probes", []):
+                if isinstance(probe, dict):
+                    observation(probe.get("name"), probe.get("outcome"),
+                                probe.get("observed") or probe.get("path"),
+                                probe.get("error") or probe.get("version"))
+            for name in checks:
+                check = preflight.get(name)
+                if isinstance(check, dict):
+                    status = ("verified" if check["passed"] else "unverified") if "passed" in check else check.get("outcome")
+                    observation(name, status, check.get("probe"),
+                                check.get("evidence") or check.get("reason"))
+                elif check is not None:
+                    observation(name, check)
         self._journal("stage_end", role=role, attempt_id=attempt_id, component=executor,
                       status=result.outcome.value, reason=result.failure_code,
                       duration_ms=result.duration_ms,

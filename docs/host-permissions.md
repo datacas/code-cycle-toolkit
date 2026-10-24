@@ -201,7 +201,14 @@ their comment. When they may verify, they do it only in a disposable clone:
   what its test runner executes. A user or project setting that would widen it (`allowWrite`, `excludedCommands`,
   `allowUnsandboxedCommands`, Unix sockets, `enableWeakerNestedSandbox`) stops
   the stage `BLOCKED`, because Claude merges such arrays across sources. A
-  sandbox that cannot start fails the stage as an environment restriction.
+  sandbox that cannot start is recorded as unavailable. On Linux/WSL2 the
+  runtime first probes the required isolation. If unavailable, it retains the
+  disposable clone and command/edit/publication guards for a static review;
+  verification, arbitrary-code tool choices and Docker commands are denied,
+  and affected checks are `not_verified`, never passed. No repository code runs
+  unconfined. Writing stages whose registry choices require this sandbox use
+  the same rule while continuing edits and publication. If even the existing
+  static boundary cannot be preserved, the stage remains `BLOCKED`.
   On Linux and WSL2 Claude Code's sandbox needs `bubblewrap` and `socat`
   (`sudo apt install bubblewrap socat` on Debian and Ubuntu, `sudo dnf install
   bubblewrap socat` on Fedora); macOS uses its built-in Seatbelt and needs

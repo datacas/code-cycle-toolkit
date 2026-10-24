@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import tempfile
+import sys
+from unittest.mock import patch
 
 
 _HOST_PREFIXES = ("HERDR_", "CODEX_", "CLAUDE_", "ORCA_")
-_HOST_SETTINGS = {"CODE_CYCLE_HOME", "XDG_CONFIG_HOME", "APPDATA"}
+_HOST_SETTINGS = {"CODE_CYCLE_HOME", "CODE_CYCLE_STAGE_EXECUTOR", "XDG_CONFIG_HOME", "APPDATA"}
 
 
 def isolate_host_environment():
@@ -24,8 +26,21 @@ def isolate_host_environment():
         os.environ.pop(key, None)
     isolated_codex_home = tempfile.TemporaryDirectory(prefix="cycle-codex-home-")
     os.environ["CODEX_HOME"] = isolated_codex_home.name
+    # Unit/native-wrapper fixtures exercise their own fake executables, not
+    # the developer's tool installer or OS sandbox. Recovery/probe tests opt
+    # into their own explicit dependency fakes instead.
+    module = sys.modules.get("native_prerequisites")
+    patchers = [] if module is None else [
+        patch.object(module, "observe", return_value={
+            "probes": [], "missing": [], "status": "observed", "functional_check": "not_run"}),
+        patch.object(module, "isolation_probe", return_value=(True, "fixture isolation")),
+    ]
+    for patcher in patchers:
+        patcher.start()
 
     def restore() -> None:
+        for patcher in reversed(patchers):
+            patcher.stop()
         for key in _HOST_SETTINGS:
             os.environ.pop(key, None)
         for key in tuple(os.environ):

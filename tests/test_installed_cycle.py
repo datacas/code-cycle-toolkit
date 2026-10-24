@@ -92,6 +92,14 @@ class InstalledCycleTests(unittest.TestCase):
             target = self.binaries / name
             shutil.copy(FAKE_AGENT, target)
             target.chmod(0o755)
+        # The installed runtime must not discover or install host prerequisites
+        # while exercising scripted agents. These fakes answer version probes;
+        # they make no claim of native isolation for a code-executing check.
+        for name in ("srt", "rg", "bwrap", "socat"):
+            target = self.binaries / name
+            target.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo '1.0.0'; exit 0; fi\n"
+                              "echo 'fixture native isolation unavailable' >&2\nexit 1\n", encoding="utf-8")
+            target.chmod(0o755)
 
     def make_credentials(self) -> None:
         (self.home / ".claude.json").write_text(

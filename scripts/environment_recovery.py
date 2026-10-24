@@ -29,8 +29,16 @@ loopback. Use a host-provided execution/verification capability or approved
 command escalation when available and permitted by the active policy. Do not
 disable sandboxing, widen permissions, or bypass a denied approval. Execution
 failure is not test success; keep the original verification requirements.
+Known native sandbox prerequisites (srt, rg, bwrap, socat, native isolation
+startup failures, and the nested Codex socket mask) are handled separately:
+retry safe equivalent checks if available, otherwise record the affected
+commands and evidence as UNVERIFIED using tests.conclusion=not_verified.
+Keep the selected executor and continue independent work. When the main work
+is finished, return the completed functional status with pending verification;
+do not return BLOCKED for these prerequisites alone. An incomplete
+implementation, a real defect, or an unsafe static-review boundary still blocks.
 If authorized recovery remains unavailable because of the executor's sandbox,
-return BLOCKED with an environment_blocker in ORCHESTRATION_RESULT:
+for other restrictions return BLOCKED with an environment_blocker in ORCHESTRATION_RESULT:
 {"kind":"sandbox_local_access","command":"the failing command",
  "error":"the observed error","attempted":["the recovery actually tried"],
  "requires_human":false}.
@@ -42,8 +50,13 @@ prove isolation.
 Codex's Linux sandbox hides its own app-server socket directory
 (/tmp/codex-daemon-<uid>, a read-only mode-000 mount) from the commands it
 runs, so `codex sandbox` or `codex exec` cannot start inside a Codex stage. No
-TMPDIR, CODEX_HOME or --no-daemon change recovers it: report it once as
-sandbox_filesystem_access with that command, without retrying variants.
+TMPDIR, CODEX_HOME or --no-daemon change recovers it. This is the known nested
+Codex limitation; do not launch `codex sandbox`, `codex exec` or `srt` from
+inside a stage whose native sandbox cannot support it. Record affected checks
+as `not_verified` with evidence and continue independent stage work when the
+implementation is complete. Never disable isolation or report a check that did
+not run as passed. Do not treat every nested executor pair as compatible: use
+the host-by-nested-executor table in `docs/routing.md`.
 Do not use this report for a genuinely unavailable service, missing credentials,
 login/trust prompts, an approval denial, or an action requiring a human. Those
 remain ordinary blockers. Forward a delegated verifier's environment_blocker

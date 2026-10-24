@@ -143,6 +143,9 @@ class StagePolicy:
     commands: tuple[str, ...] = ()
     integrations: tuple[str, ...] = ()
     registry_domains: tuple[str, ...] = ()
+    # Host-observed unavailable isolation: retain read/publication/edit guards,
+    # but never allow project code execution without the required sandbox.
+    static_only: bool = False
     # Where the hook records its own denials (#306): it runs as a separate
     # process that receives only this policy. None of these widens anything.
     journal_path: str | None = None
@@ -200,7 +203,7 @@ class StagePolicy:
     @property
     def verification_commands(self) -> tuple[str, ...]:
         """The configured test and verify commands this role receives."""
-        if self.role not in WRITING_ROLES | REVIEW_ROLES:
+        if self.static_only or self.role not in WRITING_ROLES | REVIEW_ROLES:
             return ()
         commands = (self.test_command,) if self.test_command else ()
         return commands + tuple(self.verify_prefixes)
@@ -567,8 +570,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
     if guarded_program == "gh":
         return _check_gh(words[1:], policy, cwd=cwd, run=run)
     if guarded_program == "docker":
+        if policy.static_only:
+            raise PolicyError("native isolation unavailable: code-executing checks are not_verified")
         return _check_docker(words[1:], policy)
-    if words[0] in policy.tools:
+    if words[0] in policy.tools and not policy.static_only:
         return
     # The permission view (#311): exactly the runtime's command, no arguments
     # of the stage's own, so the repository and branch are never its choice.
@@ -582,7 +587,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             and Path(words[2]).name == "pr-comment.md"
             and is_tmpdir_helper(words[2], policy.tmpdir)):
         return
-    for command in policy.commands:
+    for command in (() if policy.static_only else policy.commands):
         expected = parse_command(command, None).words
         if words[:len(expected)] == expected:
             return
@@ -1424,8 +1429,9 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     prefixes += sorted(READ_SHELL)
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))
-    prefixes += list(policy.tools) + list(policy.commands)
-    if policy.docker:
+    if not policy.static_only:
+        prefixes += list(policy.tools) + list(policy.commands)
+    if policy.docker and not policy.static_only:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
     patterns = []
     patterns.extend(policy.integrations)

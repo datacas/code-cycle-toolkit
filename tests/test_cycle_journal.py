@@ -29,6 +29,38 @@ class JournalTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "telemetry.sqlite"
         self.journal = cj.Journal(self.path, "owner/repo", "306", "first")
 
+    def test_successful_preflight_probes_are_compact_but_persisted(self):
+        j = self.journal
+        j.record("stage_end", role="resolve", stage_seq=2, component="sandbox_preflight",
+                 reason="summary", status="verified")
+        for probe, status in (("rg", "installed"), ("srt", "reused"), ("bwrap", "available"),
+                              ("functional_check", "verified"), ("preparation_isolation", "verified")):
+            j.record("stage_end", role="resolve", stage_seq=2, component="sandbox_preflight",
+                     reason=probe, status=status, detail="fixture evidence")
+        summary = j.summary()
+        self.assertEqual(1, summary.count("preflight resolve #2"))
+        self.assertIn("summary: verified", summary)
+        self.assertEqual(6, len(cj.events(self.path, "owner/repo")))
+
+    def test_preflight_volume_does_not_displace_stop_failure_or_refusal(self):
+        j = self.journal
+        j.record("stop", status="BLOCKED", reason="preserve stop reason")
+        j.record("failure", reason="preserve failure")
+        j.record("refusal", component="hook_bash", command="denied command")
+        for stage in range(1, 8):
+            for probe in ("summary", "rg", "srt", "bwrap", "socat", "functional_check",
+                          "preparation_isolation", "codex_socket"):
+                j.record("stage_end", role="resolve", stage_seq=stage,
+                         component="sandbox_preflight", reason=probe, status="unverified",
+                         detail="long diagnostic " * 20)
+        roomy = j.summary(limit=30000)
+        self.assertIn("preflight resolve #7 functional_check: unverified", roomy)
+        summary = j.summary()
+        for text in ("preserve stop reason", "preserve failure", "denied command"):
+            self.assertIn(text, summary)
+        self.assertLessEqual(len(summary), cj.SUMMARY_LIMIT)
+        self.assertEqual(59, len(cj.events(self.path, "owner/repo")))
+
     def test_stage_stop_decisions_and_context_span_runs(self):
         j = self.journal
         j.record("stage_start", role="implement", stage_seq=1, attempt_id="attempt-1")

@@ -17,6 +17,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import native_prerequisites
+
 REGISTRIES = ("registry.npmjs.org", "registry.yarnpkg.com")
 LOCKS = {"pnpm-lock.yaml": "pnpm", "package-lock.json": "npm",
          "npm-shrinkwrap.json": "npm", "yarn.lock": "yarn"}
@@ -97,8 +99,11 @@ def _manifest(path: Path) -> dict:
 
 def sandbox_command(executor: str, binary: str, command: list[str], *,
                     writable: list[Path], protected: list[Path], domains: tuple[str, ...],
-                    settings: Path) -> list[str]:
+                    settings: Path, path: str | None = None) -> list[str]:
     if executor == "codex":
+        if native_prerequisites.nested_codex():
+            raise OSError("known nested Codex limitation (#268): app-server socket directory must be "
+                          "a user-owned directory with mode 0700; check not_verified without probing")
         profile = "code_cycle_prepare"
         rules = {str(path): "write" for path in writable}
         # :read-only already protects the rest of the checkout. Serialising
@@ -119,7 +124,7 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
                 "-c", f"permissions.{profile}.filesystem={filesystem}", "--", *command]
     # This is the same sandbox runtime Claude Code uses for Bash. No npx
     # bootstrap or unsandboxed fallback when the host has not installed it.
-    srt = shutil.which("srt")
+    srt = native_prerequisites.executable("srt", path=path)
     if not srt:
         raise OSError("Claude dependency preparation needs the installed srt sandbox runtime")
     settings.write_text(json.dumps({
@@ -307,7 +312,8 @@ def _run(argv, *, timeout, **options):
 
 def prepare(cwd: str, executor: str, binary: str, *,
             domains: tuple[str, ...] = (), runner=_run,
-            evidence_root: Path | None = None, sleep=time.sleep) -> dict:
+            evidence_root: Path | None = None, sleep=time.sleep,
+            prerequisite_path: str | None = None) -> dict:
     """Return honest setup evidence even on failure; no verdict or CI claim.
 
     Logs outlive the disposable clone. Failure is given to the stage so it can
@@ -351,6 +357,9 @@ def prepare(cwd: str, executor: str, binary: str, *,
                        if key in {"PATH", "SYSTEMROOT", "LANG", "LC_ALL",
                                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
                                   "http_proxy", "https_proxy", "no_proxy"}}
+                if executor == "claude":
+                    env["PATH"] = (native_prerequisites.tool_path(env.get("PATH", ""))
+                                   if prerequisite_path is None else prerequisite_path)
                 env.update(HOME=str(scratch), TMPDIR=str(scratch), CI="true",
                            COREPACK_ENABLE_DOWNLOAD_PROMPT="0", COREPACK_HOME=str(scratch / "corepack"),
                            YARN_ENABLE_SCRIPTS="false", npm_config_ignore_scripts="true")
@@ -366,7 +375,8 @@ def prepare(cwd: str, executor: str, binary: str, *,
                     try:
                         argv = sandbox_command(executor, binary, command, writable=allowed,
                                                protected=protected, domains=tuple(dict.fromkeys(
-                                                   (*REGISTRIES, *domains))), settings=scratch / "sandbox.json")
+                                                   (*REGISTRIES, *domains))), settings=scratch / "sandbox.json",
+                                               path=environment.get("PATH") if executor == "claude" else None)
                         record["sandbox_command"] = argv
                         result = runner(argv, cwd=cwd, env=environment, capture_output=True,
                                         text=True, timeout=timeout, stdin=subprocess.DEVNULL)

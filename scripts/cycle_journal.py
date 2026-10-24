@@ -618,6 +618,14 @@ def _line(row: dict[str, Any]) -> str | None:
     role = f" {row['role']}" if row.get("role") else ""
     kind = row["kind"]
     if kind == "stage_end":
+        if row.get("component") == "sandbox_preflight":
+            if row.get("reason") != "summary" and row.get("status") in {
+                    "verified", "installed", "reused", "available"}:
+                return None
+            text = f"preflight{role} #{row.get('stage_seq')} {row.get('reason')}: {row.get('status') or 'unknown'}"
+            if row.get("detail"):
+                text += f" (untrusted evidence: {redact(row['detail'], 200)})"
+            return text
         took = (f" in {round(row['duration_ms'] / 1000)}s"
                 if isinstance(row.get("duration_ms"), int) else "")
         return f"stage{role} #{row.get('stage_seq')}: {row.get('status') or 'unknown'}{took}"
@@ -653,12 +661,14 @@ def context_summary(path, repo_id: str, task_id: str, *, limit: int = SUMMARY_LI
     Historical context, not evidence: the repository and the code host stay
     authoritative, and every text that came from an agent or the change under
     review is labelled untrusted. Redacted when written and again here; the
-    oldest lines are dropped first when it exceeds `limit`.
+    preflight lines are dropped before other context when it exceeds `limit`,
+    oldest first within each group. Full observations remain queryable.
     """
     rows = events(path, repo_id, task_id=task_id)
     if not rows:
         return ""
     lines: list[str] = []
+    preflight_lines: set[str] = set()
     runs: list[str] = []
     head = None
     for row in rows:
@@ -670,7 +680,10 @@ def context_summary(path, repo_id: str, task_id: str, *, limit: int = SUMMARY_LI
             head = sha
         line = _line(row)
         if line:
-            lines.append(f"  - {line}")
+            rendered = f"  - {line}"
+            lines.append(rendered)
+            if row.get("component") == "sandbox_preflight":
+                preflight_lines.add(rendered)
     for decision in decisions(path, repo_id, task_id):
         question = redact(decision["question"], 200) if decision["question"] else "(not recorded)"
         answer = (f"answered {decision['answer']}" if decision["answered"]
@@ -685,10 +698,11 @@ def context_summary(path, repo_id: str, task_id: str, *, limit: int = SUMMARY_LI
     body = lines
     omitted = 0
     while body and len("\n".join([header, *body])) > limit:
-        body = body[1:]
+        index = next((i for i, line in enumerate(body) if line in preflight_lines), 0)
+        body = body[:index] + body[index + 1:]
         omitted += 1
     if omitted:
-        body = [f"({omitted} earlier line(s) omitted)", *body]
+        body = [f"({omitted} context line(s) omitted)", *body]
     text = "\n".join([header, *body])
     return text[:limit]
 

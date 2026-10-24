@@ -15,6 +15,7 @@ import environment_recovery as recovery
 import grants
 import executors as ex
 import router
+import cycle_journal as journal
 from test_cycle import CycleTestCase, ScriptedAdapter
 from test_run_cycle import RunCycleTestCase, Talker, block
 
@@ -92,15 +93,121 @@ class SandboxReportTests(unittest.TestCase):
             "BLOCKED", environment_blocker=BLOCKER, questions=[{"prompt": "Allow?"}])))
 
     def test_guidance_names_the_nested_codex_limit_without_a_grant(self):
-        """#268: a Codex stage cannot start Codex; the guidance must not widen anything."""
+        """#268: report a nested sandbox limitation without widening it."""
         guidance = recovery.ENVIRONMENT_RECOVERY_GUIDANCE
         self.assertIn("/tmp/codex-daemon-<uid>", guidance)
-        self.assertIn("cannot start inside a Codex stage", guidance)
-        self.assertIn("without retrying variants", guidance)
+        self.assertIn("known nested", guidance)
+        self.assertIn("not_verified", guidance)
+        self.assertIn("codex sandbox`, `codex exec` or `srt`", guidance)
         self.assertNotIn("unix_sockets", guidance)
 
 
 class SandboxRerouteTests(CycleTestCase):
+    def test_runtime_observed_native_probe_failure_does_not_reroute(self):
+        class ProbeFailure(ScriptedAdapter):
+            def dispatch(self, target, task, **kwargs):
+                self.dispatched.append(task)
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.FAILED, self.name, target,
+                    error_code="environment_restricted", start_state="not_started", process_exited=True,
+                    detail="native probe timed out", artifacts={"native_sandbox_preflight": {
+                        "status": "unverified", "functional_check": {"passed": False}}})
+        _, primary, fallback, outcome = self.execute(primary=ProbeFailure("codex"))
+        self.assertEqual(1, len(primary.dispatched))
+        self.assertFalse(fallback.dispatched)
+        self.assertFalse(outcome.rerouted)
+        self.assertFalse(outcome.succeeded)
+
+    def test_top_level_preflight_is_persisted_in_existing_journal(self):
+        adapter = ScriptedAdapter("codex")
+        recorder = self.recorder([adapter])
+        recorder.journal = journal.Journal(self.store.path, "owner/repo", "API-055", recorder.cycle_id)
+        # A full observation exceeds the journal's per-field limit. Every tool
+        # and functional probe must survive, even when an earlier error is long.
+        evidence = {"status": "unverified", "missing": ["rg"], "probes": [
+            {"name": "rg", "outcome": "not_verified", "observed": None, "error": "x" * 900},
+            {"name": "srt", "outcome": "reused", "observed": "/tools/srt", "version": "1.0.0"}],
+            "functional_check": {"probe": "bwrap", "passed": False, "evidence": "namespace denied"},
+            "preparation_isolation": {"passed": True, "evidence": "isolation verified"}}
+        result = ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "codex",
+                                   router.parse_target("codex:openai/gpt-6-luna high"),
+                                   artifacts={"command_policy": "active",
+                                              "native_sandbox_preflight": evidence})
+        recorder._journal_attempt("implement", result, "attempt-test", None, {})
+        # Read through a fresh SQLite connection, not a mocked record method.
+        recorded = [row for row in journal.events(self.store.path, "owner/repo")
+                    if row["component"] == "sandbox_preflight"]
+        self.assertFalse(recorder.journal.errors)
+        by_probe = {row["reason"]: row for row in recorded}
+        self.assertEqual({"summary", "rg", "srt", "functional_check", "preparation_isolation"}, set(by_probe))
+        self.assertEqual("not_verified", by_probe["rg"]["status"])
+        self.assertEqual("/tools/srt", by_probe["srt"]["command"])
+        self.assertEqual("reused", by_probe["srt"]["status"])
+        self.assertEqual("unverified", by_probe["functional_check"]["status"])
+        self.assertIn("namespace denied", by_probe["functional_check"]["detail"])
+        self.assertEqual("verified", by_probe["preparation_isolation"]["status"])
+        self.assertTrue(all(row["attempt_id"] == "attempt-test" for row in recorded))
+        self.assertTrue(all(len(row["detail"] or "") <= journal.TEXT_LIMIT + 1 for row in recorded))
+        summary = recorder.journal.summary()
+        self.assertIn("preflight implement #0 rg: not_verified", summary)
+        self.assertNotIn("preflight implement #0 preparation_isolation: verified", summary)
+        self.assertNotIn("stage implement #0: reused", summary)
+
+    def test_unrelated_tool_substrings_keep_the_existing_reroute(self):
+        for command, error in (
+            ("cargo test", "open /work/target/debug/.cargo-lock: Operation not permitted"),
+            ("gradle test", "/cache/.gradle/caches/org.gradle: No such file or directory"),
+            ("python3 check.py", "large argv merge: operation not permitted"),
+            ("rg needle /private", "rg: /private: Operation not permitted"),
+        ):
+            with self.subTest(command=command):
+                blocker = {**BLOCKER, "kind": "sandbox_filesystem_access",
+                           "command": command, "error": error}
+                _, primary, fallback, outcome = self.execute(primary=RestrictedAdapter(blocker=blocker))
+                self.assertTrue(outcome.rerouted)
+                self.assertEqual(1, len(primary.dispatched))
+                self.assertEqual(1, len(fallback.dispatched))
+
+    def test_completed_work_with_known_pending_checks_continues_to_review(self):
+        for absent in ({"srt", "rg"}, {"srt"}, {"rg"}, set()):
+            class CompletedAdapter(ScriptedAdapter):
+                def dispatch(self, target, task, **kwargs):
+                    self.dispatched.append(task)
+                    return ex.DispatchResult(
+                        ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                        process_exited=True, start_state="started",
+                        agent_output=block("IMPLEMENTED" if kwargs.get("writes") else "CHANGES_REQUESTED",
+                                           tests={"conclusion": "not_verified", "ran": False},
+                                           native_sandbox_preflight={"missing": sorted(absent)}))
+            with self.subTest(absent=absent):
+                primary = CompletedAdapter("codex")
+                fallback = ScriptedAdapter("claude")
+                recorder = self.recorder([primary, fallback])
+                implemented = recorder.stage("implement", "complete main work")
+                reviewed = recorder.stage("review", "review statically")
+                self.assertTrue(implemented.succeeded)
+                self.assertTrue(reviewed.succeeded)
+                self.assertFalse(implemented.rerouted)
+                self.assertFalse(reviewed.rerouted)
+                self.assertFalse(fallback.dispatched)
+
+    def test_known_prerequisites_never_reroute_but_incomplete_work_stays_blocked(self):
+        for command, error in (
+            ("codex sandbox -- true", "app-server socket directory must be a user-owned directory with mode 0700"),
+            ("srt -- npm ci", "srt: not found"),
+            ("rg x", "rg: command not found"),
+            ("bwrap -- true", "bwrap: Creating new namespace failed: Operation not permitted"),
+            ("socat -V", "socat: not installed"),
+        ):
+            with self.subTest(command=command):
+                blocker = {**BLOCKER, "command": command, "error": error}
+                _, primary, fallback, outcome = self.execute(primary=RestrictedAdapter(blocker=blocker))
+                self.assertFalse(outcome.rerouted)
+                self.assertEqual(1, len(primary.dispatched))
+                self.assertFalse(fallback.dispatched)
+                self.assertFalse(outcome.succeeded)
+                self.assertIn("not_verified", outcome.result.detail)
+
     def execute(self, primary=None, fallback=None, **kwargs):
         primary = primary or RestrictedAdapter()
         fallback = fallback or ScriptedAdapter("claude")
