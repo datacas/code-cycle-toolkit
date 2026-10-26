@@ -120,6 +120,28 @@ print(json.dumps({{'viewerPermission': 'WRITE', 'nameWithOwner': 'owner/reposito
         self.assertGreaterEqual(sum(bool(attempt["exit_code"]) for attempt in result["attempts"]), 2)
         self.assertEqual(self.head, self.git("rev-parse", "HEAD"))
 
+    def test_preflight_before_branch_creation_never_publishes_a_ref(self):
+        for branch in ("main", "master", "release"):
+            with self.subTest(branch=branch):
+                self.git("checkout", "-B", branch)
+                before = self.git("--git-dir", str(self.bare), "show-ref")
+                result = publication.transport("preflight", "owner/repository", "release",
+                                               cwd=str(self.repo), run=self.run_process)
+                self.assertEqual("ready", result["status"], result)
+                self.assertEqual(before, self.git("--git-dir", str(self.bare), "show-ref"))
+                pushed = publication.transport("push", "owner/repository", "release",
+                                               cwd=str(self.repo), run=self.run_process)
+                self.assertEqual("failed", pushed["status"], pushed)
+                self.assertFalse(any("push" in item["command"] for item in pushed["attempts"]))
+        self.git("checkout", "--detach")
+        result = publication.transport("preflight", "owner/repository", "main",
+                                       cwd=str(self.repo), run=self.run_process)
+        self.assertEqual("ready", result["status"], result)
+        self.assertEqual(before, self.git("--git-dir", str(self.bare), "show-ref"))
+        pushed = self.publish()
+        self.assertEqual("failed", pushed["status"], pushed)
+        self.assertFalse(any("push" in item["command"] for item in pushed["attempts"]))
+
     def test_exit_zero_without_remote_update_is_failure(self):
         self.environment["NO_UPDATE"] = "1"
         result = self.publish()

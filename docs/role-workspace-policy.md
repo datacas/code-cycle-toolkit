@@ -70,6 +70,13 @@ branch. A host metadata check, host dry run, or working GitHub HTTP API does
 not establish that the stage can upload Git commits. Completion without the
 stage preflight evidence is blocked.
 
+Preflight may run on the base branch or detached HEAD before a working branch
+exists. It only dry-runs a fixed `cc-cycle-preflight` destination; the actual
+upload still requires a named non-base working branch. Active GitHub Claude
+writers require the Bash sandbox for this path even without dependency
+preparation; see [sandbox prerequisites](getting-started.md#requirements) and
+[static-only recovery](getting-started.md#troubleshooting).
+
 The helper uploads only the current non-base working branch to the authorized
 GitHub `origin`. It retains a failed original push (including SSH transport
 errors), then retries automatically using HTTPS with `gh auth git-credential`.
@@ -87,6 +94,9 @@ compares the reported SHA, local HEAD and current PR head before recording a
 successful functional verdict. A failure/progress comment must state that the
 push failed and cannot count as a successful resolution. The general invariant
 audit for merges, force pushes and unrelated refs remains separate (#261).
+The completion probe normalizes supported GitHub PR references (a number,
+`#number`, `owner/repo#number`, or a GitHub `/pull/number` URL) to the numeric
+identifier before checking the remote head.
 
 `$TMPDIR/publication.log` contains the preflight, original transport result and
 fallback result. The runtime reads it before removing the scratch directory

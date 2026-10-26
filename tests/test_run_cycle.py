@@ -206,6 +206,32 @@ class RunCycleTestCase(unittest.TestCase):
 
 
 class PublicationCompletionTests(RunCycleTestCase):
+    def test_completion_normalizes_supported_change_request_references(self):
+        class PublishingTalker(Talker):
+            requires_publication_preflight = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = WorktreeSynchronizationTests()
+            _, _, checkout = fixture.checkout_pair(Path(temporary))
+            head = fixture.git(checkout, "rev-parse", "HEAD")
+
+            def probe(repo, request, cwd):
+                if request != "7":
+                    raise rc.CycleDriverError("not a pull request number")
+                return rc.RemoteMark(head, 0, None)
+
+            for reference in ("7", "#7", "owner/api#7", "https://github.com/owner/api/pull/7"):
+                with self.subTest(reference=reference), \
+                        mock.patch.object(ex, "_publication_preflight", return_value=(True, "ready")), \
+                        mock.patch.object(rc, "probe_change_request", side_effect=probe) as observed:
+                    implementer = PublishingTalker(
+                        "codex", block("IMPLEMENTED", change_request_id=reference, head_sha=head))
+                    reviewer = Talker("claude", block("BLOCKED"))
+                    report = self.run_cycle(implementer, reviewer, code_host="github", cwd=str(checkout))
+                    self.assertEqual("IMPLEMENTED", report.stage_details[0].status, report.explain())
+                    self.assertTrue(reviewer.dispatched)
+                    self.assertEqual("7", observed.call_args_list[0].args[1])
+
     def test_exited_resolver_commit_is_attributed_for_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = WorktreeSynchronizationTests()

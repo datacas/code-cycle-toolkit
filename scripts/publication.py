@@ -60,7 +60,7 @@ def transport(action: str, repo: str, base: str, *, cwd: str | None = None,
         if action not in {"preflight", "push"} or not REPOSITORY.fullmatch(repo):
             raise ValueError("unsupported publication scope")
         branch = command(["git", "branch", "--show-current"]).stdout.strip()
-        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+        if action == "push" and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
                 or ".." in branch or branch.startswith("refs/")
                 or branch in {base, "main", "master"}):
             raise ValueError("publication requires the current non-base working branch")

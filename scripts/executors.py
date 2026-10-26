@@ -1177,7 +1177,8 @@ class NativeAdapter(Adapter):
                 if not ready or any(tool in missing for tool in ("bwrap", "socat")):
                     # The existing hook + disposable clone remains the static
                     # boundary. Remove code execution grants, never run tests
-                    # outside a sandbox. Writing stages may still edit/publish.
+                    # outside a sandbox. Writing stages may still edit, but
+                    # publication requires a working sandbox and stays denied.
                     command_policy = replace(command_policy, static_only=True)
                     policy = command_policy
                     sandbox_evidence["mode"] = "static_only"

@@ -206,18 +206,27 @@ their comment. When they may verify, they do it only in a disposable clone:
   disposable clone and command/edit/publication guards for a static review;
   verification, arbitrary-code tool choices and Docker commands are denied,
   and affected checks are `not_verified`, never passed. No repository code runs
-  unconfined. Writing stages whose registry choices require this sandbox use
-  the same rule while continuing edits and publication. If even the existing
+  unconfined. Writing stages whose registry choices or active GitHub publication
+  policy require this sandbox may continue edits, but static-only mode denies
+  publication as well as verification. It supplies no publication helper and
+  denies `git push`; completion cannot claim a confirmed sandbox preflight.
+  Retain an unpublished commit and resume the same stage and worktree after
+  restoring isolation. A writer that cannot publish cannot complete its stage.
+  If even the existing
   static boundary cannot be preserved, the stage remains `BLOCKED`.
   On Linux and WSL2 Claude Code's sandbox needs `bubblewrap` and `socat`
   (`sudo apt install bubblewrap socat` on Debian and Ubuntu, `sudo dnf install
   bubblewrap socat` on Fedora); macOS uses its built-in Seatbelt and needs
   nothing extra. Binaries outside `PATH` are set with the managed settings
   `sandbox.bwrapPath` and `sandbox.socatPath`. `/sandbox` inside Claude Code
-  shows what is missing. This applies only to a Claude review or rereview that
-  may verify, in a repository with `allowed_commands` configured; other stages
-  do not start the sandbox unless registry choices require the explicit profile.
-  A writer with registry choices also receives its scoped Git write directories.
+  shows what is missing. This applies to Claude reviews or rereviews that may
+  verify with configured `allowed_commands`, stages with registry choices, and
+  every active GitHub `implement`/`resolve` publication policy, even without
+  dependency preparation. Writers also receive their scoped Git write directories.
+  Their Bash tests run in that same sandbox: network is limited to code-host
+  and selected registry domains, with no Unix-socket or local-binding allowance
+  for Docker or localhost services. Use the documented environment-recovery
+  process for checks that cannot run; do not execute them outside confinement.
 - **Codex** reviewers now get a disposable clone too, under a profile extending
   `:read-only` whose only writable paths are the clone and `TMPDIR`. Before the
   first such review the runtime proves it with the installed CLI

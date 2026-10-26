@@ -2865,7 +2865,9 @@ def run_cycle(
                 and cwd and reported.completes(role, ci_policy)
                 and outcome.result is not None
                 and registry.get(outcome.result.executor).requires_publication_preflight):
-            request = reported.change_request_id or change_request_id
+            request = Reported(payload={
+                "change_request_id": reported.change_request_id or change_request_id
+            }).telemetry_pull_request_id("github")
             expected = (reported.payload or {}).get("head_sha")
             try:
                 if not request or not isinstance(expected, str) or not FULL_SHA.fullmatch(expected):

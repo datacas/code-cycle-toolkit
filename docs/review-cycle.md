@@ -2,30 +2,7 @@
 
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
-**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
-
-## Resume after a failed upload
-
-An unpublished resolver commit is retained. Resume with `--from resolve`, the
-same change request, and the same linked worktree; the stage retries the
-existing commit through its own sandbox instead of requiring a manual push,
-reset or reimplementation. A progress comment about failure never establishes
-that the fix reached the PR.
-
-The runtime records the clean worktree's HEAD before and after an exited
-resolution attempt, scoped to the repository, PR, branch and a hash of the
-worktree path. Resume accepts an ahead-of-PR checkout only when its exact HEAD
-was recorded by that stage (or a chain of retries), the tree is still clean,
-and the current PR head is its ancestor. No receipt or agent-reported SHA can
-authorize this exception. Dirty trees, unrelated commits, another branch or
-worktree, missing evidence and non-fast-forward histories remain rejected as
-`worktree_dirty` / `worktree_diverged` or a failed resume precondition. Review
-and rereview still require the published head.
-
-Upload retries must not recreate commits or duplicate success comments. The
-stage verifies both the remote branch ref and PR head before claiming success;
-the runtime blocks completion when the claimed SHA differs from the PR head.
-See [the publication path](role-workspace-policy.md#github-upload-from-a-writing-stage).
+**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Resume after a failed upload](#resume-after-a-failed-upload) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
 
 ## Issue review before implementation
 
@@ -81,6 +58,29 @@ sequenceDiagram
 4. Repeat until approved, or until an orchestrator's iteration limit, no-progress guard, or repeated-findings ladder stops it (see [Exit conditions](#exit-conditions)).
 
 Initial review and rereview always cover the **accumulated diff from the merge base to the current head**. Under `parallel`, resolution's internal code-review pass covers only its fix delta; this does not narrow the subsequent rereview.
+
+## Resume after a failed upload
+
+An unpublished resolver commit is retained. Resume with `--from resolve`, the
+same change request, and the same linked worktree; the stage retries the
+existing commit through its own sandbox instead of requiring a manual push,
+reset or reimplementation. A progress comment about failure never establishes
+that the fix reached the PR.
+
+The runtime records the clean worktree's HEAD before and after an exited
+resolution attempt, scoped to the repository, PR, branch and a hash of the
+worktree path. Resume accepts an ahead-of-PR checkout only when its exact HEAD
+was recorded by that stage (or a chain of retries), the tree is still clean,
+and the current PR head is its ancestor. No receipt or agent-reported SHA can
+authorize this exception. Dirty trees, unrelated commits, another branch or
+worktree, missing evidence and non-fast-forward histories remain rejected as
+`worktree_dirty` / `worktree_diverged` or a failed resume precondition. Review
+and rereview still require the published head.
+
+Upload retries must not recreate commits or duplicate success comments. The
+stage verifies both the remote branch ref and PR head before claiming success;
+the runtime blocks completion when the claimed SHA differs from the PR head.
+See [the publication path](role-workspace-policy.md#github-upload-from-a-writing-stage).
 
 ## CI policy
 
