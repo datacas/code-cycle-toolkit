@@ -610,6 +610,48 @@ class CycleHistoryStore:
                 (attempt_id,)).fetchone()
         return dict(row) if row is not None else None
 
+    def record_unpublished_head(self, attempt_id: str, repo_id: str,
+                                change_request_id: str, workspace: str, branch: str,
+                                start_sha: str, end_sha: str) -> None:
+        """Runtime-only attribution, separate from agent-authored success receipts."""
+        attempt_id = _match(_ATTEMPT_ID, attempt_id, "attempt ID")
+        repo_id = _match(_REFERENCE, repo_id, "repository")
+        change_request_id = _match(_REFERENCE, change_request_id, "change request")
+        branch = _match(_REFERENCE, branch, "branch")
+        if not _SHA.fullmatch(start_sha) or not _SHA.fullmatch(end_sha):
+            raise HistoryError("stage heads must be full commit SHAs")
+        scope = hashlib.sha256(str(Path(workspace).resolve()).encode()).hexdigest()
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS cycle_unpublished_heads ("
+                "attempt_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, "
+                "change_request_id TEXT NOT NULL, workspace TEXT NOT NULL, "
+                "branch TEXT NOT NULL, start_sha TEXT NOT NULL, end_sha TEXT NOT NULL)")
+            connection.execute(
+                "INSERT OR IGNORE INTO cycle_unpublished_heads VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (attempt_id, repo_id, change_request_id, scope, branch, start_sha, end_sha))
+            connection.commit()
+
+    def unpublished_heads(self, repo_id: str, change_request_id: str, workspace: str,
+                          branch: str, remote_head: str) -> tuple[str, str] | None:
+        """Latest runtime-recorded head; the caller proves PR-to-local ancestry.
+
+        The PR may already contain an intermediate commit uploaded during the
+        attempt, so its head need not equal the stage's starting head.
+        """
+        scope = hashlib.sha256(str(Path(workspace).resolve()).encode()).hexdigest()
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT end_sha FROM cycle_unpublished_heads "
+                    "WHERE repo_id=? AND change_request_id=? AND workspace=? AND branch=? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (repo_id, change_request_id, scope, branch)).fetchone()
+        except sqlite3.OperationalError:
+            return None  # Older/missing evidence never grants a resume exception.
+        # The caller still checks HEAD equality, cleanliness and ancestry.
+        return (remote_head, row["end_sha"]) if row is not None and row["end_sha"] != remote_head else None
+
     def pending_publications(self, repo_id: str, change_request_id: str,
                              stage: str | None = None) -> list[dict]:
         """Attempts whose publication was never observed, oldest first."""

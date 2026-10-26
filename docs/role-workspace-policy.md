@@ -61,6 +61,40 @@ write-capable role access to the implementer's tree.
 
 See also [Routing and models → Workspace policy](routing.md#workspace-policy) for how this constrains which executor each profile may use.
 
+## GitHub upload from a writing stage
+
+Native `implement` and `resolve` stages run the installed `publication.py`
+helper's `preflight` command before editing, through their own sandbox. The
+runtime supplies the exact command with the authorized repository and base
+branch. A host metadata check, host dry run, or working GitHub HTTP API does
+not establish that the stage can upload Git commits. Completion without the
+stage preflight evidence is blocked.
+
+The helper uploads only the current non-base working branch to the authorized
+GitHub `origin`. It retains a failed original push (including SSH transport
+errors), then retries automatically using HTTPS with `gh auth git-credential`.
+The URL, empty credential-helper list, replacement helper and temporary remote
+are supplied for that Git command only. No global Git settings, remotes or
+stored credentials change, and tokens are never included in command arguments
+or evidence. Multiple push URLs, an unexpected repository, and URL rewriting
+to another destination are refused. Missing network or authentication remains
+a recoverable publication failure; the runtime never pushes from the host.
+
+A successful upload requires both an exit-zero push and a remote branch ref
+equal to the expected commit. Before a success comment or receipt, the stage
+also reads the PR using `gh` and confirms that head. The runtime independently
+compares the reported SHA, local HEAD and current PR head before recording a
+successful functional verdict. A failure/progress comment must state that the
+push failed and cannot count as a successful resolution. The general invariant
+audit for merges, force pushes and unrelated refs remains separate (#261).
+
+`$TMPDIR/publication.log` contains the preflight, original transport result and
+fallback result. The runtime reads it before removing the scratch directory
+and retains bounded, redacted command results in the cycle journal. Retry the
+same upload after a failure; it creates no new commit. On resume, reuse an
+existing success publication rather than duplicating it. Bitbucket and Orca
+transport recovery are not verified by this GitHub native path.
+
 ---
 
 [← Optional workspace tools](workspace-tools.md) · [↑ Documentation index](README.md) · [Host permissions →](host-permissions.md)

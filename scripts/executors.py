@@ -679,7 +679,7 @@ def _stop_process(process: subprocess.Popen, grace: float = 5) -> None:
         process.wait()
 
 
-def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
+def _publication_preflight(cwd: str | None, *, check_transport: bool = True) -> tuple[bool, str]:
     """Check the live GitHub/Git remote write path without changing remote state."""
     directory = cwd or os.getcwd()
 
@@ -721,13 +721,15 @@ def _publication_preflight(cwd: str | None) -> tuple[bool, str]:
                         return False, "GitHub account lacks repository push permission"
         # Do not probe the checked-out branch: cycle workers often start on a
         # protected base and create their feature branch only after dispatch.
-        pushed = run(["git", "push", "--dry-run", "origin",
-                      "HEAD:refs/heads/cc-cycle-preflight"])
-        if pushed.returncode:
-            return False, f"remote rejected the publication preflight (exit {pushed.returncode})"
+        if check_transport:
+            pushed = run(["git", "push", "--dry-run", "origin",
+                          "HEAD:refs/heads/cc-cycle-preflight"])
+            if pushed.returncode:
+                return False, f"remote rejected the publication preflight (exit {pushed.returncode})"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"publication preflight could not complete ({type(exc).__name__})"
-    return True, "Git authentication and remote write access passed a no-change preflight"
+    return True, ("Git authentication and remote write access passed a no-change preflight"
+                  if check_transport else "host metadata checked; stage sandbox transport is still unverified")
 
 
 class Adapter:
@@ -1165,7 +1167,8 @@ class NativeAdapter(Adapter):
             prerequisite_path = native.tool_path(prerequisite_path, probes=sandbox_evidence.get("probes", []))
             missing = sandbox_evidence["missing"]
             needs_bash_sandbox = (self.name == "claude" and policy is not None
-                                  and (policy.requires_confined_verification or policy.registry_domains))
+                                  and (policy.requires_confined_verification or policy.registry_domains
+                                       or policy.publication_commands))
             if needs_bash_sandbox and sys.platform.startswith("linux") and runner is _run:
                 ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe, path=prerequisite_path)
                 sandbox_evidence["functional_check"] = {"probe": "bwrap", "passed": ready,
@@ -1214,6 +1217,22 @@ class NativeAdapter(Adapter):
         except Exception:
             pass
         worker_cwd = cwd or os.getcwd()
+        if publishes and writes and command_policy is not None and command_policy.publication_commands:
+            preflight, push = (shlex.join(command) for command in command_policy.publication_commands)
+            task += (
+                "\n\nGitHub upload recovery (#284): before editing, run the publication "
+                f"preflight inside this stage's own sandbox: {preflight}. "
+                f"Upload the existing working-branch commit with: {push}. "
+                "The helper retains the original push failure and retries using command-scoped "
+                "HTTPS and the gh credential helper, without changing remotes or credentials. "
+                "A host preflight or successful HTTP comment is not upload evidence. "
+                "Do not use a host-side push. If upload fails, retain the commit and return "
+                "BLOCKED with publication evidence; a progress comment must say that the "
+                "push failed. Before publishing any success receipt or claiming a fix as "
+                "remotely applied, read the PR with gh and confirm its head equals the uploaded "
+                "commit. Reuse an unpublished commit on resume; do not recreate it or repeat "
+                "a success comment already published for this attempt."
+            )
         preparation = {"status": "not_required", "items": []}
         if command_policy is not None and command_policy.role in sp.WRITING_ROLES | sp.REVIEW_ROLES:
             try:
@@ -1326,14 +1345,29 @@ class NativeAdapter(Adapter):
             ) as (worker_argv, worker_env):
                 argv = worker_argv
                 run_options = {"env": worker_env} if worker_env is not None else {}
-                if on_progress is not None and runner is _run:
-                    completed = runner(
-                        worker_argv, timeout=timeout, cwd=cwd,
-                        on_output=lambda line: self._stream_activity(line, on_progress),
-                        **run_options,
-                    )
-                else:
-                    completed = runner(worker_argv, timeout=timeout, cwd=cwd, **run_options)
+                try:
+                    if on_progress is not None and runner is _run:
+                        completed = runner(
+                            worker_argv, timeout=timeout, cwd=cwd,
+                            on_output=lambda line: self._stream_activity(line, on_progress),
+                            **run_options,
+                        )
+                    else:
+                        completed = runner(worker_argv, timeout=timeout, cwd=cwd, **run_options)
+                finally:
+                    if publishes and writes:
+                        policy_note["publication_transport"] = []
+                        try:
+                            log = Path(worker_env["TMPDIR"]) / "publication.log"
+                            for line in log.read_text(encoding="utf-8").splitlines():
+                                try:
+                                    event = json.loads(line)
+                                except ValueError:
+                                    continue  # A killed writer may leave a partial last line.
+                                if isinstance(event, dict):
+                                    policy_note["publication_transport"].append(event)
+                        except (OSError, KeyError, TypeError):
+                            pass
         except subprocess.TimeoutExpired as timeout_error:
             partial_stdout = timeout_error.stdout or ""
             if isinstance(partial_stdout, bytes):
@@ -2606,7 +2640,7 @@ class ClaudeAdapter(NativeAdapter):
                 "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
             })
             if runtime_policy.active and not runtime_policy.static_only and (runtime_policy.requires_confined_verification
-                                          or runtime_policy.registry_domains):
+                                          or runtime_policy.registry_domains or runtime_policy.publication_commands):
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []
@@ -3188,7 +3222,10 @@ def dispatch(
                 readiness_policy=policy, dispatched_from=probe.availability,
             )
         if adapter.requires_publication_preflight:
-            ready, detail = _publication_preflight(kw.get("cwd"))
+            ready, detail = _publication_preflight(
+                kw.get("cwd"), check_transport=not (
+                    isinstance(adapter, NativeAdapter) and kw.get("writes", False)
+                    and command_policy is not None and command_policy.publication_commands))
             if not ready:
                 return DispatchResult(
                     DispatchOutcome.BLOCKED, target.executor, target,

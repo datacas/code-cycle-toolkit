@@ -230,6 +230,7 @@ earlier findings".
 | `cycle_history_finding_state` | per finding: last status, claims and claimed-fix survivals |
 | `cycle_publications` | the outbox: one row per comment-publishing attempt, `pending`, `published` (with its comment ID and head) or `superseded` |
 | `cycle_history_locks` | the per-machine writer lock: owner token, process ID, acquisition time |
+| `cycle_unpublished_heads` | runtime-observed clean resolver start/end SHAs by attempt, repository, PR, branch and hashed worktree path; created lazily when an exited stage leaves a commit |
 
 Only identifiers and closed tokens are stored. Finding titles, comment bodies,
 run-line profiles and models, and author logins stay in the change request;

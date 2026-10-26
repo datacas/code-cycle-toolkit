@@ -4,6 +4,29 @@ How findings are created, tracked across rounds, and closed, and why the pull-re
 
 **On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
 
+## Resume after a failed upload
+
+An unpublished resolver commit is retained. Resume with `--from resolve`, the
+same change request, and the same linked worktree; the stage retries the
+existing commit through its own sandbox instead of requiring a manual push,
+reset or reimplementation. A progress comment about failure never establishes
+that the fix reached the PR.
+
+The runtime records the clean worktree's HEAD before and after an exited
+resolution attempt, scoped to the repository, PR, branch and a hash of the
+worktree path. Resume accepts an ahead-of-PR checkout only when its exact HEAD
+was recorded by that stage (or a chain of retries), the tree is still clean,
+and the current PR head is its ancestor. No receipt or agent-reported SHA can
+authorize this exception. Dirty trees, unrelated commits, another branch or
+worktree, missing evidence and non-fast-forward histories remain rejected as
+`worktree_dirty` / `worktree_diverged` or a failed resume precondition. Review
+and rereview still require the published head.
+
+Upload retries must not recreate commits or duplicate success comments. The
+stage verifies both the remote branch ref and PR head before claiming success;
+the runtime blocks completion when the claimed SHA differs from the PR head.
+See [the publication path](role-workspace-policy.md#github-upload-from-a-writing-stage).
+
 ## Issue review before implementation
 
 Before any code work, `run_cycle.py`, `cc-orchestrator`, and `cc-orca-orchestrator` can ask [`cc-issue-review`](skills.md#cc-issue-review) whether the work item is ready. It is a gate on the specification, not on code: it does not repeat the implementer's diagnosis (reproduction, mechanism, fix shape), and it cannot catch what only the diff will show.
