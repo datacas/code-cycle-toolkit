@@ -325,7 +325,7 @@ An unreadable history is never an empty one. The resume stops before dispatching
 
 On a GitHub code host the history comes from a local copy in the telemetry database when one remote check verifies it is current, and only the comments edited since the last sync are read otherwise; a missing or unverifiable copy is rebuilt from every comment. The comments remain the record. See [Telemetry → Cycle history](telemetry.md#cycle-history-schema-18), which also describes the publication outbox and how a conflicting writer stops the cycle as `BLOCKED`.
 
-Both orchestrator skills describe the same ladder and the seeding, and the package validator checks that they state it.
+Both orchestrator skills describe the same ladder and its seeding, and the package validator checks that they state it.
 
 ---
 
