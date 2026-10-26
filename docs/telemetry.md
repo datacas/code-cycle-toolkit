@@ -292,7 +292,10 @@ The `cycle` row adds `ci_policy` (always), `ci_polls` and `ci_wait_ms` (totals,
 when the gate ran), `final_ci_status` (the last wait), `redundant_reviews` (reviews
 of a head that already had a clean review in that run, measured whenever a
 review named its SHA), and `review_reused` (a resume that reused a clean review's
-receipt instead of dispatching one). Under `parallel`, `first_pass_approved` and
+receipt instead of dispatching one). From schema 22 a cycle that closed on a
+[manual rereview](review-cycle.md#manual-rereview) carries `review_provenance:
+manual`, and one whose manual receipt the resume could not accept stops with
+`manual_rereview_rejected`. Under `parallel`, `first_pass_approved` and
 `final_approved` mean a clean review **and** a CI pass of its SHA; they are left
 out while the gate has not decided, and `resolution_needed` still describes the
 review alone. `cc-stats` and the measured first-pass rate count a first review

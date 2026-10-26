@@ -62,6 +62,7 @@ Pick the row that matches what you want to do.
 | run the whole cycle as supervised Orca workers | [`cc-orca-orchestrator`](docs/skills.md#cc-orca-orchestrator) | via its stages |
 | have Claude implement and Codex review | [`cc-orchestrator` in `claude_codex` mode](docs/workflows.md#claude--codex-mode) | via its stages |
 | run a recorded cycle from the command line | [`run_cycle.py`](docs/workflows.md#runtime-driver-run_cyclepy) | via its stages |
+| close a cycle whose rereview ran outside the runtime | [`manual_rereview.py`](docs/review-cycle.md#manual-rereview) | publishes one PR comment |
 | list or revoke stored sandbox permissions | [`consent_control.py`](docs/routing.md#sensitive-sandbox-grants) | — |
 | review a diff or branch without a pull request | [`cc-code-review`](docs/skills.md#cc-code-review) | — |
 | audit a change for security | [`cc-security-review`](docs/skills.md#cc-security-review) | — |

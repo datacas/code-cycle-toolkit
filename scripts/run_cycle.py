@@ -102,13 +102,16 @@ from issue_review import (
 )
 from jev_shadow import JevConfig, JevConfigError, JevShadow, load_jev_config
 from review_contract import (
+    MANUAL_PROVENANCE,
     RESOLUTION_RUN,
     REVIEW_RUN,
+    RUNTIME_PROVENANCE,
     ContractError,
     ProviderComment,
     RunStatuses,
     claimed_fix_survivals,
     comment_run_history,
+    receipt_provenance,
     recover_comment_history,
     stage_evidence,
     trusted_logins,
@@ -874,6 +877,8 @@ class CycleReport:
     #: One exact, content-bound triage repair offer when a trusted comment qualifies.
     repair_proposal: dict | None = None
     journal_explanation: dict[str, object] | None = None
+    #: `manual` when the cycle closed on a manual rereview (#346), else None.
+    review_provenance: str | None = None
 
     @property
     def approved(self) -> bool:
@@ -928,6 +933,8 @@ class CycleReport:
             lines.extend(text for position, text in self.notes if position == index + 1)
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
+        if self.review_provenance is not None:
+            lines.append(f"  review_provenance: {self.review_provenance}")
         if self.reason:
             # What the agent said, so a person can weigh it rather than pay for
             # another run to find out what it was.
@@ -1237,6 +1244,9 @@ def resolve_delta_base(comments: list[ProviderComment], repo_id: str,
             return None
         latest = receipts[-1]
         if latest["status"] not in COMPLETES[latest["stage"]] | {"REVIEW_PASSED_AWAITING_CI"}:
+            return None
+        # A rereview the runtime did not run never narrows what the next one reads.
+        if receipt_provenance(latest) != RUNTIME_PROVENANCE:
             return None
         head = latest["head_sha"]
         ancestry = subprocess.run(
@@ -2164,7 +2174,9 @@ def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
                 raise CycleDriverError(str(error)) from error
             continue
         for receipt in receipts:
-            if receipt["attempt_id"] != attempt_id:
+            # Only a stage the runtime dispatched can be recovered as one.
+            if (receipt["attempt_id"] != attempt_id
+                    or receipt_provenance(receipt) != RUNTIME_PROVENANCE):
                 continue
             if (receipt["repo"] != repo_id or receipt["stage"] != role
                     or receipt["change_request_id"] != change_request_id
@@ -3029,6 +3041,7 @@ def run_cycle(
             stop_reason=stop_reason,
             reason=because,
             readiness=report.readiness,
+            review_provenance=report.review_provenance,
         )
         return report
 
@@ -3264,7 +3277,11 @@ def run_cycle(
                                     **({"pull_request_id": pull_request_id}
                                        if pull_request_id else {}))
         if not reported.completes(role, ci_policy):
-            return reported, stop(reported.explain(role, ci_policy),
+            because = reported.explain(role, ci_policy)
+            if (role == "rereview" and not local_only
+                    and (code_host or policy_code_host) == "github"):
+                because += manual_hint(reported)
+            return reported, stop(because,
                                   "BLOCKED" if (reported.payload or {}).get("publication_pending") is True
                                   else UNRESOLVED_END, reported=reported)
         if recover and role in COMMENT_STAGES and change_request_id:
@@ -3380,14 +3397,15 @@ def run_cycle(
         report.note(_ci_line(result, once=once))
         return result
 
-    def receipt_problem(role: str, head: str, attempts: set[str]) -> str | None:
+    def receipt_problem(role: str, head: str, attempts: set[str],
+                        provenance: str = RUNTIME_PROVENANCE) -> str | None:
         """Why no trusted receipt on the change request vouches for a clean review.
 
         The PR comment is the record of a clean review awaiting its checks, so
         approval never rests on the structured result alone. A trusted receipt
-        of one of `attempts` must name this stage, this head and a clean
-        status; none of their receipts may say otherwise; and nothing may have
-        been published after them.
+        of one of `attempts` must name this stage, this head, a clean status
+        and `provenance`; none of their receipts may say otherwise; and nothing
+        may have been published after them.
         """
         number = pull_number()
         trusted = trusted_logins(trusted_authors)
@@ -3420,6 +3438,8 @@ def run_cycle(
         if any(receipt["stage"] != role or receipt["head_sha"] != head
                or receipt["status"] not in CLEAN_REVIEW_STATUSES for receipt in mine):
             return "its receipt names another stage, head or status"
+        if any(receipt_provenance(receipt) != provenance for receipt in mine):
+            return f"its receipt is not a {provenance} receipt"
         if receipts[-1]["attempt_id"] not in attempts:
             return "another stage published after it"
         return None
@@ -3440,7 +3460,8 @@ def run_cycle(
                 "BLOCKED", reported=reported)
         return head, None
 
-    def gate(role: str, head: str, attempts: set[str], reported: Reported):
+    def gate(role: str, head: str, attempts: set[str], reported: Reported,
+             provenance: str = RUNTIME_PROVENANCE):
         """Wait for the checks of a clean review's head; approve only on a pass.
 
         Returns `("approved" | "moved" | "failed", result)`, or the report of a
@@ -3451,7 +3472,7 @@ def run_cycle(
         result = read_ci(head, role, once=False)
         number = pull_number() or change_request_id
         if result.status == ci_gate.CI_PASSED:
-            problem = receipt_problem(role, head, attempts)
+            problem = receipt_problem(role, head, attempts, provenance)
             if problem is not None:
                 return stop(
                     f"the checks of {head[:12]} passed, but the clean {role}'s receipt "
@@ -3554,8 +3575,11 @@ def run_cycle(
             report.note(f"  resume   no clean review reused: {readable(str(error), 200)}")
             return None, None
         latest = receipts[-1] if receipts else None
+        # A manual rereview is never reused for being clean and trusted; only
+        # `manual_review` accepts one, on its own conditions.
         if (latest is None or latest["stage"] not in {"review", "rereview"}
-                or latest["status"] not in CLEAN_REVIEW_STATUSES):
+                or latest["status"] not in CLEAN_REVIEW_STATUSES
+                or receipt_provenance(latest) != RUNTIME_PROVENANCE):
             return None, None
         if latest["head_sha"] != pull.head_sha:
             report.note(
@@ -3574,6 +3598,162 @@ def run_cycle(
             "from its receipt; no review dispatched")
         return (latest["stage"], latest["status"], latest["head_sha"],
                 {latest["attempt_id"]}), None
+
+    def manual_step(number: str, head: str) -> str:
+        """The command that records a manual rereview of `head` (#346)."""
+        return (f"python3 manual_rereview.py record --repo {repo_id} --pr {number} "
+                f"--status APPROVED --confirm-head {head} "
+                "--check RESULT:NAME:EVIDENCE")
+
+    def manual_hint(reported: Reported) -> str:
+        """What closes a cycle whose rereview could not complete here (#346)."""
+        number = pull_number()
+        if number is None:
+            return ""
+        head = (reported.payload or {}).get("head_sha")
+        if not isinstance(head, str) or FULL_SHA.fullmatch(head) is None:
+            head = "<current head SHA>"
+        return ("; a rereview done outside the runtime has no receipt until it is "
+                f"recorded with `{manual_step(number, head)}`, then resume with "
+                f"--from rereview --pr {number}")
+
+    def manual_review():
+        """The confirmed manual rereview a resume closes on, when it holds (#346).
+
+        Considered only when the latest trusted receipt of the change request
+        is a manual one; anything else returns `(None, None)` and the resume
+        goes on as before. It is accepted only when the account that published
+        it is the operator it names, it is a clean rereview confirmed for the
+        change request's current head, nothing readable was published after
+        it, and every published finding that still blocks approval is one it
+        verified. Otherwise the cycle stops for a person with the missing
+        step: a manual rereview is never replaced by a runtime one behind the
+        operator's back, nor upgraded to one.
+        Returns `((role, status, head, attempts) | None, stop | None)`.
+        """
+        number = pull_number()
+        trusted = trusted_logins(trusted_authors)
+        if number is None or not trusted:
+            return None, None
+        try:
+            comments = remote.comments(repo_id, number)
+        except (CycleDriverError, HistoryError):
+            return None, None
+        latest, publisher = None, None
+        for comment in comments:
+            author = (comment.author.strip().casefold()
+                      if isinstance(comment.author, str) else None)
+            if author not in trusted:
+                continue
+            try:
+                found = stage_evidence(comment.body)
+            except ContractError:
+                # Unreadable, so it cannot be ruled out as the latest.
+                latest, publisher = None, None
+                continue
+            for receipt in found:
+                if receipt["repo"] == repo_id and receipt["change_request_id"] == number:
+                    latest, publisher = receipt, author
+        if latest is None or receipt_provenance(latest) != MANUAL_PROVENANCE:
+            return None, None
+        try:
+            pull = checks_provider.pull(repo_id, number)
+        except ci_gate.CheckReadError as error:
+            return None, stop(
+                f"the manual rereview of change request {number} could not be "
+                f"checked against its head: {error}", "BLOCKED",
+                stop_reason="ci_unreadable")
+        if pull.state != "OPEN":
+            return None, stop(
+                f"change request {number} is {pull.state.lower()}, not open", "BLOCKED")
+        reviewed = latest["head_sha"]
+        step = manual_step(number, pull.head_sha)
+
+        def rejected(problem: str) -> tuple[None, CycleReport]:
+            return None, stop(
+                f"the latest receipt of change request {number} is a manual rereview "
+                f"of {reviewed[:12]}, but {problem}; a manual rereview is never "
+                "upgraded to a runtime one", UNRESOLVED_END,
+                stop_reason="manual_rereview_rejected")
+
+        if latest["operator"].strip().casefold() != publisher:
+            return rejected(
+                f"it names operator {readable(latest['operator'], 40)!r} while "
+                f"{readable(publisher or '', 40)!r} published it")
+        if reviewed != pull.head_sha:
+            return rejected(
+                f"the current head is {readable(pull.head_sha, 12)}: a new head "
+                "invalidates the confirmation. Review the current head and record "
+                f"it with `{step}`, or resume with --from review to have the "
+                "runtime review it")
+        if latest["status"] not in CLEAN_REVIEW_STATUSES:
+            return rejected(
+                f"it requested changes ({latest['status']}). Resolve them with "
+                f"--from resolve --pr {number}, then rereview the new head")
+        try:
+            published = recover_comment_history(comments, trusted_authors=trusted_authors)
+        except ContractError as error:
+            return rejected(f"the published review history cannot be read: "
+                            f"{readable(str(error), 200)}")
+        verified = {item["id"] for item in latest.get("finding_outcomes", [])
+                    if item["status"] in {"resolved", "not_applicable"}}
+        blocking = sorted(finding.id for finding in published.findings
+                          if finding.status == "open" and finding.blocks_approval
+                          and finding.id not in verified)
+        if blocking:
+            return rejected(
+                f"published findings still block approval and it verified none of "
+                f"them: {', '.join(blocking)}. Record their outcomes with "
+                "--finding REV-NNN=resolved in a new manual record")
+        report.review_provenance = MANUAL_PROVENANCE
+        recorder.review_provenance = MANUAL_PROVENANCE
+        declared = "; ".join(
+            f"{readable(item['name'], 60)} {item['result']}" for item in latest["checks"])
+        report.note(
+            f"  resume   accepted the manual rereview of {reviewed[:12]} by "
+            f"{readable(latest['operator'], 40)} ({latest['attempt_id']}); checks "
+            f"declared by the operator, not run by the runtime: {declared}")
+        journal.record(
+            "stage_result", role="rereview", stage_seq=recorder.stage_seq,
+            component="runtime", status="manual_rereview_accepted",
+            reason="the confirmed manual rereview of the current head is the review "
+                   "the cycle closes on, after its required checks pass",
+            correlation={"head_sha": reviewed, "attempt_id": latest["attempt_id"],
+                         "review_provenance": MANUAL_PROVENANCE})
+        return ("rereview", latest["status"], reviewed, {latest["attempt_id"]}), None
+
+    def close_manual(clean, reported: Reported) -> CycleReport:
+        """Approve a confirmed manual rereview only once its head's checks pass.
+
+        The same CI gate as a runtime review, under either CI policy: a manual
+        rereview never bypasses a required check, a conflict, or a later
+        publication. What it cannot approve goes to a person, never to a
+        runtime resolution it did not ask for.
+        """
+        role, verdict, head, attempts = clean
+        report.verdict = verdict
+        number = pull_number() or change_request_id
+        outcome = gate(role, head, attempts, reported, provenance=MANUAL_PROVENANCE)
+        if isinstance(outcome, CycleReport):
+            return outcome
+        kind, result = outcome
+        if kind == "approved":
+            return stop("", APPROVED_END, reported=reported, stop_reason="approved")
+        if kind == "moved":
+            new = readable(result.pr_head_sha or "", 40)
+            return stop(
+                f"the change request's head moved after the manual rereview of "
+                f"{head[:12]}, which invalidates its confirmation; review the new "
+                f"head and record it with `{manual_step(number, new)}`",
+                UNRESOLVED_END, reported=reported, stop_reason="head_moved")
+        detail = _ci_detail(result)
+        if kind == "conflicting":
+            detail = "the change request conflicts with its base branch"
+        return stop(
+            f"the manual rereview of {head[:12]} is clean, but {detail}; a manual "
+            f"rereview never bypasses the required checks: resolve with --from "
+            f"resolve --pr {number}", UNRESOLVED_END, reported=reported,
+            stop_reason="ci_not_passing")
 
     def drive() -> CycleReport:
         nonlocal change_request_id
@@ -3685,6 +3865,15 @@ def run_cycle(
         # `(role, status, head, attempts whose receipt vouches for it)`.
         clean = None
         role = None
+        if (start_from == "rereview" and not local_only
+                and (code_host or policy_code_host) == "github"):
+            # A confirmed manual rereview is the only exception to dispatching
+            # one, under either CI policy (#346).
+            manual, stopped = manual_review()
+            if stopped is not None:
+                return stopped
+            if manual is not None:
+                return close_manual(manual, reported)
         if parallel and start_from == "rereview":
             clean, stopped = reusable_review()
             if stopped is not None:

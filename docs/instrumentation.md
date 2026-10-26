@@ -637,12 +637,13 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `final_review_status`, `final_approved` | any review or rereview reported one of those; under `parallel`, `final_approved` waits for the CI gate in the same way |
 | `cycle` | `ci_policy` | always (schema 19) |
 | `cycle` | `ci_polls`, `ci_wait_ms`, `final_ci_status`, `redundant_reviews`, `review_reused` | the CI gate ran, a review named its SHA, or a resume could reuse a clean review (schema 19) |
+| `cycle` | `review_provenance` | the cycle accepted a [manual rereview](review-cycle.md#manual-rereview) receipt; always `manual` when present (schema 22) |
 | `cycle` | `tests_passed`, `tests_basis` | a verdict recorded a test result; the latest result and its evidence level win (schema 8) |
 | `cycle` | `verification` | a verdict supplied a conclusion token; the latest one wins (schema 8) |
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19; `worktree_dirty` and `worktree_diverged` when safe synchronization to an open pull request head is impossible |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19; `manual_rereview_rejected` from schema 22; `worktree_dirty` and `worktree_diverged` when safe synchronization to an open pull request head is impossible |
 | `cycle` | `issue_review` | the cycle started at `implement` and was not continued: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `continued` | the cycle continued an interrupted implementation with `--continue`; always `true` when present (schema 12) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
@@ -704,7 +705,9 @@ never written. Check names stay in the published comment.
 than a completion, or only started work that finishes elsewhere),
 `dispatch_failed`, `local_only`, `permission_required` (schema 20: a stage
 needs a sensitive sandbox grant nobody answered; see *Sensitive sandbox grants*
-in `routing.md`), `worktree_dirty`, or `worktree_diverged`. The last two stop
+in `routing.md`), `manual_rereview_rejected` (schema 22: the latest receipt is a
+manual rereview a resume cannot close on; see *Manual rereview* in
+`review-cycle.md`), `worktree_dirty`, or `worktree_diverged`. The last two stop
 before changing files when a dirty tree or non-fast-forward prevents syncing an
 open pull request head. A closing row from an earlier version has none, and
 `cc-stats` reads it as unknown. A stage row's `reroute_reason` may then be

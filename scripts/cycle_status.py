@@ -871,13 +871,16 @@ class CycleStatusWriter:
         return snapshot["duration_seconds"]
 
     def finish(self, status: str, *, stop_reason: str | None = None,
-               reason: str | None = None, readiness=None) -> None:
+               reason: str | None = None, readiness=None,
+               review_provenance: str | None = None) -> None:
         with self._lock:
             self._status["finished"] = True
             self._status["status"] = status
             self._status["finished_at"] = _now()
             if stop_reason:
                 self._status["stop_reason"] = _clean_activity(stop_reason)
+            if review_provenance:
+                self._status["review_provenance"] = _clean_activity(review_provenance)
             if reason:
                 self._status["reason"] = _clean_activity(reason)
             if readiness is not None and getattr(readiness, "valid", False):
