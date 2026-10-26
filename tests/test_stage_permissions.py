@@ -751,18 +751,38 @@ class AllowedToolsTests(PolicyTestCase):
     def test_the_only_edit_rules_name_the_helper_files_in_tmpdir(self) -> None:
         # #272/#273/#280: nested executor helper paths stay limited to owned names.
         root = sp._absolute_rule_path(str(self.tmpdir))
-        names = ("pr-comment.md", "report.md", "reply.md")
+        names = ("pr-comment.md", "report.md", "reply.md", "delta.diff")
         expected = ([f"Edit({root}/{name})" for name in names]
                     + [f"Edit({root}/claude-*/{name})" for name in names]
                     + [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"])
         expected += [pattern.replace("Edit(", "Write(") for pattern in list(expected)]
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
-            edits = [p for p in self.patterns(role) if not p.startswith("Bash(")]
+            edits = [p for p in self.patterns(role)
+                     if p.startswith(("Edit(", "Write("))]
             with self.subTest(role=role):
                 self.assertEqual(expected, edits)
                 self.assertFalse([p for p in edits if "**" in p])
                 self.assertFalse([p for p in self.patterns(role, tmpdir=None)
                                   if not p.startswith("Bash(")])
+
+    def test_review_stages_read_only_the_fix_delta_in_both_tmpdir_layouts(self) -> None:
+        root = sp._absolute_rule_path(str(self.tmpdir))
+        for role in ("review", "rereview"):
+            with self.subTest(role=role):
+                patterns = self.patterns(role)
+                self.assertIn(f"Read({root}/delta.diff)", patterns)
+                self.assertIn(f"Read({root}/claude-*/delta.diff)", patterns)
+        for role in ("implement", "issue_review"):
+            with self.subTest(role=role):
+                self.assertFalse(any(pattern.startswith("Read(")
+                                     and "delta.diff" in pattern
+                                     for pattern in self.patterns(role)))
+        self.assertTrue(sp.is_tmpdir_helper(str(self.tmpdir / "delta.diff"), str(self.tmpdir)))
+        claude_tmpdir = self.tmpdir / "claude-1000"
+        claude_tmpdir.mkdir()
+        self.assertTrue(sp.is_tmpdir_helper(str(claude_tmpdir / "delta.diff"), str(self.tmpdir)))
+        self.assertFalse(sp.is_tmpdir_helper(str(self.tmpdir / "other.diff"), str(self.tmpdir)))
+        self.assertFalse(sp.is_tmpdir_helper(str(self.sibling / "delta.diff"), str(self.tmpdir)))
 
     def test_an_absolute_rule_path_has_the_root_anchor_claude_expects(self) -> None:
         self.assertEqual("//tmp/code-cycle-tmp-x", sp._absolute_rule_path("/tmp/code-cycle-tmp-x/"))

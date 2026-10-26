@@ -36,6 +36,10 @@ is unchanged. Its name starts with `code-cycle-tmp-` under the selected system
 temporary parent; concurrent dispatches never share a directory. Use fixed
 helper names: `$TMPDIR/pr-comment.md`, `$TMPDIR/report.md`, and
 `$TMPDIR/<check>.log`, replacing `<check>` with the check's fixed name.
+Review stages may also read and write the fix delta as `$TMPDIR/delta.diff`;
+Claude may place it in its per-user `$TMPDIR/claude-<uid>/delta.diff`
+subdirectory. These exact names are allowed, while other diff files and the
+rest of the temporary directory remain unavailable.
 Codex read-only stages use a named permission profile extending `:read-only`
 with only this directory writable. Writing stages add the directory to their
 workspace-write roots or existing named profile, preserving Git protections,

@@ -395,7 +395,7 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
 #: after the check. Claude keeps its own session state in the same directory
 #: (materialised settings, `tasks/` output, `bash-edit-diff/`), so the grant
 #: names these top-level files rather than the whole directory.
-TMPDIR_HELPER_FILES = ("pr-comment.md", "report.md", "reply.md")
+TMPDIR_HELPER_FILES = ("pr-comment.md", "report.md", "reply.md", "delta.diff")
 TMPDIR_LOG_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.log")
 
 
@@ -1458,6 +1458,8 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             root = _absolute_rule_path(tmpdir)
             patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
             patterns += [f"Edit({root}/claude-*/{name})" for name in TMPDIR_HELPER_FILES]
+            if policy.role in REVIEW_ROLES:
+                patterns += [f"Read({root}/delta.diff)", f"Read({root}/claude-*/delta.diff)"]
             patterns += [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"]
         patterns += [pattern.replace("Edit(", "Write(") for pattern in list(patterns)
                      if pattern.startswith("Edit(")]
