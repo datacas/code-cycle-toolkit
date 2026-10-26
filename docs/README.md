@@ -43,7 +43,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 ## Project
 
 - [CHANGELOG](../CHANGELOG.md): released and unreleased changes
-- [CONTRIBUTING](../CONTRIBUTING.md): authoring rules, validator, release checklist
+- [CONTRIBUTING](../CONTRIBUTING.md): authoring rules, validator, release checklist, and the [CI fast path for non-code changes](../CONTRIBUTING.md#non-code-changes-take-a-fast-path)
 - [SECURITY](../SECURITY.md): how to report a vulnerability
 
 ---
