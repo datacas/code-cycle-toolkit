@@ -157,7 +157,43 @@ SHAs; the event is attributed to the stage about to run.
 
 ### Resume while awaiting CI
 
-`run_cycle.py --from rereview --pr <n> --ci-policy parallel` reads the change request's trusted comments first. When the latest receipt is a clean `review` or `rereview` of the PR's current head and the published findings block nothing, no review is dispatched: the cycle only runs the gate. A moved head, a later receipt from another stage, a malformed receipt, or a blocking finding reviews the current head instead, and a change request whose state cannot be read stops as `BLOCKED`. `--from review` always runs a fresh initial review.
+`run_cycle.py --from rereview --pr <n> --ci-policy parallel` reads the change request's trusted comments first. When the latest receipt is a clean `review` or `rereview` of the PR's current head and the published findings block nothing, no review is dispatched: the cycle only runs the gate. A moved head, a later receipt from another stage, a malformed receipt, or a blocking finding reviews the current head instead, and a change request whose state cannot be read stops as `BLOCKED`. `--from review` always runs a fresh initial review. A [manual rereview](#manual-rereview) receipt is never reused this way, however clean and trusted.
+
+## Manual rereview
+
+When no stage can run the final rereview, for example because its checks cannot run inside the sandbox, a person may run it in their own session and attach it to the cycle. Without a record, a rereview that ran outside the runtime is invisible to the cycle: when a dispatched rereview stops without completing on a GitHub change request, the stop names the missing receipt and the command that records it.
+
+```bash
+python3 scripts/manual_rereview.py record --repo owner/name --pr 123 \
+  --status APPROVED --confirm-head <full current head SHA> \
+  --check 'pass:python3 -m unittest discover -s tests:https://example.test/log/1' \
+  [--finding REV-001=resolved] [--dry-run]
+```
+
+It publishes one PR comment whose schema-2 receipt says what it is:
+
+```text
+<!-- code-cycle-stage {"schema":2,"provenance":"manual","stage":"rereview","attempt_id":"manual-<digest>","head_sha":"<sha>","confirmed_head":"<sha>","operator":"<login>","status":"APPROVED","checks":[{"name":"…","result":"pass","evidence":"https://…"}],"finding_outcomes":[],"repo":"owner/name","change_request_id":"123"} -->
+```
+
+- **Provenance.** `provenance: manual`; a receipt without the field is a runtime receipt. Only a `rereview` with `APPROVED` or `CHANGES_REQUESTED` can be manual, and an `APPROVED` one cannot leave a finding `open`.
+- **Operator.** The login of the account `gh` is authenticated as, read from GitHub. There is no flag for it, and a resume refuses a receipt whose `operator` is not the account that published it.
+- **Confirmation.** `--confirm-head` must be the full SHA of the PR's current head; it is written as `confirmed_head` and must equal `head_sha`. A closed PR or another head publishes nothing.
+- **Checks.** Each `--check RESULT:NAME:EVIDENCE` is declared by the operator, with `pass`, `fail` or `not_run` and a link to its evidence. The comment says they were not run by the runtime, and the report repeats that.
+- **Idempotent.** The attempt ID is derived from what the receipt records. Recording the same rereview again finds the operator's earlier comment and publishes nothing; a different record is a new comment, and no earlier one is edited.
+- **Not an approval.** Recording says nothing about whether the change passes.
+
+`run_cycle.py --from rereview --pr <n>` then looks at the change request's latest trusted receipt, under either CI policy. When it is not manual, the resume behaves as before. When it is manual, the cycle accepts it only if all of these hold, and otherwise stops with `HUMAN_INTERVENTION` (`manual_rereview_rejected`) naming the missing step:
+
+- its operator is the account that published it;
+- its head is the PR's current head: a new head invalidates the confirmation, and the stop gives the command for the new head;
+- its verdict is `APPROVED`: `CHANGES_REQUESTED` is resolved with `--from resolve`;
+- every published finding that still blocks approval is one it records as `resolved` or `not_applicable`;
+- nothing readable was published after it. A later runtime receipt is simply the latest one, and the resume follows it.
+
+An accepted manual rereview dispatches no review. It goes through the same [CI gate](#the-ci-gate) as a runtime review, under `strict` too: every required check of that head must pass while it is still the head, the PR must merge cleanly, and the receipt must still be the latest publication. Only then does the cycle end `READY_FOR_MANUAL_MERGE`. Failed checks or a conflict stop with `HUMAN_INTERVENTION` (`ci_not_passing`) rather than dispatching a resolution, and a head that moves during the wait stops as `head_moved`. The report, the cycle's telemetry row and its status file carry `review_provenance: manual`.
+
+Limits: GitHub only; one manual rereview closes one head; the runtime never runs the declared checks, and the operator answers for them. A host-run executor that the runtime launches is a separate design (#291) and can record its own provenance through the same contract.
 
 ## Anatomy of a review comment
 
@@ -306,6 +342,8 @@ An orchestrator reports `READY_FOR_MANUAL_MERGE` only when **all** of these hold
 - no open finding has `blocks:yes`;
 - required checks passed. Pending, skipped, failed, or missing checks are not success. Under `parallel` this is the CI gate's `CI_PASSED` for that SHA, never the review's own reading.
 
+The last review may be a confirmed [manual rereview](#manual-rereview) of the current head, under either policy; the CI gate still decides, and the record says `review_provenance: manual`.
+
 A human still owns the merge.
 
 The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dispatched, on any of these:
@@ -315,6 +353,7 @@ The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dis
 | Iteration limit | the resolve+rereview budget is spent: `max_iterations`, default `3` in `run_cycle.py` and `6` in the orchestrator skills | `iteration_limit` |
 | No progress | a rereview reports the same `head_sha` and the same open finding set as the review before it | `no_progress` |
 | Repeated findings | one `REV-xxx` ID survived a claimed fix twice | `repeated_findings` |
+| Manual rereview not accepted | a resume's latest receipt is a [manual rereview](#manual-rereview) it cannot close on | `manual_rereview_rejected` |
 
 Before the loop, an [issue review](#issue-review-before-implementation) can stop a new cycle as `needs_refinement` or `readiness_unconfirmed` without implementing anything.
 

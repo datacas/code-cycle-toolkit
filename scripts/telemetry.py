@@ -98,7 +98,10 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: tables in the same file, holding the bounded, redacted text the tables
 #: above never hold, deleted when the work item's change request closes.
 #: Nothing above changes; an older store simply has no journal.
-SCHEMA_VERSION = 21
+#: 22: a manual rereview (#346). The cycle row of a cycle that closed on one
+#: carries `review_provenance: manual`, and a manual receipt the resume could
+#: not accept stops with `manual_rereview_rejected`. Both payload-only.
+SCHEMA_VERSION = 22
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -142,7 +145,12 @@ STOP_REASONS = frozenset({
     "worktree_dirty", "worktree_diverged",
     # A stage needs a sensitive sandbox grant nobody has answered (schema 20).
     "permission_required",
+    # The latest receipt is a manual rereview the resume cannot accept (schema 22).
+    "manual_rereview_rejected",
 })
+
+#: Who ran the review a cycle closed on (schema 22); `review_contract` defines them.
+REVIEW_PROVENANCES = frozenset({"runtime", "manual"})
 
 #: How a cycle treats the code host's checks (schema 19). `strict` is the
 #: original serial flow; `parallel` reviews while checks run and gates
@@ -313,6 +321,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "final_ci_status": ("token", CI_STATUSES),
     "redundant_reviews": ("count", None),
     "review_reused": ("flag", None),
+    "review_provenance": ("token", REVIEW_PROVENANCES),
     "exit_code": ("count", None),
     "tokens_in": ("count", None),
     "tokens_out": ("count", None),
@@ -574,7 +583,7 @@ OUTCOME_FIELDS: dict[str, frozenset[str]] = {
         "final_approved", "tests_passed", "tests_basis", "verification",
         "boundary_verified", "fallback_stages", "contract_violations", "stop_reason",
         "issue_review", "continued", "ci_policy", "ci_wait_ms", "ci_polls",
-        "final_ci_status", "redundant_reviews", "review_reused",
+        "final_ci_status", "redundant_reviews", "review_reused", "review_provenance",
     }),
 }
 

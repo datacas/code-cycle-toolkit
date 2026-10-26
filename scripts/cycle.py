@@ -393,6 +393,8 @@ class CycleRecorder:
         # Set by the driver when a resume reused a clean review's receipt
         # instead of dispatching one; `None` is a cycle that could not have.
         self.review_reused: bool | None = None
+        # `manual` when the cycle closed on a manual rereview (#346).
+        self.review_provenance: str | None = None
         self.tests_passed: bool | None = None
         self.tests_basis: str | None = None
         self.verification: str | None = None
@@ -1315,6 +1317,8 @@ class CycleRecorder:
             outcome["redundant_reviews"] = self.redundant_reviews
         if self.review_reused is not None:
             outcome["review_reused"] = self.review_reused
+        if self.review_provenance is not None:
+            outcome["review_provenance"] = self.review_provenance
         if self.tests_passed is not None:
             outcome.update(
                 tests_passed=self.tests_passed,

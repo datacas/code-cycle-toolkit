@@ -33,6 +33,7 @@ profile_config.py
 host_permissions.py
 stats.py
 work_item_outcomes.py
+manual_rereview.py
 security_gate.py
 review_contract.py
 triage_repair.py

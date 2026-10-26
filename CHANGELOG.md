@@ -7,6 +7,15 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- **Manual rereview (#346).** `manual_rereview.py record` attaches a rereview
+  that ran outside the runtime to its pull request with a schema-2 receipt
+  marked `provenance: manual`, the authenticated operator, the confirmed head
+  and the checks the operator declared. `run_cycle.py --from rereview` closes
+  the cycle on it under either CI policy only when it is clean, confirmed for
+  the current head and still the latest receipt, and only after the required
+  checks of that head pass; otherwise it stops with
+  `manual_rereview_rejected` and the missing step. Telemetry schema 22 records
+  `review_provenance: manual`.
 - `code_cycle.allowed_commands.verify`: a list of exact verification prefixes a
   stage may extend with arguments. Interpreters, shells, inline code and
   wildcards are refused. A runtime older than this release rejects the key.

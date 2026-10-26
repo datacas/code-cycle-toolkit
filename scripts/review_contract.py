@@ -61,6 +61,18 @@ _SCHEMA_RE = re.compile(r"^schema:(\d+)$")
 _TRIAGED_RE = re.compile(r"^triaged:(.+)$")
 _BLOCKS_RE = re.compile(r"^blocks:(yes|no)$")
 _STAGE_EVIDENCE_RE = re.compile(r"<!-- code-cycle-stage\s+(.*?)\s*-->", re.DOTALL)
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+#: Who ran the stage a receipt records (#346). A receipt without the field was
+#: published by a stage the runtime dispatched. `manual` is a rereview a person
+#: ran outside the runtime and recorded with `manual_rereview.py`; it is never
+#: read as a runtime receipt.
+RUNTIME_PROVENANCE = "runtime"
+MANUAL_PROVENANCE = "manual"
+RECEIPT_PROVENANCES = (RUNTIME_PROVENANCE, MANUAL_PROVENANCE)
+#: The verdicts a manual rereview may record, and what each declared check may say.
+MANUAL_STATUSES = ("APPROVED", "CHANGES_REQUESTED")
+MANUAL_CHECK_RESULTS = ("pass", "fail", "not_run")
 
 
 class ContractError(ValueError):
@@ -97,7 +109,7 @@ def stage_evidence(text: str) -> list[dict]:
         for key in ("repo", "change_request_id", "stage", "attempt_id", "head_sha", "status"):
             if not isinstance(value.get(key), str) or not value[key]:
                 raise ContractError(f"stage evidence requires {key}")
-        if not re.fullmatch(r"[0-9a-f]{40}", value["head_sha"]):
+        if not _FULL_SHA_RE.fullmatch(value["head_sha"]):
             raise ContractError("stage evidence requires a full head SHA")
         outcomes = value.get("finding_outcomes", [])
         if not isinstance(outcomes, list):
@@ -111,8 +123,53 @@ def stage_evidence(text: str) -> list[dict]:
                     or item["id"] in ids):
                 raise ContractError("invalid or duplicate stage evidence outcome")
             ids.add(item["id"])
+        provenance = value.get("provenance", RUNTIME_PROVENANCE)
+        if provenance not in RECEIPT_PROVENANCES:
+            raise ContractError(f"unknown stage evidence provenance {provenance!r}")
+        if provenance == MANUAL_PROVENANCE:
+            _check_manual(value)
         receipts.append(value)
     return receipts
+
+
+def receipt_provenance(receipt: dict) -> str:
+    """`runtime` or `manual`: who ran the stage a parsed receipt records."""
+    return receipt.get("provenance", RUNTIME_PROVENANCE)
+
+
+def _check_manual(value: dict) -> None:
+    """A manual receipt says what it is, who confirmed it, and what was checked."""
+    if value["stage"] != "rereview":
+        raise ContractError("a manual receipt records a rereview only")
+    if value["status"] not in MANUAL_STATUSES:
+        raise ContractError(f"a manual rereview records {' or '.join(MANUAL_STATUSES)}")
+    if not isinstance(value.get("operator"), str) or not value["operator"].strip():
+        raise ContractError("a manual receipt requires its operator")
+    if value.get("confirmed_head") != value["head_sha"]:
+        raise ContractError("a manual receipt requires confirmed_head equal to head_sha")
+    if value["status"] == "APPROVED" and any(
+            item["status"] == "open" for item in value.get("finding_outcomes", [])):
+        raise ContractError("a manual APPROVED rereview cannot leave a finding open")
+    checks = value.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise ContractError("a manual receipt requires the checks the operator declared")
+    for item in checks:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("name"), str) or not item["name"].strip()
+                or item.get("result") not in MANUAL_CHECK_RESULTS
+                or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()):
+            raise ContractError(
+                "a declared check needs a name, a result "
+                f"({', '.join(MANUAL_CHECK_RESULTS)}) and its evidence")
+
+
+def format_stage_evidence(receipt: dict) -> str:
+    """The `<!-- code-cycle-stage {JSON} -->` line `stage_evidence` reads back."""
+    line = ("<!-- code-cycle-stage "
+            + json.dumps(receipt, ensure_ascii=False, sort_keys=True) + " -->")
+    if stage_evidence(line) != [receipt]:
+        raise ContractError("stage evidence does not read back as written")
+    return line
 
 
 @dataclass(frozen=True)
