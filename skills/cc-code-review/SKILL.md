@@ -123,6 +123,9 @@ cites as evidence, such as a test failure, a check state, or a command result.
   This scoped post-fix pass keeps the same review criteria; initial review and
   rereview still cover the accumulated diff. If the caller cannot establish a
   usable base, review the accumulated diff.
+- When a native rereview supplies its saved fix delta, read `$TMPDIR/delta.diff`
+  (or `$TMPDIR/claude-<uid>/delta.diff` when Claude uses its per-user temporary
+  subdirectory) as the named diff input.
 - Read enough surrounding context to judge the changed code.
 - Check that new code is consistent with the patterns of the file and module
   around it, not only with global project patterns.

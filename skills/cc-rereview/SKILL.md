@@ -467,6 +467,11 @@ intermediate reviews.
 
 ## Workflow
 
+For a fix delta saved during a native parallel cycle, use the fixed path
+`$TMPDIR/delta.diff`; Claude may resolve it as
+`$TMPDIR/claude-<uid>/delta.diff`. Keep the file in one of these paths so the
+review permission rules can read it.
+
 1. Identify change-request metadata, current head and base, draft state,
    labels, linked work item, and check rollup. Open a review run: mint a new
    `CCR-xxx` identifier for this execution, distinct from the one the initial
