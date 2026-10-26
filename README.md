@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Hosts](https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-555)
 
-[Start here](#start-here) · [Quick start](#quick-start) · [Workflows](docs/workflows.md) · [Skills](docs/skills.md) · [Configuration](docs/configuration.md) · [Documentation index](docs/README.md)
+[Start here](#start-here) · [Quick start](#quick-start) · [Workflows](docs/workflows.md) · [Skills](docs/skills.md) · [Configuration](docs/configuration.md) · [Documentation index](docs/README.md) · [2.0 roadmap](docs/ROADMAP_V2.md)
 
 </div>
 
