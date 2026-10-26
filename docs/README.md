@@ -28,6 +28,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 
 | Document | Contents |
 |---|---|
+| [CodeCycleToolkit 2.0 roadmap](ROADMAP_V2.md) | Approved strategy, execution modes, decisions, issue dependencies and milestones; planned capabilities are not implementation claims |
 | [Role workspace policy](role-workspace-policy.md) | The write permission each dispatched role has, and which executors can enforce it |
 | [Host permissions](host-permissions.md) | Each stage's closed command table, how Claude and Codex enforce it, their limits, and the opt-in global set |
 | [Dependency preparation](dependency-preparation.md) | Frozen Node installs, user-selected tools/integrations, registry access and setup evidence |
