@@ -2408,6 +2408,19 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
         self.assertEqual("claude-opus-5-5", result.model_resolved)
 
+    def test_codex_refusing_an_untrusted_directory_is_a_capability(self) -> None:
+        """Observed live: this exited non-zero with no structured event and was
+        reported as a plain failure, so nobody learned what to grant."""
+        stderr = ("Reading additional input from stdin...\n"
+                  "Not inside a trusted directory and --skip-git-repo-check was not specified.")
+
+        result = ex.CodexAdapter().dispatch(
+            TARGET, "work", runner=lambda *a, **k: completed(returncode=1, stderr=stderr)
+        )
+
+        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual("trusted_directory", result.missing_capability)
+
 
 class DockerHostProbeTests(unittest.TestCase):
     def test_granted_docker_is_probed_inside_each_executor_sandbox(self) -> None:
@@ -2519,19 +2532,6 @@ class DockerHostProbeTests(unittest.TestCase):
         self.assertIn("permission denied", result.artifacts["docker_host_probe"]["error"])
         self.assertIn("tests.conclusion=not_verified", observed["task"])
         self.assertEqual("codex", result.executor)
-
-    def test_codex_refusing_an_untrusted_directory_is_a_capability(self) -> None:
-        """Observed live: this exited non-zero with no structured event and was
-        reported as a plain failure, so nobody learned what to grant."""
-        stderr = ("Reading additional input from stdin...\n"
-                  "Not inside a trusted directory and --skip-git-repo-check was not specified.")
-
-        result = ex.CodexAdapter().dispatch(
-            TARGET, "work", runner=lambda *a, **k: completed(returncode=1, stderr=stderr)
-        )
-
-        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
-        self.assertEqual("trusted_directory", result.missing_capability)
 
 
 class NativeScratchTests(unittest.TestCase):
