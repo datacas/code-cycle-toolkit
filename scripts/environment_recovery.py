@@ -213,7 +213,8 @@ def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
     """The `docker_host` blocker for a Claude stage the command hook stopped.
 
     Claude's stage table holds `docker compose` only under the `docker_host`
-    grant (#142). When the hook denied such a command and the stage then
+    grant (#142), which also opens Unix sockets in the generated sandbox
+    settings. When the hook denied such a command and the stage then
     reported BLOCKED, the denial is the restriction, observed by the runtime
     itself rather than claimed by the agent, so it enters the grant flow. Only
     a denial the grant would lift counts: `docker compose run`, `exec` and the

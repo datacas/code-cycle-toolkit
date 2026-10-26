@@ -260,9 +260,12 @@ the cycle's stop line names the first: `blocked command in the implement stage:
 `--continue`. A denied `docker compose …` in a stage that then reports
 `BLOCKED` becomes the `docker_host` environment blocker and enters the
 [grant flow](routing.md) (`stop_reason=permission_required`,
-`--grant docker_host=…`). The Claude scope of that grant opens only the five
-compose subcommands; `docker.host_socket_access: true` pre-authorizes both
-scopes. Docker access is in practice root on the host.
+`--grant docker_host=…`). On Linux the Claude grant opens every reachable Unix
+socket for that dispatch, while the command table permits only the five listed
+Compose subcommands. The runtime probes `docker version` inside the sandbox;
+failure leaves Docker-dependent checks `not_verified` and independent work
+continues. `docker.host_socket_access: true` pre-authorizes both scopes. Docker
+access is in practice root on the host.
 
 Codex rejections are not reported this way yet: how `codex exec` reports a
 command its sandbox or execpolicy refused has not been verified.

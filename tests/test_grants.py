@@ -33,18 +33,33 @@ class GrantRegistryTests(unittest.TestCase):
             with self.subTest(executor=executor, platform=platform):
                 self.assertIsNone(grants.DOCKER_HOST.scope_for(executor, platform))
 
-    def test_claude_has_a_compose_only_scope_on_the_same_platforms_as_codex(self) -> None:
+    def test_claude_scope_opens_sockets_but_keeps_the_compose_command_limit(self) -> None:
         claude = grants.DOCKER_HOST.scope_for("claude", "linux")
         self.assertIsNotNone(claude)
         self.assertEqual({scope.platform for scope in grants.DOCKER_HOST.scopes
                           if scope.executor == "codex"},
                          {scope.platform for scope in grants.DOCKER_HOST.scopes
                           if scope.executor == "claude"})
-        self.assertIn("docker compose up, down, ps, logs and build only", claude.effective)
-        self.assertIn("docker compose run", claude.effective)
+        self.assertIn("permits only docker compose up, down, ps, logs and build", claude.effective)
+        self.assertIn("every reachable Unix socket", claude.effective)
+        self.assertIn("ssh-agent", claude.effective)
+        self.assertIn("compose run remain denied", claude.effective)
         self.assertIn("root", claude.risks)
         self.assertTrue(claude.isolated_per_dispatch)
         self.assertNotEqual(grants.DOCKER_HOST.fingerprint(LINUX),
+                            grants.DOCKER_HOST.fingerprint(claude))
+        previous_scope = grants.GrantScope(
+            executor="claude", platform="linux",
+            effective=("the host Docker daemon through docker compose up, down, ps, "
+                       "logs and build only; docker run, docker exec, docker compose "
+                       "run and every other subcommand stay denied by the stage's "
+                       "command hook"),
+            risks=("Access to the Docker daemon is in practice root on the host: a "
+                   "compose file can mount host paths and run privileged containers. "
+                   "Claude's other commands keep their stage table"),
+            isolated_per_dispatch=True,
+        )
+        self.assertNotEqual(grants.DOCKER_HOST.fingerprint(previous_scope),
                             grants.DOCKER_HOST.fingerprint(claude))
 
     def test_a_blocker_names_the_resource_or_mentions_it(self) -> None:

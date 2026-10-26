@@ -110,13 +110,13 @@ DOCKER_HOST = SensitiveGrant(
         ),
         GrantScope(
             executor="claude", platform="linux",
-            effective=("the host Docker daemon through docker compose up, down, ps, "
-                       "logs and build only; docker run, docker exec, docker compose "
-                       "run and every other subcommand stay denied by the stage's "
-                       "command hook"),
-            risks=("Access to the Docker daemon is in practice root on the host: a "
-                   "compose file can mount host paths and run privileged containers. "
-                   "Claude's other commands keep their stage table"),
+            effective=("every reachable Unix socket, including Docker, ssh-agent, "
+                       "D-Bus and other local service sockets; Claude's command hook "
+                       "still permits only docker compose up, down, ps, logs and build; "
+                       "docker run, exec and compose run remain denied"),
+            risks=("Access to the Docker daemon is in practice root on the host, and "
+                   "ssh-agent can sign with your keys. Claude's command hook still "
+                   "limits Docker commands to the listed Compose operations"),
             isolated_per_dispatch=True,
         ),
     ),

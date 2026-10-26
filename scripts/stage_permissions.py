@@ -1829,7 +1829,8 @@ REVIEW_SANDBOX_DOMAINS = ("github.com", "api.github.com", "bitbucket.org", "api.
 
 
 def review_sandbox_settings(writable: tuple[str, ...],
-                            registry_domains: tuple[str, ...] = ()) -> dict:
+                            registry_domains: tuple[str, ...] = (), *,
+                            docker_host: bool = False) -> dict:
     """Claude's Bash sandbox for a reviewer that verifies in its clone.
 
     A sandboxed command has no network route except the allowed domains, and a
@@ -1840,8 +1841,11 @@ def review_sandbox_settings(writable: tuple[str, ...],
         "failIfUnavailable": True,
         "allowUnsandboxedCommands": False,
         "filesystem": {"allowWrite": list(writable)},
-        "network": {"allowedDomains": list(dict.fromkeys(
-            (*REVIEW_SANDBOX_DOMAINS, *registry_domains)))},
+        "network": {
+            "allowedDomains": list(dict.fromkeys(
+                (*REVIEW_SANDBOX_DOMAINS, *registry_domains))),
+            **({"allowAllUnixSockets": True} if docker_host else {}),
+        },
     }}
 
 
