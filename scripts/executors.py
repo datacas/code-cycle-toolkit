@@ -629,6 +629,7 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                        runner=None) -> dict:
     """Check Docker from the granted executor sandbox before a stage relies on it."""
     argv: list[str]
+    probe_directory = None
     temporary_settings = None
     probe_scratch = None
     if adapter.name == "codex":
@@ -659,13 +660,11 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
         if executable is None:
             return {"status": "not_verified", "command": "srt docker version",
                     "error": "srt is unavailable; Docker reachability was not checked"}
-        dispatch_tmpdir = os.environ.get("TMPDIR")
-        if not dispatch_tmpdir:
-            return {"status": "not_verified", "command": "srt docker version",
-                    "error": "the per-dispatch TMPDIR is unavailable; Docker reachability was not checked"}
-        probe_scratch = Path(dispatch_tmpdir) / "docker-probe-scratch"
-        temporary_settings = Path(dispatch_tmpdir) / "docker-probe-settings.json"
         try:
+            probe_directory = Path(tempfile.mkdtemp(
+                prefix="code-cycle-docker-probe-", dir=tempfile.gettempdir()))
+            probe_scratch = probe_directory / "scratch"
+            temporary_settings = probe_directory / "settings.json"
             probe_scratch.mkdir()
             writable = [cwd, str(probe_scratch)]
             if writes and Path(cwd).is_dir():
@@ -677,14 +676,19 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                 writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
             sandbox = sp.review_sandbox_settings(
                 tuple(writable), network_domains, docker_host=True)["sandbox"]
-            settings = {key: sandbox[key] for key in ("network", "filesystem")}
+            network = dict(sandbox["network"])
+            network.setdefault("deniedDomains", [])
+            filesystem = dict(sandbox["filesystem"])
+            filesystem.setdefault("denyRead", [])
+            filesystem.setdefault("denyWrite", [])
+            settings = {"network": network, "filesystem": filesystem}
             temporary_settings.write_text(json.dumps(settings), encoding="utf-8")
             temporary_settings.chmod(0o600)
-            argv = [executable, "--settings", str(temporary_settings), "docker", "version"]
+            argv = [executable, "--settings", str(temporary_settings),
+                    "--", "docker", "version"]
         except OSError as error:
-            temporary_settings.unlink(missing_ok=True)
-            if probe_scratch.exists():
-                probe_scratch.rmdir()
+            if probe_directory is not None:
+                shutil.rmtree(probe_directory, ignore_errors=True)
             return {"status": "not_verified", "command": "srt docker version",
                     "error": f"could not prepare the Claude sandbox probe ({type(error).__name__})"}
     else:
@@ -717,13 +721,8 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                 "executor": adapter.name,
                 "error": f"sandbox probe could not run ({type(error).__name__}: {error})"}
     finally:
-        if temporary_settings is not None:
-            try:
-                temporary_settings.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if probe_scratch is not None and probe_scratch.exists():
-            shutil.rmtree(probe_scratch, ignore_errors=True)
+        if probe_directory is not None:
+            shutil.rmtree(probe_directory, ignore_errors=True)
 
 
 def _process_group_alive(group: int) -> bool:
