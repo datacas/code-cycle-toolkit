@@ -58,7 +58,7 @@ from usage import normalize_executor_output
 
 #: The sensitive grants (`grants.py`) Codex knows how to apply, and how.
 CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets"}
-#: Claude applies `docker_host` by adding the compose subcommands to its table.
+#: Claude applies `docker_host` through the sandbox network settings and command table.
 CLAUDE_GRANT_OPTIONS = {"docker_host": "docker_compose"}
 
 SCHEMA_VERSION = 1
@@ -624,6 +624,107 @@ def _run_sandbox_probe(argv: list[str], *, cwd: str | None = None, timeout: int 
     return _run(argv, timeout=timeout, cwd=cwd, env=env)
 
 
+def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
+                       network_domains: tuple[str, ...] = (), path: str | None = None,
+                       runner=None) -> dict:
+    """Check Docker from the granted executor sandbox before a stage relies on it."""
+    argv: list[str]
+    probe_directory = None
+    temporary_settings = None
+    probe_scratch = None
+    if adapter.name == "codex":
+        if native.nested_codex():
+            return {"status": "not_verified", "command": "codex sandbox -- docker version",
+                    "executor": adapter.name,
+                    "error": "known nested Codex limitation (#268); no sandbox probe was launched"}
+        if publishes:
+            profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
+        elif network_domains:
+            profile = "code_cycle_registry_write" if writes else "code_cycle_registry_read"
+        else:
+            profile = "code_cycle_write" if writes else "code_cycle_docker_read"
+        parent = ":workspace" if writes else ":read-only"
+        argv = [adapter.binary, "sandbox", "--permission-profile", profile,
+                "-c", f'permissions.{profile}.extends="{parent}"',
+                "-c", f"permissions.{profile}.network.enabled=true",
+                "-c", f"permissions.{profile}.network.dangerously_allow_all_unix_sockets=true"]
+        domains_to_allow = tuple(dict.fromkeys(
+            (*(sp.REVIEW_SANDBOX_DOMAINS if publishes else ()), *network_domains)))
+        if domains_to_allow:
+            domains = ",".join(f'{json.dumps(host)}="allow"'
+                                for host in domains_to_allow)
+            argv += ["-c", f"permissions.{profile}.network.domains={{{domains}}}"]
+        argv += ["--", "docker", "version"]
+    elif adapter.name == "claude":
+        executable = shutil.which("srt", path=path)
+        if executable is None:
+            return {"status": "not_verified", "command": "srt docker version",
+                    "error": "srt is unavailable; Docker reachability was not checked"}
+        try:
+            probe_directory = Path(tempfile.mkdtemp(
+                prefix="code-cycle-docker-probe-", dir=tempfile.gettempdir()))
+            probe_scratch = probe_directory / "scratch"
+            temporary_settings = probe_directory / "settings.json"
+            probe_scratch.mkdir()
+            writable = [cwd, str(probe_scratch)]
+            if writes and Path(cwd).is_dir():
+                git_directories = []
+                for option in ("--git-common-dir", "--git-dir"):
+                    status, path_value = _git_read(cwd, "rev-parse", option)
+                    if status == 0:
+                        git_directories.append(str((Path(cwd) / path_value).resolve()))
+                writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
+            sandbox = sp.review_sandbox_settings(
+                tuple(writable), network_domains, docker_host=True)["sandbox"]
+            network = dict(sandbox["network"])
+            network.setdefault("deniedDomains", [])
+            filesystem = dict(sandbox["filesystem"])
+            filesystem.setdefault("denyRead", [])
+            filesystem.setdefault("denyWrite", [])
+            settings = {"network": network, "filesystem": filesystem}
+            temporary_settings.write_text(json.dumps(settings), encoding="utf-8")
+            temporary_settings.chmod(0o600)
+            argv = [executable, "--settings", str(temporary_settings),
+                    "--", "docker", "version"]
+        except OSError as error:
+            if probe_directory is not None:
+                shutil.rmtree(probe_directory, ignore_errors=True)
+            return {"status": "not_verified", "command": "srt docker version",
+                    "error": f"could not prepare the Claude sandbox probe ({type(error).__name__})"}
+    else:
+        return {"status": "not_verified", "command": "docker version",
+                "error": f"{adapter.name} has no Docker sandbox probe"}
+
+    try:
+        result = (runner or _run_sandbox_probe)(
+            argv, cwd=cwd, capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+        stdout = failure_excerpt(result.stdout or "", 1000)
+        stderr = failure_excerpt(result.stderr or "", 1000)
+        return {
+            "status": "verified" if result.returncode == 0 else "not_verified",
+            "command": "docker version",
+            "executor": adapter.name,
+            "exit_code": result.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            **({"error": stderr or stdout or f"probe exited {result.returncode}"}
+               if result.returncode else {}),
+        }
+    except subprocess.TimeoutExpired as error:
+        return {"status": "not_verified", "command": "docker version",
+                "executor": adapter.name,
+                "error": f"sandbox probe timed out after {error.timeout or 30} seconds"}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"status": "not_verified", "command": "docker version",
+                "executor": adapter.name,
+                "error": f"sandbox probe could not run ({type(error).__name__}: {error})"}
+    finally:
+        if probe_directory is not None:
+            shutil.rmtree(probe_directory, ignore_errors=True)
+
+
 def _process_group_alive(group: int) -> bool:
     try:
         os.killpg(group, 0)
@@ -1134,7 +1235,8 @@ class NativeAdapter(Adapter):
                  command_policy: StagePolicy | None = None,
                  review_clone: str | None = None,
                  on_progress=None, on_workspace=None,
-                 dispatch_attempt_id: str | None = None) -> DispatchResult:
+                 dispatch_attempt_id: str | None = None,
+                 docker_probe_runner=None) -> DispatchResult:
         """Run the agent non-interactively and classify what came back.
 
         `writes` is what the stage is for, not what it might want: an
@@ -1217,6 +1319,38 @@ class NativeAdapter(Adapter):
             policy_note = {**policy_note, **self.policy_notice(policy, cwd)}
         except Exception:
             pass
+        docker_granted = ("docker_host" in sandbox_grants
+                          or bool(command_policy is not None and command_policy.docker))
+        if docker_granted:
+            native_preflight = policy_note.get("native_sandbox_preflight", {})
+            if ((command_policy is not None and command_policy.static_only)
+                    or native_preflight.get("status") == "unverified"):
+                docker_probe = {
+                    "status": "not_verified", "command": "docker version",
+                    "executor": self.name,
+                    "error": "the stage's effective native sandbox could not be reproduced; "
+                             "Docker reachability was not checked",
+                    "sandbox_evidence": native_preflight,
+                }
+            else:
+                docker_probe = _docker_host_probe(
+                    self, cwd=cwd or os.getcwd(), writes=writes, publishes=publishes,
+                    network_domains=tuple(command_policy.registry_domains
+                                          if command_policy is not None
+                                          else ()),
+                    path=prerequisite_path, runner=docker_probe_runner,
+                )
+            policy_note["docker_host_probe"] = docker_probe
+            if docker_probe.get("status") != "verified":
+                task += (
+                    "\n\nDocker grant sandbox probe (runtime evidence): "
+                    f"{json.dumps(docker_probe, sort_keys=True)}. Keep the selected executor "
+                    "and do not ask for this grant again. Continue independent implementation "
+                    "and checks. Do not run Docker-dependent checks unless reachability is "
+                    "verified; report those checks as not_verified with this error and continue. "
+                    "When the main work is complete, return its functional status with "
+                    "tests.conclusion=not_verified rather than stopping for this prerequisite."
+                )
         worker_cwd = cwd or os.getcwd()
         if publishes and writes and command_policy is not None and command_policy.publication_commands:
             preflight, push = (shlex.join(command) for command in command_policy.publication_commands)
@@ -1950,13 +2084,13 @@ class CodexAdapter(NativeAdapter):
         # start (#239). The proxy keeps the domain allowlist, or none at all.
         unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
         profile = None
-        if publishes or network_domains or (writes and unix_sockets):
+        if publishes or network_domains or unix_sockets:
             if publishes:
                 profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
             elif network_domains:
                 profile = "code_cycle_registry_write" if writes else "code_cycle_registry_read"
             else:
-                profile = "code_cycle_write"
+                profile = "code_cycle_write" if writes else "code_cycle_docker_read"
             parent = ":workspace" if writes else ":read-only"
             argv += [
                 "-c", f'default_permissions="{profile}"',
@@ -2549,7 +2683,8 @@ class ClaudeAdapter(NativeAdapter):
                  read_dirs: tuple[str, ...] = (),
                  command_policy: StagePolicy | None = None,
                  on_progress=None, on_workspace=None,
-                 dispatch_attempt_id: str | None = None) -> DispatchResult:
+                 dispatch_attempt_id: str | None = None,
+                 docker_probe_runner=None) -> DispatchResult:
         return super().dispatch(
             target, task, cwd=cwd, timeout=timeout, runner=runner,
             writes=writes, publishes=publishes,
@@ -2558,6 +2693,7 @@ class ClaudeAdapter(NativeAdapter):
             read_dirs=read_dirs, command_policy=command_policy,
             on_progress=on_progress,
             on_workspace=on_workspace, dispatch_attempt_id=dispatch_attempt_id,
+            docker_probe_runner=docker_probe_runner,
         )
 
     def policy_preflight(self, policy: StagePolicy | None, cwd: str | None) -> str | None:
@@ -2641,7 +2777,8 @@ class ClaudeAdapter(NativeAdapter):
                 "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
             })
             if runtime_policy.active and not runtime_policy.static_only and (runtime_policy.requires_confined_verification
-                                          or runtime_policy.registry_domains or runtime_policy.publication_commands):
+                                          or runtime_policy.registry_domains or runtime_policy.publication_commands
+                                          or runtime_policy.docker):
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []
@@ -2651,7 +2788,8 @@ class ClaudeAdapter(NativeAdapter):
                             git_directories.append(str((Path(cwd) / path).resolve()))
                     writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
                 settings.update(sp.review_sandbox_settings(
-                    tuple(writable), runtime_policy.registry_domains))
+                    tuple(writable), runtime_policy.registry_domains,
+                    docker_host=runtime_policy.docker))
             if os.name != "nt":
                 for path in (script, journal_module, policy_file):
                     os.chmod(path, 0o400)

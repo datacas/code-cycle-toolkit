@@ -1290,6 +1290,14 @@ class ClaudeConfigurationTests(unittest.TestCase):
                          network["allowedDomains"])
         self.assertEqual({"allowedDomains"}, set(network))
 
+    def test_only_a_docker_grant_opens_unix_sockets_in_the_review_sandbox(self) -> None:
+        without_grant = sp.review_sandbox_settings(("/clone",))["sandbox"]["network"]
+        with_grant = sp.review_sandbox_settings(
+            ("/clone",), docker_host=True)["sandbox"]["network"]
+
+        self.assertNotIn("allowAllUnixSockets", without_grant)
+        self.assertTrue(with_grant["allowAllUnixSockets"])
+
     def test_the_hook_block_matches_bash_and_the_file_edit_tools(self) -> None:
         block = sp.hook_settings("python3 /x/stage_permissions.py hook /x/policy.json")
         [entry] = block["hooks"]["PreToolUse"]

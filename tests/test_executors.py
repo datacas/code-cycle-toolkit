@@ -2422,6 +2422,118 @@ class LiveObservationTests(unittest.TestCase):
         self.assertEqual("trusted_directory", result.missing_capability)
 
 
+class DockerHostProbeTests(unittest.TestCase):
+    def test_granted_docker_is_probed_inside_each_executor_sandbox(self) -> None:
+        for adapter, expected in (
+            (ex.CodexAdapter(), "dangerously_allow_all_unix_sockets=true"),
+            (ex.ClaudeAdapter(), "allowAllUnixSockets"),
+        ):
+            seen = {"settings_paths": []}
+
+            def runner(argv, **kwargs):
+                seen["argv"] = argv
+                seen["cwd"] = kwargs["cwd"]
+                if adapter.name == "claude":
+                    settings_path = Path(argv[argv.index("--settings") + 1])
+                    seen["settings_paths"].append(settings_path)
+                    seen["settings"] = json.loads(settings_path.read_text(encoding="utf-8"))
+                return completed("Client: Docker Engine\n", stderr="")
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("executors.tempfile.gettempdir", return_value=tmpdir):
+                    with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                        repetitions = 2 if adapter.name == "claude" else 1
+                        for _ in range(repetitions):
+                            result = ex._docker_host_probe(
+                                adapter, cwd="/worktree", writes=True, publishes=False,
+                                runner=runner,
+                            )
+                            self.assertEqual("verified", result["status"])
+            with self.subTest(executor=adapter.name):
+                self.assertEqual("/worktree", seen["cwd"])
+                self.assertIn(expected, " ".join(seen["argv"]) if adapter.name == "codex"
+                              else str(seen["settings"]))
+                self.assertEqual(["--", "docker", "version"], seen["argv"][-3:])
+                if adapter.name == "claude":
+                    self.assertEqual(2, len(seen["settings_paths"]))
+                    self.assertNotEqual(seen["settings_paths"][0], seen["settings_paths"][1])
+                    self.assertTrue(all(not path.parent.exists() for path in seen["settings_paths"]))
+                    self.assertEqual([], seen["settings"]["network"]["deniedDomains"])
+                    self.assertIn("allowAllUnixSockets", seen["settings"]["network"])
+                    self.assertIn("denyRead", seen["settings"]["filesystem"])
+                    self.assertIn("denyWrite", seen["settings"]["filesystem"])
+
+    def test_restricted_sandbox_docker_probe_is_evidence_not_a_stop(self) -> None:
+        for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+            with self.subTest(executor=adapter.name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with patch.dict(os.environ, {"TMPDIR": tmpdir}):
+                        with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                            result = ex._docker_host_probe(
+                                adapter, cwd="/worktree", writes=True, publishes=False,
+                                runner=lambda *args, **kwargs: completed(
+                                    returncode=1,
+                                    stderr="permission denied while connecting to the Docker socket"),
+                            )
+                self.assertEqual("not_verified", result["status"])
+                self.assertEqual(1, result["exit_code"])
+                self.assertIn("permission denied", result["error"])
+
+    def test_missing_srt_is_reported_as_not_verified(self) -> None:
+        with patch("executors.shutil.which", return_value=None):
+            result = ex._docker_host_probe(
+                ex.ClaudeAdapter(), cwd="/worktree", writes=True, publishes=False,
+            )
+
+        self.assertEqual("not_verified", result["status"])
+        self.assertIn("srt is unavailable", result["error"])
+
+    def test_nested_codex_cannot_claim_a_docker_probe(self) -> None:
+        with patch("executors.native.nested_codex", return_value=True):
+            result = ex._docker_host_probe(
+                ex.CodexAdapter(), cwd="/worktree", writes=True, publishes=False,
+                runner=lambda *args, **kwargs: self.fail("must not launch nested Codex"),
+            )
+
+        self.assertEqual("not_verified", result["status"])
+        self.assertIn("known nested Codex limitation", result["error"])
+
+    def test_failed_probe_is_forwarded_without_changing_executor_or_stopping(self) -> None:
+        observed = {}
+
+        class RecordingCodex(ex.CodexAdapter):
+            def dispatch(self, target, task, **kwargs):
+                def agent_runner(argv, **options):
+                    observed["task"] = argv[-1]
+                    return completed(
+                        json.dumps({"type": "item.completed", "item": {
+                            "type": "agent_message", "text": "implemented"}}) + "\n"
+                        + json.dumps({"type": "turn.completed"}))
+
+                kwargs["runner"] = agent_runner
+                return super().dispatch(target, task, **kwargs)
+
+        adapter = RecordingCodex()
+        probe = ex.ProbeResult(
+            "codex", ex.Availability.AUTHENTICATED, "test",
+            provable_ceiling=ex.Availability.AUTHENTICATED,
+        )
+        result = ex.dispatch(
+            decision(router.parse_target("codex:openai/gpt-6-luna high")), "implement issue",
+            ex.Registry([adapter]), policy=ex.ReadinessPolicy.ATTEMPT,
+            probes={"codex": probe}, writes=True,
+            sandbox_grants=("docker_host",),
+            docker_probe_runner=lambda *args, **kwargs: completed(
+                returncode=1, stderr="permission denied connecting to /var/run/docker.sock"),
+        )
+
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("not_verified", result.artifacts["docker_host_probe"]["status"])
+        self.assertIn("permission denied", result.artifacts["docker_host_probe"]["error"])
+        self.assertIn("tests.conclusion=not_verified", observed["task"])
+        self.assertEqual("codex", result.executor)
+
+
 class NativeScratchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = git_repo(self)
