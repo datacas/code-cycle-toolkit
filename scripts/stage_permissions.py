@@ -180,6 +180,17 @@ class StagePolicy:
                 "--repo", self.repo, "--branch", self.checkout_branch)
 
     @property
+    def publication_commands(self) -> tuple[tuple[str, ...], ...]:
+        """Only the installed transport helper, with this dispatch's fixed scope."""
+        if (self.static_only or self.role not in WRITING_ROLES or self.code_host != "github"
+                or not self.repo or not _SAFE_REPOSITORY.fullmatch(self.repo)
+                or not self.base_branch):
+            return ()
+        script = (Path(self.runtime_dir) / "publication.py").as_posix()
+        return tuple(("python3", script, action, "--repo", self.repo,
+                      "--base", self.base_branch) for action in ("preflight", "push"))
+
+    @property
     def active(self) -> bool:
         return self.code_host == "github" and self.issue_provider == "github"
 
@@ -581,6 +592,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if parsed.redirects:
             raise PolicyError("the permissions command may not redirect its output")
         return
+    if tuple(words) in policy.publication_commands:
+        if parsed.redirects:
+            raise PolicyError("the publication command may not redirect its evidence")
+        return
     if (policy.role in {"review", "rereview", "resolve"} and policy.tmpdir
             and len(words) == 3
             and words[:2] == ["python3", policy.triage_validator_path]
@@ -618,6 +633,8 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
     if not args or args[0].startswith("-"):
         raise PolicyError("git global options other than --no-pager are not allowed")
     subcommand, rest = args[0], args[1:]
+    if subcommand == "push" and policy.static_only:
+        raise PolicyError("publication requires the stage sandbox; no host-side push fallback")
     allowed = set(GIT_COMMON_READ)
     if policy.role in GIT_SEARCH_ROLES:
         allowed |= GIT_REVIEW_READ
@@ -1429,6 +1446,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     prefixes += sorted(READ_SHELL)
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))
+    prefixes += [shlex.join(command) for command in policy.publication_commands]
     if not policy.static_only:
         prefixes += list(policy.tools) + list(policy.commands)
     if policy.docker and not policy.static_only:

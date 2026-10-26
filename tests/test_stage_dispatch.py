@@ -355,7 +355,10 @@ class ClaudePolicyTests(DispatchTestCase):
         for writable in (self.repo, tmpdir):
             self.assertNotIn(writable, seen["policy_path"].parents)
         self.assertFalse(seen["policy_path"].parent.exists())
-        self.assertNotIn("sandbox", settings_of(seen["argv"]))
+        sandbox = settings_of(seen["argv"])["sandbox"]
+        self.assertTrue(sandbox["enabled"])
+        self.assertTrue(sandbox["failIfUnavailable"])
+        self.assertFalse(sandbox["allowUnsandboxedCommands"])
 
     def test_a_tool_check_mod_stops_the_dispatch_before_it_starts(self) -> None:
         plugin = self.claude_home / "plugins" / "cache" / "mod"

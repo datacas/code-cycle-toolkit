@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -202,6 +203,78 @@ class RunCycleTestCase(unittest.TestCase):
 
     def rows(self):
         return self.store.rows("owner/api")
+
+
+class PublicationCompletionTests(RunCycleTestCase):
+    def test_completion_normalizes_supported_change_request_references(self):
+        class PublishingTalker(Talker):
+            requires_publication_preflight = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = WorktreeSynchronizationTests()
+            _, _, checkout = fixture.checkout_pair(Path(temporary))
+            head = fixture.git(checkout, "rev-parse", "HEAD")
+
+            def probe(repo, request, cwd):
+                if request != "7":
+                    raise rc.CycleDriverError("not a pull request number")
+                return rc.RemoteMark(head, 0, None)
+
+            for reference in ("7", "#7", "owner/api#7", "https://github.com/owner/api/pull/7"):
+                with self.subTest(reference=reference), \
+                        mock.patch.object(ex, "_publication_preflight", return_value=(True, "ready")), \
+                        mock.patch.object(rc, "probe_change_request", side_effect=probe) as observed:
+                    implementer = PublishingTalker(
+                        "codex", block("IMPLEMENTED", change_request_id=reference, head_sha=head))
+                    reviewer = Talker("claude", block("BLOCKED"))
+                    report = self.run_cycle(implementer, reviewer, code_host="github", cwd=str(checkout))
+                    self.assertEqual("IMPLEMENTED", report.stage_details[0].status, report.explain())
+                    self.assertTrue(reviewer.dispatched)
+                    self.assertEqual("7", observed.call_args_list[0].args[1])
+
+    def test_exited_resolver_commit_is_attributed_for_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = WorktreeSynchronizationTests()
+            _, _, checkout = fixture.checkout_pair(Path(temporary))
+            old = fixture.git(checkout, "rev-parse", "HEAD")
+
+            class CommittingTalker(Talker):
+                def dispatch(self, target, task, **kw):
+                    (checkout / "file.txt").write_text("unpublished fix\n", encoding="utf-8")
+                    fixture.git(checkout, "commit", "-am", "fix")
+                    result = super().dispatch(target, task, **kw)
+                    return replace(result, process_exited=True)
+
+            report = self.run_cycle(CommittingTalker("codex", block("BLOCKED", reason="push failed")),
+                           Talker("claude", APPROVED), cwd=str(checkout),
+                           start_from="resolve", change_request_id="7")
+            new = fixture.git(checkout, "rev-parse", "HEAD")
+            self.assertNotEqual(old, new, report.explain())
+            history = rc.CycleHistoryStore(self.store.path)
+            self.assertEqual((old, new), history.unpublished_heads(
+                "owner/api", "7", str(checkout), "main", old))
+
+    def test_claimed_unpushed_commit_blocks_before_review_or_success_verdict(self):
+        class PublishingTalker(Talker):
+            requires_publication_preflight = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = WorktreeSynchronizationTests()
+            _, _, checkout = fixture.checkout_pair(Path(temporary))
+            old = fixture.git(checkout, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("unpublished\n", encoding="utf-8")
+            fixture.git(checkout, "commit", "-am", "fix")
+            new = fixture.git(checkout, "rev-parse", "HEAD")
+            implementer = PublishingTalker("codex", block("IMPLEMENTED", head_sha=new))
+            reviewer = Talker("claude", APPROVED)
+            with mock.patch.object(ex, "_publication_preflight", return_value=(True, "host ready")), \
+                    mock.patch.object(rc, "probe_change_request", return_value=rc.RemoteMark(old, 0, None)):
+                report = self.run_cycle(implementer, reviewer, code_host="github", cwd=str(checkout))
+            self.assertEqual("BLOCKED", report.status, report.explain())
+            self.assertEqual("BLOCKED", report.stage_details[0].status)
+            self.assertIn("upload unconfirmed", report.explain())
+            self.assertFalse(reviewer.dispatched)
+            self.assertEqual(new, fixture.git(checkout, "rev-parse", "HEAD"))
 
 
 class ImplementationForecastTests(RunCycleTestCase):
@@ -2595,6 +2668,71 @@ class WorkspaceSelectionTests(unittest.TestCase):
 
 
 class WorktreeSynchronizationTests(unittest.TestCase):
+    def test_resume_after_only_an_intermediate_commit_was_uploaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bare, _, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("first fix\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "first fix")
+            middle = self.git(checkout, "rev-parse", "HEAD")
+            self.git(checkout, "push", str(bare), "HEAD:refs/pull/7/head")
+            (checkout / "file.txt").write_text("final fix\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "final fix")
+            final = self.git(checkout, "rev-parse", "HEAD")
+            history = rc.CycleHistoryStore(Path(temporary) / "history.sqlite")
+            history.record_unpublished_head("attempt-1", "owner/api", "7", str(checkout),
+                                            "main", old, final)
+            recorded = history.unpublished_heads("owner/api", "7", str(checkout), "main", middle)
+            self.assertEqual((middle, final), recorded)
+            self.assertIsNone(rc.synchronize_worktree("7", str(checkout), unpublished_heads=recorded))
+            self.assertEqual(final, self.git(checkout, "rev-parse", "HEAD"))
+
+    def test_resume_retains_runtime_recorded_unpublished_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("unpublished fix\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "fix")
+            new = self.git(checkout, "rev-parse", "HEAD")
+            self.assertIsNone(rc.synchronize_worktree(
+                "7", str(checkout), unpublished_heads=(old, new)))
+            self.assertEqual(new, self.git(checkout, "rev-parse", "HEAD"))
+
+    def test_unrecorded_fast_forward_commit_still_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("unrelated commit\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "unrelated")
+            new = self.git(checkout, "rev-parse", "HEAD")
+            for recorded in (None, (old, "a" * 40), ("b" * 40, new)):
+                with self.subTest(recorded=recorded), self.assertRaises(rc.WorktreeSyncError):
+                    rc.synchronize_worktree("7", str(checkout), unpublished_heads=recorded)
+
+    def test_startup_accepts_only_the_attributed_clean_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, checkout = self.checkout_pair(Path(temporary))
+            old = self.git(checkout, "rev-parse", "HEAD")
+            (checkout / "file.txt").write_text("unpublished fix\n", encoding="utf-8")
+            self.git(checkout, "commit", "-am", "fix")
+            new = self.git(checkout, "rev-parse", "HEAD")
+            history = rc.CycleHistoryStore(Path(temporary) / "history.sqlite")
+            history.record_unpublished_head("attempt-1", "owner/api", "7", str(checkout),
+                                            "main", old, new)
+
+            def run(argv, **options):
+                if argv[0] == "gh":
+                    data = {"state": "OPEN", "headRefName": "main", "headRefOid": old}
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
+                return subprocess.run(argv, **options)
+
+            rc.check_change_request("owner/api", "7", str(checkout), run=run, history_store=history)
+            with self.assertRaises(rc.CycleDriverError):
+                rc.check_change_request("owner/api", "7", str(checkout), run=run)
+            (checkout / "dirty.txt").write_text("unrelated\n", encoding="utf-8")
+            with self.assertRaises(rc.CycleDriverError):
+                rc.check_change_request("owner/api", "7", str(checkout), run=run, history_store=history)
+
     def git(self, cwd: Path, *args: str) -> str:
         result = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
                                  text=True, check=True)

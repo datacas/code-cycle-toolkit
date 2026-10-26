@@ -1342,8 +1342,20 @@ def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
     return value if completed.returncode == 0 and value else None
 
 
+def _clean_worktree(cwd: str) -> bool:
+    """Empty successful Git status is clean; an unreadable status is unknown."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=cwd,
+            capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and not result.stdout.strip()
+
+
 def synchronize_worktree(change_request_id: str, cwd: str, *,
                          target_head: str | None = None,
+                         unpublished_heads: tuple[str, str] | None = None,
                          run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
                          ) -> tuple[str, str] | None:
     """Fast-forward a clean linked checkout to its open GitHub PR head.
@@ -1386,6 +1398,11 @@ def synchronize_worktree(change_request_id: str, cwd: str, *,
         raise CycleDriverError("worktree synchronization could not read the fetched PR head")
     if current == target:
         return None
+
+    if unpublished_heads == (target, current):
+        ancestor = git(["merge-base", "--is-ancestor", target, current], check=False)
+        if ancestor.returncode == 0:
+            return None  # Preserve the attributed commit for upload in the stage.
 
     ancestor = git(["merge-base", "--is-ancestor", current, target], check=False)
     if ancestor.returncode == 1:
@@ -1959,7 +1976,8 @@ def continued_change_request(repo_id: str, cwd: str | None,
 
 
 def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
-                         *, run=subprocess.run) -> None:
+                         *, run=subprocess.run,
+                         history_store: CycleHistoryStore | None = None) -> None:
     """Refuse to resume a change request that is not there to work on.
 
     A resume trusts the pull request's comments to carry the earlier review,
@@ -2014,6 +2032,16 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
     checked_out = call(["git", "rev-parse", "HEAD"],
                        "read the commit checked out in the working directory")
     if checked_out != head:
+        recorded = (history_store.unpublished_heads(repo_id, reference, cwd, current, head)
+                    if history_store is not None and cwd else None)
+        if recorded == (head, checked_out):
+            dirty = call(["git", "status", "--porcelain", "--untracked-files=all"],
+                         "check the unpublished worktree")
+            if not dirty:
+                # call raises on a non-ancestor or an unavailable object.
+                call(["git", "merge-base", "--is-ancestor", head, checked_out],
+                     "verify the unpublished commit's ancestry")
+                return
         raise CycleDriverError(
             f"the working directory is at {checked_out[:12]}, not at {head[:12]}, "
             f"the head commit of pull request {change_request_id}; update it "
@@ -2753,6 +2781,8 @@ def run_cycle(
             _git_line(cwd, ["rev-parse", "HEAD"], 30)
             if role == "resolve" and cwd else None
         )
+        stage_start_branch = _git_line(cwd, ["branch", "--show-current"], 30) if cwd else None
+        stage_start_clean = cwd is not None and _clean_worktree(cwd)
         evidence = ""
         stage_kwargs = dispatch_kwargs
         artifact = None
@@ -2831,6 +2861,46 @@ def run_cycle(
                 # Assisted repair requires this proof; absent storage stays manual.
                 pass
         reported = read_structured_result(outcome.result)
+        if (role in {"implement", "resolve"} and code_host == "github" and not local_only
+                and cwd and reported.completes(role, ci_policy)
+                and outcome.result is not None
+                and registry.get(outcome.result.executor).requires_publication_preflight):
+            request = Reported(payload={
+                "change_request_id": reported.change_request_id or change_request_id
+            }).telemetry_pull_request_id("github")
+            expected = (reported.payload or {}).get("head_sha")
+            try:
+                if not request or not isinstance(expected, str) or not FULL_SHA.fullmatch(expected):
+                    raise CycleDriverError("publication completion requires a change request and full head SHA")
+                remote_head = probe_change_request(repo_id, request, cwd).head_sha
+                local_head = _git_line(cwd, ["rev-parse", "HEAD"], 30)
+                if remote_head != expected or local_head != expected:
+                    raise CycleDriverError(
+                        f"upload unconfirmed: claimed {expected}, local {local_head}, PR {remote_head}; "
+                        "retain the local commit and resume the publishing stage")
+                transport = (outcome.result.artifacts if outcome.result else {}).get("publication_transport")
+                if transport is not None and not any(
+                        item.get("action") == "preflight" and item.get("status") == "ready"
+                        for item in transport if isinstance(item, dict)):
+                    raise CycleDriverError("publication preflight inside the stage sandbox was not confirmed")
+            except CycleDriverError as error:
+                reported = Reported(present=True, status="BLOCKED", payload={
+                    **(reported.payload or {}), "status": "BLOCKED", "reason": str(error),
+                    "publication_pending": True})
+        if (role == "resolve" and change_request_id and cwd and resolve_start_head
+                and stage_start_clean and stage_start_branch and history_store is not None
+                and isinstance(attempt_id, str) and outcome.result is not None
+                and outcome.result.process_exited and not outcome.result.asynchronous):
+            end_head = _git_line(cwd, ["rev-parse", "HEAD"], 30)
+            if (end_head and end_head != resolve_start_head
+                    and stage_start_branch == _git_line(cwd, ["branch", "--show-current"], 30)
+                    and _clean_worktree(cwd)):
+                try:
+                    history_store.record_unpublished_head(
+                        attempt_id, repo_id, change_request_id, cwd, stage_start_branch,
+                        resolve_start_head, end_head)
+                except (sqlite3.Error, HistoryError):
+                    pass  # Missing attribution keeps resume conservative.
         if (outcome.succeeded and outcome.result is not None
                 and not outcome.result.asynchronous and reported.status is None):
             result = outcome.result
@@ -2888,6 +2958,25 @@ def run_cycle(
         journal.record("stage_result", role=role, stage_seq=recorder.stage_seq,
                        attempt_id=attempt_id, component="runtime", status=reported.status,
                        detail=reported.reason, correlation={"head_sha": payload.get("head_sha")})
+        transport = (outcome.result.artifacts if outcome.result else {}).get("publication_transport", [])
+        for event in transport if isinstance(transport, list) else []:
+            if not isinstance(event, dict):
+                continue
+            attempts = event.get("attempts", [])
+            for attempt in attempts if isinstance(attempts, list) else []:
+                if not isinstance(attempt, dict):
+                    continue
+                command = attempt.get("command")
+                if not isinstance(command, list) or not all(isinstance(word, str) for word in command):
+                    continue
+                journal.record(
+                    "stage_result", role=role, stage_seq=recorder.stage_seq,
+                    attempt_id=attempt_id, component="publication_transport",
+                    status=event.get("status"), command=shlex.join(command),
+                    detail=attempt.get("error"),
+                    correlation={"head_sha": event.get("head_sha"),
+                                 "remote_head_sha": event.get("remote_head_sha"),
+                                 "exit_code": attempt.get("exit_code")})
         questions = payload.get("questions")
         if isinstance(questions, list):
             for question in questions:
@@ -3044,8 +3133,15 @@ def run_cycle(
                 and change_request_id is not None and cwd is not None):
             try:
                 target_head = probe_change_request(repo_id, change_request_id, cwd).head_sha
-                synchronized = synchronize_worktree(
-                    change_request_id, cwd, target_head=target_head)
+                unpublished = (history_store.unpublished_heads(
+                    repo_id, change_request_id, cwd,
+                    _git_line(cwd, ["branch", "--show-current"], 30) or "", target_head or "")
+                    if history_store is not None and role == "resolve" else None)
+                if unpublished is None:
+                    synchronized = synchronize_worktree(change_request_id, cwd, target_head=target_head)
+                else:
+                    synchronized = synchronize_worktree(
+                        change_request_id, cwd, target_head=target_head, unpublished_heads=unpublished)
             except WorktreeSyncError as error:
                 return Reported(), stop(str(error), "BLOCKED",
                                         stop_reason=error.stop_reason or "stage_not_completed")
@@ -3168,7 +3264,9 @@ def run_cycle(
                                     **({"pull_request_id": pull_request_id}
                                        if pull_request_id else {}))
         if not reported.completes(role, ci_policy):
-            return reported, stop(reported.explain(role, ci_policy), reported=reported)
+            return reported, stop(reported.explain(role, ci_policy),
+                                  "BLOCKED" if (reported.payload or {}).get("publication_pending") is True
+                                  else UNRESOLVED_END, reported=reported)
         if recover and role in COMMENT_STAGES and change_request_id:
             stopped = after_publication(
                 role, change_request_id,
@@ -4682,7 +4780,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.continue_work:
             check_continuation(args.cwd, config)
         if args.start_from in RESUMES:
-            check_change_request(repo, args.change_request, args.cwd)
+            database = Path(args.database) if args.database else default_database_path()
+            if database.is_file() and args.start_from == "resolve":
+                check_change_request(repo, args.change_request, args.cwd,
+                                     history_store=CycleHistoryStore(database))
+            else:
+                check_change_request(repo, args.change_request, args.cwd)
     except (CycleDriverError, GrantError) as error:
         parser.error(str(error))
 
