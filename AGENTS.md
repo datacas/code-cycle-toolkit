@@ -37,3 +37,11 @@
 - A change that alters visible behaviour, a command, a stored schema or a configuration key updates the page in `docs/` that owns that concept in the same pull request. `README.md` only changes when a skill or an entry point is added or removed; otherwise it links.
 - A review treats a visible change without its `docs/` page as a finding.
 - Before closing a work item, check whether its behaviour is already documented, and say so in the pull request description.
+
+## Issue planning
+
+- Every new issue gets exactly one milestone and one priority label (`P0`–`P3`) when it is created. An issue without a milestone is untriaged. The milestones and their exit criteria are in `docs/ROADMAP_V2.md`.
+- Pick the milestone by the outcome the issue serves, not by when it will be done. When none fits, propose a new milestone in the issue instead of leaving it empty.
+- `P0` is the critical path of 2.0, `P1` is needed for 2.0 after it, `P2` is measurement or conditional work, and `P3` is deliberate or deferred work.
+- `priority: urgent` marks work that blocks cycles today. It is orthogonal to the milestone and the `P` label, and is removed when the blocker is fixed.
+- A change to a milestone's content or a new milestone updates the milestone table in `docs/ROADMAP_V2.md` in the same pull request.
