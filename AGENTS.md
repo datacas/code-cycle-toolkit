@@ -44,5 +44,5 @@
 - Pick the milestone by the outcome the issue serves, not by when it will be done. When none fits, propose a new milestone in the issue instead of leaving it empty.
 - `P0` is the critical path of 2.0, `P1` is needed for 2.0 after it, `P2` is measurement or conditional work, and `P3` is deliberate or deferred work.
 - `priority: urgent` marks work that blocks cycles today. It is orthogonal to the milestone and the `P` label, and is removed when the blocker is fixed.
-- Add every new issue to the [roadmap project](https://github.com/users/datacas/projects/2) and set its `Priority` field to match its `P` label, unless the project's auto-add workflow already did. `Order` is only set for issues in the integration sequence of `docs/ROADMAP_V2.md`.
+- Add every new issue to the "Code Cycle Toolkit roadmap" GitHub Project of the repository and set its `Priority` field to match its `P` label, unless the project's auto-add workflow already did. `Order` is only set for issues in the integration sequence of `docs/ROADMAP_V2.md`.
 - A change to a milestone's content or a new milestone updates the milestone table in `docs/ROADMAP_V2.md` in the same pull request.
