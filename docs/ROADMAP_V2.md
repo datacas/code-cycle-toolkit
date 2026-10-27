@@ -341,6 +341,17 @@ La asignación de una issue a un milestone expresa el objetivo de planificación
 | [M4 — Measured cycle effectiveness](https://github.com/datacas/code-cycle-toolkit/milestone/4) | #185, #192, #180 y #127. Tiempos, costes, rework, findings e intervenciones por cohortes con cobertura de datos visible. |
 | [M5 — Production delivery analytics](https://github.com/datacas/code-cycle-toolkit/milestone/5) | #335/#336. Cinco métricas DORA sobre eventos reales y atribuibles; ninguna sustituida por métricas de PR. Condicionado a datos de producción; opcional para el candidato principal. |
 | [M6 — Evidence-led optimization](https://github.com/datacas/code-cycle-toolkit/milestone/6) | #126/#128 y únicamente otras iniciativas P3 seleccionadas deliberadamente. Mejoras con evidencia suficiente y sin degradar garantías. Evolución posterior. |
+| [M7 — Runtime hardening and UX](https://github.com/datacas/code-cycle-toolkit/milestone/7) | F0 follow-ups #197/#198/#201, the F1/F2 refactor queue (#181, #184, #186–#188, #190) and cycle UX (#202, #225, #263, #264, #265, #267, #300, #321, #323). Fewer runtime stops and fewer interruptions, integrated as needed. Does not block M1–M4. |
+| [M8 — Live monitoring](https://github.com/datacas/code-cycle-toolkit/milestone/8) | #161–#169. Read-only monitoring of cycles and workspaces. After the main candidate M1–M4; #226 lands first. |
+| [M9 — Repository knowledge](https://github.com/datacas/code-cycle-toolkit/milestone/9) | #207–#217 and #250. Four-phase discovery and validation of repository knowledge with a measured pilot. After the main candidate M1–M4. |
+
+M6 also holds the model registry and discovery issues #121–#125 and #129, which feed the routing recommendations of #128.
+
+### Priority labels and triage
+
+- Every issue carries one milestone and one label: `P0` (critical path of 2.0), `P1` (needed for 2.0 after it), `P2` (measurement or conditional) or `P3` (deliberate or deferred). The labels mirror the integration sequence above.
+- `priority: urgent` is separate from the milestone: it marks a defect that blocks cycles today (at the time of writing #338, #342 and #348, all in M1) and is removed once fixed. A milestone is not used for "critical" because an issue has only one milestone and an urgent fix must keep the one that describes its outcome.
+- A new issue without a milestone is untriaged; see "Issue planning" in `AGENTS.md`.
 
 ### Primera tanda aprobada
 
