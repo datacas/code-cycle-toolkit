@@ -839,6 +839,7 @@ class FailedDispatchRerouteTests(CycleTestCase):
                     ex.DispatchOutcome.FAILED, self.name, target,
                     error_code=self.code, start_state=start,
                     process_exited=exited, asynchronous=asynchronous,
+                    detail="quota exhausted; reset at 9:46 PM",
                 )
         primary = FailureAdapter("codex")
         primary.code = code
@@ -860,6 +861,38 @@ class FailedDispatchRerouteTests(CycleTestCase):
                 self.assertEqual(ex.Availability.READY, recorder.availability["codex"])
                 recorder.stage("implement", "later stage")
                 self.assertEqual(2, len(primary.dispatched))
+
+    def test_dirty_quota_stop_is_reused_by_a_later_continue(self):
+        clean = {"dirty": False, "workspace": {"head": "old"}, "remote": "old",
+                 "pulls": [], "comments": []}
+        dirty = {**clean, "dirty": True}
+        with patch("cycle.effect_snapshot", side_effect=[clean, dirty]):
+            first, primary, fallback, stopped = self.run_failure(
+                code="quota", start="started",
+            )
+        self.assertFalse(stopped.rerouted)
+        self.assertFalse(fallback.dispatched)
+        self.assertEqual("quota", stopped.result.failure_code)
+        stopped_row = self.store.rows("owner/repo")[-1]["payload"]
+        self.assertEqual("quota", stopped_row["reroute_error_code"])
+        self.assertEqual("dirty_workspace", stopped_row["reroute_reason"])
+        exhaustion = self.store.active_quota_exhaustions("owner/repo")
+        self.assertEqual("gpt-6-luna", exhaustion[0]["model"])
+
+        resumed_primary = ScriptedAdapter("codex")
+        resumed_fallback = ScriptedAdapter("claude")
+        resumed = self.recorder(
+            [resumed_primary, resumed_fallback], continue_work=True,
+        )
+        continued = resumed.stage("implement", "continue from partial work")
+        self.assertEqual("claude", continued.decision.target.executor)
+        self.assertTrue(continued.decision.used_fallback)
+        self.assertFalse(resumed_primary.dispatched)
+        self.assertEqual(1, len(resumed_fallback.dispatched))
+        self.assertEqual(
+            "recorded_quota_exhaustion",
+            self.store.rows("owner/repo")[-1]["payload"]["quota_resume_reason"],
+        )
 
     def test_no_reroute_without_exit_proof_including_async(self):
         for exited, asynchronous in ((False, False), (True, True)):

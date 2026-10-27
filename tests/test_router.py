@@ -122,6 +122,29 @@ class FallbackPolicyTests(unittest.TestCase):
         self.assertIn("codex is authenticated", d.explain())
         self.assertNotIn("codex is ready", d.explain())
 
+    def test_production_continuation_falls_back_around_one_exhausted_model(self) -> None:
+        d = router.route(
+            "implement", signals(), READY,
+            mode=router.RoutingMode.PRODUCTION,
+            exhausted_until={("codex", "gpt-6-luna"): "2026-10-27T21:46:00+00:00"},
+        )
+
+        self.assertFalse(d.blocked)
+        self.assertTrue(d.used_fallback)
+        self.assertEqual("claude", d.target.executor)
+        self.assertTrue(any("quota exhausted until" in reason for reason in d.reasons))
+
+    def test_calibration_ignores_recorded_exhaustion_and_never_falls_back(self) -> None:
+        d = router.route(
+            "implement", signals(), READY,
+            mode=router.RoutingMode.CALIBRATION,
+            exhausted_until={("codex", "gpt-6-luna"): "2026-10-27T21:46:00+00:00"},
+        )
+
+        self.assertFalse(d.blocked)
+        self.assertEqual("codex", d.target.executor)
+        self.assertFalse(d.used_fallback)
+
     def test_a_profile_without_a_fallback_blocks_rather_than_improvising(self) -> None:
         d = router.route("review", signals(), {"claude": router.Availability.QUOTA_EXHAUSTED})
 

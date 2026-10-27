@@ -511,12 +511,15 @@ def route(
     rate_known: bool | None = None,
     rate_explanation: str | None = None,
     selector: ProfileSelector = rule_selector,
+    exhausted_until: dict[tuple[str, str], str] | None = None,
 ) -> RoutingDecision:
     """Resolve a role to a concrete target, or block.
 
     The gate runs before the choice: an executor that is merely installed or
     authenticated is not dispatchable, and one with exhausted quota is not a
-    candidate whatever its profile scores.
+    candidate whatever its profile scores. A persisted quota window can also
+    exclude one exact model during a production continuation without mutating
+    the executor-wide availability probe or calibration arms.
 
     `selector` only names a profile among the role's candidates. Everything
     after that — policy, availability, fallback and the blocking rules — is
@@ -567,7 +570,15 @@ def route(
 
     primary_state = availability.get(profile.primary.executor, Availability.UNKNOWN)
     primary_policy_reason = None
+    exhausted_until = exhausted_until or {}
     for index, target in enumerate(profile.targets()):
+        expires_at = exhausted_until.get((target.executor, target.model))
+        if expires_at is not None and mode is not RoutingMode.CALIBRATION:
+            reason = f"{target.executor}/{target.model} quota exhausted until {expires_at}"
+            reasons = reasons + (reason,)
+            if index == 0:
+                primary_policy_reason = reason
+            continue
         if eligible_executors is not None and target.executor not in eligible_executors:
             reasons = reasons + (
                 f"{target.executor} cannot satisfy the workspace policy",
@@ -593,8 +604,7 @@ def route(
                 f"primary executor {profile.primary.executor} is"
                 f" {primary_state.value} -> fell back to {target.executor}"
             )
-            if primary_policy_reason:
-                fallback_reason += f" -> fell back to {target.executor}"
+            fallback_reason += f" -> fell back to {target.executor}"
             return RoutingDecision(
                 name,
                 target,
@@ -611,10 +621,18 @@ def route(
                         for target in profile.targets())):
         blocked_because = "no executor for this profile satisfies the workspace policy"
     else:
+        exhausted_targets = [
+            (executor, model, expires_at)
+            for (executor, model), expires_at in exhausted_until.items()
+            if any(target.executor == executor and target.model == model
+                   for target in profile.targets())
+        ]
         blocked_because = (
             "a calibration never substitutes an arm: an unavailable executor blocks and waits"
             if mode is RoutingMode.CALIBRATION
-            else "no executor for this profile is ready"
+            else ("no target is ready; earliest recorded quota reset is "
+                  f"{min(item[2] for item in exhausted_targets)}"
+                  if exhausted_targets else "no executor for this profile is ready")
         )
     return RoutingDecision(
         name, None, mode, blocked=True, reasons=reasons + (blocked_because,),
