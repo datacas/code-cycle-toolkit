@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -577,8 +578,11 @@ class NativeDispatchTests(unittest.TestCase):
     """The adapters actually build a command and read what came back."""
 
     def test_native_stages_disable_gh_telemetry_and_preserve_parent_values(self) -> None:
+        codex_home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, codex_home, ignore_errors=True)
         for telemetry, notifier in ((None, None), ("log", "0")):
-            parent = {"PATH": os.environ.get("PATH", "")}
+            # Windows has no HOME in a cleared environment, so name the session root.
+            parent = {"PATH": os.environ.get("PATH", ""), "CODEX_HOME": codex_home}
             if telemetry is not None:
                 parent["GH_TELEMETRY"] = telemetry
                 parent["GH_NO_UPDATE_NOTIFIER"] = notifier
