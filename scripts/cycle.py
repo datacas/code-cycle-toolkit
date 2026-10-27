@@ -929,9 +929,11 @@ class CycleRecorder:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)
                 exhaustion_expiry = None
+                reset_reported = False
                 if (result.failure_code == "quota"
                         and self.mode is RoutingMode.PRODUCTION):
                     try:
+                        _, reset_reported = self.telemetry.quota_expiry(result.detail)
                         exhaustion_expiry = self.telemetry.record_quota_exhaustion(
                             self.repo_id, decision.target.executor,
                             decision.target.model, result.detail,
@@ -968,14 +970,19 @@ class CycleRecorder:
                     detail = f"{result.detail}; reroute stopped: {reason}"
                     if (result.failure_code == "quota"
                             and self.mode is RoutingMode.PRODUCTION):
-                        if exhaustion_expiry:
+                        if exhaustion_expiry and reset_reported:
                             detail += (f"; quota exhaustion recorded until {exhaustion_expiry}; "
                                        "wait for the reset or run --continue to use the configured fallback")
+                        elif exhaustion_expiry:
+                            detail += ("; quota reset is unknown; retry after 30 minutes; "
+                                       f"temporary quota window recorded until {exhaustion_expiry}; "
+                                       "run --continue to use the configured fallback")
                         else:
                             detail += ("; quota reset is unknown; retry after 30 minutes or "
                                        "run --continue to use the configured fallback")
                     result = replace(result, detail=detail)
-            elif result.outcome is DispatchOutcome.SUCCEEDED:
+            elif (result.outcome is DispatchOutcome.SUCCEEDED
+                    and self.mode is RoutingMode.PRODUCTION):
                 try:
                     self.telemetry.clear_quota_exhaustion(
                         self.repo_id, decision.target.executor, decision.target.model,

@@ -604,7 +604,8 @@ def route(
                 f"primary executor {profile.primary.executor} is"
                 f" {primary_state.value} -> fell back to {target.executor}"
             )
-            fallback_reason += f" -> fell back to {target.executor}"
+            if primary_policy_reason:
+                fallback_reason += f" -> fell back to {target.executor}"
             return RoutingDecision(
                 name,
                 target,

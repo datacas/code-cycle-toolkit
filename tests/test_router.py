@@ -121,6 +121,10 @@ class FallbackPolicyTests(unittest.TestCase):
 
         self.assertIn("codex is authenticated", d.explain())
         self.assertNotIn("codex is ready", d.explain())
+        self.assertEqual(
+            "primary executor codex is authenticated -> fell back to claude",
+            d.reasons[-1],
+        )
 
     def test_production_continuation_falls_back_around_one_exhausted_model(self) -> None:
         d = router.route(
@@ -144,6 +148,28 @@ class FallbackPolicyTests(unittest.TestCase):
         self.assertFalse(d.blocked)
         self.assertEqual("codex", d.target.executor)
         self.assertFalse(d.used_fallback)
+
+    def test_blocked_route_reports_the_earliest_recorded_quota_reset(self) -> None:
+        profile = router.load_profiles()["cheap_coder"]
+        exhausted_until = {
+            (target.executor, target.model): (
+                "2026-10-27T20:00:00+00:00" if index == 0
+                else "2026-10-27T21:00:00+00:00"
+            )
+            for index, target in enumerate(profile.targets())
+        }
+
+        d = router.route(
+            "implement", signals(), READY,
+            mode=router.RoutingMode.PRODUCTION,
+            exhausted_until=exhausted_until,
+        )
+
+        self.assertTrue(d.blocked)
+        self.assertIn(
+            "earliest recorded quota reset is 2026-10-27T20:00:00+00:00",
+            d.explain(),
+        )
 
     def test_a_profile_without_a_fallback_blocks_rather_than_improvising(self) -> None:
         d = router.route("review", signals(), {"claude": router.Availability.QUOTA_EXHAUSTED})

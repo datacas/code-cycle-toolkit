@@ -215,6 +215,12 @@ class StorageTests(TelemetryTestCase):
         self.assertFalse(reported)
         self.assertEqual("2026-10-27T12:30:00+00:00", expiry)
 
+        compact_expiry, compact_reported = tm.Telemetry.quota_expiry(
+            "quota exceeded; reset at 9:46PM", now,
+        )
+        self.assertTrue(compact_reported)
+        self.assertNotEqual("2026-10-27T12:30:00+00:00", compact_expiry)
+
     def test_expired_quota_record_makes_the_target_eligible_again(self) -> None:
         self.store.record_quota_exhaustion("repo", "codex", "gpt-6-luna")
         with sqlite3.connect(self.store.path) as connection:

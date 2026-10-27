@@ -2082,7 +2082,8 @@ class Telemetry:
         match = re.search(r"\b(\d{1,2}:\d{2}\s*[APap][Mm])\b", detail or "")
         if match is not None and local_now.tzinfo is not None:
             try:
-                reset = datetime.strptime(match.group(1).upper(), "%I:%M %p")
+                reset_text = re.sub(r"(?i)(\d)(am|pm)$", r"\1 \2", match.group(1))
+                reset = datetime.strptime(reset_text.upper(), "%I:%M %p")
                 candidate = local_now.replace(
                     hour=reset.hour, minute=reset.minute, second=0, microsecond=0,
                 )
