@@ -24,6 +24,7 @@ consent_control.py
 stage_permissions.py
 run_cycle.py
 executors.py
+gh_environment.py
 usage.py
 harness.py
 router.py

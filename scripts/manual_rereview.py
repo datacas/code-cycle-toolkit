@@ -26,6 +26,10 @@ import re
 import subprocess
 import sys
 
+try:
+    from gh_environment import apply_gh_environment_defaults
+except ModuleNotFoundError:
+    from .gh_environment import apply_gh_environment_defaults
 from review_contract import (
     MANUAL_CHECK_RESULTS,
     MANUAL_PROVENANCE,
@@ -217,6 +221,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_gh_environment_defaults()
     args = _parser().parse_args(argv)
     try:
         result = record(

@@ -52,6 +52,16 @@ existing behaviour: worker-start has no per-worker environment setting and
 returns before completion, so the runtime cannot safely own or clean up a
 per-dispatch temporary directory for them.
 
+Native Codex and Claude stages receive `GH_TELEMETRY=false` and
+`GH_NO_UPDATE_NOTIFIER=1` when their parent environment leaves those variables
+unset. These defaults prevent GitHub CLI telemetry and its version update check
+from making network requests that can interrupt a sandboxed stage. An explicit
+parent value takes precedence. Codex receives both values in the process
+environment and through `shell_environment_policy.set` for commands run by its
+agent; Claude receives them in its process environment. The cycle runtime also
+sets these defaults before making its own GitHub CLI calls. Orca workers remain
+excluded because worker-start has no per-worker environment setting; see #354.
+
 Claude remains ineligible for `disposable` roles because it cannot confine writes to their workspace. Orca follows its explicit review-workspace contract and requires its own orchestration context where applicable.
 
 This deliberately separates useful generated output from unauthorized source

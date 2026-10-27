@@ -10,6 +10,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from gh_environment import apply_gh_environment_defaults
+except ModuleNotFoundError:
+    from .gh_environment import apply_gh_environment_defaults
 from telemetry import (
     Telemetry,
     TelemetryError,
@@ -438,6 +442,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_gh_environment_defaults()
     args = _parser().parse_args(argv)
     try:
         telemetry = Telemetry(args.database)

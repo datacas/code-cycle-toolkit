@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -575,6 +576,46 @@ class InteractiveFrictionTests(unittest.TestCase):
 
 class NativeDispatchTests(unittest.TestCase):
     """The adapters actually build a command and read what came back."""
+
+    def test_native_stages_disable_gh_telemetry_and_preserve_parent_values(self) -> None:
+        codex_home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, codex_home, ignore_errors=True)
+        for telemetry, notifier in ((None, None), ("log", "0")):
+            # `Path.home()` is evaluated even when CODEX_HOME is set, and on
+            # Windows it fails without a home variable in a cleared environment.
+            parent = {
+                "PATH": os.environ.get("PATH", ""),
+                "CODEX_HOME": codex_home,
+                "HOME": codex_home,
+                "USERPROFILE": codex_home,
+            }
+            if telemetry is not None:
+                parent["GH_TELEMETRY"] = telemetry
+                parent["GH_NO_UPDATE_NOTIFIER"] = notifier
+            with self.subTest(telemetry=telemetry), patch.dict(os.environ, parent, clear=True):
+                for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+                    seen = {}
+
+                    def runner(argv, timeout=None, cwd=None, env=None):
+                        seen["argv"] = argv
+                        seen["env"] = env
+                        return completed('{"model": "gpt-6-luna"}')
+
+                    adapter.dispatch(TARGET, "do the thing", cwd="/tmp/x", runner=runner)
+
+                    expected_telemetry = telemetry or "false"
+                    expected_notifier = notifier or "1"
+                    self.assertEqual(expected_telemetry, seen["env"]["GH_TELEMETRY"])
+                    self.assertEqual(expected_notifier, seen["env"]["GH_NO_UPDATE_NOTIFIER"])
+                    if adapter.name == "codex":
+                        self.assertIn(
+                            f'shell_environment_policy.set.GH_TELEMETRY="{expected_telemetry}"',
+                            seen["argv"],
+                        )
+                        self.assertIn(
+                            f'shell_environment_policy.set.GH_NO_UPDATE_NOTIFIER="{expected_notifier}"',
+                            seen["argv"],
+                        )
 
     def test_codex_runs_non_interactively_with_the_requested_model_and_effort(self) -> None:
         seen = {}

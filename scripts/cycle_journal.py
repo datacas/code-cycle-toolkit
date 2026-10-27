@@ -46,6 +46,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from gh_environment import apply_gh_environment_defaults
+except ModuleNotFoundError:
+    from .gh_environment import apply_gh_environment_defaults
+
 #: The journal tables, created by `telemetry.Telemetry` with the rest of the
 #: store (schema 21) and by `connect()` for a caller that opens the file alone.
 JOURNAL_SCHEMA = """
@@ -818,6 +823,7 @@ def _checkout_branch(cwd) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_gh_environment_defaults()
     parser = argparse.ArgumentParser(
         prog="cycle_journal",
         description="Explain a cycle from its journal, summarise a work item's runs, "
