@@ -2362,6 +2362,20 @@ def _safe_repair_start_head(history_store: CycleHistoryStore, attempt_id: str, r
         return None
 
 
+def _with_sandbox_startup_failures(reported: Reported, failures: list[dict]) -> Reported:
+    """Make runtime-observed Claude sandbox startup failures veto verification."""
+    if not failures:
+        return reported
+    payload = dict(reported.payload or {})
+    tests = payload.get("tests")
+    tests = dict(tests) if isinstance(tests, dict) else {"ran": False}
+    tests["conclusion"] = "not_verified"
+    tests["sandbox_startup_failures"] = failures
+    payload["tests"] = tests
+    payload["sandbox_startup_failures"] = failures
+    return Reported(present=reported.present, status=reported.status, payload=payload)
+
+
 def run_cycle(
     repo_id: str,
     task_id: str,
@@ -2877,6 +2891,9 @@ def run_cycle(
                 # Assisted repair requires this proof; absent storage stays manual.
                 pass
         reported = read_structured_result(outcome.result)
+        sandbox_startup_failures = (outcome.result.artifacts.get("sandbox_startup_failures", [])
+                                    if outcome.result is not None else [])
+        reported = _with_sandbox_startup_failures(reported, sandbox_startup_failures)
         if (role in {"implement", "resolve"} and code_host == "github" and not local_only
                 and cwd and reported.completes(role, ci_policy)
                 and outcome.result is not None

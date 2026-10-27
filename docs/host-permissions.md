@@ -201,7 +201,12 @@ their comment. When they may verify, they do it only in a disposable clone:
   what its test runner executes. A user or project setting that would widen it (`allowWrite`, `excludedCommands`,
   `allowUnsandboxedCommands`, Unix sockets, `enableWeakerNestedSandbox`) stops
   the stage `BLOCKED`, because Claude merges such arrays across sources. A
-  sandbox that cannot start is recorded as unavailable. On Linux/WSL2 the
+  sandbox that cannot start is recorded as unavailable. If a failed Bash tool
+  result reports bubblewrap's `Can't find source path` startup error, the
+  runtime records the affected path as the `sandbox_startup_failure` capability,
+  explains the missing protected source and Claude Code's lack of a supported
+  runtime-owned mount for it, and forces the stage checks to `not_verified` even
+  if the agent reports success. On Linux/WSL2 the
   runtime first probes the required isolation. If unavailable, it retains the
   disposable clone and command/edit/publication guards for a static review;
   verification, arbitrary-code tool choices and Docker commands are denied,

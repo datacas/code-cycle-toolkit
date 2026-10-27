@@ -1445,6 +1445,45 @@ class RolePermissionTests(RunCycleTestCase):
         self.assertEqual([False, False], reviewer.permissions)
 
 
+class SandboxStartupFailureTests(unittest.TestCase):
+    def test_runtime_failure_overrides_agent_reported_verification(self) -> None:
+        failure = {
+            "capability": "sandbox_startup_failure",
+            "path": "/work/.claude/settings.json",
+            "cause": "bubblewrap could not bind a missing source",
+            "limitation": "Claude Code has no supported runtime-owned mount setting",
+            "command": "ls -l",
+        }
+        reported = rc.Reported(
+            present=True,
+            status="IMPLEMENTED",
+            payload={"tests": {"ran": True, "conclusion": "verified"}},
+        )
+
+        observed = rc._with_sandbox_startup_failures(reported, [failure])
+
+        self.assertEqual("IMPLEMENTED", observed.status)
+        self.assertEqual("not_verified", observed.payload["tests"]["conclusion"])
+        self.assertEqual([failure], observed.payload["tests"]["sandbox_startup_failures"])
+        self.assertEqual([failure], observed.payload["sandbox_startup_failures"])
+
+    def test_runtime_failure_keeps_a_blocked_status_and_marks_checks_not_verified(self) -> None:
+        failure = {"capability": "sandbox_startup_failure", "path": "/work/.claude/settings.json"}
+        reported = rc.Reported(present=True, status="BLOCKED", payload={"reason": "stuck"})
+
+        observed = rc._with_sandbox_startup_failures(reported, [failure])
+
+        self.assertEqual("BLOCKED", observed.status)
+        self.assertEqual("not_verified", observed.payload["tests"]["conclusion"])
+        self.assertEqual("stuck", observed.payload["reason"])
+        self.assertEqual([failure], observed.payload["sandbox_startup_failures"])
+
+    def test_no_runtime_failure_preserves_reported_verification(self) -> None:
+        reported = rc.Reported(payload={"tests": {"conclusion": "verified"}})
+
+        self.assertIs(reported, rc._with_sandbox_startup_failures(reported, []))
+
+
 class ReportedReasonTests(RunCycleTestCase):
     """Why a stage stopped, in the agent's own words and nowhere else.
 
