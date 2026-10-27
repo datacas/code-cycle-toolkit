@@ -581,8 +581,14 @@ class NativeDispatchTests(unittest.TestCase):
         codex_home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, codex_home, ignore_errors=True)
         for telemetry, notifier in ((None, None), ("log", "0")):
-            # Windows has no HOME in a cleared environment, so name the session root.
-            parent = {"PATH": os.environ.get("PATH", ""), "CODEX_HOME": codex_home}
+            # `Path.home()` is evaluated even when CODEX_HOME is set, and on
+            # Windows it fails without a home variable in a cleared environment.
+            parent = {
+                "PATH": os.environ.get("PATH", ""),
+                "CODEX_HOME": codex_home,
+                "HOME": codex_home,
+                "USERPROFILE": codex_home,
+            }
             if telemetry is not None:
                 parent["GH_TELEMETRY"] = telemetry
                 parent["GH_NO_UPDATE_NOTIFIER"] = notifier
