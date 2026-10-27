@@ -2825,6 +2825,7 @@ class ClaudeAdapter(NativeAdapter):
         authorize it once (#142).
         """
         denied: list[str] = []
+        sandbox_startup_failures: list[dict[str, str]] = []
         # The permission layer's own list, every tool, for the cycle journal
         # (#306). The hook records its denials itself, so it is kept apart.
         layer: list[dict[str, object]] = []
@@ -2866,16 +2867,48 @@ class ClaudeAdapter(NativeAdapter):
                         and isinstance(block.get("input"), dict)):
                     bash_calls[str(block.get("id"))] = block["input"].get("command")
                 elif (kind == "user" and block.get("type") == "tool_result"
-                        and block.get("is_error")
-                        and sp.HOOK_DENIAL_MARKER in _tool_result_text(block.get("content"))):
-                    add(bash_calls.get(str(block.get("tool_use_id"))))
+                        and block.get("is_error")):
+                    tool_use_id = str(block.get("tool_use_id"))
+                    tool_output = _tool_result_text(block.get("content"))
+                    command = bash_calls.get(tool_use_id)
+                    if sp.HOOK_DENIAL_MARKER in tool_output:
+                        add(command)
+                    # Only an error result tied to a real Bash tool call whose whole
+                    # output is the bwrap abort counts. A command that ran and merely
+                    # quoted the line (a test failure, a `cat` of a file) is no
+                    # evidence that the sandbox failed to start.
+                    missing_source = self._BWRAP_MISSING_SOURCE.fullmatch(tool_output.strip())
+                    if command and missing_source:
+                        failure = {
+                            "capability": "sandbox_startup_failure",
+                            "path": failure_excerpt(missing_source.group(1), 300),
+                            "cause": (
+                                "Claude Code's Bash sandbox protects the path, but bubblewrap "
+                                "cannot bind a source that does not exist"
+                            ),
+                            "limitation": (
+                                "Claude Code sandbox settings do not provide a supported "
+                                "runtime-owned bind mount for this protected path"
+                            ),
+                            "command": failure_excerpt(command, 300),
+                        }
+                        if failure not in sandbox_startup_failures:
+                            sandbox_startup_failures.append(failure)
         artifacts: dict[str, object] = {"permission_denials": denied} if denied else {}
         if layer:
             artifacts["claude_permission_denials"] = layer
+        if sandbox_startup_failures:
+            artifacts["sandbox_startup_failures"] = sandbox_startup_failures
         pending = self.pending_background_evidence(stdout)
         if pending:
             artifacts["background_command"] = pending
         return artifacts
+
+    #: A Bash result that is nothing but bubblewrap's abort, apart from the
+    #: `Exit code N` line Claude prefixes to a failed command's output.
+    _BWRAP_MISSING_SOURCE = re.compile(
+        r"(?:Exit code \d+\s*\n)?"
+        r"bwrap: Can't find source path ([^\n]+?): No such file or directory")
 
     #: A final message that says the stage is waiting on something it started.
     _WAITING_TEXT = re.compile(

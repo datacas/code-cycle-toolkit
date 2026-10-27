@@ -1445,6 +1445,95 @@ class RolePermissionTests(RunCycleTestCase):
         self.assertEqual([False, False], reviewer.permissions)
 
 
+class SandboxStartupFailureTests(unittest.TestCase):
+    def test_runtime_failure_overrides_agent_reported_verification(self) -> None:
+        failure = {
+            "capability": "sandbox_startup_failure",
+            "path": "/work/.claude/settings.json",
+            "cause": "bubblewrap could not bind a missing source",
+            "limitation": "Claude Code has no supported runtime-owned mount setting",
+            "command": "ls -l",
+        }
+        reported = rc.Reported(
+            present=True,
+            status="IMPLEMENTED",
+            payload={"tests": {"ran": True, "conclusion": "verified"}},
+        )
+
+        observed = rc._with_sandbox_startup_failures(reported, [failure])
+
+        self.assertEqual("IMPLEMENTED", observed.status)
+        self.assertEqual("not_verified", observed.payload["tests"]["conclusion"])
+        self.assertEqual([failure], observed.payload["tests"]["sandbox_startup_failures"])
+        self.assertEqual([failure], observed.payload["sandbox_startup_failures"])
+
+    def test_runtime_failure_keeps_a_blocked_status_and_marks_checks_not_verified(self) -> None:
+        failure = {"capability": "sandbox_startup_failure", "path": "/work/.claude/settings.json"}
+        reported = rc.Reported(present=True, status="BLOCKED", payload={"reason": "stuck"})
+
+        observed = rc._with_sandbox_startup_failures(reported, [failure])
+
+        self.assertEqual("BLOCKED", observed.status)
+        self.assertEqual("not_verified", observed.payload["tests"]["conclusion"])
+        self.assertEqual("stuck", observed.payload["reason"])
+        self.assertEqual([failure], observed.payload["sandbox_startup_failures"])
+
+    def test_no_runtime_failure_preserves_reported_verification(self) -> None:
+        reported = rc.Reported(payload={"tests": {"conclusion": "verified"}})
+
+        self.assertIs(reported, rc._with_sandbox_startup_failures(reported, []))
+
+
+class SandboxStartupFailureCycleTests(RunCycleTestCase):
+    FAILURE = {
+        "capability": "sandbox_startup_failure",
+        "path": "/work/.claude/settings.json",
+        "cause": "bubblewrap cannot bind a missing source",
+        "limitation": "no supported runtime-owned mount",
+        "command": "ls -l",
+    }
+
+    def implementer(self, failures):
+        reported = block("IMPLEMENTED", tests={
+            "ran": True, "passed": True, "conclusion": "verified",
+            "evidence": [{"level": "test", "command": "pytest", "exit_code": 0, "executed": 3}],
+        })
+
+        class Aborted(Talker):
+            def dispatch(adapter, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                if failures:
+                    result.artifacts["sandbox_startup_failures"] = failures
+                return result
+
+        return Aborted("codex", reported)
+
+    def verdict(self):
+        return next(row for row in self.rows()
+                    if row["role"] == "implement"
+                    and row["payload"].get("record_kind") == "verdict")
+
+    def test_an_observed_abort_vetoes_the_recorded_verdict_of_a_successful_report(self) -> None:
+        report = self.run_cycle(self.implementer([self.FAILURE]), Talker("claude"))
+
+        payload = self.verdict()["payload"]
+        self.assertEqual("IMPLEMENTED", self.verdict()["status"])
+        self.assertEqual("not_verified", payload["verification"])
+        self.assertFalse(payload["tests_passed"])
+        warnings = [warning for stage in report.stage_details for warning in stage.warnings]
+        self.assertTrue(any("sandbox_startup_failure" in warning
+                            and "/work/.claude/settings.json" in warning for warning in warnings))
+
+    def test_without_an_abort_the_reported_verification_is_recorded(self) -> None:
+        report = self.run_cycle(self.implementer([]), Talker("claude"))
+
+        payload = self.verdict()["payload"]
+        self.assertEqual("verified", payload["verification"])
+        self.assertTrue(payload["tests_passed"])
+        self.assertFalse(any("sandbox_startup_failure" in warning
+                             for stage in report.stage_details for warning in stage.warnings))
+
+
 class ReportedReasonTests(RunCycleTestCase):
     """Why a stage stopped, in the agent's own words and nowhere else.
 

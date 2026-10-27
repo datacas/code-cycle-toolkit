@@ -375,6 +375,28 @@ class JournalRuntimeTests(RunCycleTestCase):
         self.assertIn("stage_end", {r["kind"] for r in rows})
         self.assertIn("stage_start", {r["kind"] for r in rows})
 
+    def test_sandbox_startup_failure_is_journaled_with_its_path_and_limitation(self):
+        failure = {"capability": "sandbox_startup_failure",
+                   "path": "/work/.claude/settings.json", "command": "ls -l",
+                   "cause": "bubblewrap cannot bind a missing source",
+                   "limitation": "no supported runtime-owned mount"}
+
+        class Aborted(Talker):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                result.artifacts["sandbox_startup_failures"] = [failure]
+                return result
+
+        self.run_cycle(Aborted("codex", block("BLOCKED", reason="stuck")), Talker("claude"))
+        rows = cj.events(self.store.path, "owner/api", task_id="API-7")
+        refusals = [r for r in rows if r["kind"] == "refusal"
+                    and r["component"] == "claude_sandbox"]
+        self.assertEqual(1, len(refusals))
+        self.assertEqual("sandbox_startup_failure", refusals[0]["status"])
+        self.assertIn("/work/.claude/settings.json", refusals[0]["reason"])
+        self.assertIn("no supported runtime-owned mount", refusals[0]["detail"])
+        self.assertEqual("ls -l", refusals[0]["command"])
+
     def test_policy_preflight_refusal_is_persisted_with_stop(self):
         class Preflight(Talker):
             def dispatch(self, target, task, **kw):
