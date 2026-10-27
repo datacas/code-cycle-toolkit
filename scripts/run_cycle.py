@@ -1128,6 +1128,11 @@ def _stage_warnings(outcome: StageOutcome) -> list[str]:
     detail = result.detail
     if isinstance(detail, str) and detail.strip().casefold().startswith("warning:"):
         candidates.append(detail.split(":", 1)[1])
+    for failure in result.artifacts.get("sandbox_startup_failures") or []:
+        if isinstance(failure, dict):
+            candidates.append(
+                f"sandbox_startup_failure: the Claude Bash sandbox could not start "
+                f"(missing {failure.get('path')}); checks are not_verified")
     cleaned = []
     for candidate in candidates:
         warning = readable(candidate)

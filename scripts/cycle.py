@@ -1106,6 +1106,13 @@ class CycleRecorder:
                               command=denial.get("command") or denial.get("tool"),
                               reason=f"Claude's permission layer denied {denial.get('tool')}",
                               correlation={"tool_use_id": denial.get("tool_use_id")})
+        for failure in artifacts.get("sandbox_startup_failures") or []:
+            if isinstance(failure, dict):
+                self._journal("refusal", role=role, attempt_id=attempt_id,
+                              component="claude_sandbox", status="sandbox_startup_failure",
+                              command=failure.get("command"),
+                              reason=f"the Claude Bash sandbox could not start: {failure.get('path')}",
+                              detail=f"{failure.get('cause')}; {failure.get('limitation')}")
         if blocker is not None:
             self._journal("refusal", role=role, attempt_id=attempt_id,
                           component=f"{executor}_sandbox", status=str(blocker.get("kind")),

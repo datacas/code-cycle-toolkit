@@ -553,6 +553,42 @@ class ClaudePolicyTests(DispatchTestCase):
 
         self.assertNotIn("sandbox_startup_failures", ex.ClaudeAdapter().extra_artifacts(stream))
 
+    def test_claude_bwrap_abort_after_an_exit_code_line_is_classified(self) -> None:
+        stream = "\n".join((
+            json.dumps({"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": "bash-1", "name": "Bash", "input": {"command": "ls -l"},
+            }]}}),
+            json.dumps({"type": "user", "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "bash-1", "is_error": True,
+                "content": [{"type": "text", "text": "Exit code 1\nbwrap: Can't find source path "
+                             "/work/.claude/settings.json: No such file or directory\n"}],
+            }]}}),
+        ))
+
+        failures = ex.ClaudeAdapter().extra_artifacts(stream)["sandbox_startup_failures"]
+        self.assertEqual(["/work/.claude/settings.json"], [item["path"] for item in failures])
+
+    def test_claude_bwrap_text_quoted_by_a_command_that_ran_is_not_classified(self) -> None:
+        quoted = ("bwrap: Can't find source path /work/.claude/settings.json: "
+                  "No such file or directory")
+        for output in (f"FAIL: test_x\nAssertionError: {quoted!r} != ''\nExit code 1",
+                       f"Exit code 1\n{quoted}\nand a later line from the command",
+                       f"Exit code 1\nbefore\n{quoted}"):
+            with self.subTest(output=output):
+                stream = "\n".join((
+                    json.dumps({"type": "assistant", "message": {"content": [{
+                        "type": "tool_use", "id": "bash-1", "name": "Bash",
+                        "input": {"command": "python3 -m unittest"},
+                    }]}}),
+                    json.dumps({"type": "user", "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "bash-1", "is_error": True,
+                        "content": output,
+                    }]}}),
+                ))
+
+                self.assertNotIn("sandbox_startup_failures",
+                                 ex.ClaudeAdapter().extra_artifacts(stream))
+
     def test_preflight_refusal_is_exposed_for_the_cycle_journal(self) -> None:
         adapter = ex.ClaudeAdapter()
         with mock.patch.object(adapter, "policy_preflight", return_value="unsafe tool.check mod"):

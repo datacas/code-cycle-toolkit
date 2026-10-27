@@ -1484,6 +1484,56 @@ class SandboxStartupFailureTests(unittest.TestCase):
         self.assertIs(reported, rc._with_sandbox_startup_failures(reported, []))
 
 
+class SandboxStartupFailureCycleTests(RunCycleTestCase):
+    FAILURE = {
+        "capability": "sandbox_startup_failure",
+        "path": "/work/.claude/settings.json",
+        "cause": "bubblewrap cannot bind a missing source",
+        "limitation": "no supported runtime-owned mount",
+        "command": "ls -l",
+    }
+
+    def implementer(self, failures):
+        reported = block("IMPLEMENTED", tests={
+            "ran": True, "passed": True, "conclusion": "verified",
+            "evidence": [{"level": "test", "command": "pytest", "exit_code": 0, "executed": 3}],
+        })
+
+        class Aborted(Talker):
+            def dispatch(adapter, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                if failures:
+                    result.artifacts["sandbox_startup_failures"] = failures
+                return result
+
+        return Aborted("codex", reported)
+
+    def verdict(self):
+        return next(row for row in self.rows()
+                    if row["role"] == "implement"
+                    and row["payload"].get("record_kind") == "verdict")
+
+    def test_an_observed_abort_vetoes_the_recorded_verdict_of_a_successful_report(self) -> None:
+        report = self.run_cycle(self.implementer([self.FAILURE]), Talker("claude"))
+
+        payload = self.verdict()["payload"]
+        self.assertEqual("IMPLEMENTED", self.verdict()["status"])
+        self.assertEqual("not_verified", payload["verification"])
+        self.assertFalse(payload["tests_passed"])
+        warnings = [warning for stage in report.stage_details for warning in stage.warnings]
+        self.assertTrue(any("sandbox_startup_failure" in warning
+                            and "/work/.claude/settings.json" in warning for warning in warnings))
+
+    def test_without_an_abort_the_reported_verification_is_recorded(self) -> None:
+        report = self.run_cycle(self.implementer([]), Talker("claude"))
+
+        payload = self.verdict()["payload"]
+        self.assertEqual("verified", payload["verification"])
+        self.assertTrue(payload["tests_passed"])
+        self.assertFalse(any("sandbox_startup_failure" in warning
+                             for stage in report.stage_details for warning in stage.warnings))
+
+
 class ReportedReasonTests(RunCycleTestCase):
     """Why a stage stopped, in the agent's own words and nowhere else.
 

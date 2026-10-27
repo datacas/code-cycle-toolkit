@@ -2873,17 +2873,15 @@ class ClaudeAdapter(NativeAdapter):
                     command = bash_calls.get(tool_use_id)
                     if sp.HOOK_DENIAL_MARKER in tool_output:
                         add(command)
-                    # Only inspect an error result tied to a real Bash tool call.
-                    # Text in files, comments, assistant narration, and historical
-                    # stream events is not evidence that the sandbox failed to start.
-                    missing_source = re.search(
-                        r"bwrap: Can't find source path (.+?): No such file or directory",
-                        tool_output,
-                    )
+                    # Only an error result tied to a real Bash tool call whose whole
+                    # output is the bwrap abort counts. A command that ran and merely
+                    # quoted the line (a test failure, a `cat` of a file) is no
+                    # evidence that the sandbox failed to start.
+                    missing_source = self._BWRAP_MISSING_SOURCE.fullmatch(tool_output.strip())
                     if command and missing_source:
                         failure = {
                             "capability": "sandbox_startup_failure",
-                            "path": missing_source.group(1),
+                            "path": failure_excerpt(missing_source.group(1), 300),
                             "cause": (
                                 "Claude Code's Bash sandbox protects the path, but bubblewrap "
                                 "cannot bind a source that does not exist"
@@ -2905,6 +2903,12 @@ class ClaudeAdapter(NativeAdapter):
         if pending:
             artifacts["background_command"] = pending
         return artifacts
+
+    #: A Bash result that is nothing but bubblewrap's abort, apart from the
+    #: `Exit code N` line Claude prefixes to a failed command's output.
+    _BWRAP_MISSING_SOURCE = re.compile(
+        r"(?:Exit code \d+\s*\n)?"
+        r"bwrap: Can't find source path ([^\n]+?): No such file or directory")
 
     #: A final message that says the stage is waiting on something it started.
     _WAITING_TEXT = re.compile(
