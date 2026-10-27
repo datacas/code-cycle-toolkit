@@ -50,6 +50,10 @@ from urllib.parse import urlsplit
 from typing import Any
 
 import stage_permissions as sp
+try:
+    from gh_environment import gh_environment
+except ModuleNotFoundError:
+    from .gh_environment import gh_environment
 import dependency_setup
 import native_prerequisites as native
 from router import Availability, RoutingDecision, RoutingMode, Target
@@ -156,7 +160,7 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
     with tempfile.TemporaryDirectory(prefix="code-cycle-tmp-", dir=parent) as scratch:
         if repository is not None and _paths_overlap(scratch, str(repository)):
             raise ExecutorError("dispatch temporary directory overlaps the checkout")
-        worker_env = dict(os.environ if environment is None else environment)
+        worker_env = gh_environment(environment)
         worker_env["TMPDIR"] = scratch
         worker_argv = list(argv)
         if adapter.name == "codex":
@@ -188,7 +192,11 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                     table = worker_argv[existing][len(rule):]
                     separator = "," if table[1:-1].strip() else ""
                     worker_argv[existing] = f"{rule}{table[:-1]}{separator}{entry}}}"
-            options += ["-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}']
+            options += [
+                "-c", f'shell_environment_policy.set.GH_TELEMETRY={json.dumps(worker_env["GH_TELEMETRY"])}',
+                "-c", f'shell_environment_policy.set.GH_NO_UPDATE_NOTIFIER={json.dumps(worker_env["GH_NO_UPDATE_NOTIFIER"])}',
+                "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}',
+            ]
             worker_argv[-1:-1] = options
         with adapter.policy_files(worker_argv, command_policy, scratch=scratch,
                                   cwd=cwd) as policed_argv:
@@ -785,8 +793,9 @@ def _publication_preflight(cwd: str | None, *, check_transport: bool = True) -> 
     directory = cwd or os.getcwd()
 
     def run(argv: list[str]) -> subprocess.CompletedProcess:
+        options = {"env": gh_environment()} if argv[:1] == ["gh"] else {}
         return subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=directory,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, **options)
 
     try:
         root = run(["git", "rev-parse", "--show-toplevel"])
@@ -1449,7 +1458,7 @@ class NativeAdapter(Adapter):
         environment = self.dispatch_environment(
             writes=writes, publishes=publishes, writable_dirs=writable_dirs,
         )
-        environment = dict(os.environ if environment is None else environment)
+        environment = gh_environment(environment)
         environment["CODE_CYCLE_STAGE_EXECUTOR"] = self.name
         # Managed tools need no shell-profile edits or globally changed PATH.
         environment["PATH"] = native.tool_path(environment.get("PATH", ""), probes=

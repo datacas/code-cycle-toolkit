@@ -79,18 +79,34 @@ print(json.dumps({{'viewerPermission': 'WRITE', 'nameWithOwner': 'owner/reposito
             path.chmod(0o755)
         self.environment = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
                             "SANDBOX": "1"}
+        self.expected_gh_environment = {
+            "GH_TELEMETRY": os.environ.get("GH_TELEMETRY", "false"),
+            "GH_NO_UPDATE_NOTIFIER": os.environ.get("GH_NO_UPDATE_NOTIFIER", "1"),
+        }
+        self.gh_environments = []
 
     def git(self, *args, cwd=None):
         return subprocess.run([self.real_git, *args], cwd=cwd or self.repo,
                               capture_output=True, text=True, check=True).stdout.strip()
 
     def run_process(self, argv, **options):
+        if argv and argv[0] == "gh":
+            self.gh_environments.append(options.get("env", {}).copy())
         options["env"] = {**options.get("env", {}), **self.environment}
         return subprocess.run(argv, **options)
 
     def publish(self):
         return publication.transport("push", "owner/repository", "main",
                                      cwd=str(self.repo), run=self.run_process)
+
+    def test_runtime_gh_calls_receive_telemetry_defaults(self):
+        self.publish()
+
+        self.assertTrue(self.gh_environments)
+        for environment in self.gh_environments:
+            self.assertEqual(self.expected_gh_environment, {
+                name: environment[name] for name in self.expected_gh_environment
+            })
 
     def test_host_preflight_passes_but_sandbox_ssh_fails_and_https_recovers(self):
         host = {**self.environment}

@@ -245,6 +245,8 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 | `APPDATA` | same (Windows) | Base for `code-cycle-toolkit\` when `CODE_CYCLE_HOME` is unset |
 | `CODEX_HOME` | Codex probe, `host_permissions.py` | Where the Codex credential (`auth.json`) and `rules/default.rules` are looked for; default `~/.codex` |
 | `CLAUDE_CONFIG_DIR` | Claude stage preflight, `host_permissions.py` | Where Claude's `settings.json` and plugins are read; default `~/.claude` |
+| `GH_TELEMETRY` | native stages and runtime GitHub CLI calls | Defaults to `false` when unset, disabling GitHub CLI telemetry. An explicit parent value takes precedence. |
+| `GH_NO_UPDATE_NOTIFIER` | native stages and runtime GitHub CLI calls | Defaults to `1` when unset, disabling GitHub CLI update checks. An explicit parent value takes precedence. |
 | `TYPESAFE_API_KEY` | Jev shadow | API key, read at call time and never stored. Without it, Jev records `unavailable`. |
 | `JEV_API_KEY` | Jev shadow | Legacy fallback for `TYPESAFE_API_KEY` |
 

@@ -42,6 +42,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote
 
+try:
+    from gh_environment import apply_gh_environment_defaults
+except ModuleNotFoundError:
+    from .gh_environment import apply_gh_environment_defaults
+
 # Every result the gate can return; telemetry stores them as `ci_status`, so
 # the vocabulary is defined once, there. Only `CI_PASSED` can lead to
 # approval. `CI_SKIPPED` is a required check that concluded `skipped` or
@@ -550,6 +555,7 @@ class GitHubChecks:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_gh_environment_defaults()
     parser = argparse.ArgumentParser(
         prog="ci_gate",
         description=("Wait once for the required checks of one change-request head "

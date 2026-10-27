@@ -60,6 +60,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
 import ci_gate
+try:
+    from gh_environment import apply_gh_environment_defaults
+except ModuleNotFoundError:
+    from .gh_environment import apply_gh_environment_defaults
 import user_choices
 import triage_repair
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
@@ -4842,6 +4846,7 @@ def detach(arguments: list[str], database: str | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_gh_environment_defaults()
     _configure_stdout()
     parser = argparse.ArgumentParser(
         prog="run_cycle",

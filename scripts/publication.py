@@ -12,6 +12,11 @@ import os
 import re
 import subprocess
 from pathlib import Path
+
+try:
+    from gh_environment import gh_environment
+except ModuleNotFoundError:
+    from .gh_environment import gh_environment
 from typing import Any, Callable
 
 
@@ -39,9 +44,11 @@ def transport(action: str, repo: str, base: str, *, cwd: str | None = None,
 
     def command(argv: list[str], *, required: bool = True):
         try:
+            environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+            if argv and argv[0] == "gh":
+                environment = gh_environment(environment)
             result = run(argv, cwd=cwd, capture_output=True, text=True, timeout=60,
-                         stdin=subprocess.DEVNULL,
-                         env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"})
+                         stdin=subprocess.DEVNULL, env=environment)
         except subprocess.TimeoutExpired as error:
             partial = error.stderr or ""
             if isinstance(partial, bytes):
