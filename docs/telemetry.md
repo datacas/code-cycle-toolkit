@@ -22,6 +22,7 @@ The `production_events` tables are additive and separate from cycle telemetry:
 | `production_deployment_classifications` | Mapping fingerprint and each classification/service result, so explicit mapping corrections remain traceable. |
 | `production_deployment_commits` | Many-to-many commit relations marked `observed` or `derived`, with method, reference SHAs and provenance. |
 | `production_deployment_links` | Explicit rollback/corrective deployment relations and their evidence. |
+| `production_relation_history` | The previous evidence of a commit or deployment relation after a correction, with when it was superseded. |
 | `production_incidents` | Versioned incident ID/source/service/times/status and import provenance. |
 | `production_incident_links` | Explicit incident-to-deployment or incident-to-commit relations (`related_to`, `affected_by`, `recovered_by`) and evidence. |
 
@@ -76,6 +77,7 @@ use the normal telemetry database unless `--database` is supplied:
 ```sh
 python3 scripts/production_events.py import-github owner/repository --mapping deployment-mapping.json
 python3 scripts/production_events.py import-incidents incidents.json --source incident-feed
+python3 scripts/production_events.py import-relations relations.json --source release-notes
 ```
 
 The GitHub adapter reads repository deployments and every deployment's status
@@ -84,17 +86,61 @@ Repeated imports update the same external IDs, so status corrections and late
 events reconcile without duplicate rows. An API deployment SHA is one observed
 commit relation. The importer never treats all ancestors of that SHA as included
 in the deployment. Additional observed or derived commit relations must be
-recorded with explicit source evidence; derived relations retain their method
-and reference SHAs. If no reliable inclusion evidence exists, inclusion remains
-unknown.
+recorded with explicit source evidence (see the relations file below); derived
+relations retain their method and reference SHAs. If no reliable inclusion
+evidence exists, inclusion remains unknown.
 
-Rollback or corrective-deployment relations use the explicit
-`link_deployments` store operation and require source evidence; both the
-deployment and its target must already be imported, otherwise the operation
-fails with a `ProductionEventError`. A failed status
-followed by a successful status, a matching SHA, or temporal proximity alone
-does not establish a rollback. Incident links can mark a deployment as
-`recovered_by` only when the imported incident record supplies evidence.
+A failed status followed by a successful status, a matching SHA, or temporal
+proximity alone does not establish a rollback. Incident links can mark a
+deployment as `recovered_by` only when the imported incident record supplies
+evidence.
+
+### Relations JSON v1
+
+`import-relations` records extra commit inclusion and rollback, corrective, or
+related deployment links from a file you wrote or exported from a source that
+names them. Nothing is inferred from temporal proximity, Git ancestry, merges,
+releases, or CI.
+
+```json
+{
+  "schema_version": 1,
+  "repository": "owner/repository",
+  "commit_inclusions": [
+    {"deployment_id": 1, "commit_sha": "<full SHA>", "kind": "observed",
+     "method": "release_manifest", "evidence": "manifest of release 1 lists the commit"},
+    {"deployment_id": 2, "commit_sha": "<full SHA>", "kind": "derived",
+     "method": "explicit_compare", "references": ["<full SHA>"],
+     "evidence": "compare view between deployments 1 and 2"}
+  ],
+  "deployment_links": [
+    {"deployment_id": 3, "target_deployment_id": 2, "relation": "rollback",
+     "evidence": "deployment 3 description names it as a rollback of 2"}
+  ]
+}
+```
+
+- Both arrays are optional. Every entry needs `evidence` (at most 500
+  characters) and a deployment of `repository` that is already imported;
+  unknown fields are rejected rather than ignored.
+- `kind` is `observed` (a source states the commit is included) or `derived`
+  (a method over named `references`). A derived relation needs at least one
+  reference commit that an earlier deployment of the same service and
+  environment carried. Observed and derived relations of one commit are
+  separate rows.
+- `relation` is `rollback`, `corrective`, or `related`. A deployment cannot link
+  to itself.
+- The whole file is applied atomically. A reference to a deployment that has
+  not been imported fails the import and lists every such ID; import the
+  deployment and run the file again. Nothing is guessed.
+- Importing the same file again changes nothing and keeps each relation's
+  original provenance. When an entry's evidence, method, or references change,
+  the row takes the new values and the previous ones are kept in
+  `production_relation_history` with the time they were superseded, so the
+  original evidence is never rewritten away.
+- `--source` names the evidence source and is stored in each relation's
+  provenance. The store operations `add_commit_relation` and `link_deployments`
+  validate and store the same way.
 
 ### Neutral incident JSON v1
 
@@ -113,8 +159,9 @@ corrections and late timestamps and replaces that incident's previous links.
 Automated tests use synthetic fixtures only; those fixtures are not production
 evidence. For #335, verified locally are schema validation, idempotency,
 correction/reconciliation, explicit service/environment classification,
-status separation, direct SHA provenance, multi-commit relationships, rollback
-statuses, incidents without known deployments, late events, invalid timestamps,
+status separation, direct SHA provenance, multi-commit relationships, the
+relations file (inclusion, rollback, corrective, corrections, unresolved
+references), rollback statuses, incidents without known deployments, late events, invalid timestamps,
 incomplete events, and pagination through the adapter contract. **Pending
 acceptance:** validate at least one integration against real anonymized
 deployment and incident events. That requires source records or a sanitized

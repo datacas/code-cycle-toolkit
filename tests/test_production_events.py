@@ -276,6 +276,145 @@ class ProductionEventTests(unittest.TestCase):
             pe.main(["--database", str(database), "import-incidents", str(document.with_name("missing.json")),
                      "--source", "incident-feed"])
 
+    def relations_doc(self, **overrides: object) -> dict:
+        document = {
+            "schema_version": 1, "repository": "acme/service",
+            "commit_inclusions": [
+                {"deployment_id": 1, "commit_sha": SHA_B.upper(), "kind": "observed",
+                 "method": "release_manifest", "evidence": "manifest of release 1 lists the commit"},
+                {"deployment_id": 2, "commit_sha": SHA_A, "kind": "derived", "method": "explicit_compare",
+                 "references": [SHA_A], "evidence": "compare view between deployments 1 and 2"}],
+            "deployment_links": [
+                {"deployment_id": 3, "target_deployment_id": 2, "relation": "rollback",
+                 "evidence": "deployment 3 description names it as a rollback of 2"},
+                {"deployment_id": 4, "target_deployment_id": 2, "relation": "corrective",
+                 "evidence": "deployment 4 description names it as the fix for 2"}]}
+        return document | overrides
+
+    def import_relation_fixtures(self) -> None:
+        later = {"created_at": "2026-10-27T12:01:00Z"}
+        self.import_deployments([self.deployment(1, "prod-east", SHA_A),
+                                 self.deployment(2, "prod-east", SHA_B) | later,
+                                 self.deployment(3, "prod-east", SHA_A) | later,
+                                 self.deployment(4, "prod-east", SHA_B) | later])
+
+    def test_relations_import_records_inclusion_rollback_and_corrective_with_evidence(self) -> None:
+        self.import_relation_fixtures()
+        self.assertEqual(self.store.import_relations_document(
+            self.relations_doc(), source="release-notes", imported_at=NOW), 4)
+        commits = self.rows("SELECT deployment_external_id,commit_sha,relation_kind,method,references_json "
+                            "FROM production_deployment_commits WHERE method!='deployment_sha' "
+                            "ORDER BY deployment_external_id")
+        self.assertEqual(commits, [("1", SHA_B, "observed", "release_manifest", "[]"),
+                                   ("2", SHA_A, "derived", "explicit_compare", json.dumps([SHA_A]))])
+        links = self.rows("SELECT deployment_external_id,target_external_id,relation,evidence "
+                          "FROM production_deployment_links ORDER BY deployment_external_id")
+        self.assertEqual([row[:3] for row in links], [("3", "2", "rollback"), ("4", "2", "corrective")])
+        self.assertIn("rollback of 2", links[0][3])
+        provenance = self.rows("SELECT provenance FROM production_deployment_links LIMIT 1")[0][0]
+        self.assertEqual(json.loads(provenance)["source"], "release-notes")
+
+    def test_relations_import_is_idempotent_and_keeps_original_provenance(self) -> None:
+        self.import_relation_fixtures()
+        self.store.import_relations_document(self.relations_doc(), source="notes", imported_at=NOW)
+        before = self.rows("SELECT provenance FROM production_deployment_links ORDER BY id")
+        self.store.import_relations_document(
+            self.relations_doc(), source="notes", imported_at="2026-10-30T00:00:00Z")
+        self.assertEqual(self.rows("SELECT provenance FROM production_deployment_links ORDER BY id"), before)
+        self.assertEqual(self.rows("SELECT count(*) FROM production_deployment_links"), [(2,)])
+        self.assertEqual(self.rows("SELECT count(*) FROM production_relation_history"), [(0,)])
+
+    def test_relation_correction_keeps_the_original_evidence_in_history(self) -> None:
+        self.import_relation_fixtures()
+        self.store.import_relations_document(self.relations_doc(), source="notes", imported_at=NOW)
+        corrected = self.relations_doc()
+        corrected["deployment_links"][0]["evidence"] = "revised: the incident review names 3 as the rollback"
+        corrected["commit_inclusions"][0]["method"] = "release_manifest_v2"
+        self.store.import_relations_document(corrected, source="notes", imported_at="2026-10-30T00:00:00Z")
+        current = self.rows("SELECT evidence FROM production_deployment_links WHERE deployment_external_id='3'")
+        self.assertIn("revised", current[0][0])
+        history = self.rows("SELECT relation_table,subject,relation,method,evidence "
+                            "FROM production_relation_history ORDER BY relation_table")
+        self.assertEqual(history, [
+            ("commit", SHA_B, "observed", "release_manifest", "manifest of release 1 lists the commit"),
+            ("deployment_link", "2", "rollback", None, "deployment 3 description names it as a rollback of 2")])
+        self.assertEqual(self.rows("SELECT count(*) FROM production_deployment_links"), [(2,)])
+
+    def test_observed_and_derived_inclusion_of_one_commit_stay_distinct(self) -> None:
+        self.import_relation_fixtures()
+        document = self.relations_doc(deployment_links=[], commit_inclusions=[
+            {"deployment_id": 2, "commit_sha": SHA_A, "kind": "observed", "method": "release_manifest",
+             "evidence": "manifest"},
+            {"deployment_id": 2, "commit_sha": SHA_A, "kind": "derived", "method": "explicit_compare",
+             "references": [SHA_A], "evidence": "compare"}])
+        self.store.import_relations_document(document, source="notes", imported_at=NOW)
+        self.assertEqual(self.rows("SELECT relation_kind FROM production_deployment_commits "
+                                   "WHERE deployment_external_id='2' AND commit_sha=%r AND method!='deployment_sha' "
+                                   "ORDER BY relation_kind" % SHA_A), [("derived",), ("observed",)])
+
+    def test_relations_to_unimported_deployments_are_reported_and_nothing_is_stored(self) -> None:
+        self.import_relation_fixtures()
+        document = self.relations_doc()
+        document["deployment_links"].append({"deployment_id": 9, "target_deployment_id": 404,
+                                             "relation": "rollback", "evidence": "names it"})
+        with self.assertRaisesRegex(pe.ProductionEventError, "not been imported: 404, 9"):
+            self.store.import_relations_document(document, source="notes", imported_at=NOW)
+        self.assertEqual(self.rows("SELECT count(*) FROM production_deployment_links"), [(0,)])
+        self.assertEqual(self.rows("SELECT count(*) FROM production_deployment_commits "
+                                   "WHERE method!='deployment_sha'"), [(0,)])
+        # A late deployment makes the same document importable without any guessing.
+        self.import_deployments([self.deployment(9, "prod-east"), self.deployment(404, "prod-east")])
+        self.assertEqual(self.store.import_relations_document(document, source="notes", imported_at=NOW), 5)
+
+    def test_relations_without_evidence_or_with_unknown_fields_are_rejected(self) -> None:
+        self.import_relation_fixtures()
+        broken = self.relations_doc()
+        broken["deployment_links"][0]["evidence"] = " "
+        with self.assertRaisesRegex(pe.ProductionEventError, "explicit evidence"):
+            self.store.import_relations_document(broken, source="notes")
+        broken = self.relations_doc()
+        broken["commit_inclusions"][1]["references"] = []
+        with self.assertRaisesRegex(pe.ProductionEventError, "reference commits"):
+            self.store.import_relations_document(broken, source="notes")
+        broken = self.relations_doc()
+        broken["commit_inclusions"][0]["inferred_from"] = "git ancestry"
+        with self.assertRaisesRegex(pe.ProductionEventError, "unknown keys"):
+            self.store.import_relations_document(broken, source="notes")
+        for bad in (self.relations_doc(schema_version=2), self.relations_doc(repository="nope"),
+                    self.relations_doc(deployment_links="x"), self.relations_doc(unexpected=[])):
+            with self.assertRaises(pe.ProductionEventError):
+                self.store.import_relations_document(bad, source="notes")
+        with self.assertRaises(pe.ProductionEventError):
+            self.store.import_relations_document(self.relations_doc(), source=" ")
+        self.assertEqual(self.rows("SELECT count(*) FROM production_deployment_links"), [(0,)])
+
+    def test_derived_inclusion_in_a_relations_file_still_needs_an_earlier_reference(self) -> None:
+        self.import_relation_fixtures()
+        document = self.relations_doc(deployment_links=[], commit_inclusions=[
+            {"deployment_id": 1, "commit_sha": SHA_B, "kind": "derived", "method": "explicit_compare",
+             "references": [SHA_B], "evidence": "compare"}])
+        with self.assertRaisesRegex(pe.ProductionEventError, "earlier deployment"):
+            self.store.import_relations_document(document, source="notes", imported_at=NOW)
+
+    def test_cli_imports_relations_into_the_telemetry_database(self) -> None:
+        database = Path(self.temporary.name) / "cli.sqlite"
+        store = pe.ProductionEventStore(database)
+        store.import_github("acme/service", [self.deployment(1, "prod-east"), self.deployment(2, "prod-east")],
+                            {}, self.mapping, imported_at=NOW)
+        document = Path(self.temporary.name) / "relations.json"
+        document.write_text(json.dumps(self.relations_doc(commit_inclusions=[], deployment_links=[
+            {"deployment_id": 2, "target_deployment_id": 1, "relation": "rollback", "evidence": "names it"}])),
+            encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = pe.main(["--database", str(database), "import-relations", str(document),
+                              "--source", "release-notes"])
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output.getvalue())["imported"], 1)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            pe.main(["--database", str(database), "import-relations", str(document.with_name("missing.json")),
+                     "--source", "release-notes"])
+
     def test_mapping_validation_rejects_implicit_or_invalid_configuration(self) -> None:
         path = Path(self.temporary.name) / "mapping.json"
         path.write_text(json.dumps(self.mapping), encoding="utf-8")

@@ -102,6 +102,22 @@ CREATE TABLE IF NOT EXISTS production_deployment_links (
     FOREIGN KEY(source, repository, target_external_id)
       REFERENCES production_deployments(source, repository, external_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS production_relation_history (
+    id INTEGER PRIMARY KEY,
+    relation_table TEXT NOT NULL CHECK(relation_table IN ('commit','deployment_link')),
+    source TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    deployment_external_id TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    method TEXT,
+    references_json TEXT,
+    evidence TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    superseded_at TEXT NOT NULL,
+    FOREIGN KEY(source, repository, deployment_external_id)
+      REFERENCES production_deployments(source, repository, external_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS production_incidents (
     id INTEGER PRIMARY KEY,
     schema_version INTEGER NOT NULL,
@@ -180,6 +196,32 @@ def _provenance(source: str, endpoint: str, imported_at: str) -> str:
     return json.dumps({"source": source, "endpoint": endpoint,
                        "imported_at": imported_at, "schema_version": 1},
                       sort_keys=True, separators=(",", ":"))
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _provenance_endpoint(provenance: str) -> str | None:
+    try:
+        endpoint = json.loads(provenance).get("endpoint")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return endpoint if isinstance(endpoint, str) else None
+
+
+def _entries(document: Mapping[str, Any], key: str, allowed: set[str]) -> list[Mapping[str, Any]]:
+    entries = document.get(key, [])
+    if not isinstance(entries, list):
+        raise ProductionEventError(f"{key} must be an array")
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ProductionEventError(f"each {key} entry must be an object")
+        unknown = set(entry) - allowed
+        if unknown:
+            raise ProductionEventError(
+                f"{key} entry has unknown keys: {', '.join(sorted(map(str, unknown)))}")
+    return entries
 
 
 def load_deployment_mapping(path: str | Path) -> dict[str, Any]:
@@ -361,6 +403,21 @@ class ProductionEventStore:
                             *, relation_kind: str, method: str, references: Iterable[str],
                             evidence_source: str) -> None:
         """Record explicit commit evidence or a reproducible derived relation."""
+        relation = self._check_commit_relation(repository, deployment_id, commit_sha, relation_kind,
+                                               method, references, evidence_source)
+        when = _now()
+        with closing(self._connect()) as connection, connection:
+            self._require_deployments(connection, repository, relation[0])
+            self._write_commit_relation(connection, repository, relation,
+                                        _provenance("explicit-inclusion-evidence", relation[5], when), when)
+
+    @staticmethod
+    def _check_commit_relation(repository: str, deployment_id: Any, commit_sha: Any,
+                               relation_kind: Any, method: Any, references: Iterable[Any],
+                               evidence_source: Any) -> tuple[str, str, str, str, list[str], str]:
+        """Validate one commit relation; returns (deployment, sha, kind, method, refs, evidence)."""
+        if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
+            raise ProductionEventError("repository must be owner/name")
         if relation_kind not in {"observed", "derived"}:
             raise ProductionEventError("relation_kind must be observed or derived")
         refs = list(references)
@@ -374,36 +431,69 @@ class ProductionEventStore:
             raise ProductionEventError("method must be a non-empty name of at most 100 characters")
         if not isinstance(evidence_source, str) or not evidence_source.strip() or len(evidence_source) > 500:
             raise ProductionEventError("evidence_source must be a safe, non-empty reference of at most 500 characters")
-        when = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        provenance = _provenance("explicit-inclusion-evidence", evidence_source, when)
-        with closing(self._connect()) as connection, connection:
-            self._require_deployments(connection, repository, _identifier(deployment_id, "deployment id"))
-            if relation_kind == "derived":
-                target = connection.execute("""SELECT service_id,environment,created_at
-                  FROM production_deployments WHERE source='github-deployments' AND repository=?
-                  AND external_id=?""", (repository, _identifier(deployment_id, "deployment id"))).fetchone()
-                if target is None or target["service_id"] is None or target["environment"] is None:
-                    raise ProductionEventError("derived inclusion requires a configured target service and environment")
-                placeholders = ",".join("?" for _ in refs)
-                prior = connection.execute(f"""SELECT 1 FROM production_deployments
-                  WHERE source='github-deployments' AND repository=? AND service_id=? AND environment=?
-                  AND created_at < ? AND sha IN ({placeholders}) LIMIT 1""",
-                  (repository, target["service_id"], target["environment"], target["created_at"],
-                   *(ref.lower() for ref in refs))).fetchone()
-                if prior is None:
-                    raise ProductionEventError("derived inclusion requires a reference from an earlier deployment of the same service and environment")
-            connection.execute("""INSERT INTO production_deployment_commits
-              (source,repository,deployment_external_id,commit_sha,relation_kind,method,references_json,provenance)
-              VALUES ('github-deployments',?,?,?,?,?,?,?)
-              ON CONFLICT(source,repository,deployment_external_id,commit_sha,relation_kind) DO UPDATE SET
-               method=excluded.method,references_json=excluded.references_json,provenance=excluded.provenance""",
-              (repository, _identifier(deployment_id, "deployment id"), commit_sha.lower(), relation_kind,
-               method, json.dumps(refs, separators=(",", ":")), provenance))
+        return (_identifier(deployment_id, "deployment id"), commit_sha.lower(), relation_kind,
+                method, refs, evidence_source)
+
+    def _write_commit_relation(self, connection: sqlite3.Connection, repository: str,
+                               relation: tuple[str, str, str, str, list[str], str],
+                               provenance: str, when: str) -> None:
+        deployment_id, commit_sha, relation_kind, method, refs, evidence = relation
+        if relation_kind == "derived":
+            target = connection.execute("""SELECT service_id,environment,created_at
+              FROM production_deployments WHERE source='github-deployments' AND repository=?
+              AND external_id=?""", (repository, deployment_id)).fetchone()
+            if target is None or target["service_id"] is None or target["environment"] is None:
+                raise ProductionEventError("derived inclusion requires a configured target service and environment")
+            placeholders = ",".join("?" for _ in refs)
+            prior = connection.execute(f"""SELECT 1 FROM production_deployments
+              WHERE source='github-deployments' AND repository=? AND service_id=? AND environment=?
+              AND created_at < ? AND sha IN ({placeholders}) LIMIT 1""",
+              (repository, target["service_id"], target["environment"], target["created_at"],
+               *(ref.lower() for ref in refs))).fetchone()
+            if prior is None:
+                raise ProductionEventError("derived inclusion requires a reference from an earlier deployment of the same service and environment")
+        references_json = json.dumps(refs, separators=(",", ":"))
+        existing = connection.execute("""SELECT method,references_json,provenance
+          FROM production_deployment_commits WHERE source='github-deployments' AND repository=?
+          AND deployment_external_id=? AND commit_sha=? AND relation_kind=?""",
+          (repository, deployment_id, commit_sha, relation_kind)).fetchone()
+        if existing is not None:
+            previous_evidence = _provenance_endpoint(existing["provenance"])
+            if (existing["method"], existing["references_json"], previous_evidence) == (
+                    method, references_json, evidence):
+                return  # Same relation again: keep its original provenance.
+            # A correction supersedes the row but never erases what it said before.
+            connection.execute("""INSERT INTO production_relation_history
+              (relation_table,source,repository,deployment_external_id,subject,relation,method,
+               references_json,evidence,provenance,superseded_at)
+              VALUES ('commit','github-deployments',?,?,?,?,?,?,?,?,?)""",
+              (repository, deployment_id, commit_sha, relation_kind, existing["method"],
+               existing["references_json"], previous_evidence, existing["provenance"], when))
+        connection.execute("""INSERT INTO production_deployment_commits
+          (source,repository,deployment_external_id,commit_sha,relation_kind,method,references_json,provenance)
+          VALUES ('github-deployments',?,?,?,?,?,?,?)
+          ON CONFLICT(source,repository,deployment_external_id,commit_sha,relation_kind) DO UPDATE SET
+           method=excluded.method,references_json=excluded.references_json,provenance=excluded.provenance""",
+          (repository, deployment_id, commit_sha, relation_kind, method, references_json, provenance))
 
     def link_deployments(self, repository: str, deployment_id: str | int,
                          target_deployment_id: str | int, *, relation: str,
                          evidence: str) -> None:
         """Link rollback/corrective deployments only when a source names the relation."""
+        link = self._check_deployment_link(repository, deployment_id, target_deployment_id,
+                                           relation, evidence)
+        when = _now()
+        with closing(self._connect()) as connection, connection:
+            self._require_deployments(connection, repository, link[0], link[1])
+            self._write_deployment_link(connection, repository, link,
+                                        _provenance("explicit-deployment-relation", link[3], when), when)
+
+    @staticmethod
+    def _check_deployment_link(repository: str, deployment_id: Any, target_deployment_id: Any,
+                               relation: Any, evidence: Any) -> tuple[str, str, str, str]:
+        """Validate one link; returns (deployment, target, relation, evidence)."""
+        if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
+            raise ProductionEventError("repository must be owner/name")
         if relation not in {"rollback", "corrective", "related"}:
             raise ProductionEventError("deployment relation must be rollback, corrective, or related")
         if (not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 500):
@@ -412,16 +502,87 @@ class ProductionEventStore:
         target_deployment_id = _identifier(target_deployment_id, "target deployment id")
         if deployment_id == target_deployment_id:
             raise ProductionEventError("a deployment cannot link to itself")
-        when = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        provenance = _provenance("explicit-deployment-relation", evidence.strip(), when)
+        return deployment_id, target_deployment_id, relation, evidence.strip()
+
+    @staticmethod
+    def _write_deployment_link(connection: sqlite3.Connection, repository: str,
+                               link: tuple[str, str, str, str], provenance: str, when: str) -> None:
+        deployment_id, target_id, relation, evidence = link
+        existing = connection.execute("""SELECT evidence,provenance FROM production_deployment_links
+          WHERE source='github-deployments' AND repository=? AND deployment_external_id=?
+          AND target_external_id=? AND relation=?""",
+          (repository, deployment_id, target_id, relation)).fetchone()
+        if existing is not None:
+            if existing["evidence"] == evidence:
+                return  # Same relation again: keep its original provenance.
+            connection.execute("""INSERT INTO production_relation_history
+              (relation_table,source,repository,deployment_external_id,subject,relation,method,
+               references_json,evidence,provenance,superseded_at)
+              VALUES ('deployment_link','github-deployments',?,?,?,?,NULL,NULL,?,?,?)""",
+              (repository, deployment_id, target_id, relation, existing["evidence"],
+               existing["provenance"], when))
+        connection.execute("""INSERT INTO production_deployment_links
+          (source,repository,deployment_external_id,target_external_id,relation,evidence,provenance)
+          VALUES ('github-deployments',?,?,?,?,?,?)
+          ON CONFLICT(source,repository,deployment_external_id,target_external_id,relation)
+          DO UPDATE SET evidence=excluded.evidence,provenance=excluded.provenance""",
+          (repository, deployment_id, target_id, relation, evidence, provenance))
+
+    def import_relations_document(self, document: Mapping[str, Any], *, source: str,
+                                  imported_at: str | None = None) -> int:
+        """Import version-1 relations: extra commit inclusion and deployment links.
+
+        Every entry names its evidence; nothing is inferred. The whole document is
+        applied atomically, and a reference to a deployment that has not been
+        imported fails the import and names it instead of guessing.
+        """
+        if (not isinstance(document, Mapping) or type(document.get("schema_version")) is not int
+                or document["schema_version"] != 1):
+            raise ProductionEventError("relations document requires schema_version 1")
+        unknown = set(document) - {"schema_version", "repository", "commit_inclusions", "deployment_links"}
+        if unknown:
+            raise ProductionEventError(f"relations document has unknown keys: {', '.join(sorted(map(str, unknown)))}")
+        if not isinstance(source, str) or not source.strip() or len(source) > 200:
+            raise ProductionEventError("relations source must be a non-empty name")
+        repository = document.get("repository")
+        if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository):
+            raise ProductionEventError("relations document requires an owner/name repository")
+        when = _timestamp(imported_at or datetime.now(timezone.utc).isoformat(), "imported_at")
+        assert when is not None
+        inclusions = _entries(document, "commit_inclusions",
+                              {"deployment_id", "commit_sha", "kind", "method", "references", "evidence"})
+        links = _entries(document, "deployment_links",
+                         {"deployment_id", "target_deployment_id", "relation", "evidence"})
+        commit_relations = []
+        for entry in inclusions:
+            references = entry.get("references", [])
+            if not isinstance(references, list):
+                raise ProductionEventError("commit inclusion references must be an array")
+            commit_relations.append(self._check_commit_relation(
+                repository, entry.get("deployment_id"), entry.get("commit_sha"), entry.get("kind"),
+                entry.get("method"), references, entry.get("evidence")))
+        deployment_links = [self._check_deployment_link(
+            repository, entry.get("deployment_id"), entry.get("target_deployment_id"),
+            entry.get("relation"), entry.get("evidence")) for entry in links]
         with closing(self._connect()) as connection, connection:
-            self._require_deployments(connection, repository, deployment_id, target_deployment_id)
-            connection.execute("""INSERT INTO production_deployment_links
-              (source,repository,deployment_external_id,target_external_id,relation,evidence,provenance)
-              VALUES ('github-deployments',?,?,?,?,?,?)
-              ON CONFLICT(source,repository,deployment_external_id,target_external_id,relation)
-              DO UPDATE SET evidence=excluded.evidence,provenance=excluded.provenance""",
-              (repository, deployment_id, target_deployment_id, relation, evidence.strip(), provenance))
+            referenced = {relation[0] for relation in commit_relations}
+            for link in deployment_links:
+                referenced.update(link[:2])
+            missing = sorted(identifier for identifier in referenced
+                             if connection.execute("""SELECT 1 FROM production_deployments
+                               WHERE source='github-deployments' AND repository=? AND external_id=?""",
+                               (repository, identifier)).fetchone() is None)
+            if missing:
+                raise ProductionEventError(
+                    f"relations reference deployments of {repository} that have not been imported: "
+                    + ", ".join(missing))
+            for relation in commit_relations:
+                self._write_commit_relation(connection, repository, relation,
+                                            _provenance(source, relation[5], when), when)
+            for link in deployment_links:
+                self._write_deployment_link(connection, repository, link,
+                                            _provenance(source, link[3], when), when)
+        return len(commit_relations) + len(deployment_links)
 
     def import_incident_document(self, document: Mapping[str, Any], *, source: str,
                                  imported_at: str | None = None) -> int:
@@ -581,6 +742,18 @@ def import_incident_file(store: ProductionEventStore, path: str | Path, *,
     return store.import_incident_document(document, source=source)
 
 
+def import_relations_file(store: ProductionEventStore, path: str | Path, *,
+                          source: str) -> int:
+    """Read a versioned relations file and reconcile its explicit relations."""
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProductionEventError(f"cannot read relations document: {error}") from error
+    if not isinstance(document, Mapping):
+        raise ProductionEventError("relations document must be a JSON object")
+    return store.import_relations_document(document, source=source)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import production deployment and incident events")
     parser.add_argument("--database", help="telemetry SQLite database (default: configured telemetry database)")
@@ -591,6 +764,10 @@ def main(argv: list[str] | None = None) -> int:
     incidents = commands.add_parser("import-incidents", help="import versioned neutral incident JSON")
     incidents.add_argument("file", help="incident JSON file")
     incidents.add_argument("--source", required=True, help="stable external incident source name")
+    relations = commands.add_parser(
+        "import-relations", help="import versioned commit-inclusion and deployment-link evidence")
+    relations.add_argument("file", help="relations JSON file")
+    relations.add_argument("--source", required=True, help="stable name of the evidence source")
     args = parser.parse_args(argv)
     try:
         from telemetry import Telemetry, default_database_path
@@ -603,6 +780,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "import-github":
             count = import_github_deployments(
                 store, args.repository, load_deployment_mapping(args.mapping))
+        elif args.command == "import-relations":
+            count = import_relations_file(store, args.file, source=args.source)
         else:
             count = import_incident_file(store, args.file, source=args.source)
         print(json.dumps({"imported": count, "database": str(database)}, sort_keys=True))
