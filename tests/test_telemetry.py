@@ -223,11 +223,15 @@ class StorageTests(TelemetryTestCase):
 
     def test_expired_quota_record_makes_the_target_eligible_again(self) -> None:
         self.store.record_quota_exhaustion("repo", "codex", "gpt-6-luna")
-        with sqlite3.connect(self.store.path) as connection:
-            connection.execute(
-                "UPDATE quota_exhaustions SET expires_at=? WHERE repo_id=?",
-                ("2000-01-01T00:00:00+00:00", "repo"),
-            )
+        connection = sqlite3.connect(self.store.path)
+        try:
+            with connection:
+                connection.execute(
+                    "UPDATE quota_exhaustions SET expires_at=? WHERE repo_id=?",
+                    ("2000-01-01T00:00:00+00:00", "repo"),
+                )
+        finally:
+            connection.close()
 
         self.assertEqual([], self.store.active_quota_exhaustions("repo"))
 
