@@ -67,6 +67,7 @@ except ModuleNotFoundError:
 import user_choices
 import triage_repair
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
+from execution_plan import completion_statuses, skills_for_roles
 from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup
 from cycle_history import (
     COMMENT_STAGES,
@@ -95,7 +96,6 @@ from executors import (
 from issue_review import (
     CONTINUE as READINESS_CONTINUE,
     ROLE as ISSUE_REVIEW_ROLE,
-    SKILL as ISSUE_REVIEW_SKILL,
     STOP as READINESS_STOP,
     IssueReviewConfigError,
     IssueReviewMode,
@@ -180,13 +180,7 @@ KNOWN_KEYS = DRIVER_KEYS | FOREIGN_KEYS
 ROUTING_KEYS = frozenset({"strategy", "jev"})
 
 #: The skill each role runs, as the executor is told to invoke it.
-SKILL_FOR_ROLE = {
-    ISSUE_REVIEW_ROLE: ISSUE_REVIEW_SKILL,
-    "implement": "cc-implement-issue",
-    "review": "cc-initial-review",
-    "resolve": "cc-resolve-comments",
-    "rereview": "cc-rereview",
-}
+SKILL_FOR_ROLE = skills_for_roles()
 
 #: Asking for the block is what makes the verdict readable. Every review skill
 #: treats it as opt-in and emits it when the request asks in plain language, so
@@ -231,14 +225,7 @@ REASON_LIMIT = 500
 #: else — `BLOCKED`, `FAILED`, a status this driver does not know — is a stage
 #: that did not complete, whatever its exit code was. `PARTIALLY_RESOLVED`
 #: continues because the re-review is what judges how much was resolved.
-COMPLETES = {
-    "implement": frozenset({"IMPLEMENTED"}),
-    "resolve": frozenset({"RESOLVED", "PARTIALLY_RESOLVED"}),
-    "review": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
-    "rereview": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
-    # Necessary, not sufficient: `issue_review.assess` also has to confirm it.
-    ISSUE_REVIEW_ROLE: frozenset({"READY"}),
-}
+COMPLETES = completion_statuses()
 
 #: A review that completed with nothing blocking. Under the parallel CI policy
 #: neither is an approval until the CI gate passes the reviewed SHA (#228).
