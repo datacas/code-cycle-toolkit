@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import production_events as pe
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import production_events as pe  # noqa: E402
 
 
 NOW = "2026-10-27T12:00:00Z"
