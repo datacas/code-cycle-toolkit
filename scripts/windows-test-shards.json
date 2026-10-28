@@ -18,6 +18,7 @@
       "test_cycle_progress": 9.0,
       "test_cycle_status": 1.6,
       "test_dispatch_failures": 14.4,
+      "test_execution_plan": 0.0,
       "test_environment_recovery": 29.6,
       "test_executors": 60.6,
       "test_finding_results": 0.0,
@@ -89,6 +90,7 @@
       "test_cycle_history",
       "test_cycle_progress",
       "test_dispatch_failures",
+      "test_execution_plan",
       "test_stats",
       "test_support",
       "test_validate_package"

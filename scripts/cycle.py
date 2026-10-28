@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from cycle_journal import Journal
+from execution_plan import RoleContract, role_contracts
 from executors import (
     Availability,
     DispatchOutcome,
@@ -97,40 +98,7 @@ TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 #: it becomes an approval only once the CI gate passes the same SHA.
 CLEAN_REVIEW_STATUSES = frozenset({"APPROVED", AWAITING_CI_STATUS})
 
-@dataclass(frozen=True)
-class RoleContract:
-    """The workspace boundary a role must receive before it can run."""
-
-    workspace_policy: WorkspacePolicy
-    publishes: bool = False
-    publication_permissions: tuple[str, ...] = ()
-
-ROLE_CONTRACTS = {
-    "implement": RoleContract(
-        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
-        publication_permissions=("comment", "create_pr", "push_branch"),
-    ),
-    "resolve": RoleContract(
-        WorkspacePolicy.WORKSPACE_WRITE, publishes=True,
-        publication_permissions=("comment", "push_branch"),
-    ),
-    "review": RoleContract(
-        WorkspacePolicy.READ_ONLY, publishes=True,
-        publication_permissions=("comment",),
-    ),
-    "rereview": RoleContract(
-        WorkspacePolicy.READ_ONLY, publishes=True,
-        publication_permissions=("comment",),
-    ),
-    # Judges the work item against the repository; it edits neither and
-    # publishes nothing, not even a comment on the item it judged.
-    "issue_review": RoleContract(WorkspacePolicy.READ_ONLY),
-    "security": RoleContract(WorkspacePolicy.READ_ONLY),
-    "bootstrap": RoleContract(WorkspacePolicy.READ_ONLY),
-    "verify": RoleContract(WorkspacePolicy.DISPOSABLE),
-    "run": RoleContract(WorkspacePolicy.DISPOSABLE),
-    "coordinate": RoleContract(WorkspacePolicy.READ_ONLY),
-}
+ROLE_CONTRACTS = role_contracts()
 DEFAULT_ROLE_CONTRACT = RoleContract(WorkspacePolicy.READ_ONLY)
 
 def role_contract(role: str) -> RoleContract:

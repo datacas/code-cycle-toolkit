@@ -10,6 +10,7 @@
 # One file per line. Blank lines and `#` comments are ignored.
 
 cycle.py
+execution_plan.py
 cycle_history.py
 cycle_journal.py
 ci_gate.py
