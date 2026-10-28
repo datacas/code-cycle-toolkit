@@ -116,6 +116,7 @@
       "test_router",
       "test_security_gate",
       "test_spike_fixture_runner",
+      "test_production_events",
       "test_stage_dispatch",
       "test_stage_permissions",
       "test_stage_recovery",

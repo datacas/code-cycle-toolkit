@@ -2,6 +2,120 @@
 
 When the runtime drives a cycle, every stage writes rows to a local SQLite database. `cc-stats` turns those rows into a per-repository report. This page covers what is recorded, what never is, and how to read it.
 
+## Production delivery events (#335)
+
+The same SQLite file can hold normalized deployment and incident events for
+future delivery analytics. This importer records source evidence; it does not
+calculate DORA metrics, infer deployments from Git events, or create incidents
+from issues, CI, or failed deployments. The selected inputs are the GitHub
+Deployments REST API for deployments/statuses and version-1 neutral JSON for
+incidents. The import is explicit and does not add a service or background job.
+
+The `production_events` tables are additive and separate from cycle telemetry:
+
+| Table | Contents |
+|---|---|
+| `production_deployments` | External ID, repository, original environment, configured classification/service, deployment SHA/ref/task, available timestamps, API provenance. |
+| `production_deployment_statuses` | Each external status ID, state, environment and available timestamps. Statuses remain distinct from deployment requests. |
+| `production_deployment_classifications` | Mapping fingerprint and each classification/service result, so explicit mapping corrections remain traceable. |
+| `production_deployment_commits` | Many-to-many commit relations marked `observed` or `derived`, with method, reference SHAs and provenance. |
+| `production_deployment_links` | Explicit rollback/corrective deployment relations and their evidence. |
+| `production_incidents` | Versioned incident ID/source/service/times/status and import provenance. |
+| `production_incident_links` | Explicit incident-to-deployment or incident-to-commit relations (`related_to`, `affected_by`, `recovered_by`) and evidence. |
+
+The importer stores only allow-listed fields. It does not persist GitHub request
+headers, the caller-controlled deployment payload, status descriptions, user
+objects, or target URLs. GitHub's `production_environment` flag is retained as
+source metadata but never classifies an event. Classification comes only from
+an explicit mapping; missing or unconfigured environments are `unknown` and
+have no service ID. The original environment is always preserved.
+
+### Explicit environment mapping
+
+Pass a version-1 JSON file to the importer. Add only environment names checked
+against the actual repository configuration. This example is illustrative and
+does not activate a mapping:
+
+```json
+{
+  "schema_version": 1,
+  "deployment_mapping": {
+    "github": {
+      "repositories": {
+        "owner/repository": {
+          "environments": {
+            "prod-east": {"classification": "production", "service_id": "checkout"},
+            "staging": {"classification": "staging", "service_id": "checkout"},
+            "ci": {"classification": "ci", "service_id": "builds"}
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Allowed classifications are `production`, `staging`, `ci`, and `other`. Each
+configured environment needs a stable `service_id`; repositories can map
+multiple services. Configuration changes can reclassify an event on a later
+idempotent import while retaining its original environment and GitHub metadata.
+Each new mapping fingerprint is appended to the classification history with its
+result and import time; the deployment's current classification reflects the
+latest import.
+The repository name, branches, commit history, and GitHub's production flag are
+never used to guess a service or classification.
+
+### Import commands
+
+Run these from a checkout with the project's existing `gh` authentication and
+use the normal telemetry database unless `--database` is supplied:
+
+```sh
+python3 scripts/production_events.py import-github owner/repository --mapping deployment-mapping.json
+python3 scripts/production_events.py import-incidents incidents.json --source incident-feed
+```
+
+The GitHub adapter reads repository deployments and every deployment's status
+history through the authenticated `gh api` command, following REST pagination.
+Repeated imports update the same external IDs, so status corrections and late
+events reconcile without duplicate rows. An API deployment SHA is one observed
+commit relation. The importer never treats all ancestors of that SHA as included
+in the deployment. Additional observed or derived commit relations must be
+recorded with explicit source evidence; derived relations retain their method
+and reference SHAs. If no reliable inclusion evidence exists, inclusion remains
+unknown.
+
+Rollback or corrective-deployment relations use the explicit
+`link_deployments` store operation and require source evidence. A failed status
+followed by a successful status, a matching SHA, or temporal proximity alone
+does not establish a rollback. Incident links can mark a deployment as
+`recovered_by` only when the imported incident record supplies evidence.
+
+### Neutral incident JSON v1
+
+An incident document has `schema_version: 1` and an `incidents` array. Each
+entry needs a stable external `id`, explicit `service_id`, timezone-aware
+`started_at`, status (`open`, `resolved`, `monitoring`, `closed`, or `unknown`),
+and optional timezone-aware `resolved_at`. Optional links have type `deployment`
+or `commit`, target ID, optional relation (`related_to`, `affected_by`, or
+`recovered_by`), and a human-auditable `evidence` value. Deployment links
+also include `repository`; commit links use a full SHA. A link without evidence
+is rejected. Temporal proximity never creates a link. An incident without any
+known deployment is valid. Reimporting the same source and ID reconciles
+corrections and late timestamps and replaces that incident's previous links.
+
+Automated tests use synthetic fixtures only; those fixtures are not production
+evidence. For #335, verified locally are schema validation, idempotency,
+correction/reconciliation, explicit service/environment classification,
+status separation, direct SHA provenance, multi-commit relationships, rollback
+statuses, incidents without known deployments, late events, invalid timestamps,
+incomplete events, and pagination through the adapter contract. **Pending
+acceptance:** validate at least one integration against real anonymized
+deployment and incident events. That requires source records or a sanitized
+export that can be independently traced to the source, plus the actual
+environment-to-service mapping. Passing automated tests does not satisfy this
+criterion. Keep #335 open until that evidence is available and reviewed.
+
 **On this page:** [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [Work-item outcomes](#work-item-outcomes) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)
 
 ## When rows are written
