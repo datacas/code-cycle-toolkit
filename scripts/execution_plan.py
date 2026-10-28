@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 from executors import WorkspacePolicy
+from issue_review import ROLE as ISSUE_REVIEW_ROLE, SKILL as ISSUE_REVIEW_SKILL
 
 
 CONTRACT_VERSION = 1
@@ -85,9 +86,9 @@ class ControlDefinition:
 # their findings, checks, or evidence payloads.
 STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
-        "issue_review", "issue_review", "Assess work-item readiness",
+        ISSUE_REVIEW_ROLE, ISSUE_REVIEW_ROLE, "Assess work-item readiness",
         "ISSUE_REVIEW_RESULT", WorkspacePolicy.READ_ONLY,
-        skill="cc-issue-review", function="issue_review.assess",
+        skill=ISSUE_REVIEW_SKILL, function="issue_review.assess",
         completes_with=frozenset({"READY"}),
     ),
     StageDefinition(
@@ -142,7 +143,7 @@ STAGES: tuple[StageDefinition, ...] = (
 CONTROLS: tuple[ControlDefinition, ...] = (
     ControlDefinition("ci_gate", "Wait for checks of the reviewed head", "CI_GATE_RESULT", "ci_gate.wait_for_checks"),
     ControlDefinition("security_gate", "Select whether a security review is required", "SECURITY_GATE_RESULT", "security_gate.evaluate"),
-    ControlDefinition("worktree", "Select and validate the implementation workspace", "WORKTREE_RESULT", "run_cycle.select_worktree"),
+    ControlDefinition("worktree", "Select and validate the implementation workspace", "WORKTREE_RESULT", "run_cycle.select_workspace"),
 )
 
 
@@ -197,8 +198,13 @@ def role_contracts() -> dict[str, RoleContract]:
 
 
 def skills_for_roles() -> dict[str, str]:
-    """Return only role-to-skill adapters for roles with an agent skill."""
-    return {item.role: item.skill for item in STAGES if item.skill is not None}
+    """Return the historical role-to-skill compatibility view."""
+    legacy_roles = {"issue_review", "implement", "review", "resolve", "rereview"}
+    return {
+        item.role: item.skill
+        for item in STAGES
+        if item.role in legacy_roles and item.skill is not None
+    }
 
 
 def completion_statuses() -> dict[str, frozenset[str]]:
@@ -257,29 +263,63 @@ class ExecutionPlan:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        if type(self.contract_version) is not int:
+            raise ContractError("contract version must be an integer")
         if self.contract_version != CONTRACT_VERSION:
             raise ContractError(f"unsupported execution-plan contract version: {self.contract_version}")
+        if type(self.revision) is not int or self.revision < 1:
+            raise ContractError("plan revision must be a positive integer")
+        if any(not isinstance(value, str) for value in (
+            self.plan_id, self.repository, self.work_item, self.objective,
+            self.execution_profile, self.plan_provenance,
+        )):
+            raise ContractError("plan identity, execution profile, and provenance must be strings")
         if (not self.plan_id.strip() or not self.repository.strip()
                 or not self.work_item.strip() or not self.objective.strip()):
             raise ContractError(
                 "plan identity requires plan_id, repository, work_item, and objective"
             )
-        if self.revision < 1:
-            raise ContractError("plan revision must be positive")
         if not self.execution_profile.strip() or not self.plan_provenance.strip():
             raise ContractError("execution profile and plan provenance are required")
+        if not all(isinstance(value, Mapping) for value in (
+            self.effective_configuration, self.effective_policy, self.review, self.metadata,
+        )):
+            raise ContractError("configuration, policy, review, and metadata must be objects")
+        if any(value is not None and not isinstance(value, str) for value in (
+            self.base_ref, self.head_sha,
+        )):
+            raise ContractError("base_ref and head_sha must be strings or null")
+        if not isinstance(self.stages, (tuple, list)):
+            raise ContractError("stages must be a sequence")
+        if any(not isinstance(stage, PlannedStage) for stage in self.stages):
+            raise ContractError("stages must contain planned-stage objects")
         seen: set[str] = set()
+        if any(not isinstance(stage.stage_id, str) for stage in self.stages):
+            raise ContractError("stage ID must be a string")
         stage_ids = {stage.stage_id for stage in self.stages}
+        stages_by_id = {stage.stage_id: stage for stage in self.stages}
         for stage in self.stages:
             definition = stage_definition(stage.stage_id)
             if stage.stage_id in seen:
                 raise ContractError(f"duplicate planned stage: {stage.stage_id}")
             seen.add(stage.stage_id)
+            if not isinstance(stage.obligation, Obligation):
+                raise ContractError(f"stage {stage.stage_id} has an invalid obligation")
+            if type(stage.selected) is not bool:
+                raise ContractError(f"stage {stage.stage_id} selected must be a boolean")
+            if not isinstance(stage.state, ExecutionState):
+                raise ContractError(f"stage {stage.stage_id} has an invalid execution state")
+            if any(not isinstance(value, str) for value in (
+                stage.condition, stage.reason, stage.provenance,
+            )):
+                raise ContractError(f"stage {stage.stage_id} condition, reason, and provenance must be strings")
             if (not stage.condition.strip() or not stage.reason.strip()
                     or not stage.provenance.strip()):
                 raise ContractError(
                     f"stage {stage.stage_id} requires condition, reason, and provenance"
                 )
+            if stage.conclusion is not None and not isinstance(stage.conclusion, str):
+                raise ContractError(f"stage {stage.stage_id} conclusion must be a string")
             if stage.executor is not None and not isinstance(stage.executor, ExecutorKind):
                 raise ContractError(f"stage {stage.stage_id} has an unknown executor")
             if stage.selected and stage.state is ExecutionState.NOT_SELECTED:
@@ -290,6 +330,10 @@ class ExecutionPlan:
                 raise ContractError(f"required stage {stage.stage_id} cannot be omitted")
             if stage.conclusion is not None and stage.state is not ExecutionState.COMPLETED:
                 raise ContractError(f"stage {stage.stage_id} cannot have a conclusion before completion")
+            if not isinstance(stage.depends_on, (tuple, list)) or any(
+                not isinstance(dependency, str) for dependency in stage.depends_on
+            ):
+                raise ContractError(f"stage {stage.stage_id} dependencies must be stage IDs")
             if len(set(stage.depends_on)) != len(stage.depends_on):
                 raise ContractError(f"stage {stage.stage_id} has duplicate dependencies")
             for dependency in stage.depends_on:
@@ -298,8 +342,29 @@ class ExecutionPlan:
                     raise ContractError(
                         f"stage {stage.stage_id} has invalid dependency {dependency}"
                     )
+                if stage.selected and not stages_by_id[dependency].selected:
+                    raise ContractError(
+                        f"selected stage {stage.stage_id} depends on omitted stage {dependency}"
+                    )
             if definition.kind is not StageKind.DISPATCH:
                 raise ContractError(f"planned stage {stage.stage_id} is not dispatchable")
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(stage_id: str) -> None:
+            if stage_id in visiting:
+                raise ContractError(f"cyclic stage dependency involving {stage_id}")
+            if stage_id in visited:
+                return
+            visiting.add(stage_id)
+            for dependency in stages_by_id[stage_id].depends_on:
+                visit(dependency)
+            visiting.remove(stage_id)
+            visited.add(stage_id)
+
+        for stage_id in stage_ids:
+            visit(stage_id)
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -324,8 +389,16 @@ class ExecutionPlan:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ExecutionPlan:
         try:
-            stages = tuple(
-                PlannedStage(
+            if not isinstance(payload, Mapping):
+                raise ContractError("execution plan must be an object")
+            raw_stages = payload["stages"]
+            if not isinstance(raw_stages, (tuple, list)):
+                raise ContractError("stages must be an array")
+            def parse_stage(item: Mapping[str, Any]) -> PlannedStage:
+                dependencies = item.get("depends_on", ())
+                if not isinstance(dependencies, (tuple, list)):
+                    raise ContractError("stage dependencies must be an array")
+                return PlannedStage(
                     stage_id=item["stage_id"],
                     obligation=Obligation(item["obligation"]),
                     selected=item["selected"],
@@ -335,11 +408,16 @@ class ExecutionPlan:
                     provenance=item["provenance"],
                     executor=(ExecutorKind(item["executor"])
                               if item.get("executor") is not None else None),
-                    depends_on=tuple(item.get("depends_on", ())),
+                    depends_on=tuple(dependencies),
                     conclusion=item.get("conclusion"),
                 )
-                for item in payload["stages"]
-            )
+
+            parsed_stages = []
+            for item in raw_stages:
+                if not isinstance(item, Mapping):
+                    raise ContractError("each stage must be an object")
+                parsed_stages.append(parse_stage(item))
+            stages = tuple(parsed_stages)
             plan = cls(
                 plan_id=payload["plan_id"],
                 revision=payload["revision"],
@@ -357,10 +435,10 @@ class ExecutionPlan:
                 review=payload.get("review", {}),
                 metadata=payload.get("metadata", {}),
             )
-        except (KeyError, TypeError, ValueError) as exc:
+            plan.validate()
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
             if isinstance(exc, ContractError):
                 raise
             raise ContractError(f"invalid execution plan: {exc}") from exc
-        plan.validate()
         return plan
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 import unittest
 from pathlib import Path
@@ -26,8 +27,33 @@ class StageCatalogTests(unittest.TestCase):
         )
         self.assertEqual(set(cycle.ROLE_CONTRACTS), set(plan.STAGES_BY_ROLE))
         self.assertTrue(all(item.skill or item.function for item in plan.STAGES))
-        self.assertEqual(run_cycle.SKILL_FOR_ROLE, plan.skills_for_roles())
-        self.assertEqual(run_cycle.COMPLETES, plan.completion_statuses())
+        self.assertEqual(
+            run_cycle.SKILL_FOR_ROLE,
+            {
+                "issue_review": "cc-issue-review",
+                "implement": "cc-implement-issue",
+                "review": "cc-initial-review",
+                "resolve": "cc-resolve-comments",
+                "rereview": "cc-rereview",
+            },
+        )
+        self.assertEqual(
+            run_cycle.COMPLETES,
+            {
+                "issue_review": frozenset({"READY"}),
+                "implement": frozenset({"IMPLEMENTED"}),
+                "resolve": frozenset({"RESOLVED", "PARTIALLY_RESOLVED"}),
+                "review": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
+                "rereview": frozenset({"APPROVED", "CHANGES_REQUESTED"}),
+            },
+        )
+
+    def test_control_targets_resolve_to_existing_functions(self) -> None:
+        for control in plan.CONTROLS:
+            module_name, function_name = control.function.rsplit(".", 1)
+            self.assertTrue(callable(getattr(
+                importlib.import_module(module_name), function_name
+            )), control.function)
 
     def test_unknown_stages_and_controls_fail_before_dispatch(self) -> None:
         with self.assertRaisesRegex(plan.ContractError, "unknown stage"):
@@ -130,6 +156,38 @@ class ExecutionPlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(plan.ContractError, "unknown stage"):
             invalid.validate()
+
+    def test_invalid_types_are_rejected_as_contract_errors(self) -> None:
+        invalid_payloads = (
+            ("revision", "1"),
+            ("plan_id", 5),
+            ("head_sha", []),
+        )
+        for field, value in invalid_payloads:
+            with self.subTest(field=field):
+                payload = self.sample().to_dict()
+                payload[field] = value
+                with self.assertRaises(plan.ContractError):
+                    plan.ExecutionPlan.from_dict(payload)
+
+        payload = self.sample().to_dict()
+        payload["stages"][0]["selected"] = "no"
+        with self.assertRaisesRegex(plan.ContractError, "selected must be a boolean"):
+            plan.ExecutionPlan.from_dict(payload)
+
+    def test_dependency_cycles_and_omitted_dependencies_are_rejected(self) -> None:
+        payload = self.sample().to_dict()
+        payload["stages"][0]["depends_on"] = ["rereview"]
+        payload["stages"][1]["depends_on"] = ["implement"]
+        payload["stages"][1]["selected"] = True
+        payload["stages"][1]["state"] = "planned"
+        with self.assertRaisesRegex(plan.ContractError, "cyclic stage dependency"):
+            plan.ExecutionPlan.from_dict(payload)
+
+        payload = self.sample().to_dict()
+        payload["stages"][0]["depends_on"] = ["rereview"]
+        with self.assertRaisesRegex(plan.ContractError, "depends on omitted stage"):
+            plan.ExecutionPlan.from_dict(payload)
 
     def test_unknown_executor_is_rejected(self) -> None:
         payload = self.sample().to_dict()

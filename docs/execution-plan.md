@@ -10,7 +10,8 @@ The registry is static. Unknown stage and control identifiers raise
 `ContractError`, so a caller can reject a typo before dispatch. The compatibility
 views `cycle.ROLE_CONTRACTS`, `run_cycle.SKILL_FOR_ROLE`, and
 `run_cycle.COMPLETES` are derived from the catalog and retain their existing
-interfaces.
+keys and values. In particular, `SKILL_FOR_ROLE` remains the five-role adapter
+used by existing callers; catalog entries for other skills do not expand it.
 
 ## ExecutionPlan version 1
 
@@ -32,9 +33,11 @@ reported. An omitted stage must say why it was omitted. A selected required
 stage cannot be omitted. Conclusions may be recorded only after completion.
 
 Use `to_dict()` to validate and serialize, and `ExecutionPlan.from_dict()` to
-validate input before a consumer uses it. The loader rejects unsupported
-contract versions, unknown or repeated stages, missing required stages,
-invalid selection/execution combinations, and invalid dependencies. A future
+validate input before a consumer uses it. The loader reports malformed types
+through `ContractError` and rejects unsupported contract versions, unknown or
+repeated stages, missing required stages, invalid selection/execution
+combinations, and unknown, omitted, or cyclic dependencies. Catalog tests
+ensure runtime-owned control targets resolve to existing functions. A future
 incompatible contract increments `CONTRACT_VERSION`; readers must not silently
 interpret an unknown version.
 
