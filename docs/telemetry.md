@@ -2,6 +2,8 @@
 
 When the runtime drives a cycle, every stage writes rows to a local SQLite database. `cc-stats` turns those rows into a per-repository report. This page covers what is recorded, what never is, and how to read it.
 
+**On this page:** [Production delivery events](#production-delivery-events-335) · [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [Work-item outcomes](#work-item-outcomes) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)
+
 ## Production delivery events (#335)
 
 The same SQLite file can hold normalized deployment and incident events for
@@ -59,9 +61,10 @@ Allowed classifications are `production`, `staging`, `ci`, and `other`. Each
 configured environment needs a stable `service_id`; repositories can map
 multiple services. Configuration changes can reclassify an event on a later
 idempotent import while retaining its original environment and GitHub metadata.
-Each new mapping fingerprint is appended to the classification history with its
-result and import time; the deployment's current classification reflects the
-latest import.
+Each mapping fingerprint has one classification-history row holding its result
+and the time of its latest import, so the newest `classified_at` is the current
+classification, including when a deployment returns to an earlier mapping; the
+deployment's current classification reflects the latest import.
 The repository name, branches, commit history, and GitHub's production flag are
 never used to guess a service or classification.
 
@@ -86,7 +89,9 @@ and reference SHAs. If no reliable inclusion evidence exists, inclusion remains
 unknown.
 
 Rollback or corrective-deployment relations use the explicit
-`link_deployments` store operation and require source evidence. A failed status
+`link_deployments` store operation and require source evidence; both the
+deployment and its target must already be imported, otherwise the operation
+fails with a `ProductionEventError`. A failed status
 followed by a successful status, a matching SHA, or temporal proximity alone
 does not establish a rollback. Incident links can mark a deployment as
 `recovered_by` only when the imported incident record supplies evidence.
@@ -99,8 +104,9 @@ entry needs a stable external `id`, explicit `service_id`, timezone-aware
 and optional timezone-aware `resolved_at`. Optional links have type `deployment`
 or `commit`, target ID, optional relation (`related_to`, `affected_by`, or
 `recovered_by`), and a human-auditable `evidence` value. Deployment links
-also include `repository`; commit links use a full SHA. A link without evidence
-is rejected. Temporal proximity never creates a link. An incident without any
+also include `repository`; commit links use a full SHA, stored lowercase. A link without
+evidence, a repeated link in one incident, or a `resolved_at` earlier than
+`started_at` is rejected. Temporal proximity never creates a link. An incident without any
 known deployment is valid. Reimporting the same source and ID reconciles
 corrections and late timestamps and replaces that incident's previous links.
 
@@ -115,8 +121,6 @@ deployment and incident events. That requires source records or a sanitized
 export that can be independently traced to the source, plus the actual
 environment-to-service mapping. Passing automated tests does not satisfy this
 criterion. Keep #335 open until that evidence is available and reviewed.
-
-**On this page:** [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [Work-item outcomes](#work-item-outcomes) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)
 
 ## When rows are written
 

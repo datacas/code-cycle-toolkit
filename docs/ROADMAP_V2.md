@@ -146,7 +146,7 @@ Las comparaciones deben usar categorías de trabajo, riesgo, modo, proveedor y m
 | Change fail rate | Despliegues fallidos y denominador de despliegues de producción según una semántica acordada. Findings de review no son fallos de producción. |
 | Deployment rework rate | Despliegues atribuibles a rework correctivo de producción y denominador explícito. Iteraciones del agente no son ese rework. |
 
-[#335][i335] incorpora importadores explícitos para GitHub Deployments y JSON neutral versionado de incidentes, sin otro servicio; el mapeo explícito de entornos a servicios evita inferir producción. Estas decisiones resuelven la selección inicial de fuente y semántica. La aceptación de #335 sigue condicionada a validar los importadores con eventos reales anonimizados y una configuración comprobable; las pruebas sintéticas no satisfacen esa evidencia. [#336][i336] calcula las cinco métricas con cobertura y limitaciones explícitas, preservando identidad externa y relaciones atribuibles sin forzar un PR a equivaler a un despliegue.
+[#335][i335] incorpora importadores explícitos para GitHub Deployments y JSON neutral versionado de incidentes, sin otro servicio; el mapeo explícito de entornos a servicios evita inferir producción. Estas son las opciones por defecto implementadas; la selección de fuente real y la semántica de servicio/producción siguen pendientes de confirmación del responsable contra eventos reales. La aceptación de #335 sigue condicionada a validar los importadores con eventos reales anonimizados y una configuración comprobable; las pruebas sintéticas no satisfacen esa evidencia. [#336][i336] calcula las cinco métricas con cobertura y limitaciones explícitas, preservando identidad externa y relaciones atribuibles sin forzar un PR a equivaler a un despliegue.
 
 El informe DORA *The ROI of AI-assisted Software Development*, edición 2026.1, se utilizó en la auditoría como referencia sobre baseline, aprendizaje, adaptación del pipeline y coste de verificación. No autoriza estimaciones numéricas de ROI sin datos propios. Aumentar velocidad local puede aumentar el trabajo posterior; por eso se miden resultados, estabilidad, calidad y coste conjuntamente.
 
@@ -214,7 +214,7 @@ La migración parte de defaults compatibles, sin exigir herramientas opcionales 
 - [#146][i146] + [#156][i156] → [#157][i157] → [#158][i158]. [#146][i146] + el núcleo [#155][i155], ya completado al planificar, → [#159][i159]. #159 no tiene que esperar a #158.
 - [#290][i290] + los metadatos comunes de [#146][i146] → [#331][i331], [#332][i332] y [#333][i333]. Esto no exige hacer obligatoria la captura visual de #146.
 - [#333][i333] + [#294][i294] → [#334][i334]. [#294][i294] + [#290][i290] → [#291][i291].
-- [#335][i335] → [#336][i336]. Los adaptadores y la semántica de servicio/entorno están decididos; antes de completar #335 y empezar #336 debe verificarse al menos una integración con eventos reales anonimizados.
+- [#335][i335] → [#336][i336]. Los adaptadores y la semántica de servicio/entorno están implementados con opciones por defecto, pendientes de confirmación contra eventos reales; antes de completar #335 y empezar #336 debe verificarse al menos una integración con eventos reales anonimizados.
 - [#185][i185] → [#186][i186] mientras esa extracción conserve el alcance que usa la identidad común.
 
 ### Precedencias recomendadas, condiciones y trabajo paralelo

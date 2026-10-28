@@ -299,7 +299,9 @@ class ProductionEventStore:
                     connection.execute("""INSERT INTO production_deployment_classifications
                       (source,repository,deployment_external_id,mapping_version,mapping_fingerprint,
                        classification,service_id,classified_at,provenance) VALUES (?,?,?,?,?,?,?,?,?)
-                      ON CONFLICT(source,repository,deployment_external_id,mapping_fingerprint) DO NOTHING""",
+                      ON CONFLICT(source,repository,deployment_external_id,mapping_fingerprint)
+                      DO UPDATE SET classification=excluded.classification,service_id=excluded.service_id,
+                       classified_at=excluded.classified_at,provenance=excluded.provenance""",
                       (source, repository, external_id, 1, mapping_fingerprint, classification,
                        service_id, when, provenance))
                     # A corrected source SHA replaces only the direct API-SHA
@@ -343,6 +345,18 @@ class ProductionEventStore:
                 raise
         return count
 
+    @staticmethod
+    def _require_deployments(connection: sqlite3.Connection, repository: str,
+                             *deployment_ids: str) -> None:
+        """Reject a relation to a deployment that was never imported."""
+        for deployment_id in deployment_ids:
+            found = connection.execute("""SELECT 1 FROM production_deployments
+              WHERE source='github-deployments' AND repository=? AND external_id=?""",
+              (repository, deployment_id)).fetchone()
+            if found is None:
+                raise ProductionEventError(
+                    f"deployment {deployment_id} of {repository} has not been imported")
+
     def add_commit_relation(self, repository: str, deployment_id: str | int, commit_sha: str,
                             *, relation_kind: str, method: str, references: Iterable[str],
                             evidence_source: str) -> None:
@@ -363,6 +377,7 @@ class ProductionEventStore:
         when = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         provenance = _provenance("explicit-inclusion-evidence", evidence_source, when)
         with closing(self._connect()) as connection, connection:
+            self._require_deployments(connection, repository, _identifier(deployment_id, "deployment id"))
             if relation_kind == "derived":
                 target = connection.execute("""SELECT service_id,environment,created_at
                   FROM production_deployments WHERE source='github-deployments' AND repository=?
@@ -400,6 +415,7 @@ class ProductionEventStore:
         when = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         provenance = _provenance("explicit-deployment-relation", evidence.strip(), when)
         with closing(self._connect()) as connection, connection:
+            self._require_deployments(connection, repository, deployment_id, target_deployment_id)
             connection.execute("""INSERT INTO production_deployment_links
               (source,repository,deployment_external_id,target_external_id,relation,evidence,provenance)
               VALUES ('github-deployments',?,?,?,?,?,?)
@@ -429,6 +445,11 @@ class ProductionEventStore:
                         raise ProductionEventError("incident service_id must be explicitly provided")
                     started = _timestamp(incident.get("started_at"), "incident started_at")
                     resolved = _timestamp(incident.get("resolved_at"), "incident resolved_at", optional=True)
+                    assert started is not None
+                    if resolved is not None and (
+                            datetime.fromisoformat(resolved.replace("Z", "+00:00")) <
+                            datetime.fromisoformat(started.replace("Z", "+00:00"))):
+                        raise ProductionEventError("incident resolved_at must not precede started_at")
                     status = incident.get("status")
                     if status not in _INCIDENT_STATUSES:
                         raise ProductionEventError("incident status is invalid")
@@ -445,6 +466,7 @@ class ProductionEventStore:
                     links = incident.get("links", [])
                     if not isinstance(links, list):
                         raise ProductionEventError("incident links must be an array")
+                    seen_links: set[tuple[str, str, str, str]] = set()
                     for link in links:
                         if not isinstance(link, Mapping):
                             raise ProductionEventError("incident link must be an object")
@@ -462,8 +484,17 @@ class ProductionEventStore:
                         relation = link.get("relation", "related_to")
                         if relation not in {"related_to", "affected_by", "recovered_by"}:
                             raise ProductionEventError("incident link relation is invalid")
-                        if target_type == "commit" and not _SHA.fullmatch(target_id):
-                            raise ProductionEventError("commit links require a full hexadecimal SHA")
+                        if target_type == "commit":
+                            if not _SHA.fullmatch(target_id):
+                                raise ProductionEventError("commit links require a full hexadecimal SHA")
+                            # Deployment commits are stored lowercase; match them.
+                            target_id = target_id.lower()
+                        # SQLite treats NULL repositories as distinct in the unique key,
+                        # so commit-link duplicates are rejected here.
+                        link_key = (str(target_type), str(target_repository or ""), target_id, str(relation))
+                        if link_key in seen_links:
+                            raise ProductionEventError("incident has a duplicate link")
+                        seen_links.add(link_key)
                         connection.execute("""INSERT INTO production_incident_links
                           (source,incident_external_id,target_type,target_repository,target_external_id,relation,evidence,provenance)
                           VALUES (?,?,?,?,?,?,?,?)""",
@@ -492,7 +523,7 @@ class ProductionEventStore:
             query += " WHERE service_id=?"
             values = (service_id,)
         query += " ORDER BY started_at, source, external_id"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return [dict(row) for row in connection.execute(query, values)]
 
 
