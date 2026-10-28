@@ -29,6 +29,7 @@ usage.py
 harness.py
 router.py
 telemetry.py
+production_events.py
 cycle_status.py
 profile_config.py
 host_permissions.py

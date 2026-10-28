@@ -146,7 +146,7 @@ Las comparaciones deben usar categorías de trabajo, riesgo, modo, proveedor y m
 | Change fail rate | Despliegues fallidos y denominador de despliegues de producción según una semántica acordada. Findings de review no son fallos de producción. |
 | Deployment rework rate | Despliegues atribuibles a rework correctivo de producción y denominador explícito. Iteraciones del agente no son ese rework. |
 
-[#335][i335] importa eventos de una primera fuente real, sin otro servicio; [#336][i336] calcula las cinco métricas con cobertura y limitaciones explícitas. La selección de fuente y la semántica de servicio/producción son condiciones previas, no decisiones ya tomadas. Se preservan identidad externa y relaciones entre cambios, despliegues e incidentes, sin forzar un PR a equivaler a un despliegue.
+[#335][i335] incorpora importadores explícitos para GitHub Deployments y JSON neutral versionado de incidentes, sin otro servicio; el mapeo explícito de entornos a servicios evita inferir producción. Estas son las opciones por defecto implementadas; la selección de fuente real y la semántica de servicio/producción siguen pendientes de confirmación del responsable contra eventos reales. La aceptación de #335 sigue condicionada a validar los importadores con eventos reales anonimizados y una configuración comprobable; las pruebas sintéticas no satisfacen esa evidencia. [#336][i336] calcula las cinco métricas con cobertura y limitaciones explícitas, preservando identidad externa y relaciones atribuibles sin forzar un PR a equivaler a un despliegue.
 
 El informe DORA *The ROI of AI-assisted Software Development*, edición 2026.1, se utilizó en la auditoría como referencia sobre baseline, aprendizaje, adaptación del pipeline y coste de verificación. No autoriza estimaciones numéricas de ROI sin datos propios. Aumentar velocidad local puede aumentar el trabajo posterior; por eso se miden resultados, estabilidad, calidad y coste conjuntamente.
 
@@ -214,7 +214,7 @@ La migración parte de defaults compatibles, sin exigir herramientas opcionales 
 - [#146][i146] + [#156][i156] → [#157][i157] → [#158][i158]. [#146][i146] + el núcleo [#155][i155], ya completado al planificar, → [#159][i159]. #159 no tiene que esperar a #158.
 - [#290][i290] + los metadatos comunes de [#146][i146] → [#331][i331], [#332][i332] y [#333][i333]. Esto no exige hacer obligatoria la captura visual de #146.
 - [#333][i333] + [#294][i294] → [#334][i334]. [#294][i294] + [#290][i290] → [#291][i291].
-- [#335][i335] → [#336][i336]. Antes de #335 debe existir una fuente real y una semántica acordada.
+- [#335][i335] → [#336][i336]. Los adaptadores y la semántica de servicio/entorno están implementados con opciones por defecto, pendientes de confirmación contra eventos reales; antes de completar #335 y empezar #336 debe verificarse al menos una integración con eventos reales anonimizados.
 - [#185][i185] → [#186][i186] mientras esa extracción conserve el alcance que usa la identidad común.
 
 ### Precedencias recomendadas, condiciones y trabajo paralelo
@@ -311,7 +311,7 @@ El orden no es una cola estrictamente serial ni una estimación de duración. La
 | 33 | [#192][i192] / P2 | Referencias cualificadas e identidad para atribuir outcomes. | #180 |
 | 34 | [#180][i180] / P2 | Piloto operacional; #172/#174 ya completadas al planificar. | #127 |
 | 35 | [#127][i127] / P2 | Efectividad por modo/cohorte; #126 solo para afirmaciones controladas. | Evaluación DORA |
-| 36 | [#335][i335] / P2 condicionada | Eventos reales tras seleccionar fuente y semántica. | Analytics local |
+| 36 | [#335][i335] / P2 condicionada | Eventos reales tras implementar GitHub Deployments, JSON neutral de incidentes y el mapeo explícito servicio/entorno. | Analytics local |
 | 37 | [#336][i336] / P2 condicionada | Cinco métricas con cobertura explícita, tras #335. | No bloquea el núcleo 2.0 |
 
 ### Correcciones intercaladas y deuda independiente
