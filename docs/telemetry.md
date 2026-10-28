@@ -316,6 +316,17 @@ read from these rows and the [attempt table](#physical-attempts-usage-and-harnes
 `tests/test_ci_policy.py` (`BenchmarkTests`) is a repeatable, simulated
 comparison of the two policies on a controlled fake CI.
 
+### Quota exhaustion windows (schema 23)
+
+The `quota_exhaustions` table persists a quota reset window per repository,
+executor, and requested model so a later production `--continue` can skip that
+exact target and use the configured fallback. A reported time of day expires at
+its next occurrence in the local timezone; an absent or unparseable reset uses a
+30-minute window. Reading active rows deletes expired entries. A successful
+production dispatch clears only its matching row. Calibration does not read,
+write, or clear these records. The table is additive; reverting the code leaves
+its rows unused.
+
 ### Work-item outcomes (schema 14)
 
 Work-item disposition events are stored in a separate append-only table. Each

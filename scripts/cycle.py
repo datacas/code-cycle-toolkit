@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -267,6 +268,7 @@ class CycleRecorder:
         profiles: dict | None = None,
         routing_strategy: RoutingStrategy = RoutingStrategy.FIXED,
         local_only: bool = False,
+        continue_work: bool = False,
         started_from: str = "implement",
         change_observer: Callable[[], ChangeSignals | None] | None = None,
         verification_available: bool | None = None,
@@ -314,6 +316,20 @@ class CycleRecorder:
         )
         self.signals = signals
         self.availability = dict(availability)
+        self.quota_exhaustions: list[dict] = []
+        self.exhausted_until: dict[tuple[str, str], str] = {}
+        if continue_work and mode is RoutingMode.PRODUCTION:
+            try:
+                self.quota_exhaustions = telemetry.active_quota_exhaustions(repo_id)
+                self.exhausted_until = {
+                    (row["executor"], row["model"]): row["expires_at"]
+                    for row in self.quota_exhaustions
+                }
+            except (OSError, sqlite3.Error, TelemetryError, ValueError):
+                # Quota persistence is an optimization; a telemetry outage never
+                # prevents the selected cycle from running.
+                self.quota_exhaustions = []
+                self.exhausted_until = {}
         self.registry = registry or Registry()
         self.mode = mode
         self.policy = policy or ReadinessPolicy.for_mode(mode)
@@ -509,7 +525,7 @@ class CycleRecorder:
                 workspace_policy, **dispatch_kwargs,
             )
             def select(candidates):
-                return route(
+                decision = route(
                     role, self.signals, self.availability,
                     mode=self.mode, profiles=self.profiles,
                     eligible_executors=candidates,
@@ -536,7 +552,15 @@ class CycleRecorder:
                         self.first_pass_rate.explain()
                         if self.first_pass_rate is not None else None
                     ),
+                    exhausted_until=self.exhausted_until,
                 )
+                if (self.mode is RoutingMode.PRODUCTION
+                        and decision.used_fallback and decision.target is not None
+                        and any(f"{row['executor']}/{row['model']} quota exhausted until "
+                                f"{row['expires_at']}" in decision.reasons
+                                for row in self.quota_exhaustions)):
+                    signals["quota_resume_reason"] = "recorded_quota_exhaustion"
+                return decision
 
             decision = select(eligible)
             if role == "resolve" and not decision.blocked and decision.target is not None:
@@ -904,6 +928,19 @@ class CycleRecorder:
             if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
                 action, reason = "stop", "retry_exhausted"
                 fallback = stage_fallback(decision, self.profiles)
+                exhaustion_expiry = None
+                reset_reported = False
+                if (result.failure_code == "quota"
+                        and self.mode is RoutingMode.PRODUCTION):
+                    try:
+                        _, reset_reported = self.telemetry.quota_expiry(result.detail)
+                        exhaustion_expiry = self.telemetry.record_quota_exhaustion(
+                            self.repo_id, decision.target.executor,
+                            decision.target.model, result.detail,
+                        )
+                    except (OSError, sqlite3.Error, TelemetryError, ValueError):
+                        # Telemetry failure must not block the writing stage.
+                        pass
                 if self.mode is RoutingMode.CALIBRATION:
                     reason = "calibration"
                 elif attempt == 0 and attempt_id is not None:
@@ -930,7 +967,28 @@ class CycleRecorder:
                         "reroute_action": action, "reroute_reason": reason,
                     }
                 else:
-                    result = replace(result, detail=f"{result.detail}; reroute stopped: {reason}")
+                    detail = f"{result.detail}; reroute stopped: {reason}"
+                    if (result.failure_code == "quota"
+                            and self.mode is RoutingMode.PRODUCTION):
+                        if exhaustion_expiry and reset_reported:
+                            detail += (f"; quota exhaustion recorded until {exhaustion_expiry}; "
+                                       "wait for the reset or run --continue to use the configured fallback")
+                        elif exhaustion_expiry:
+                            detail += ("; quota reset is unknown; retry after 30 minutes; "
+                                       f"temporary quota window recorded until {exhaustion_expiry}; "
+                                       "run --continue to use the configured fallback")
+                        else:
+                            detail += ("; quota reset is unknown; retry after 30 minutes or "
+                                       "run --continue to use the configured fallback")
+                    result = replace(result, detail=detail)
+            elif (result.outcome is DispatchOutcome.SUCCEEDED
+                    and self.mode is RoutingMode.PRODUCTION):
+                try:
+                    self.telemetry.clear_quota_exhaustion(
+                        self.repo_id, decision.target.executor, decision.target.model,
+                    )
+                except (OSError, sqlite3.Error, TelemetryError, ValueError):
+                    pass
             # A restriction requests a grant on the chosen executor, never a fallback.
             grant = (self.consent.grant_for(blocker)
                      if blocker is not None and self.consent is not None

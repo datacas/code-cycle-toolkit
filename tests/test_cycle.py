@@ -831,7 +831,8 @@ class RerouteRecordingTests(CycleTestCase):
 
 class FailedDispatchRerouteTests(CycleTestCase):
     def run_failure(self, role="implement", *, code="capacity", start="not_started",
-                    exited=True, asynchronous=False, second_code=None, **kwargs):
+                    exited=True, asynchronous=False, second_code=None,
+                    detail="quota exhausted; reset at 9:46 PM", **kwargs):
         class FailureAdapter(ScriptedAdapter):
             def dispatch(self, target, task, **kw):
                 self.dispatched.append(task)
@@ -839,6 +840,7 @@ class FailedDispatchRerouteTests(CycleTestCase):
                     ex.DispatchOutcome.FAILED, self.name, target,
                     error_code=self.code, start_state=start,
                     process_exited=exited, asynchronous=asynchronous,
+                    detail=detail,
                 )
         primary = FailureAdapter("codex")
         primary.code = code
@@ -860,6 +862,74 @@ class FailedDispatchRerouteTests(CycleTestCase):
                 self.assertEqual(ex.Availability.READY, recorder.availability["codex"])
                 recorder.stage("implement", "later stage")
                 self.assertEqual(2, len(primary.dispatched))
+
+    def test_dirty_quota_stop_is_reused_by_a_later_continue(self):
+        clean = {"dirty": False, "workspace": {"head": "old"}, "remote": "old",
+                 "pulls": [], "comments": []}
+        dirty = {**clean, "dirty": True}
+        with patch("cycle.effect_snapshot", side_effect=[clean, dirty]):
+            first, primary, fallback, stopped = self.run_failure(
+                code="quota", start="started",
+            )
+        self.assertFalse(stopped.rerouted)
+        self.assertFalse(fallback.dispatched)
+        self.assertEqual("quota", stopped.result.failure_code)
+        stopped_row = self.store.rows("owner/repo")[-1]["payload"]
+        self.assertEqual("quota", stopped_row["reroute_error_code"])
+        self.assertEqual("dirty_workspace", stopped_row["reroute_reason"])
+        exhaustion = self.store.active_quota_exhaustions("owner/repo")
+        self.assertEqual("gpt-6-luna", exhaustion[0]["model"])
+
+        resumed_primary = ScriptedAdapter("codex")
+        resumed_fallback = ScriptedAdapter("claude")
+        resumed = self.recorder(
+            [resumed_primary, resumed_fallback], continue_work=True,
+        )
+        continued = resumed.stage("implement", "continue from partial work")
+        self.assertEqual("claude", continued.decision.target.executor)
+        self.assertTrue(continued.decision.used_fallback)
+        self.assertFalse(resumed_primary.dispatched)
+        self.assertEqual(1, len(resumed_fallback.dispatched))
+        self.assertEqual(
+            "recorded_quota_exhaustion",
+            self.store.rows("owner/repo")[-1]["payload"]["quota_resume_reason"],
+        )
+
+    def test_quota_stop_reports_recorded_reset_or_fallback_window(self):
+        clean = {"dirty": False, "workspace": {"head": "old"}, "remote": "old",
+                 "pulls": [], "comments": []}
+        dirty = {**clean, "dirty": True}
+        cases = (
+            ("quota exhausted; reset at 9:46 PM", "quota exhaustion recorded until",
+             "run --continue to use the configured fallback"),
+            ("quota exhausted", "quota reset is unknown; retry after 30 minutes",
+             "run --continue to use the configured fallback"),
+        )
+        for detail, expected, guidance in cases:
+            with self.subTest(detail=detail):
+                with patch("cycle.effect_snapshot", side_effect=[clean, dirty]):
+                    _, _, _, outcome = self.run_failure(
+                        code="quota", start="started", detail=detail,
+                    )
+                self.assertIn(expected, outcome.result.detail)
+                self.assertIn(guidance, outcome.result.detail)
+
+    def test_success_clears_quota_only_in_production(self):
+        self.store.record_quota_exhaustion(
+            "owner/repo", "codex", "gpt-6-luna", "quota exhausted",
+        )
+
+        calibration = self.recorder(
+            [ScriptedAdapter("codex", ex.Availability.READY)],
+            mode=router.RoutingMode.CALIBRATION,
+        )
+        calibration_outcome = calibration.stage("implement", "calibration")
+        self.assertTrue(calibration_outcome.succeeded, calibration_outcome.result.detail)
+        self.assertEqual(1, len(self.store.active_quota_exhaustions("owner/repo")))
+
+        production = self.recorder([ScriptedAdapter("codex")])
+        self.assertTrue(production.stage("implement", "production").succeeded)
+        self.assertEqual([], self.store.active_quota_exhaustions("owner/repo"))
 
     def test_no_reroute_without_exit_proof_including_async(self):
         for exited, asynchronous in ((False, False), (True, True)):

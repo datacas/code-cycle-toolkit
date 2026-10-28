@@ -2500,6 +2500,7 @@ def run_cycle(
         telemetry, repo_id, task_id, signals,
         availability=availability, registry=registry, mode=mode, policy=policy,
         probes=probes, profiles=profiles, local_only=local_only,
+        continue_work=continue_work,
         started_from=start_from,
         routing_strategy=routing_strategy,
         change_observer=(

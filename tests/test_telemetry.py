@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import sqlite3
 import tempfile
 import unittest
 import unittest.mock
@@ -188,6 +189,51 @@ class StorageTests(TelemetryTestCase):
         self.assertEqual(16, legacy["schema_version"])
         self.assertFalse(legacy["payload"]["escalated"])
         self.assertEqual([], legacy["payload"]["escalation_finding_ids"])
+
+    def test_quota_exhaustion_is_scoped_expires_and_clears_by_model(self) -> None:
+        expiry = self.store.record_quota_exhaustion(
+            "repo", "codex", "gpt-6.1-sol", "quota exhausted; reset at 9:46 PM",
+        )
+        self.assertTrue(expiry)
+        self.store.record_quota_exhaustion("other-repo", "codex", "gpt-6.1-sol")
+        self.store.record_quota_exhaustion("repo", "codex", "gpt-6.1-sol-mini")
+
+        active = self.store.active_quota_exhaustions("repo")
+        self.assertEqual({"gpt-6.1-sol", "gpt-6.1-sol-mini"},
+                         {row["model"] for row in active})
+        self.assertEqual(1, next(row["reset_reported"] for row in active
+                                 if row["model"] == "gpt-6.1-sol"))
+        self.store.clear_quota_exhaustion("repo", "codex", "gpt-6.1-sol")
+        self.assertEqual({"gpt-6.1-sol-mini"},
+                         {row["model"] for row in self.store.active_quota_exhaustions("repo")})
+
+    def test_quota_without_a_reported_reset_uses_a_fallback_window(self) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+        expiry, reported = tm.Telemetry.quota_expiry("quota exceeded", now)
+        self.assertFalse(reported)
+        self.assertEqual("2026-10-27T12:30:00+00:00", expiry)
+
+        compact_expiry, compact_reported = tm.Telemetry.quota_expiry(
+            "quota exceeded; reset at 9:46PM", now,
+        )
+        self.assertTrue(compact_reported)
+        self.assertNotEqual("2026-10-27T12:30:00+00:00", compact_expiry)
+
+    def test_expired_quota_record_makes_the_target_eligible_again(self) -> None:
+        self.store.record_quota_exhaustion("repo", "codex", "gpt-6-luna")
+        connection = sqlite3.connect(self.store.path)
+        try:
+            with connection:
+                connection.execute(
+                    "UPDATE quota_exhaustions SET expires_at=? WHERE repo_id=?",
+                    ("2000-01-01T00:00:00+00:00", "repo"),
+                )
+        finally:
+            connection.close()
+
+        self.assertEqual([], self.store.active_quota_exhaustions("repo"))
 
     def test_it_reopens_without_losing_rows(self) -> None:
         self.store.record_stage("repo", "t1", "implement")

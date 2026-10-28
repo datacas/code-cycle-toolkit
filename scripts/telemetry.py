@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -101,7 +101,9 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: 22: a manual rereview (#346). The cycle row of a cycle that closed on one
 #: carries `review_provenance: manual`, and a manual receipt the resume could
 #: not accept stops with `manual_rereview_rejected`. Both payload-only.
-SCHEMA_VERSION = 22
+#: 23: quota exhaustion windows, keyed by repository, executor and model, so
+#: production continuations can avoid the exact target until its reset.
+SCHEMA_VERSION = 23
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -294,6 +296,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "environment_restricted",
     })),
     "reroute_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
+    "quota_resume_reason": ("token", frozenset({"recorded_quota_exhaustion"})),
     "routing_reason_count": ("count", None),
     "routing_rate_observations": ("count", None),
     "routing_rate_minimum": ("count", None),
@@ -783,6 +786,19 @@ CREATE TABLE IF NOT EXISTS stages (
 );
 CREATE INDEX IF NOT EXISTS stages_repo_task ON stages (repo_id, task_id);
 CREATE INDEX IF NOT EXISTS stages_profile   ON stages (repo_id, profile, role);
+
+-- Schema 23: an executor/model quota window survives a stopped cycle so a
+-- later --continue can route around the exhausted target.
+CREATE TABLE IF NOT EXISTS quota_exhaustions (
+    repo_id       TEXT NOT NULL,
+    executor      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    exhausted_at  TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    reset_reported INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo_id, executor, model)
+);
 
 -- Additive schema 13: one row per physical executor invocation. Existing
 -- stage rows are left untouched and remain queryable as unmeasured history.
@@ -2057,6 +2073,66 @@ class Telemetry:
                 item["patch"] = json.loads(item.pop("patch_json"))
                 result.append(item)
             return result
+
+    @staticmethod
+    def quota_expiry(detail: str | None, now: datetime | None = None) -> tuple[str, bool]:
+        """Return a UTC expiry and whether the executor reported a reset time."""
+        current = now or datetime.now(timezone.utc)
+        local_now = current.astimezone()
+        match = re.search(r"\b(\d{1,2}:\d{2}\s*[APap][Mm])\b", detail or "")
+        if match is not None and local_now.tzinfo is not None:
+            try:
+                reset_text = re.sub(r"(?i)(\d)(am|pm)$", r"\1 \2", match.group(1))
+                reset = datetime.strptime(reset_text.upper(), "%I:%M %p")
+                candidate = local_now.replace(
+                    hour=reset.hour, minute=reset.minute, second=0, microsecond=0,
+                )
+                if candidate <= local_now:
+                    candidate += timedelta(days=1)
+                return candidate.astimezone(timezone.utc).isoformat(), True
+            except (ValueError, OverflowError):
+                pass
+        return (current + timedelta(minutes=30)).isoformat(), False
+
+    def record_quota_exhaustion(self, repo_id: str, executor: str, model: str,
+                                detail: str | None = None) -> str:
+        now = datetime.now(timezone.utc)
+        expires_at, reset_reported = self.quota_expiry(detail, now)
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT INTO quota_exhaustions "
+                "(repo_id, executor, model, exhausted_at, expires_at, reason, reset_reported) "
+                "VALUES (?, ?, ?, ?, ?, 'quota', ?) "
+                "ON CONFLICT(repo_id, executor, model) DO UPDATE SET "
+                "exhausted_at=excluded.exhausted_at, expires_at=excluded.expires_at, "
+                "reason=excluded.reason, reset_reported=excluded.reset_reported",
+                (repo_id, executor, model, now.isoformat(), expires_at, int(reset_reported)),
+            )
+            connection.commit()
+        return expires_at
+
+    def active_quota_exhaustions(self, repo_id: str) -> list[dict]:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "DELETE FROM quota_exhaustions WHERE repo_id=? AND expires_at<=?",
+                (repo_id, now),
+            )
+            connection.commit()
+            rows = connection.execute(
+                "SELECT executor, model, exhausted_at, expires_at, reason, reset_reported "
+                "FROM quota_exhaustions WHERE repo_id=? AND expires_at>?",
+                (repo_id, now),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_quota_exhaustion(self, repo_id: str, executor: str, model: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "DELETE FROM quota_exhaustions WHERE repo_id=? AND executor=? AND model=?",
+                (repo_id, executor, model),
+            )
+            connection.commit()
 
     def record_stage(self, repo_id: str, task_id: str, role: str, **fields) -> int:
         """Append one stage execution.

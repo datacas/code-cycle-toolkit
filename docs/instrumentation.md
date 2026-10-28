@@ -759,6 +759,14 @@ opaque-reference check; outcome and source values are closed vocabularies.
 PR merge and revert associations are stored per PR, and a revert can revoke a
 resolution only when it names a merged PR in the resolving snapshot.
 
+Schema 23 adds `quota_exhaustions`, keyed by repository, executor, and requested
+model, with exhaustion and expiry timestamps, a closed reason token, and whether
+the executor reported a reset time. Production `--continue` reads active rows;
+expired rows are deleted when read, and a successful production dispatch clears
+its matching row. The additive table does not rewrite existing telemetry, and a
+code rollback leaves unused rows. The `quota_resume_reason` cycle payload field
+records when a continuation routes around a persisted exhaustion.
+
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
 `(cycle_id, stage_seq)`, without that selector being installed while the run is
