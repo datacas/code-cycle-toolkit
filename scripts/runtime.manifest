@@ -11,6 +11,7 @@
 
 cycle.py
 execution_plan.py
+execution_profiles.py
 cycle_history.py
 cycle_journal.py
 ci_gate.py

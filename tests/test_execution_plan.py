@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import cycle  # noqa: E402
 import execution_plan as plan  # noqa: E402
+import execution_profiles as profiles  # noqa: E402
 import run_cycle  # noqa: E402
 
 
@@ -194,6 +196,144 @@ class ExecutionPlanTests(unittest.TestCase):
         payload["stages"][0]["executor"] = "invented"
         with self.assertRaisesRegex(plan.ContractError, "invalid execution plan"):
             plan.ExecutionPlan.from_dict(payload)
+
+
+class ContractVersionTwoTests(unittest.TestCase):
+    def v1_payload(self) -> dict:
+        payload = ExecutionPlanTests().sample().to_dict(contract_version=1)
+        self.assertEqual(payload["contract_version"], 1)
+        self.assertNotIn("policy", payload["stages"][0])
+        return payload
+
+    def standard(self) -> plan.ExecutionPlan:
+        return profiles.build_plan(
+            profiles.resolve_execution(profiles.ExecutionSettings(),
+                                       profiles.ExecutionSettings()),
+            repository="o/r", work_item="328")
+
+    def test_v2_round_trip_keeps_decisions_obligations_and_controls(self) -> None:
+        sample = self.standard()
+        payload = sample.to_dict()
+        self.assertEqual(payload["contract_version"], 2)
+        self.assertEqual({item["control_id"] for item in payload["controls"]}, {"ci", "merge"})
+        self.assertTrue(payload["decisions"] and payload["obligations"])
+        self.assertEqual(plan.ExecutionPlan.from_dict(payload), sample)
+        self.assertEqual(plan.ExecutionPlan.from_dict(
+            json.loads(json.dumps(payload))).to_dict(), payload)
+
+    def test_v1_payload_is_read_and_projected_back_unchanged(self) -> None:
+        payload = self.v1_payload()
+        upgraded = plan.ExecutionPlan.from_dict(payload)
+        self.assertEqual(upgraded.contract_version, 2)
+        self.assertEqual(upgraded.stages[0].resolution, plan.Resolution.RESOLVED)
+        self.assertIsNone(upgraded.stages[0].policy)
+        self.assertEqual(upgraded.to_dict(contract_version=1), payload)
+
+    def test_v1_projection_refuses_pending_decisions(self) -> None:
+        with self.assertRaisesRegex(plan.ContractError, "decision for security.*version 2"):
+            self.standard().to_dict(contract_version=1)
+
+    def test_v1_projection_carries_controls_instead_of_dropping_them(self) -> None:
+        local = profiles.build_plan(
+            profiles.resolve_execution(
+                profiles.ExecutionSettings(),
+                profiles.invocation_settings(execution_profile="prototype")),
+            repository="o/r", work_item="328")
+        projected = local.to_dict(contract_version=1)
+        carried = projected["effective_policy"][plan.V1_PROJECTION_KEY]
+        self.assertEqual({item["control_id"] for item in carried["controls"]}, {"ci", "merge"})
+        self.assertEqual(carried["stages"]["review"]["resolution"], "not_applicable")
+        upgraded = plan.ExecutionPlan.from_dict(projected)
+        self.assertEqual(upgraded, local)
+        self.assertEqual(upgraded.to_dict(contract_version=1), projected)
+
+    def test_v1_projection_envelope_is_validated_on_upgrade(self) -> None:
+        local = profiles.build_plan(
+            profiles.resolve_execution(profiles.ExecutionSettings(),
+                                       profiles.invocation_settings(execution_profile="prototype")),
+            repository="o/r", work_item="328")
+        for field, value in (("controls", [{"control_id": "merge"}]),
+                             ("stages", {"unknown": {}}),
+                             ("obligations", [{"subject": "review"}])):
+            with self.subTest(field=field):
+                payload = local.to_dict(contract_version=1)
+                payload["effective_policy"][plan.V1_PROJECTION_KEY][field] = value
+                with self.assertRaises(plan.ContractError):
+                    plan.ExecutionPlan.from_dict(payload)
+
+    def test_unsupported_versions_are_rejected_not_read_as_v1(self) -> None:
+        for version in (0, 3, "1", None, True):
+            with self.subTest(version=version):
+                payload = self.v1_payload()
+                payload["contract_version"] = version
+                with self.assertRaisesRegex(plan.ContractError, "unsupported"):
+                    plan.ExecutionPlan.from_dict(payload)
+        with self.assertRaisesRegex(plan.ContractError, "unsupported"):
+            self.standard().to_dict(contract_version=3)
+        for version in (True, False, 1.0, 2.0, "2"):
+            with self.subTest(output_version=version):
+                with self.assertRaisesRegex(plan.ContractError, "unsupported"):
+                    self.standard().to_dict(contract_version=version)
+        payload = self.v1_payload()
+        payload["controls"] = []
+        with self.assertRaisesRegex(plan.ContractError, "version 1 plan cannot carry"):
+            plan.ExecutionPlan.from_dict(payload)
+        payload = self.v1_payload()
+        payload["stages"][0]["policy"] = "auto"
+        with self.assertRaisesRegex(plan.ContractError, "does not define"):
+            plan.ExecutionPlan.from_dict(payload)
+
+    def test_v2_validation(self) -> None:
+        def mutated(change) -> dict:
+            payload = self.standard().to_dict()
+            change(payload)
+            return payload
+
+        def stage(payload, stage_id):
+            return next(item for item in payload["stages"] if item["stage_id"] == stage_id)
+
+        cases = (
+            (lambda p: p["decisions"].pop(), "pending without a pending decision"),
+            (lambda p: p["decisions"].append(dict(p["decisions"][0], subject="implement")),
+             "which is not pending"),
+            (lambda p: p["decisions"][0].update(awaits="weather"), "unknown signal"),
+            (lambda p: p["controls"][1].update(automatic=True), "never automatic"),
+            (lambda p: p["controls"][0].update(resolution="disabled"), "cannot be disabled"),
+            (lambda p: p["controls"].append(dict(p["controls"][0], control_id="deploy")),
+             "unknown plan control"),
+            (lambda p: p["controls"][0].update(timing="eventually"), "invalid timing"),
+            (lambda p: stage(p, "security").update(selected=True, state="planned"),
+             "pending and cannot be selected"),
+            (lambda p: stage(p, "issue_review").update(policy="disabled"),
+             "only a disabled policy"),
+            (lambda p: stage(p, "verify").update(embedded_in="verify"), "invalid host"),
+            (lambda p: p["obligations"][0].update(subject="nowhere"), "unknown subject"),
+            (lambda p: (p["obligations"][0].update(subject="ci", state="applies"),
+                        p["controls"][0].update(requirement="optional")), "must be required"),
+            (lambda p: (p["obligations"][0].update(subject="implement", state="applies"),
+                        stage(p, "implement").update(selected=False, state="not_selected",
+                                                      obligation="optional",
+                                                      resolution="not_applicable"),
+                        stage(p, "verify").update(depends_on=[]),
+                        stage(p, "review").update(depends_on=[])), "not applicable but obligation"),
+        )
+        for change, pattern in cases:
+            with self.subTest(pattern=pattern):
+                with self.assertRaisesRegex(plan.ContractError, pattern):
+                    plan.ExecutionPlan.from_dict(mutated(change))
+
+    def test_a_pending_required_decision_prevents_execution(self) -> None:
+        standard = self.standard()
+        self.assertEqual({item.subject for item in standard.pending_required_decisions()},
+                         {"rereview"})
+        with self.assertRaisesRegex(plan.ContractError, "pending required decision"):
+            standard.check_executable("rereview")
+        resolved = standard.resolve_decision("security", True, "auth/ changed", "diff")
+        self.assertEqual(resolved.revision, 2)
+        self.assertIs(resolved.stage("security").obligation, plan.Obligation.REQUIRED)
+        resolved.check_executable("security")
+        with self.assertRaisesRegex(plan.ContractError, "no pending decision"):
+            resolved.resolve_decision("security", True, "again", "diff")
 
 
 if __name__ == "__main__":

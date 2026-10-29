@@ -47,6 +47,7 @@
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_dependency_setup",
+      "test_execution_profiles",
       "test_host_permissions",
       "test_manual_rereview",
       "test_native_prerequisites",
@@ -91,6 +92,7 @@
       "test_cycle_progress",
       "test_dispatch_failures",
       "test_execution_plan",
+      "test_execution_profiles",
       "test_stats",
       "test_support",
       "test_validate_package"

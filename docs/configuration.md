@@ -2,7 +2,7 @@
 
 Every setting the toolkit reads, in one place.
 
-**On this page:** [Precedence](#precedence) · [Full example](#full-example) · [`.code-cycle.yml` reference](#code-cycleyml-reference) · [Providers and repository](#providers-and-repository) · [Provider health cache](#provider-health-cache) · [Profiles and routing](#profiles-and-routing) · [CI policy](#ci-policy) · [Review](#review) · [Security review rule](#security-review-rule) · [Orchestration](#orchestration) · [Calibration](#calibration) · [Invocation parameters](#invocation-parameters) · [Output language](#output-language) · [Environment variables](#environment-variables) · [Command-line flags](#command-line-flags) · [Local files](#local-files)
+**On this page:** [Precedence](#precedence) · [Full example](#full-example) · [`.code-cycle.yml` reference](#code-cycleyml-reference) · [Providers and repository](#providers-and-repository) · [Provider health cache](#provider-health-cache) · [Profiles and routing](#profiles-and-routing) · [Execution profiles](#execution-profiles) · [CI policy](#ci-policy) · [Review](#review) · [Security review rule](#security-review-rule) · [Orchestration](#orchestration) · [Calibration](#calibration) · [Invocation parameters](#invocation-parameters) · [Output language](#output-language) · [Environment variables](#environment-variables) · [Command-line flags](#command-line-flags) · [Local files](#local-files)
 
 ## Precedence
 
@@ -74,6 +74,11 @@ code_cycle:
     timeout: 900                    # seconds the parallel CI gate waits for one SHA
   docker:
     host_socket_access: false       # true grants docker_host without asking (see routing.md)
+  execution:                        # how deep the cycle goes; not model routing
+    profile: standard               # prototype | standard | full | hotfix | custom
+    # objective: merge_ready        # local_change | verified_change | merge_ready
+    # stages:
+    #   security: required          # disabled | auto | enabled | required
 
   # ── Orchestration ─────────────────────────────────────────
   orchestration:
@@ -88,7 +93,7 @@ code_cycle:
 
 ## `.code-cycle.yml` reference
 
-All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, `routing`, `issue_review`, `ci`, and `docker` itself. It recognises the other keys and leaves them to the component that owns them.
+All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this table**, by name and before dispatching anything, so a typo such as `profles` can't silently run on defaults. It reads `repository`, `profiles`, `routing`, `issue_review`, `ci`, `docker`, and `execution` itself. It recognises the other keys and leaves them to the component that owns them.
 
 | Key | Type / values | Default | Read by |
 |---|---|---|---|
@@ -114,6 +119,9 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `ci.timeout` | whole seconds, 1 to 86400 | `900` | `run_cycle.py` and the orchestrators' `ci_gate.py` call, under `parallel` |
 | `docker.host_socket_access` | boolean | `false`: a stage that needs Docker asks first. `true` authorizes the `docker_host` grant in advance for both of its scopes. On Linux both native sandboxes open every reachable Unix socket; Claude's command hook still limits Docker to the listed Compose commands. A runtime `docker version` probe checks reachability inside the selected sandbox before Docker-dependent checks run | `run_cycle.py` (sensitive grants) |
 | `issue_review.mode` | `auto` · `off` | `auto` | `run_cycle.py`, both orchestrators |
+| `execution.profile` | `prototype` · `standard` · `full` · `hotfix` · `custom` | `standard` | `run_cycle.py`; see [Execution profiles](#execution-profiles) |
+| `execution.objective` | `local_change` · `verified_change` · `merge_ready` | the profile's | `run_cycle.py` |
+| `execution.stages.<stage_id>` | `disabled` · `auto` · `enabled` · `required` | the profile's | `run_cycle.py` |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
 | `security_review.always_when.files` | filename glob list | built-in defaults | same |
@@ -153,6 +161,70 @@ only when its branch contains the exact, delimited work-item identifier or its e
 Target format: `executor:provider/model effort`, where executor is `codex`, `claude`, or `orca`. Profile names: `cheap_coder`, `deep_coder`, `reviewer`, `senior_reviewer`, `security`, `coordinator`, `auxiliary_tool`, `cheap_tool`. Models you declare here are also added to telemetry's accepted model set for this repository.
 
 Defaults, role rules, fallback behaviour, strategies, and Jev are explained in [Routing and models](routing.md). To see the effective profiles or write this block with a preset, use [`cc-profile-config`](skills.md#cc-profile-config).
+
+### Execution profiles
+
+An execution profile states how deep a cycle goes; an objective states the outcome it must reach; a stage policy adjusts one stage. They are separate from each other and from the model routing [profiles](#profiles-and-routing), which they never read or change. `run_cycle.py --dry-run [--json]` prints the resulting [execution plan](execution-plan.md) without running anything.
+
+```yaml
+code_cycle:
+  execution:
+    profile: full                   # prototype | standard | full | hotfix | custom
+    objective: merge_ready          # local_change | verified_change | merge_ready
+    stages:
+      security: required            # disabled | auto | enabled | required
+```
+
+**Profiles.** `standard` is the current cycle and the default: with no new configuration, the plan records `standard` and the current stage order, policies, and side effects. `prototype` is fast local output. `full` applies every applicable declared control at greater depth, without repeating an unchanged review. `hotfix` reproduces the defect, makes the minimal change, and runs a focused regression, with no exception to security or review. `custom` starts from `standard` and applies explicit stage policies.
+
+| Stage | `prototype` | `standard` | `full` | `hotfix` | `custom` |
+|---|---|---|---|---|---|
+| `issue_review` | auto | auto | required | auto | auto, configurable |
+| `implement` | required | required | required | required | required, configurable |
+| `verify` (within `implement`) | required | required | required | required | required, configurable |
+| `review` | disabled | required | required | required | required, configurable |
+| `security` (within the reviews) | auto | auto | required when it applies | auto | auto, configurable |
+| `resolve` | auto | auto | auto | auto | auto, configurable |
+| `rereview` | auto | auto | auto | auto | auto, configurable |
+
+A row is not a dispatch: `verify` runs inside the implementation and `security` inside the reviews, as each plan entry's `embedded_in` records. `resolve` runs only for concrete findings or failed checks. `rereview` runs only after changes that invalidate the review's evidence, in every profile including `full`: a clean review without later changes is not repeated, and open findings without fixes keep their blocks instead of being reviewed again.
+
+**Stage policies.**
+
+| Policy | Meaning |
+|---|---|
+| `disabled` | Do not request the stage. When that contradicts an obligation of the profile or objective, or a stage that depends on it, the plan is refused with the conflict. A conditional obligation, such as the security rule, stays in the plan; if it later applies, the plan is invalid rather than the obligation void. |
+| `auto` | Decide by deterministic rules on the available signals. Unknown risk is never read as no risk: a condition that needs the change stays `pending`. |
+| `enabled` | Schedule the stage when it applies. Its unavailability is recorded; it creates no obligation of success. |
+| `required` | When the stage applies, require its result and evidence. A missing tool or an inconclusive result does not satisfy it. |
+
+**Objectives.** `prototype` defaults to `local_change`; every other profile to `merge_ready`.
+
+| Objective | Verification | Review | CI | Merge | Publication |
+|---|---|---|---|---|---|
+| `local_change` | per stage policy | not required | not required | not required | none |
+| `verified_change` | required | required | may run, not required | not required | change request |
+| `merge_ready` | required | required | required for the reviewed SHA | never automatic; stays an explicit human merge | change request |
+
+An objective adds obligations: publishing a `prototype` with `--objective merge_ready` makes its review required, and the plan records the objective as that policy's source. Conflicting explicit objectives in the repository and invocation are refused, including `--local-only` against a configured publication objective; agreeing selections are accepted.
+
+**Precedence.** Settings resolve in layers: compatible defaults, profile, repository (`.code-cycle.yml`), invocation. A later layer replaces an earlier one, and the plan lists each effective value with its source and the values it replaced. Two different values in one layer, such as `--issue-review off` with `--stage issue_review=auto`, or `--local-only` with `--objective merge_ready`, are refused rather than one silently winning. Obligations are monotonic: an override may add one but never remove one. Lowering a `required` stage of `prototype`, `standard`, `full`, or `hotfix` is a conflict (use `custom`), and no profile may lower what the objective or a declared `--security-sensitive` requires. Every conflict is reported, with its source, before any effect.
+
+| Key or flag | Layer | Stage or control | Policy it sets |
+|---|---|---|---|
+| `code_cycle.issue_review.mode` (`auto`\|`off`) | repository | `issue_review` | `auto` \| `disabled` |
+| `--issue-review auto\|off` | invocation | `issue_review` | `auto` \| `disabled` |
+| `code_cycle.ci.policy` (`strict`\|`parallel`) | repository | `ci` control | timing of the gate, not whether it runs |
+| `--ci-policy strict\|parallel` | invocation | `ci` control | timing of the gate, not whether it runs |
+| `--local-only` | invocation | objective | selects `local_change` |
+| `code_cycle.execution.objective` / `--objective` | repository / invocation | objective | selects the objective |
+| `code_cycle.execution.profile` / `--execution-profile` | repository / invocation | profile | selects the base profile |
+| `code_cycle.execution.stages.<stage_id>` / `--stage STAGE=POLICY` | repository / invocation | one stage | `disabled`\|`auto`\|`enabled`\|`required` |
+| `--from` / `--continue` | invocation | resume start point | not a policy: the stages before it are `not_applicable`, with the resumed run as provenance |
+
+The configurable stages are `issue_review`, `implement`, `verify`, `review`, `security`, `resolve`, and `rereview`. `ci` and `merge` are controls, not stages: `--stage ci=…` is refused, and nothing makes a merge automatic. An unknown key, stage, profile, objective, or policy stops the run by name.
+
+**Before plan-driven execution (#329).** The driver follows the plan only from #329 on. Until then, a run without `--dry-run` refuses, before any effect, any execution configuration whose behaviour differs from `standard`, naming the setting and its source. No new configuration, or an explicit configuration that resolves to `standard` (including `custom` without a difference, `issue_review` off, and `local_change` through the local-only run), runs the current flow; `local_change` from `--objective` or the file applies the local-only run's own requirements (`--cwd` linked worktree, `--workspace current`). A requested profile is never silently replaced by `standard`. `--dry-run` shows the plan for every profile and override.
 
 ### Issue review
 
@@ -266,7 +338,7 @@ Machine-readable tokens never translate: `REV-xxx`, severities, statuses, dispos
 
 ### `run_cycle.py`
 
-`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--ci-policy strict|parallel` (default `ci.policy`, else strict) · `--ci-timeout` (default `ci.timeout`, else 900 seconds) · `--cwd` · `--workspace task|current` (default task) · `--local-only` (requires `--workspace current`) · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config`. Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
+`--task` (required) · `--repo` · `--difficulty 1|2|3` (default 2) · `--verifiability auto|partial|human` (default auto) · `--security-sensitive` · `--verification available|unavailable` · `--mode production|calibration` · `--issue-review auto|off` (default `issue_review.mode`, else auto) · `--from implement|review|resolve|rereview` (default implement) · `--pr` (required by any `--from` but implement) · `--continue` · `--max-iterations` (default 3) · `--ci-policy strict|parallel` (default `ci.policy`, else strict) · `--ci-timeout` (default `ci.timeout`, else 900 seconds) · `--cwd` · `--workspace task|current` (default task) · `--local-only` (requires `--workspace current`) · `--timeout` · `--detach` · `--verbose` · `--progress-interval` (default 60 seconds) · `--database` · `--config` · `--no-config` · `--execution-profile prototype|standard|full|hotfix|custom` (default `execution.profile`, else standard) · `--objective local_change|verified_change|merge_ready` (default `execution.objective`, else the profile's) · `--stage STAGE=POLICY` (repeatable) · `--dry-run` · `--json` (requires `--dry-run`). Each is explained in [Workflows → Runtime driver](workflows.md#runtime-driver-run_cyclepy).
 
 ### `ci_gate.py` (used by both orchestrators under `parallel`)
 
