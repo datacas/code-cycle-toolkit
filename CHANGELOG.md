@@ -7,6 +7,15 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- **Publication audit (#261).** After every publishing stage, whatever it
+  reported, `run_cycle.py` compares the cycle branch, the default branch and
+  the protected branches on `origin`, and the cycle's change requests, with
+  their state before the stage. A merged or closed change request, a
+  non-fast-forward move or deletion of the cycle branch, or any move or
+  deletion of the default or a protected branch stops the cycle with
+  `publication_violation` and the before/after evidence; an unreadable state
+  stops it with `publication_unverified`. Code hosts other than GitHub have
+  their refs audited and the rest reported `unverified`. Telemetry schema 24.
 - **Manual rereview (#346).** `manual_rereview.py record` attaches a rereview
   that ran outside the runtime to its pull request with a schema-2 receipt
   marked `provenance: manual`, the authenticated operator, the confirmed head

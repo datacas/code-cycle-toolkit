@@ -102,8 +102,9 @@ equal to the expected commit. Before a success comment or receipt, the stage
 also reads the PR using `gh` and confirms that head. The runtime independently
 compares the reported SHA, local HEAD and current PR head before recording a
 successful functional verdict. A failure/progress comment must state that the
-push failed and cannot count as a successful resolution. The general invariant
-audit for merges, force pushes and unrelated refs remains separate (#261).
+push failed and cannot count as a successful resolution. The invariant audit
+for merges, force pushes and deleted refs is described in
+[Publication audit](#publication-audit) below.
 The completion probe normalizes supported GitHub PR references (a number,
 `#number`, `owner/repo#number`, or a GitHub `/pull/number` URL) to the numeric
 identifier before checking the remote head.
@@ -114,6 +115,66 @@ and retains bounded, redacted command results in the cycle journal. Retry the
 same upload after a failure; it creates no new commit. On resume, reuse an
 existing success publication rather than duplicating it. Bitbucket and Orca
 transport recovery are not verified by this GitHub native path.
+
+## Publication audit
+
+The cycle never merges, force-pushes or deletes refs. A stage's command table
+(#142) narrows what it can run, but code that its verification executes and
+non-Bash tools that its host pre-approves can still reach the code host. So
+`run_cycle.py` checks the result after every publishing stage (`implement`,
+`review`, `resolve`, `rereview`), on every executor, whatever status the stage
+reported (`scripts/publication_audit.py`):
+
+1. **Change requests.** Every change request of the cycle that was open before
+   the stage is still open, and any change request the stage created is open.
+   A merge or a close is a breach. The audit reads the change request that the
+   stage was given, or for `implement` the one it reports, and every change
+   request whose head is the cycle branch.
+2. **Cycle branch.** Its remote head did not move, or moved fast-forward from
+   the head recorded before the stage. A non-fast-forward move or a deletion
+   is a breach. `implement` may create the branch when it was absent. A commit
+   the checkout does not have is fetched into `FETCH_HEAD` only, so the audit
+   leaves no ref behind.
+3. **Default and protected branches.** They did not move, and none was deleted.
+   Any move is a breach, even a fast-forward or a legitimate push by someone
+   else.
+
+The audited refs are the cycle branch (the change request's head branch when
+the runtime knows it, otherwise the checkout's branch), the default branch
+(`code_cycle.repository.default_branch` when configured, otherwise the branch
+`origin`'s `HEAD` names), and the branches the code host reports as protected.
+A remote that has no branch yet has no default branch to audit; that part is
+reported `unverified`. They are read once
+before the stage, on `origin` only, and the same set is compared after it. A
+push to any other branch never fails the check (#197).
+
+The runtime cannot tell who moved a ref during a stage. A breach stops the
+cycle with `publication_violation` whoever caused it, and the stop line says
+"changed outside the stage?" instead of blaming the stage. `publication_violation`
+means that an invariant failed, not that the stage caused it. The audit runs
+before the stage's report is read, so a breach wins over a `BLOCKED` or any
+other `stage_not_completed`. No later stage is dispatched. The evidence goes to
+the cycle report (`CycleReport.publication_audit`) and the cycle journal. It
+holds the before and after SHA of each audited ref, the before and after state
+of each change request, and for each breach its kind (`change_request_merged`,
+`change_request_closed`, `non_fast_forward`, `protected_ref_moved`,
+`ref_deleted`) with up to 20 commits added and removed when they are available.
+
+A state that cannot be read is never read as empty. If `origin`'s refs, its
+default branch, the protected branches or a change request cannot be read, the
+cycle stops with `publication_unverified`. Before the stage, nothing is
+dispatched. After it, the stage's report is not accepted.
+
+On GitHub the change requests and protected branches are read through `gh api`.
+Other code hosts, Bitbucket included, have no reader until #238. For those, the
+cycle branch and the default branch are still audited through Git, and the
+change-request state and protected branches are reported `unverified` in the
+cycle report, never as passed. A `--local-only` run publishes nothing and is
+not audited.
+
+Reconciling a stage that published a verified result but reported `BLOCKED` is
+#364. Until it exists, a `BLOCKED` result is never turned into a success, even
+when the SHAs match.
 
 ---
 

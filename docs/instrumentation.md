@@ -643,7 +643,7 @@ Each outcome has one source row, listed in `telemetry.OUTCOME_FIELDS`:
 | `cycle` | `boundary_verified` | the latest test report recorded it (schema 9) |
 | `cycle` | `fallback_stages`, `contract_violations` | always: every dispatch of the run went through the recorder |
 | `cycle` | `status`, `iterations` | always |
-| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19; `manual_rereview_rejected` from schema 22; `worktree_dirty` and `worktree_diverged` when safe synchronization to an open pull request head is impossible |
+| `cycle` | `stop_reason` | the run closed through `run_cycle.py` (schema 7); `needs_refinement` and `readiness_unconfirmed` from schema 11; `interrupted` from schema 12; `ci_timeout`, `ci_unreadable`, `ci_not_passing`, and `head_moved` from schema 19; `manual_rereview_rejected` from schema 22; `publication_violation` and `publication_unverified` from schema 24; `worktree_dirty` and `worktree_diverged` when safe synchronization to an open pull request head is impossible |
 | `cycle` | `issue_review` | the cycle started at `implement` and was not continued: `off`, `skipped` (declared trivial and not security-sensitive), or `dispatched` (schema 11) |
 | `cycle` | `continued` | the cycle continued an interrupted implementation with `--continue`; always `true` when present (schema 12) |
 | `cycle` | `repeated_findings` | the ladder was evaluated at least once; the last value, so a survival the final rereview found is kept when no dispatch follows it (schema 7) |
@@ -707,9 +707,12 @@ than a completion, or only started work that finishes elsewhere),
 needs a sensitive sandbox grant nobody answered; see *Sensitive sandbox grants*
 in `routing.md`), `manual_rereview_rejected` (schema 22: the latest receipt is a
 manual rereview a resume cannot close on; see *Manual rereview* in
-`review-cycle.md`), `worktree_dirty`, or `worktree_diverged`. The last two stop
-before changing files when a dirty tree or non-fast-forward prevents syncing an
-open pull request head. A closing row from an earlier version has none, and
+`review-cycle.md`), `publication_violation` (schema 24: a publication invariant
+failed during a publishing stage, whoever caused it), `publication_unverified`
+(schema 24: the audited refs or change-request state could not be read; see
+*Publication audit* in `role-workspace-policy.md`), `worktree_dirty`, or
+`worktree_diverged`. The last two stop before changing files when a dirty tree
+or non-fast-forward prevents syncing an open pull request head. A closing row from an earlier version has none, and
 `cc-stats` reads it as unknown. A stage row's `reroute_reason` may then be
 `permission_required` or `permission_answered`.
 
@@ -766,6 +769,13 @@ expired rows are deleted when read, and a successful production dispatch clears
 its matching row. The additive table does not rewrite existing telemetry, and a
 code rollback leaves unused rows. The `quota_resume_reason` cycle payload field
 records when a continuation routes around a persisted exhaustion.
+
+Schema 24 adds the stop reasons `publication_violation` and
+`publication_unverified` of the [publication audit](role-workspace-policy.md#publication-audit).
+They are payload-only. The audit's evidence is not stored in the telemetry
+rows. The cycle journal holds one `publication_audit` result per publishing
+stage and one `failure` row per breach, with the ref and its before and after
+SHA. The full evidence is in the cycle report.
 
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by

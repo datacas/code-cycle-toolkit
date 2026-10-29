@@ -354,6 +354,7 @@ The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dis
 | No progress | a rereview reports the same `head_sha` and the same open finding set as the review before it | `no_progress` |
 | Repeated findings | one `REV-xxx` ID survived a claimed fix twice | `repeated_findings` |
 | Manual rereview not accepted | a resume's latest receipt is a [manual rereview](#manual-rereview) it cannot close on | `manual_rereview_rejected` |
+| Publication invariant failed | during any publishing stage, a change request was merged or closed, the cycle branch moved non-fast-forward or was deleted, or the default or a protected branch moved ([Publication audit](role-workspace-policy.md#publication-audit)) | `publication_violation` |
 
 Before the loop, an [issue review](#issue-review-before-implementation) can stop a new cycle as `needs_refinement` or `readiness_unconfirmed` without implementing anything.
 
