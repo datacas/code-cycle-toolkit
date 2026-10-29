@@ -288,8 +288,14 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--progress-interval` | `120` seconds | Progress cadence through the first 15 minutes; switches to `300` seconds after the 15-minute update |
 | `--database` | [default path](telemetry.md#where-it-lives) | Telemetry database |
 | `--config` / `--no-config` | `.code-cycle.yml` in `--cwd` | Use another file, or the built-in defaults on purpose |
+| `--execution-profile` | `execution.profile`, else `standard` | `prototype`, `standard`, `full`, `hotfix`, or `custom`; separate from the model routing profiles. See [Execution profiles](configuration.md#execution-profiles) |
+| `--objective` | `execution.objective`, else the profile's | `local_change`, `verified_change`, or `merge_ready`; `--local-only` is `local_change` |
+| `--stage STAGE=POLICY` | the profile's | One stage's policy, `disabled`, `auto`, `enabled`, or `required`; repeatable |
+| `--dry-run` [`--json`] | off | Print the execution plan, readable or as its JSON contract, and exit. Runs no stage and changes nothing |
 
 **Requires:** the runtime and an authenticated Codex and/or Claude CLI. For publishing stages, it also needs `gh` authenticated with push access, Codex CLI 0.138.0 or later, and a working tree on a named branch. Before any publishing dispatch, a readiness check verifies this and records `missing_capability=publication_access` when it fails.
+
+**Dry run:** `--dry-run` resolves the execution profile, objective, and stage policies and prints the plan without selecting a worktree, opening the telemetry database, preparing dependencies, asking for a grant, or starting an agent. Conditions that need the future change stay `pending`. A conflict, such as `--issue-review off` under `full`, is refused before anything runs. Until the driver follows the plan (#329), a run without `--dry-run` refuses any execution configuration whose behaviour differs from `standard`, naming each setting and its source. See [Execution profiles](configuration.md#execution-profiles).
 
 **Local-only rehearsal:** `--cwd /path/to/linked-worktree --workspace current --local-only` refuses the live repository. The explicit `current` policy is required so workspace selection cannot create another task worktree. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
 

@@ -58,6 +58,7 @@ from urllib.parse import quote, urlsplit
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 import ci_gate
 try:
@@ -67,7 +68,26 @@ except ModuleNotFoundError:
 import user_choices
 import triage_repair
 from cycle import CycleInterrupted, CycleRecorder, StageOutcome
-from execution_plan import completion_statuses, skills_for_roles
+from execution_plan import (
+    ExecutionPlan,
+    StagePolicy as PlanStagePolicy,
+    completion_statuses,
+    skills_for_roles,
+)
+from execution_profiles import (
+    OBJECTIVES as EXECUTION_OBJECTIVES,
+    PROFILES as EXECUTION_PROFILES,
+    ExecutionConfigError,
+    PlanSignals,
+    ResolvedExecution,
+    Setting,
+    build_plan,
+    current_flow_differences,
+    invocation_settings,
+    render_text as render_plan,
+    repository_settings,
+    resolve_execution,
+)
 from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup
 from cycle_history import (
     COMMENT_STAGES,
@@ -152,7 +172,7 @@ DEFAULT_WORKTREE_DIR = ".worktree"
 #: The keys under `code_cycle` this driver reads itself.
 DRIVER_KEYS = frozenset({"repository", "profiles", "routing", "issue_review",
                          "resolve", "worktree_dir", "allowed_commands", "ci",
-                         "docker", "user_choices"})
+                         "docker", "user_choices", "execution"})
 
 #: The keys under `code_cycle.ci` (#228), all read by this driver.
 CI_KEYS = frozenset({"policy", "timeout"})
@@ -423,6 +443,7 @@ def load_config(path: Path) -> dict:
         "code_cycle.routing", "code_cycle.calibration",
         "code_cycle.issue_review", "code_cycle.resolve",
         "code_cycle.allowed_commands", "code_cycle.ci", "code_cycle.docker",
+        "code_cycle.execution",
     ):
         section, value = config, None
         for part in key.split("."):
@@ -538,7 +559,9 @@ def load_config(path: Path) -> dict:
         load_jev_config(config)
         load_issue_review_mode(config)
         configured_worktree_dir(config)
-    except (RouterError, JevConfigError, IssueReviewConfigError) as error:
+        repository_settings(config, str(path))
+    except (RouterError, JevConfigError, IssueReviewConfigError,
+            ExecutionConfigError) as error:
         raise CycleDriverError(str(error)) from error
     return config
 
@@ -4671,6 +4694,91 @@ def plan_with_strategy(args) -> tuple[str, dict, RoutingStrategy]:
     return repo, profiles, routing_strategy
 
 
+def execution_of(args, config: dict[str, Any]) -> ResolvedExecution:
+    """The execution profile, objective, and stage policies, with their sources.
+
+    Validation only: nothing is read beyond the already loaded configuration,
+    and model routing (`code_cycle.profiles`) is not part of it.
+    """
+    try:
+        repository = repository_settings(config, CONFIG_NAME)
+        invocation = invocation_settings(
+            execution_profile=getattr(args, "execution_profile", None),
+            objective=getattr(args, "objective", None),
+            local_only=getattr(args, "local_only", False),
+            stages=getattr(args, "stage", None) or (),
+            issue_review=getattr(args, "issue_review", None),
+        )
+        if getattr(args, "ci_policy", None) is not None:
+            ci_source = "--ci-policy"
+        elif "policy" in _ci_section(config):
+            ci_source = f"code_cycle.ci.policy in {CONFIG_NAME}"
+        else:
+            ci_source = "built-in default"
+        ci_layer = {"--ci-policy": "invocation", "built-in default": "default"}.get(
+            ci_source, "repository")
+        return resolve_execution(repository, invocation, ci_policy=Setting(
+            ci_policy_of(config, getattr(args, "ci_policy", None)), ci_source, ci_layer))
+    except ExecutionConfigError as error:
+        raise CycleDriverError(str(error)) from error
+
+
+def execution_plan_of(args, config: dict[str, Any], repo: str,
+                      provenance: str = "dry_run") -> ExecutionPlan:
+    """Build the plan for this invocation; conflicts are refused here, before any effect."""
+    resolved = execution_of(args, config)
+    try:
+        return build_plan(
+            resolved, repository=repo, work_item=args.task,
+            signals=PlanSignals(difficulty=args.difficulty,
+                                security_sensitive=args.security_sensitive),
+            start_from=args.start_from, continue_work=args.continue_work,
+            change_request=args.change_request,
+            base_ref=base_branch_of(config, None), provenance=provenance,
+        )
+    except ExecutionConfigError as error:
+        raise CycleDriverError(str(error)) from error
+
+
+def dry_run(args) -> ExecutionPlan:
+    """The plan an invocation would follow, built without running anything.
+
+    No worktree is selected, no database opened, no dependency prepared, no
+    grant asked for and no agent started: only the configuration file is read.
+    """
+    config = resolve_config(args)
+    repo = args.repo or repository_of(config)
+    if not repo:
+        raise CycleDriverError(
+            "no repository: pass --repo or declare "
+            f"code_cycle.repository.selector in {CONFIG_NAME}")
+    for field_name, value in (("repo_id", repo), ("task_id", args.task)):
+        try:
+            validate_reference(field_name, value)
+        except TelemetryError as error:
+            raise CycleDriverError(str(error)) from error
+    return execution_plan_of(args, config, repo)
+
+
+#: Until the driver follows the plan (#329), it runs the current flow only.
+PLAN_DRIVEN_EXECUTION = "#329"
+
+
+def check_current_flow(resolved: ResolvedExecution) -> None:
+    """Refuse an execution configuration the current flow would not honour.
+
+    A requested profile is never replaced by `standard` in silence: the run
+    stops before any effect, naming each setting and its source.
+    """
+    differences = current_flow_differences(resolved)
+    if differences:
+        raise CycleDriverError(
+            "this execution configuration differs from the standard flow: "
+            + "; ".join(differences)
+            + f". Plan-driven execution needs {PLAN_DRIVEN_EXECUTION}; until then a "
+            "run follows only the standard flow. Inspect the plan with --dry-run.")
+
+
 def _main_worktree_root(cwd: Path, run=subprocess.run) -> Path | None:
     """Return the main worktree root seen from this worktree, when available.
 
@@ -4939,15 +5047,50 @@ def main(argv: list[str] | None = None) -> int:
                              "and deny are stored only for a scope an earlier run asked about")
     parser.add_argument("--repair-approval", default=None,
                         help="approve exactly one proposed comment repair: COMMENT_ID:SHA256")
+    parser.add_argument("--execution-profile", choices=EXECUTION_PROFILES, default=None,
+                        help=("how deep the cycle goes (default: code_cycle.execution.profile "
+                              f"in {CONFIG_NAME}, else standard); separate from the model "
+                              "routing profiles"))
+    parser.add_argument("--objective", choices=EXECUTION_OBJECTIVES, default=None,
+                        help=("the outcome the cycle must reach (default: "
+                              "code_cycle.execution.objective, else the profile's); "
+                              "--local-only is local_change"))
+    parser.add_argument("--stage", action="append", default=[], metavar="STAGE=POLICY",
+                        help=("set one stage's policy: disabled, auto, enabled or "
+                              "required (repeatable); an override never removes an "
+                              "obligation"))
+    parser.add_argument("--dry-run", action="store_true",
+                        help=("print the execution plan and exit; runs no stage and "
+                              "changes nothing"))
+    parser.add_argument("--json", action="store_true",
+                        help="with --dry-run, print the plan as its JSON contract")
     args = parser.parse_args(argv)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
+    if args.json and not args.dry_run:
+        parser.error("--json needs --dry-run")
+    if args.dry_run and args.detach:
+        parser.error("--dry-run runs nothing to detach")
 
     try:
         validate_start(args.start_from, args.change_request, local_only=args.local_only,
                        continue_work=args.continue_work)
+        if args.dry_run:
+            planned = dry_run(args)
+            print(json.dumps(planned.to_dict(), indent=2) if args.json
+                  else render_plan(planned))
+            return 0
         repo, profiles, routing_strategy = plan_with_strategy(args)
         config = resolve_config(args, report=print)
+        execution = execution_of(args, config)
+        execution_plan_of(args, config, repo, provenance="run")
+        check_current_flow(execution)
+        if execution.objective.value == "local_change" and not args.local_only:
+            # The current flow reaches local_change only as a local-only run,
+            # with the same explicit worktree it requires.
+            args.local_only = True
+            validate_start(args.start_from, args.change_request, local_only=True,
+                           continue_work=args.continue_work)
         grant_answers = parse_grant_options(args.grant)
         if args.local_only:
             validate_local_only_cwd(args.cwd)
@@ -5001,8 +5144,11 @@ def main(argv: list[str] | None = None) -> int:
     change_bases = change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.
     jev = load_jev_config(config)
-    issue_review = (IssueReviewMode(args.issue_review) if args.issue_review
-                    else load_issue_review_mode(config))
+    # `--issue-review`, `--stage issue_review=…` and the file's mode were layered
+    # into one policy; the current flow honours auto and disabled.
+    issue_review = (IssueReviewMode.OFF
+                    if execution.stages["issue_review"].policy is PlanStagePolicy.DISABLED
+                    else IssueReviewMode.AUTO)
     work_item_provider, work_item_repository = _work_item_scope(
         config, repo, args.work_item_repository
     )
