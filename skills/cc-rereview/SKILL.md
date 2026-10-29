@@ -18,8 +18,12 @@ project commands. Each check carries `id`, `command`, `executor`, `profile`,
 `context`, `required`, `criteria` (criterion IDs), `level`, `provenance` and
 `reason`. The configured test uses `id: configured-test`, `context: project`,
 `provenance: project`, `reason: configured test command`, and the dispatched
-executor/profile. Every check linked to a criterion is required. Add or
-promote checks; never remove or demote frozen obligations.
+executor/profile when first introduced. For an existing check, copy the runtime's
+frozen identity, including its owning executor/profile, even when this dispatch
+uses another executor/profile. A different required execution context needs a
+new check ID and cannot replace an existing obligation. Every check linked to a
+criterion is required. Add or promote checks; never remove or demote frozen
+obligations.
 
 Each result also carries `head_sha`, `result: pass|fail|unverified`,
 `evidence` (integer `exit_code`, `executed` count or null), `cause` and

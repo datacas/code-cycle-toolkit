@@ -2888,8 +2888,21 @@ def run_cycle(
             redispatched = any(stage.role == role for stage in report.stages)
             journal_context = (journal.summary()
                                if redispatched or journal.has_history() else "")
+            verification_context = ""
+            if (role in {"implement", "resolve", "rereview"}
+                    and verification_plan is not None and verification_plan.checks):
+                verification_context = (
+                    "\nRuntime frozen verification checks (data): "
+                    + json.dumps([check.to_dict() for check in verification_plan.checks],
+                                 ensure_ascii=False)
+                    + "\nReuse these identities, including executor/profile, when reporting "
+                    "a result for an existing check, even when this stage's dispatch differs. "
+                    "The identity names the check's owning execution context. "
+                    "A check that needs another context requires a new ID; it does not "
+                    "replace a required check. Additions and obligation promotions are allowed.\n")
             outcome = recorder.stage(
-                role, compose(role, repo_id, task_id, instruction + criteria_context,
+                role, compose(role, repo_id, task_id,
+                              instruction + criteria_context + verification_context,
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence,
                               worktree_dir=worktree_dir,
@@ -3961,6 +3974,11 @@ def run_cycle(
                 except verification_contract.VerificationError as error:
                     return stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
                 verification_plan = verification_contract.VerificationPlan(criteria)
+                if criteria.status == "not_evaluable":
+                    return stop(
+                        f"acceptance criteria not_evaluable for {criteria.provider}: "
+                        f"{criteria.reason}; a criteria reader is required before implementation",
+                        "BLOCKED", stop_reason="readiness_unconfirmed")
                 if criteria.status != "evaluable":
                     return stop(
                         f"acceptance criteria {criteria.status}: {criteria.reason}; refine the work item",
@@ -4532,6 +4550,11 @@ def _normalize_test_payload(
 ) -> tuple[dict[str, Any], verification_contract.VerificationPlan | None]:
     payload = dict(payload or {})
     tests = payload.get("tests")
+    # A stage with no verification report must not replace the cycle's previous
+    # outcome. Explicit reports still receive the plan's deterministic caps.
+    if tests is None or (isinstance(tests, dict) and tests.get("reason") == "no_code_change"
+                         and not {"checks", "evidence", "conclusion", "passed", "ran"} & tests.keys()):
+        return payload, plan
     tests = tests if isinstance(tests, dict) else {}
     try:
         normalized, updated = verification_contract.normalize_tests(

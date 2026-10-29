@@ -208,7 +208,11 @@ top-level `tests.evidence` list. This is separate from the unchanged code-host
 ```
 
 Freeze each check before execution. A result names the same check ID, command,
-executor/profile and context. Required checks originate in project policy and
+executor/profile and context. The runtime supplies frozen check identities to
+later code stages. Copy that identity, including its owning executor/profile,
+even when resolve or rereview is dispatched with another profile or executor.
+A check requiring a different execution context gets a new ID and does not
+replace the existing obligation. Required checks originate in project policy and
 criterion links; an agent may promote, never demote. Record an unexecuted check
 as `result: unverified`, with `cause`, evidence and actual recovery `attempts`;
 do not invent an exit code. Results on another HEAD stay in history but cannot
@@ -228,8 +232,13 @@ before any implementation, even with issue review off or difficulty 1. They
 are insufficient specification, never a failed test. Existing issues are not
 migrated. `.github/ISSUE_TEMPLATE/work-item.md` supplies the grammar for new work.
 IDs are `AC-n` in order, scoped to the execution-plan revision and content hash.
-Plane and Jira return `not_evaluable` with reason `criteria reader unavailable`,
-distinct from parsed criteria that remain unmet; neither counts as satisfied.
+Plane and Jira return `not_evaluable` with reason `criteria reader unavailable`.
+Their cycles stop as `BLOCKED` with `stop_reason: readiness_unconfirmed` before
+any agent dispatch, regardless of issue-review mode or difficulty. Editing the
+work item cannot clear this stop: a provider reader must become available
+(Plane reading belongs to #238-A; Jira needs its own reader). This differs from
+parsed criteria needing refinement; neither unavailable nor unmet criteria
+count as satisfied.
 
 For one release, omitted `tests.version` or version 1 accepts `tests.evidence`.
 The compatibility interval starts with the first published release supporting
@@ -240,6 +249,11 @@ reports retain their historical evidence classification. Version 2 evidence
 is normalized into a private compatibility view for `tests_basis`,
 `boundary_verified`, telemetry and stats; this view is not a second result
 contract. Malformed or unsupported reports cap at `not_verified`.
+Stages that omit `tests` or report `tests.reason: no_code_change` without outcome
+fields record no new test outcome and preserve the previous cycle-level outcome.
+Explicit reports (including `checks`, `evidence`, `conclusion`, `passed` or `ran`)
+still receive the deterministic caps, even with `no_code_change`; a required
+boundary run can still be recorded as missing for completed code work.
 
 Plan persistence, the final verification gate and verification-only resume are
 deferred to #329; see [Execution plan](execution-plan.md). CI substitution is

@@ -18,7 +18,7 @@ import execution_profiles as profiles
 import run_cycle as rc
 import stats
 import verification_plan as vp
-from test_run_cycle import RunCycleTestCase, Talker, block
+from test_run_cycle import RunCycleTestCase, Talker, Sequence, block
 
 HEAD = "a" * 40
 OTHER = "b" * 40
@@ -157,6 +157,26 @@ class PlanTests(unittest.TestCase):
 
 
 class ResultTests(unittest.TestCase):
+    def test_no_test_report_preserves_plan_and_does_not_invent_an_outcome(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),)).record(result())
+        for omitted in ({}, {"tests": {"reason": "no_code_change"}},
+                        {"tests": {"version": 2, "reason": "no_code_change"}}):
+            with self.subTest(payload=omitted):
+                original = {"status": "RESOLVED", "head_sha": HEAD, **omitted}
+                payload, updated = rc._normalize_test_payload(original, plan)
+                self.assertEqual(payload, original)
+                self.assertEqual(updated, plan)
+                self.assertEqual(rc._legacy_tests(payload), {})
+
+    def test_no_code_change_cannot_hide_an_explicit_required_failure(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        payload, updated = rc._normalize_test_payload({"status": "RESOLVED", "head_sha": HEAD,
+            "tests": {"version": 2, "reason": "no_code_change", "conclusion": "verified",
+                      "passed": True, "checks": [report("fail")]}}, plan)
+        self.assertEqual(updated.current("check-1", HEAD), "fail")
+        self.assertEqual(rc._legacy_tests(payload)["verification"], "failed")
+        self.assertFalse(rc._legacy_tests(payload)["tests_passed"])
+
     def test_v2_records_caps_and_boundary_without_touching_host_checks(self):
         payload = {"status": "IMPLEMENTED", "head_sha": HEAD, "tests": {
             "version": 2, "conclusion": "verified", "criteria": criteria().to_dict(),
@@ -231,11 +251,15 @@ class CriteriaGateTests(RunCycleTestCase):
                         availability={"codex": ex.Availability.READY, "claude": ex.Availability.READY},
                         work_item_provider=provider, work_item_repository="owner/issues",
                         issue_review=mode, criteria_reader=reader)
-                    self.assertEqual(report_.status, "HUMAN_INTERVENTION")
+                    self.assertEqual(report_.status, "HUMAN_INTERVENTION" if provider == "github" else "BLOCKED")
                     self.assertIn("acceptance criteria", report_.stopped_because)
                     self.assertEqual(implementer.dispatched, [])
                     reader.assert_called_once()
-                    self.assertEqual(self.rows()[-1]["payload"]["stop_reason"], "needs_refinement")
+                    self.assertEqual(self.rows()[-1]["payload"]["stop_reason"],
+                                     "needs_refinement" if provider == "github" else "readiness_unconfirmed")
+                    if provider != "github":
+                        self.assertIn("criteria reader unavailable", report_.stopped_because)
+                        self.assertNotIn("refine the work item", report_.stopped_because)
                     self.assertNotIn("verification", self.rows()[-1]["payload"])
 
     def test_valid_criteria_read_once_and_context_reaches_implementation(self):
@@ -268,6 +292,67 @@ class CriteriaGateTests(RunCycleTestCase):
                        criteria_reader=lambda *_a, **_kw: criteria())
         aggregate = stats.aggregate(self.rows(), repo_id="owner/api", days=None)
         self.assertEqual(aggregate["summary"]["verification"]["by_basis"]["agent_reported"]["passed"], 1)
+
+    def test_no_test_resolution_and_rereview_keep_implementation_outcome(self):
+        for tests in (None, {"reason": "no_code_change"}):
+            with self.subTest(tests=tests):
+                initial = {"version": 2, "conclusion": "verified", "checks": [report(), {
+                    **vp.configured_check(check().command, "codex", "cheap_coder").to_dict(),
+                    **result(id="configured-test").to_dict()}]}
+                resolution = {} if tests is None else {"tests": tests}
+                implementer = Sequence("codex", [
+                    block("IMPLEMENTED", head_sha=HEAD, tests=initial),
+                    block("RESOLVED", head_sha=HEAD, **resolution)])
+                reviewer = Sequence("claude", [block("CHANGES_REQUESTED"),
+                                               block("APPROVED", head_sha=HEAD, **resolution)])
+                run = self.run_cycle(implementer, reviewer, allowed_test_command=check().command,
+                                     work_item_provider="github", work_item_repository="owner/issues")
+                self.assertEqual([stage.role for stage in run.stages],
+                                 ["implement", "review", "resolve", "rereview"])
+                verdicts = [row["payload"] for row in self.rows()
+                            if row["payload"].get("record_kind") == "verdict"
+                            and row["role"] in {"resolve", "rereview"}]
+                for verdict in verdicts:
+                    self.assertNotIn("verification", verdict)
+                    self.assertNotIn("tests_passed", verdict)
+                closing = self.rows()[-1]["payload"]
+                self.assertEqual(closing["verification"], "verified")
+                self.assertTrue(closing["tests_passed"])
+
+    def test_later_profiles_receive_and_reuse_frozen_check_identity(self):
+        configured = replace(vp.configured_check(check().command, "codex", "cheap_coder"),
+                             criteria=("AC-1",))
+        tests = {"version": 2, "conclusion": "verified", "checks": [
+            {**configured.to_dict(), **result(id="configured-test").to_dict()}]}
+        prompts = []
+
+        class FollowingReporter(Talker):
+            def spoken(self, task):
+                if "cc-implement-issue" in task:
+                    return block("IMPLEMENTED", head_sha=HEAD, tests=tests)
+                if "cc-initial-review" in task:
+                    return block("CHANGES_REQUESTED")
+                prompts.append(task)
+                marker = "Runtime frozen verification checks (data): "
+                frozen = json.loads(task.split(marker, 1)[1].splitlines()[0])
+                checks = [{**item, **result(id=item["id"]).to_dict()} for item in frozen]
+                return block("RESOLVED" if "cc-resolve-comments" in task else "APPROVED",
+                             head_sha=HEAD, tests={"version": 2, "conclusion": "verified", "checks": checks})
+
+        run = self.run_cycle(FollowingReporter("codex"), FollowingReporter("claude"),
+                             allowed_test_command=check().command, work_item_provider="github",
+                             work_item_repository="owner/issues")
+        self.assertEqual([stage.role for stage in run.stages],
+                         ["implement", "review", "resolve", "rereview"])
+        self.assertNotEqual(run.stages[0].decision.profile, run.stages[-1].decision.profile)
+        assert run.stages[0].result is not None
+        assert run.stages[-1].result is not None
+        self.assertNotEqual(run.stages[0].result.executor, run.stages[-1].result.executor)
+        self.assertEqual(len(prompts), 2)
+        for row in self.rows():
+            if row["payload"].get("record_kind") == "verdict" and row["role"] in {"resolve", "rereview"}:
+                self.assertEqual(row["payload"]["verification"], "verified")
+                self.assertTrue(row["payload"]["tests_passed"])
 
 
 if __name__ == "__main__":
