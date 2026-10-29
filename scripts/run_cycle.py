@@ -4539,7 +4539,10 @@ def _normalize_test_payload(
     except (verification_contract.VerificationError, KeyError, TypeError, ValueError):
         # Invalid version/identity/evidence is insufficient verification, not
         # an executed test failure and never an exception escaping the driver.
-        normalized, updated = {"conclusion": "not_verified", "passed": False}, plan
+        conclusion = "failed" if tests.get("conclusion") == "failed" else "not_verified"
+        if plan is not None:
+            conclusion = plan.cap(conclusion, payload.get("head_sha", ""))
+        normalized, updated = {"conclusion": conclusion, "passed": False}, plan
     payload["tests"] = normalized
     return payload, updated
 

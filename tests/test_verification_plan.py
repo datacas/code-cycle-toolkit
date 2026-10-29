@@ -191,6 +191,13 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(tests["conclusion"], "failed")
         self.assertEqual(updated.results, plan.results)
 
+    def test_invalid_followup_never_raises_failed_agent_or_frozen_conclusion(self):
+        for plan, conclusion in ((None, "failed"), (
+                vp.VerificationPlan(criteria()).extend((check(),)).record(result("fail")), "verified")):
+            payload, _ = rc._normalize_test_payload({"head_sha": HEAD, "tests": {
+                "version": 99, "conclusion": conclusion, "passed": True}}, plan)
+            self.assertEqual(rc._legacy_tests(payload)["verification"], "failed")
+
     def test_legacy_unmatched_failures_are_retained(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
         payload, updated = rc._normalize_test_payload({"status": "IMPLEMENTED", "head_sha": HEAD,
