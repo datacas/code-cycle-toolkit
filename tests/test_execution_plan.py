@@ -213,18 +213,18 @@ class ContractVersionTwoTests(unittest.TestCase):
 
     def test_v2_round_trip_keeps_decisions_obligations_and_controls(self) -> None:
         sample = self.standard()
-        payload = sample.to_dict()
+        payload = sample.to_dict(contract_version=2)
         self.assertEqual(payload["contract_version"], 2)
         self.assertEqual({item["control_id"] for item in payload["controls"]}, {"ci", "merge"})
         self.assertTrue(payload["decisions"] and payload["obligations"])
         self.assertEqual(plan.ExecutionPlan.from_dict(payload), sample)
         self.assertEqual(plan.ExecutionPlan.from_dict(
-            json.loads(json.dumps(payload))).to_dict(), payload)
+            json.loads(json.dumps(payload))).to_dict(contract_version=2), payload)
 
     def test_v1_payload_is_read_and_projected_back_unchanged(self) -> None:
         payload = self.v1_payload()
         upgraded = plan.ExecutionPlan.from_dict(payload)
-        self.assertEqual(upgraded.contract_version, 2)
+        self.assertEqual(upgraded.contract_version, plan.CONTRACT_VERSION)
         self.assertEqual(upgraded.stages[0].resolution, plan.Resolution.RESOLVED)
         self.assertIsNone(upgraded.stages[0].policy)
         self.assertEqual(upgraded.to_dict(contract_version=1), payload)
@@ -262,14 +262,14 @@ class ContractVersionTwoTests(unittest.TestCase):
                     plan.ExecutionPlan.from_dict(payload)
 
     def test_unsupported_versions_are_rejected_not_read_as_v1(self) -> None:
-        for version in (0, 3, "1", None, True):
+        for version in (0, 4, "1", None, True):
             with self.subTest(version=version):
                 payload = self.v1_payload()
                 payload["contract_version"] = version
                 with self.assertRaisesRegex(plan.ContractError, "unsupported"):
                     plan.ExecutionPlan.from_dict(payload)
         with self.assertRaisesRegex(plan.ContractError, "unsupported"):
-            self.standard().to_dict(contract_version=3)
+            self.standard().to_dict(contract_version=4)
         for version in (True, False, 1.0, 2.0, "2"):
             with self.subTest(output_version=version):
                 with self.assertRaisesRegex(plan.ContractError, "unsupported"):

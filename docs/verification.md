@@ -184,6 +184,67 @@ layers:
 This section decides whether output is complete. [Evidence levels](#evidence-levels)
 decides who produced it; the two don't overlap.
 
+## Verification plan and tests version 2
+
+New reports use `tests.version: 2` and `tests.checks`, replacing the legacy
+top-level `tests.evidence` list. This is separate from the unchanged code-host
+`checks.items` object. The enclosing result supplies `head_sha`.
+
+```json
+{
+  "version": 2,
+  "conclusion": "verified",
+  "boundary": "not_required",
+  "checks": [{
+    "id": "configured-test", "command": "python3 -m unittest",
+    "executor": "codex", "profile": "deep_coder", "context": "project",
+    "required": true, "criteria": ["AC-1"], "level": "test",
+    "provenance": "project", "reason": "configured test command",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result": "pass", "cause": "", "attempts": [],
+    "evidence": [{"exit_code": 0, "executed": 14}]
+  }]
+}
+```
+
+Freeze each check before execution. A result names the same check ID, command,
+executor/profile and context. Required checks originate in project policy and
+criterion links; an agent may promote, never demote. Record an unexecuted check
+as `result: unverified`, with `cause`, evidence and actual recovery `attempts`;
+do not invent an exit code. Results on another HEAD stay in history but cannot
+prove the current change. An uncovered criterion remains open. Required failure
+caps `tests.conclusion` at `failed`; required unverified or open criteria cap it
+at `not_verified`. These caps never improve an agent conclusion.
+
+Before implementation, the runtime reads the GitHub work-item body once per
+cycle and parses one explicit criteria section. Accepted headings are exactly
+`Acceptance criteria` and `Criterios de aceptación`, case insensitive, as a
+Markdown heading (`#` through `######`) or bold label. A trailing colon or
+period is allowed inside a bold label or after it. The section is a flat list
+at column zero using `-`, `+`, `*`, `1.` or `1)` markers and optional Markdown
+checkboxes; another heading or bold label ends it. Empty, missing, duplicate,
+placeholder or unparseable sections produce deterministic `needs_refinement`
+before any implementation, even with issue review off or difficulty 1. They
+are insufficient specification, never a failed test. Existing issues are not
+migrated. `.github/ISSUE_TEMPLATE/work-item.md` supplies the grammar for new work.
+IDs are `AC-n` in order, scoped to the execution-plan revision and content hash.
+Plane and Jira return `not_evaluable` with reason `criteria reader unavailable`,
+distinct from parsed criteria that remain unmet; neither counts as satisfied.
+
+For one release, omitted `tests.version` or version 1 accepts `tests.evidence`.
+The compatibility interval starts with the first published release supporting
+version 2 and ends at the next published release. With runtime obligations,
+the adapter matches exact commands and preserves missing required checks as
+explicit unverified results; absence never creates a pass. Legacy standalone
+reports retain their historical evidence classification. Version 2 evidence
+is normalized into a private compatibility view for `tests_basis`,
+`boundary_verified`, telemetry and stats; this view is not a second result
+contract. Malformed or unsupported reports cap at `not_verified`.
+
+Plan persistence, the final verification gate and verification-only resume are
+deferred to #329; see [Execution plan](execution-plan.md). CI substitution is
+out of scope: `CI_PASSED` does not turn a local unverified result into pass.
+
 ## Evidence levels
 
 Every recorded test outcome has one `tests_basis` token. The functional

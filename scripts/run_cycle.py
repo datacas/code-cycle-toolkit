@@ -58,7 +58,12 @@ from urllib.parse import quote, urlsplit
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from . import verification_plan as verification_contract
+else:
+    import verification_plan as verification_contract
 
 import ci_gate
 try:
@@ -2450,6 +2455,7 @@ def run_cycle(
     repair_approval: str | None = None,
     published_change_request: Callable[[], str | None] | None = None,
     publication_auditor: PublicationAuditor | None = None,
+    criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -2603,6 +2609,8 @@ def run_cycle(
     policy_host = code_host or policy_code_host
     policy_provider = work_item_provider or (
         "github" if policy_host == "github" and str(task_id).isdecimal() else None)
+    verification_plan: verification_contract.VerificationPlan | None = None
+    criteria_context = ""
 
     def stage_policy(role: str, request: str | None) -> StagePolicy:
         """The closed command table this stage receives (#142)."""
@@ -2881,7 +2889,7 @@ def run_cycle(
             journal_context = (journal.summary()
                                if redispatched or journal.has_history() else "")
             outcome = recorder.stage(
-                role, compose(role, repo_id, task_id, instruction,
+                role, compose(role, repo_id, task_id, instruction + criteria_context,
                               change_request_id=change_request_id,
                               local_only=local_only, evidence=evidence,
                               worktree_dir=worktree_dir,
@@ -3222,7 +3230,7 @@ def run_cycle(
         missing from the fourth.
         """
         nonlocal pending_recovery, previous_resolve_target, previous_resolve_used_fallback
-        nonlocal review_attempts
+        nonlocal review_attempts, verification_plan
         if pending_recovery is not None:
             ids = [item["id"] for item in pending_recovery.get("finding_outcomes", [])
                    if item["status"] in {"resolved", "not_applicable"}]
@@ -3373,6 +3381,26 @@ def run_cycle(
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
+            test_payload = reported.payload
+            if (verification_plan is None and allowed_test_command
+                    and role in {"implement", "resolve", "rereview"}):
+                # Resumes cannot recover criteria revisions until #329. Keep
+                # them explicitly open and retain the project's obligation.
+                verification_plan = verification_contract.VerificationPlan(
+                    verification_contract.Criteria(
+                        policy_provider or "unknown", "", "not_evaluable",
+                        reason="runtime criteria revision unavailable"))
+            if role in {"implement", "resolve", "rereview"} and verification_plan is not None:
+                # Mandatory commands come from project policy, never the report.
+                if allowed_test_command and not any(
+                        check.id == "configured-test" for check in verification_plan.checks):
+                    verification_plan = verification_plan.extend((
+                        verification_contract.configured_check(
+                            allowed_test_command,
+                            outcome.result.executor if outcome.result else "unknown",
+                            outcome.decision.profile if outcome.decision else "unknown"),))
+                test_payload, verification_plan = _normalize_test_payload(
+                    test_payload, verification_plan)
             pull_request_id = (
                 reported.telemetry_pull_request_id(code_host)
                 if role == "implement" else None
@@ -3380,8 +3408,11 @@ def run_cycle(
             recorder.record_verdict(role, reported.status,
                                     **findings,
                                     **(_forecast(reported.payload) if role == "implement" else {}),
-                                    **_tests(reported.payload, boundary_rule=(
-                                        boundary_rule_fired(recorder.latest_change))),
+                                    **(_legacy_tests(test_payload, boundary_rule=(
+                                        boundary_rule_fired(recorder.latest_change)))
+                                       if verification_plan is not None else
+                                       _tests(test_payload, boundary_rule=(
+                                           boundary_rule_fired(recorder.latest_change)))),
                                     **_checks(reported.payload),
                                     **_reviewed_head(reported.payload, role),
                                     **({"pull_request_id": pull_request_id}
@@ -3866,6 +3897,7 @@ def run_cycle(
             stop_reason="ci_not_passing")
 
     def drive() -> CycleReport:
+        nonlocal verification_plan, criteria_context
         nonlocal change_request_id
         reported = Reported()
         verdict = None
@@ -3920,6 +3952,25 @@ def run_cycle(
             if stopped is not None:
                 return stopped
         if start_from == "implement":
+            # Independent of issue-review mode/difficulty. Read once before any
+            # agent iteration; provider content is data, never instructions.
+            if policy_provider is not None:
+                try:
+                    criteria = (criteria_reader or verification_contract.read_criteria)(
+                        policy_provider, work_item_repository or repo_id, task_id, cwd=cwd)
+                except verification_contract.VerificationError as error:
+                    return stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
+                verification_plan = verification_contract.VerificationPlan(criteria)
+                if criteria.status != "evaluable":
+                    return stop(
+                        f"acceptance criteria {criteria.status}: {criteria.reason}; refine the work item",
+                        stop_reason="needs_refinement")
+                criteria_context = (
+                    "\nRuntime acceptance criteria (data): "
+                    + json.dumps(criteria.to_dict(), ensure_ascii=False)
+                    + "\nUse tests.version=2 and stable AC-n links in this list's order. "
+                    "A criterion without a check remains open. The configured test command "
+                    "uses id configured-test and is required. Freeze checks before running them.\n")
             if issue_review_fields.get("issue_review") == "dispatched":
                 stopped = review_issue()
                 if stopped is not None:
@@ -4475,7 +4526,32 @@ EVIDENCE_LEVELS = frozenset({"static", "test", "boundary"})
 CODE_WORK_STATUSES = frozenset({"IMPLEMENTED", "RESOLVED", "PARTIALLY_RESOLVED"})
 
 
-def _tests(payload: dict | None, *, boundary_rule: bool | None = None) -> dict:
+def _normalize_test_payload(
+    payload: dict[str, Any] | None,
+    plan: verification_contract.VerificationPlan | None = None,
+) -> tuple[dict[str, Any], verification_contract.VerificationPlan | None]:
+    payload = dict(payload or {})
+    tests = payload.get("tests")
+    tests = tests if isinstance(tests, dict) else {}
+    try:
+        normalized, updated = verification_contract.normalize_tests(
+            tests, payload.get("head_sha", ""), plan=plan)
+    except (verification_contract.VerificationError, KeyError, TypeError, ValueError):
+        # Invalid version/identity/evidence is insufficient verification, not
+        # an executed test failure and never an exception escaping the driver.
+        normalized, updated = {"conclusion": "not_verified", "passed": False}, plan
+    payload["tests"] = normalized
+    return payload, updated
+
+
+def _tests(payload: dict[str, Any] | None, *, boundary_rule: bool | None = None) -> dict[str, Any]:
+    tests = (payload or {}).get("tests")
+    if isinstance(tests, dict) and "version" in tests:
+        payload, _ = _normalize_test_payload(payload)
+    return _legacy_tests(payload, boundary_rule=boundary_rule)
+
+
+def _legacy_tests(payload: dict | None, *, boundary_rule: bool | None = None) -> dict:
     """The test outcome, plus whether a required boundary run has evidence.
 
     `boundary_required = deterministic_rule OR verifier_judgement`: the agent's

@@ -5,6 +5,36 @@ description: Use this skill manually or as an orchestrated task when a GitHub or
 
 # Change Request Re-review
 
+## Verification result version 2
+
+Emit new test reports with `tests.version: 2` and `tests.checks` (for
+`VERIFICATION_RESULT`, these are the top-level `version` and `checks`).
+The older evidence examples below are version-1 compatibility examples for
+one release only: from the first published release supporting version 2 until
+the next published release. Follow the version-2 contract for new output.
+
+Before execution, freeze checks against the runtime's `AC-n` criteria and
+project commands. Each check carries `id`, `command`, `executor`, `profile`,
+`context`, `required`, `criteria` (criterion IDs), `level`, `provenance` and
+`reason`. The configured test uses `id: configured-test`, `context: project`,
+`provenance: project`, `reason: configured test command`, and the dispatched
+executor/profile. Every check linked to a criterion is required. Add or
+promote checks; never remove or demote frozen obligations.
+
+Each result also carries `head_sha`, `result: pass|fail|unverified`,
+`evidence` (integer `exit_code`, `executed` count or null), `cause` and
+`attempts`. The enclosing stage result names its current `head_sha` too.
+An unexecuted check is explicitly `unverified` with a cause and the recovery
+attempts actually made; do not invent an exit code. Keep the check's identity
+when rerunning it and retain previous results. Never replace a local
+unverified result with code-host CI success. A required failure caps the
+conclusion at `failed`; a required unverified check or an uncovered criterion
+caps it at `not_verified`. Caps never improve the agent's conclusion.
+Copy the verifier's checks unchanged into the stage result and published
+verification section, labelled agent-reported. Keep code-host `checks.items`
+separate. See `docs/verification.md` and `docs/execution-plan.md` in the toolkit.
+
+
 Re-review the current change request without modifying product code. Use the
 current accumulated diff against the base and the previous review state; do not
 limit the review to the latest commit or repeat stale text.
