@@ -97,6 +97,9 @@ from cycle_history import (
     LockHeld,
     RemoteMark,
 )
+from publication_audit import (
+    AuditUnreadable, GitHubHostReader, PublicationAuditor, VIOLATED as AUDIT_VIOLATED,
+)
 from cycle_status import (
     CycleStatusWriter, _configure_stdout, _duration, _visible_revision,
     _write_cursor, status_directory,
@@ -380,6 +383,9 @@ RETRY_PUBLICATION = (
 #: The runtime writes it through `subprocess`, which no host hook rewrites; the
 #: agent's own `git diff` may pass through one that shortens it.
 DIFF_ROLES = frozenset({"review", "resolve", "rereview"})
+
+#: The stages that may write to the code host, each audited after it (#261).
+PUBLISHING_ROLES = frozenset({"implement", "review", "resolve", "rereview"})
 
 #: What a diff stage is told when no base resolved: no file, and no pretence.
 NO_DIFF_FILE = (
@@ -893,6 +899,9 @@ class CycleReport:
     journal_explanation: dict[str, object] | None = None
     #: `manual` when the cycle closed on a manual rereview (#346), else None.
     review_provenance: str | None = None
+    #: The last publication audit's evidence (#261): refs and change-request
+    #: states before and after the stage, and every breach. SHAs and names only.
+    publication_audit: dict | None = None
 
     @property
     def approved(self) -> bool:
@@ -2440,6 +2449,7 @@ def run_cycle(
     ci_sleep: Callable[[float], None] | None = None,
     repair_approval: str | None = None,
     published_change_request: Callable[[], str | None] | None = None,
+    publication_auditor: PublicationAuditor | None = None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -2489,6 +2499,11 @@ def run_cycle(
     cycle reads the open pull request of the checkout's branch. The
     continuation is told to reuse it, and a result naming another change
     request stops before review instead of reviewing a duplicate.
+
+    With `publication_auditor` (#261), every publishing stage is bracketed by a
+    read of the code host's audited state, and the cycle stops with
+    `publication_violation` when an invariant failed, whatever the stage
+    reported, or `publication_unverified` when that state cannot be read.
     """
     validate_start(start_from, change_request_id, local_only=local_only,
                    continue_work=continue_work)
@@ -3111,6 +3126,47 @@ def run_cycle(
             return stop(_elsewhere(outcome), reported=reported)
         return None
 
+    def audit_publication(role: str, before, reported: Reported,
+                          request: str | None) -> CycleReport | None:
+        """Stop when a publication invariant failed during `role` (#261).
+
+        The change request the stage was given, or for `implement` the one it
+        reports, is read as well as those whose head is the cycle branch. A
+        breach names what moved, never who moved it.
+        """
+        number = _pull_number(request)
+        if number is None and role == "implement":
+            number = reported.telemetry_pull_request_id("github")
+        try:
+            result = publication_auditor.verify(before, change_request_id=number)
+        except AuditUnreadable as error:
+            report.publication_audit = {"status": "unreadable", "role": role}
+            return stop(f"the publication audit could not read the code host after the "
+                        f"{role} stage: {error}", "BLOCKED", reported=reported,
+                        stop_reason="publication_unverified")
+        evidence = {"role": role, **result.evidence()}
+        report.publication_audit = evidence
+        journal.record("stage_result", role=role, stage_seq=recorder.stage_seq,
+                       component="publication_audit", status=result.status,
+                       correlation={"cycle_branch": result.before.cycle_branch,
+                                    "default_branch": result.before.default_branch,
+                                    "breaches": len(result.breaches)})
+        for breach in result.breaches:
+            journal.record("failure", role=role, stage_seq=recorder.stage_seq,
+                           component="publication_audit", status=breach.kind,
+                           reason=breach.explain(),
+                           correlation={"ref": breach.ref, "before": breach.before,
+                                        "after": breach.after})
+        if result.unverified:
+            report.note(f"publication audit after {role}: unverified "
+                        f"({', '.join(result.unverified)}); the rest was checked")
+        if result.status != AUDIT_VIOLATED:
+            return None
+        for breach in result.breaches:
+            report.note(f"  publication breach  {json.dumps(breach.evidence(), sort_keys=True)}")
+        return stop(result.explain(role), reported=reported,
+                    stop_reason="publication_violation")
+
     def review_issue() -> CycleReport | None:
         """The readiness gate: only a confirmed READY lets `implement` run.
 
@@ -3205,6 +3261,17 @@ def run_cycle(
                     component="runtime", status="worktree_synchronized",
                     reason="clean worktree fast-forwarded to the open pull request head",
                     correlation={"old_head_sha": old_head, "new_head_sha": new_head})
+        audited = None
+        if publication_auditor is not None and role in PUBLISHING_ROLES:
+            try:
+                audited = publication_auditor.capture(
+                    checkout_branch=_git_line(cwd, ["branch", "--show-current"], 30),
+                    change_request_id=_pull_number(change_request_id))
+            except AuditUnreadable as error:
+                return Reported(), stop(
+                    f"the publication audit could not read the code host before the {role} "
+                    f"stage, so nothing was dispatched: {error}", "BLOCKED",
+                    stop_reason="publication_unverified")
         outcome, reported, tampered, findings = run(
             role, instruction, change_request_id=change_request_id,
             resolve_target=resolve_target,
@@ -3212,6 +3279,12 @@ def run_cycle(
             resolve_escalated=resolve_escalated,
             escalation_finding_ids=escalation_finding_ids,
             publishes=recover)
+        if audited is not None:
+            # Before anything the stage reported is read, whatever it reported:
+            # a breach is never a `stage_not_completed` (#261, #364).
+            stopped = audit_publication(role, audited, reported, change_request_id)
+            if stopped is not None:
+                return reported, stopped
         if role == "resolve" and outcome.decision is not None:
             previous_resolve_target = outcome.decision.target
             previous_resolve_used_fallback = outcome.decision.used_fallback
@@ -5153,6 +5226,15 @@ def main(argv: list[str] | None = None) -> int:
         config, repo, args.work_item_repository
     )
     code_host = (config.get("code_cycle") or {}).get("code_host")
+    policy_code_host = code_host_of(config, args.cwd)
+    # Every publishing stage is audited on `origin` (#261). Only GitHub can be
+    # read for change-request state and protected branches until #238; any
+    # other code host still has its refs audited and the rest is `unverified`.
+    publication_auditor = (None if args.local_only or not args.cwd else PublicationAuditor(
+        args.cwd, repo,
+        GitHubHostReader(args.cwd) if (code_host or policy_code_host) == "github" else None,
+        # Only a configured default branch; otherwise `origin`'s live HEAD.
+        default_branch=base_branch_of(config, None)))
     # Asked on a terminal only; a run nobody watches never widens a sandbox
     # without an answer given in advance.
     consent = ConsentBroker(
@@ -5193,7 +5275,8 @@ def main(argv: list[str] | None = None) -> int:
                 work_item_provider=work_item_provider,
                 work_item_repository=work_item_repository,
                 code_host=code_host,
-                policy_code_host=code_host_of(config, args.cwd),
+                policy_code_host=policy_code_host,
+                publication_auditor=publication_auditor,
                 trusted_authors=tuple(((config.get("code_cycle") or {}).get("review") or {}).get(
                     "trusted_authors", [])),
                 resolve_effort=((config.get("code_cycle") or {}).get("resolve") or {}).get("effort"),

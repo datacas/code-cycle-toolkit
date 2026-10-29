@@ -17,6 +17,7 @@ cycle_journal.py
 ci_gate.py
 reroute.py
 publication.py
+publication_audit.py
 environment_recovery.py
 dependency_setup.py
 native_prerequisites.py

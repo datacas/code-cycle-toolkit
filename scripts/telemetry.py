@@ -103,7 +103,11 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: not accept stops with `manual_rereview_rejected`. Both payload-only.
 #: 23: quota exhaustion windows, keyed by repository, executor and model, so
 #: production continuations can avoid the exact target until its reset.
-SCHEMA_VERSION = 23
+#: 24: the publication audit (#261). A cycle may stop with
+#: `publication_violation`, an invariant on an audited ref or change request
+#: failed during a publishing stage, or `publication_unverified`, the audited
+#: state could not be read. Both payload-only.
+SCHEMA_VERSION = 24
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -149,6 +153,8 @@ STOP_REASONS = frozenset({
     "permission_required",
     # The latest receipt is a manual rereview the resume cannot accept (schema 22).
     "manual_rereview_rejected",
+    # A publication invariant failed, or could not be read (schema 24).
+    "publication_violation", "publication_unverified",
 })
 
 #: Who ran the review a cycle closed on (schema 22); `review_contract` defines them.
