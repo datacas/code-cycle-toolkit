@@ -104,6 +104,28 @@ class ConfigurationTests(unittest.TestCase):
             documented,
         )
 
+    def test_installed_skills_carry_the_minimum_equal_to_the_reference_constants(self) -> None:
+        # Skills are installed without docs/, so each one must hold the patterns.
+        expected = set(gate.MANDATORY_PATHS + gate.MANDATORY_FILES)
+        skills = ("cc-initial-review", "cc-provider-bootstrap", "cc-rereview", "cc-resolve-comments")
+        for skill in skills:
+            with self.subTest(skill=skill):
+                text = (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+                section = text.split("### Mandatory security minimum", 1)[1]
+                section = re.split(r"\n#{1,3} ", section, maxsplit=1)[0]
+                rows = [line for line in section.splitlines() if line.startswith("|")]
+                documented = {pattern for row in rows for pattern in re.findall(r"`([^`]+)`", row)}
+
+                self.assertEqual(expected, documented)
+
+    def test_review_cycle_page_links_the_minimum_instead_of_copying_it(self) -> None:
+        text = (ROOT / "docs" / "review-cycle.md").read_text(encoding="utf-8")
+        text = text.split("\n## Security triage", 1)[1].split("\n## ", 1)[0]
+
+        for pattern in gate.MANDATORY_PATHS + gate.MANDATORY_FILES:
+            with self.subTest(pattern=pattern):
+                self.assertNotIn(f"`{pattern}`", text)
+
     def test_a_repository_rule_replaces_defaults_but_keeps_the_minimum(self) -> None:
         rule = gate.GateRule.from_config(
             {"code_cycle": {"security_review": {"always_when": {

@@ -562,8 +562,7 @@ This reviewer judgement is added to the deterministic minimum, never used to
 replace it. Every review always applies the shared minimum for CI and
 automation, secrets and keys, and agent/toolkit configuration, even when the
 repository declares `security_review.always_when`. The exact categories and
-patterns are maintained in [Configuration → Security review rule](../../docs/configuration.md#security-review-rule)
-and implemented by `scripts/security_gate.py`.
+patterns are in *Mandatory security minimum* below.
 
 Inspect the request-handling, authorization, data-seeding, and migration
 surfaces of whatever stack the repository uses, plus environment templates,
@@ -582,6 +581,26 @@ Not a sensitive change: the security audit was skipped after triage.
 
 Silence is not a triage result. The comment must say the audit was skipped and
 why, never simply omit it.
+
+### Mandatory security minimum
+
+Every review applies this minimum, whatever `security_review.always_when`
+declares. A project rule can add paths, files, and labels, or replace the other
+defaults, but never removes an entry here. A changed path or filename that
+matches any entry fires the security audit. The toolkit's
+`scripts/security_gate.py` implements the same table, and a test keeps the two
+equal.
+
+| Group | Paths and files |
+|---|---|
+| CI and automation | `.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml` |
+| Secrets and keys | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*` |
+| Agent and toolkit configuration | `.code-cycle.yml`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, `.codex/**`, `.agents/**`, `opencode.json*` |
+
+When a path also matches a project rule, the audit runs once and the changed
+path is reported once. Labels and every other default stay
+project-configurable. The gate decides whether the audit runs; severity and
+blocking policy are separate.
 
 ## Execution-backed validation
 

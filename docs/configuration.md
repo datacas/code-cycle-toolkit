@@ -267,7 +267,7 @@ Built-in defaults, used when the block is absent:
 
 A declared `paths`, `files`, or `labels` list replaces the corresponding default list. The mandatory minimum below is always added to declared path and file lists; it cannot be disabled or excluded. Other defaults remain replaceable. An absent or empty configuration keeps the built-in defaults and the minimum.
 
-The mandatory minimum is the shared baseline applied by `scripts/security_gate.py` and every review skill:
+The mandatory minimum is the shared baseline applied by `scripts/security_gate.py` and every review skill. Skills are installed without `docs/`, so `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` and `cc-provider-bootstrap` each carry the same table in a *Mandatory security minimum* section; `validate-package.py` keeps those copies identical and a test keeps them equal to the script constants:
 
 | Group | Paths and files |
 |---|---|

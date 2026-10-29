@@ -21,6 +21,12 @@
         "test_security_gate.ConfigurationTests.test_documented_mandatory_minimum_matches_the_reference_constants"
       ]
     },
+    "review-cycle-documentation": {
+      "paths": ["docs/review-cycle.md"],
+      "tests": [
+        "test_security_gate.ConfigurationTests.test_review_cycle_page_links_the_minimum_instead_of_copying_it"
+      ]
+    },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],
       "tests": ["test_spike_fixture_runner"]

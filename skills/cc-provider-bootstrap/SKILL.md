@@ -212,8 +212,8 @@ An optional `security_review` key declares additional conditions for always
 running the security audit, regardless of what any model concludes. The
 mandatory minimum for CI and automation, secrets and keys, and agent/toolkit
 configuration is always applied on top of this rule; it cannot be removed by a
-project declaration. The shared categories and exact patterns are documented
-in [Configuration → Security review rule](../../docs/configuration.md#security-review-rule).
+project declaration. The shared categories and exact patterns are in
+*Mandatory security minimum* below.
 
 ```yaml
 code_cycle:
@@ -272,6 +272,26 @@ When the values are complete but `.code-cycle.yml` is absent or incomplete,
 show the proposed file and ask for confirmation before writing it. If the user
 declines, keep the resolved context in memory for the current run and report
 that it was not persisted; do not silently create the file.
+
+### Mandatory security minimum
+
+Every review applies this minimum, whatever `security_review.always_when`
+declares. A project rule can add paths, files, and labels, or replace the other
+defaults, but never removes an entry here. A changed path or filename that
+matches any entry fires the security audit. The toolkit's
+`scripts/security_gate.py` implements the same table, and a test keeps the two
+equal.
+
+| Group | Paths and files |
+|---|---|
+| CI and automation | `.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml` |
+| Secrets and keys | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*` |
+| Agent and toolkit configuration | `.code-cycle.yml`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, `.codex/**`, `.agents/**`, `opencode.json*` |
+
+When a path also matches a project rule, the audit runs once and the changed
+path is reported once. Labels and every other default stay
+project-configurable. The gate decides whether the audit runs; severity and
+blocking policy are separate.
 
 ## Startup workflow
 
