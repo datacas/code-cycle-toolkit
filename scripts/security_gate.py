@@ -25,10 +25,8 @@ import fnmatch
 import re
 from dataclasses import dataclass
 
-# Sensible defaults for a repository that has not declared its own. They are
-# deliberately broad: a security audit that was not needed costs credits, and a
-# missed one costs a vulnerability. They are also not a taxonomy — a project
-# states its own and those replace these entirely.
+# Sensible defaults for a repository that has not declared its own. These
+# remain replaceable; MANDATORY_* below is always combined with a project rule.
 DEFAULT_PATHS = (
     "auth/**",
     "**/auth/**",
@@ -55,6 +53,32 @@ DEFAULT_FILES = (
     "Dockerfile",
     "docker-compose*.yml",
     "*.env.example",
+)
+
+# The canonical non-reducible minimum for every repository. The documentation
+# mirrors these constants and tests enforce that it stays in sync. Review
+# skills may widen this rule, but cannot narrow it.
+MANDATORY_PATHS = (
+    ".github/workflows/**",
+    ".github/actions/**",
+    ".claude/**",
+    ".codex/**",
+    ".agents/**",
+)
+
+MANDATORY_FILES = (
+    ".gitlab-ci.yml",
+    "bitbucket-pipelines.yml",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "id_rsa*",
+    "id_ed25519*",
+    ".code-cycle.yml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "opencode.json*",
 )
 
 # Matched by meaning, not by exact string: every project spells them differently.
@@ -109,10 +133,10 @@ class GateDecision:
 
 @dataclass(frozen=True)
 class GateRule:
-    """One repository's `security_review.always_when` block."""
+    """A repository rule combined with the non-reducible security minimum."""
 
-    paths: tuple[str, ...] = DEFAULT_PATHS
-    files: tuple[str, ...] = DEFAULT_FILES
+    paths: tuple[str, ...] = tuple(dict.fromkeys((*DEFAULT_PATHS, *MANDATORY_PATHS)))
+    files: tuple[str, ...] = tuple(dict.fromkeys((*DEFAULT_FILES, *MANDATORY_FILES)))
     label_terms: tuple[str, ...] = DEFAULT_LABEL_TERMS
 
     @classmethod
@@ -135,8 +159,12 @@ class GateRule:
                 f"security_review.always_when must be a mapping, got {type(block).__name__}"
             )
         return cls(
-            paths=tuple(block.get("paths") or DEFAULT_PATHS),
-            files=tuple(block.get("files") or DEFAULT_FILES),
+            paths=tuple(dict.fromkeys((*block.get("paths", ()), *MANDATORY_PATHS)))
+            if block.get("paths")
+            else tuple(dict.fromkeys((*DEFAULT_PATHS, *MANDATORY_PATHS))),
+            files=tuple(dict.fromkeys((*block.get("files", ()), *MANDATORY_FILES)))
+            if block.get("files")
+            else tuple(dict.fromkeys((*DEFAULT_FILES, *MANDATORY_FILES))),
             label_terms=tuple(block.get("labels") or DEFAULT_LABEL_TERMS),
         )
 
@@ -167,15 +195,17 @@ def evaluate(
     the model may add an audit and may not remove one.
     """
     rule = rule or GateRule()
+    paths_rule = tuple(dict.fromkeys((*rule.paths, *MANDATORY_PATHS)))
+    files_rule = tuple(dict.fromkeys((*rule.files, *MANDATORY_FILES)))
     paths = [p for p in changed_paths if p]
 
-    matched_paths = tuple(sorted({p for p in paths if _matches_path(p, rule.paths)}))
+    matched_paths = tuple(sorted({p for p in paths if _matches_path(p, paths_rule)}))
     matched_files = tuple(
         sorted(
             {
                 p
                 for p in paths
-                if any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], f) for f in rule.files)
+                if any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], f) for f in files_rule)
             }
             - set(matched_paths)
         )

@@ -15,6 +15,33 @@ from run_windows_test_shard import validate_assignments
 
 
 class ValidateWorkflowTests(unittest.TestCase):
+    def test_release_workflow_head_sha_checkout_requires_successful_push(self) -> None:
+        # Read as text: PyYAML is an optional dependency of the toolkit.
+        text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        jobs_section = text.split("\njobs:\n", 1)[1]
+        blocks = re.split(r"(?m)^  (?=[A-Za-z_][\w-]*:\s*$)", jobs_section)[1:]
+        guarded = [block for block in blocks if "workflow_run.head_sha" in block]
+        self.assertTrue(guarded, "no job uses workflow_run.head_sha; update this guard test")
+
+        for block in guarded:
+            name = block.split(":", 1)[0]
+            lines = block.splitlines()
+            start = next((i for i, line in enumerate(lines) if line.startswith("    if:")), -1)
+            self.assertGreaterEqual(start, 0, f"job {name!r} must declare a job-level `if:`")
+            condition_lines = [lines[start].split(":", 1)[1]]
+            for line in lines[start + 1 :]:
+                if not line.startswith("      "):
+                    break
+                condition_lines.append(line)
+            condition = " ".join(" ".join(condition_lines).replace(">-", "").split())
+            self.assertRegex(
+                condition,
+                r"^github\.event_name == 'workflow_dispatch' \|\| "
+                r"\(github\.event\.workflow_run\.conclusion == 'success' && "
+                r"github\.event\.workflow_run\.event == 'push'\)$",
+                f"job {name!r} uses workflow_run.head_sha and must be push-only",
+            )
+
     def test_validation_triggers_and_concurrency_preserve_required_runs(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 

@@ -75,6 +75,13 @@ WORKSPACE_TOOL_SKILLS = EVIDENCE_SKILLS
 WORKSPACE_TOOL_ORCHESTRATORS = ("cc-orchestrator", "cc-orca-orchestrator")
 SHARED_WORKSPACE_TOOL_SECTIONS = ("## Workspace tools and evidence",)
 SHARED_PROGRESS_SECTIONS = ("## User-visible progress",)
+# Skills are installed without docs/, so the skills that apply or explain the
+# security gate carry its mandatory minimum themselves. tests/test_security_gate.py
+# keeps that table equal to scripts/security_gate.py.
+SECURITY_MINIMUM_SKILLS = (
+    "cc-initial-review", "cc-provider-bootstrap", "cc-rereview", "cc-resolve-comments",
+)
+SHARED_SECURITY_MINIMUM_SECTIONS = ("### Mandatory security minimum",)
 # Every skill that can stop for a person's decision asks it the same way, and
 # returns the same `questions` shape when it is delegated.
 ASKING_SKILLS = tuple(sorted(CYCLE_SKILLS | {"cc-provider-bootstrap"}))
@@ -942,6 +949,9 @@ def validate_package(root: Path) -> list[str]:
         )
         check_shared_sections(root, REVIEW_CYCLE_SKILLS, SHARED_REVIEW_SECTIONS, errors)
         check_shared_sections(root, HEAD_PUSHING_SKILLS, SHARED_HEAD_SECTIONS, errors)
+        check_shared_sections(
+            root, SECURITY_MINIMUM_SKILLS, SHARED_SECURITY_MINIMUM_SECTIONS, errors
+        )
         check_shared_sections(root, EVIDENCE_SKILLS, SHARED_EVIDENCE_SECTIONS, errors)
         check_workspace_tool_sections(root, errors)
         check_shared_sections(

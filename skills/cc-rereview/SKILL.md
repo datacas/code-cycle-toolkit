@@ -494,6 +494,10 @@ review permission rules can read it.
    the rule activated. Use the
    repository's own triggers when it defines any and the defaults of
    `cc-initial-review` when it does not.
+   Every rule also retains the mandatory minimum for CI and automation,
+   secrets and keys, and agent/toolkit configuration. Project rules may widen
+   or tighten checks but cannot remove that minimum. Use the exact categories
+   and patterns in *Mandatory security minimum* below.
 7. Run `cc-security-review` when triage activates it; otherwise record
    explicitly, in the language chosen by *Output language*, that triage found no
    sensitive change and the security audit was therefore skipped. Use wording
@@ -540,6 +544,26 @@ Use these functional statuses:
 
 Set top-level `blocking` to `true` only for `BLOCKED` or `FAILED`.
 `CHANGES_REQUESTED` and `REVIEW_PASSED_AWAITING_CI` have `blocking: false`.
+
+### Mandatory security minimum
+
+Every review applies this minimum, whatever `security_review.always_when`
+declares. A project rule can add paths, files, and labels, or replace the other
+defaults, but never removes an entry here. A changed path or filename that
+matches any entry fires the security audit. The toolkit's
+`scripts/security_gate.py` implements the same table, and a test keeps the two
+equal.
+
+| Group | Paths and files |
+|---|---|
+| CI and automation | `.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml` |
+| Secrets and keys | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*` |
+| Agent and toolkit configuration | `.code-cycle.yml`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, `.codex/**`, `.agents/**`, `opencode.json*` |
+
+When a path also matches a project rule, the audit runs once and the changed
+path is reported once. Labels and every other default stay
+project-configurable. The gate decides whether the audit runs; severity and
+blocking policy are separate.
 
 ## Classify previous findings
 
