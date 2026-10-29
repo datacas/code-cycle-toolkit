@@ -208,8 +208,12 @@ report, that `cc-profile-config` can show the effective profiles and write one,
 such as a balanced preset where the vendor that implements never reviews its
 own work. Do not run it automatically and do not add a profiles block yourself.
 
-An optional `security_review` key declares when the security audit always runs,
-regardless of what any model concludes:
+An optional `security_review` key declares additional conditions for always
+running the security audit, regardless of what any model concludes. The
+mandatory minimum for CI and automation, secrets and keys, and agent/toolkit
+configuration is always applied on top of this rule; it cannot be removed by a
+project declaration. The shared categories and exact patterns are documented
+in [Configuration → Security review rule](../../docs/configuration.md#security-review-rule).
 
 ```yaml
 code_cycle:
@@ -228,11 +232,13 @@ code_cycle:
       labels: ["security", "auth", "data"]
 ```
 
-A repository that declares this replaces the defaults entirely; one that declares
-nothing keeps them. Never write an empty block to mean "no rule": absence keeps
-the gate on precisely so that a missing configuration cannot be the unsafe case.
-The list belongs to the repository — review it per project and add whatever
-touches a trust boundary there.
+A repository declaration replaces the corresponding built-in defaults, while
+the mandatory path and file minimum always remains. A repository that declares
+nothing keeps the defaults too. Never write an empty block to mean "no rule":
+absence keeps the gate on precisely so that a missing configuration cannot be
+the unsafe case. The list belongs to the repository — review it per project
+and add whatever touches a trust boundary there. Overlapping matches are
+reported once; labels remain configurable.
 
 An optional `calibration` key names the experimental reviewer profiles a paired
 review can dispatch. It is the single place an alias maps to a provider, model,

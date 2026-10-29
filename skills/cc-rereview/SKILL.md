@@ -494,6 +494,11 @@ review permission rules can read it.
    the rule activated. Use the
    repository's own triggers when it defines any and the defaults of
    `cc-initial-review` when it does not.
+   Every rule also retains the mandatory minimum for CI and automation,
+   secrets and keys, and agent/toolkit configuration. Project rules may widen
+   or tighten checks but cannot remove that minimum. Use the exact categories
+   and patterns in [Configuration → Security review rule](../../docs/configuration.md#security-review-rule),
+   whose reference implementation is `scripts/security_gate.py`.
 7. Run `cc-security-review` when triage activates it; otherwise record
    explicitly, in the language chosen by *Output language*, that triage found no
    sensitive change and the security audit was therefore skipped. Use wording

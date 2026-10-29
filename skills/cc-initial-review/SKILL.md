@@ -558,6 +558,13 @@ names them differently; labels such as `type:security`, `type:privacy`,
 When the repository defines its own triage triggers in its instructions, those
 replace this list. When it defines none, this list is the default.
 
+This reviewer judgement is added to the deterministic minimum, never used to
+replace it. Every review always applies the shared minimum for CI and
+automation, secrets and keys, and agent/toolkit configuration, even when the
+repository declares `security_review.always_when`. The exact categories and
+patterns are maintained in [Configuration → Security review rule](../../docs/configuration.md#security-review-rule)
+and implemented by `scripts/security_gate.py`.
+
 Inspect the request-handling, authorization, data-seeding, and migration
 surfaces of whatever stack the repository uses, plus environment templates,
 lockfiles, package manifests, and CI workflows when the diff touches them. Do

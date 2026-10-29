@@ -316,9 +316,9 @@ Every review and resolution round decides whether `cc-security-review` runs:
 security_required = deterministic_rule OR reviewer_requests_security
 ```
 
-- **The rule** matches changed paths, filenames, and PR labels against `security_review.always_when` (or the built-in defaults: auth, middleware, migrations, routes, and policies directories; lockfiles; Dockerfiles; `*.env.example`; labels meaning security, auth, privacy, data, secrets, or dependencies). See [Configuration → Security review rule](configuration.md#security-review-rule).
+- **The rule** matches changed paths, filenames, and PR labels against `security_review.always_when` plus the mandatory minimum. The minimum always covers CI and automation (`.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml`), secrets and keys (`.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`), and agent/toolkit configuration (`.code-cycle.yml`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, `.codex/**`, `.agents/**`, `opencode.json*`). Other built-in defaults cover auth, middleware, migrations, routes, and policies directories; lockfiles; Dockerfiles; `*.env.example`; and labels meaning security, auth, privacy, data, secrets, or dependencies. See [Configuration → Security review rule](configuration.md#security-review-rule).
 - **The reviewer** may add an audit for anything touching sessions, tokens, validation, public APIs, uploads, personal data, CORS, cookies, headers, deployment configuration, or dependencies. It can **never remove** one the rule fired.
-- Declaring the rule replaces the defaults. Leaving it out keeps them, so a missing configuration can never switch the gate off.
+- Declaring a rule replaces the corresponding built-in default lists, but cannot remove the mandatory path and file minimum. Leaving it out keeps all built-in defaults, so a missing configuration can never switch the gate off. Overlapping matches are reported once. Labels remain configurable.
 - The comment always says whether the audit ran and which half fired. When nothing fired, it says the audit was skipped after triage. Silence is not a triage result.
 
 `scripts/security_gate.py` is the reference implementation.

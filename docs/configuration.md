@@ -45,7 +45,7 @@ code_cycle:
   review:
     trusted_authors: [your-login]   # empty/absent → finding recovery BLOCKS
 
-  security_review:                  # absent → built-in defaults; declared → replaces them
+  security_review:                  # absent → defaults; declared → replaces defaults, keeps minimum
     always_when:
       paths: ["auth/**", "**/migrations/**"]
       files: ["package-lock.json", "Dockerfile", "*.env.example"]
@@ -265,7 +265,17 @@ Built-in defaults, used when the block is absent:
 | files | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `composer.lock`, `requirements.txt`, `poetry.lock`, `Gemfile.lock`, `go.sum`, `Cargo.lock`, `Dockerfile`, `docker-compose*.yml`, `*.env.example` |
 | label terms | security, auth, authz, authentication, authorization, permission, privacy, data, secret, credential, dependencies |
 
-A declared list **replaces** the matching defaults. Don't write an empty block to mean "no rule": absence is what keeps the gate on.
+A declared `paths`, `files`, or `labels` list replaces the corresponding default list. The mandatory minimum below is always added to declared path and file lists; it cannot be disabled or excluded. Other defaults remain replaceable. An absent or empty configuration keeps the built-in defaults and the minimum.
+
+The mandatory minimum is the shared baseline applied by `scripts/security_gate.py` and every review skill:
+
+| Group | Paths and files |
+|---|---|
+| CI and automation | `.github/workflows/**`, `.github/actions/**`, `.gitlab-ci.yml`, `bitbucket-pipelines.yml` |
+| Secrets and keys | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*` |
+| Agent and toolkit configuration | `.code-cycle.yml`, `AGENTS.md`, `CLAUDE.md`, `.claude/**`, `.codex/**`, `.agents/**`, `opencode.json*` |
+
+When a mandatory path or file also matches a declared project rule, the audit runs once and reports that changed path once. Labels stay project-configurable. This gate determines whether the audit runs; severity and blocking policy are separate.
 
 ### Orchestration
 

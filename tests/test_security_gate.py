@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -18,6 +19,26 @@ class DeterministicTriggerTests(unittest.TestCase):
         self.assertTrue(decision.required)
         self.assertTrue(decision.deterministic)
         self.assertIn("app/Policies/EntryPolicy.php", decision.matched_paths)
+
+    def test_ci_secret_and_agent_configuration_changes_require_an_audit(self) -> None:
+        cases = {
+            ".github/workflows/ci.yml": "matched_paths",
+            ".env.local": "matched_files",
+            "deploy/key.pem": "matched_files",
+            ".code-cycle.yml": "matched_files",
+            "AGENTS.md": "matched_files",
+        }
+        for path, match_field in cases.items():
+            with self.subTest(path=path):
+                decision = gate.evaluate([path])
+                self.assertTrue(decision.required)
+                self.assertIn(path, getattr(decision, match_field))
+
+    def test_dotenv_example_overlap_is_reported_once(self) -> None:
+        decision = gate.evaluate([".env.example"])
+
+        self.assertTrue(decision.required)
+        self.assertEqual((".env.example",), decision.matched_files)
 
     def test_a_migration_requires_an_audit(self) -> None:
         self.assertTrue(gate.evaluate(["database/migrations/2026_01_01_add.php"]).required)
@@ -71,22 +92,70 @@ class ModelCanAddNeverRemoveTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_a_repository_rule_replaces_the_defaults(self) -> None:
+    def test_documented_mandatory_minimum_matches_the_reference_constants(self) -> None:
+        documentation = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+        section = documentation.split("The mandatory minimum is the shared baseline", 1)[1]
+        section = section.split("\n### ", 1)[0]
+        rows = [line for line in section.splitlines() if line.startswith("|")]
+        documented = {pattern for row in rows for pattern in re.findall(r"`([^`]+)`", row)}
+
+        self.assertEqual(
+            set(gate.MANDATORY_PATHS + gate.MANDATORY_FILES),
+            documented,
+        )
+
+    def test_a_repository_rule_replaces_defaults_but_keeps_the_minimum(self) -> None:
         rule = gate.GateRule.from_config(
             {"code_cycle": {"security_review": {"always_when": {
                 "paths": ["billing/**"], "files": ["secrets.yml"], "labels": ["money"]}}}}
         )
 
-        self.assertEqual(("billing/**",), rule.paths)
+        self.assertIn("billing/**", rule.paths)
+        self.assertIn(".github/workflows/**", rule.paths)
         self.assertFalse(gate.evaluate(["auth/session.php"], rule=rule).required)
         self.assertTrue(gate.evaluate(["billing/charge.rb"], rule=rule).required)
+
+    def test_a_project_rule_cannot_disable_any_mandatory_group(self) -> None:
+        rule = gate.GateRule.from_config(
+            {"code_cycle": {"security_review": {"always_when": {
+                "paths": ["billing/**"], "files": ["secrets.yml"], "labels": ["money"]}}}}
+        )
+
+        for path in (".github/workflows/ci.yml", ".env.local", ".code-cycle.yml"):
+            with self.subTest(path=path):
+                decision = gate.evaluate([path], rule=rule)
+                self.assertTrue(decision.required)
+                matches = (*decision.matched_paths, *decision.matched_files)
+                self.assertEqual(1, matches.count(path))
+
+    def test_direct_rule_construction_cannot_bypass_the_minimum(self) -> None:
+        rule = gate.GateRule(paths=("billing/**",), files=("secrets.yml",))
+
+        self.assertTrue(gate.evaluate([".github/workflows/ci.yml"], rule=rule).required)
+        self.assertTrue(gate.evaluate([".env.local"], rule=rule).required)
+
+    def test_overlapping_project_and_mandatory_matches_are_reported_once(self) -> None:
+        rule = gate.GateRule.from_config(
+            {"code_cycle": {"security_review": {"always_when": {
+                "paths": [".github/workflows/**"], "files": [".env.*"]}}}}
+        )
+
+        decision = gate.evaluate(
+            [".github/workflows/ci.yml", ".env.local"], rule=rule
+        )
+
+        self.assertEqual((".github/workflows/ci.yml",), decision.matched_paths)
+        self.assertEqual((".env.local",), decision.matched_files)
 
     def test_an_absent_configuration_keeps_the_gate_on(self) -> None:
         """An unconfigured repository must not be the unsafe case."""
         for config in (None, {}, {"code_cycle": {}}):
             with self.subTest(config=config):
                 rule = gate.GateRule.from_config(config)
-                self.assertEqual(gate.DEFAULT_PATHS, rule.paths)
+                self.assertTrue(set(gate.DEFAULT_PATHS).issubset(rule.paths))
+                self.assertTrue(set(gate.MANDATORY_PATHS).issubset(rule.paths))
+                self.assertTrue(set(gate.DEFAULT_FILES).issubset(rule.files))
+                self.assertTrue(set(gate.MANDATORY_FILES).issubset(rule.files))
                 self.assertTrue(gate.evaluate(["auth/session.php"], rule=rule).required)
 
     def test_an_empty_block_also_keeps_the_defaults(self) -> None:

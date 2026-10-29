@@ -17,7 +17,8 @@
     "configuration-documentation": {
       "paths": ["docs/configuration.md"],
       "tests": [
-        "test_validate_package.ValidatePackageTests.test_implementation_workspace_default_and_opt_out_are_documented"
+        "test_validate_package.ValidatePackageTests.test_implementation_workspace_default_and_opt_out_are_documented",
+        "test_security_gate.ConfigurationTests.test_documented_mandatory_minimum_matches_the_reference_constants"
       ]
     },
     "spike-fixtures": {
