@@ -719,7 +719,16 @@ strict JSON, not a Markdown code fence, and do not include chain-of-thought.
 `reviewed_head_sha` is mandatory and `blocking_findings` contains the IDs of
 all open findings with `blocks_approval: true`.
 
-The serialised block carries identifiers and status only. It must not repeat
+The serialised block carries identifiers, status, and the boolean
+`security_audit_ran`. Set it to `true` only when the required `cc-security-review`
+pass actually completed for `reviewed_head_sha`; findings do not make it false.
+Set it to `false` when triage skipped the audit or it could not complete, and
+explain that state in the published comment. Never infer completion from a clean
+verdict. When the runtime plan says `security_required`, the audit is mandatory:
+an omitted, false, or unverified value stops the native cycle with
+`verification_unverified`. Include the field in every structured result,
+including `BLOCKED` and `FAILED`; it does not replace the audit evidence in prose.
+It must not repeat
 narrative already published in the comment: no `title`, no `description`, no
 `summary`, no `reason`, no quoted evidence. `comment_url` is the pointer to
 that prose and is mandatory whenever a comment was published. The one
@@ -742,6 +751,7 @@ ORCHESTRATION_RESULT
   "comment_url": "https://github.com/owner/repo/pull/123#issuecomment-1234567890",
   "head_sha": "0123456789abcdef0123456789abcdef01234567",
   "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "security_audit_ran": true,
   "review_run_id": "CCR-20260918-001",
   "reviewer": {
     "profile": "senior_reviewer",

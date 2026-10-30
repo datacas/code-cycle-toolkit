@@ -260,17 +260,20 @@ class ValidatePackageTests(unittest.TestCase):
 
     def test_rejects_a_result_that_forbids_the_prose_of_questions(self) -> None:
         package = self.copy_package()
-        path = package / "skills" / "cc-rereview" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-        self.assertIn("The one\nexception is `questions`", text)
-        path.write_text(text.replace("The one\nexception is `questions`",
-                                     "No\nexception is `questions`", 1), encoding="utf-8")
+        for skill in VALIDATOR.REVIEW_CYCLE_SKILLS:
+            with self.subTest(skill=skill):
+                path = package / "skills" / skill / "SKILL.md"
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("The one\nexception is `questions`", text)
+                path.write_text(text.replace("The one\nexception is `questions`",
+                                             "No\nexception is `questions`", 1), encoding="utf-8")
 
-        errors = VALIDATOR.validate_package(package)
+                errors = VALIDATOR.validate_package(package)
 
-        self.assert_error_contains(
-            errors, "skills/cc-rereview/SKILL.md: its result allows identifiers and "
-            "status only, with no exception for `questions`")
+                self.assert_error_contains(
+                    errors, f"skills/{skill}/SKILL.md: its result restricts prose, "
+                    "with no exception for `questions`")
+                path.write_text(text, encoding="utf-8")
 
     def test_rejects_a_questions_example_the_runtime_refuses(self) -> None:
         package = self.copy_package()

@@ -1,16 +1,5 @@
 # Review lifecycle
 
-Native cycles select stages from the current execution plan. Resolution remains
-bounded by the existing iteration budget. After a resolution, identical explicit
-review and resolution HEADs stop with `no_progress`: open findings retain their
-blocks, and no rereview runs, including under Full. A changed HEAD invalidates
-incompatible review and verification evidence and activates the applicable
-controls again. A clean trusted receipt for the unchanged current HEAD can be
-reused on resume under either CI policy. Final readiness still requires valid
-`REV-*` history, required verification and the checks of that SHA; merge remains
-a human action. Verification-only recovery uses `cc-verify`, not another review;
-see [Verification](verification.md).
-
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
 **On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Resume after a failed upload](#resume-after-a-failed-upload) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
@@ -48,6 +37,17 @@ A delegated stage returns its questions as a `questions` list in its structured 
 `recommended` is `null` or the first option; `blocks` names what the answer settles, and in an issue-review result only its own `IR-NNN` and `IU-NNN` identifiers. `stop_questions.questions_errors` is the executable definition, and the validator checks the shared section's example against it. Answers go back to the resumed stage as explicit input; an edit to the work item is shown and applied only after confirmation.
 
 ## The loop
+
+Native cycles select stages from the current execution plan. Resolution remains
+bounded by the existing iteration budget. After a resolution, identical explicit
+review and resolution HEADs stop with `no_progress`: open findings retain their
+blocks, and no rereview runs, including under Full. A changed HEAD invalidates
+incompatible review and verification evidence and activates the applicable
+controls again. A clean trusted receipt for the unchanged current HEAD can be
+reused on resume under either CI policy. Final readiness still requires valid
+`REV-*` history, required verification and the checks of that SHA; merge remains
+a human action. Verification-only recovery uses `cc-verify`, not another review;
+see [Verification](verification.md).
 
 ```mermaid
 sequenceDiagram
@@ -334,6 +334,10 @@ security_required = deterministic_rule OR reviewer_requests_security
 
 `scripts/security_gate.py` is the reference implementation.
 
+The native execution plan can also require security (for example, under Full
+or when diff paths are unavailable). Its `security_required` obligation is
+mandatory even when the rule and reviewer judgement would otherwise skip it.
+
 ## The structured result is opt-in
 
 `ORCHESTRATION_RESULT`, a strict JSON block with IDs, statuses, and SHAs, is emitted only when:
@@ -343,6 +347,15 @@ security_required = deterministic_rule OR reviewer_requests_security
 - the status is `BLOCKED` or `FAILED`, or no comment could be published.
 
 When it is emitted alongside a published comment, it is collapsed in a `<details>` element there, not repeated in the response. Otherwise the published comment, with the headers above, is the record. See [Instrumentation → The comment is the record](instrumentation.md#the-comment-is-the-record).
+
+Review and rereview results include the boolean `security_audit_ran`. Use `true`
+only when the `cc-security-review` pass completed for `reviewed_head_sha`, even
+if it found vulnerabilities. Use `false` when triage skipped it or execution
+could not complete, and explain why in the comment. A clean review status does
+not imply an audit. If the execution plan requires security, an omitted or
+false value stops the native cycle with `verification_unverified`; prose that
+says an audit ran does not substitute for the structured field. Both review
+skills' result examples declare the field, including its use in blocked results.
 
 ## Exit conditions
 
@@ -357,12 +370,19 @@ The last review may be a confirmed [manual rereview](#manual-rereview) of the cu
 
 A human still owns the merge.
 
+The `verified_change` objective completes after required verification and a
+clean review with `HUMAN_INTERVENTION` and `stop_reason: approved`. This records
+objective completion before merge readiness, including after verification-only
+resume; it does not run the merge-readiness CI gate or report
+`READY_FOR_MANUAL_MERGE`. `local_only` remains the stop for `local_change`.
+
 The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dispatched, on any of these:
 
 | Stop | When | Recorded as |
 |---|---|---|
 | Iteration limit | the resolve+rereview budget is spent: `max_iterations`, default `3` in `run_cycle.py` and `6` in the orchestrator skills | `iteration_limit` |
-| No progress | a rereview reports the same `head_sha` and the same open finding set as the review before it | `no_progress` |
+| No progress | a resolution reports the same explicit `head_sha` as the review it addresses; no rereview is dispatched and open findings retain their blocks | `no_progress` |
+| Required verification unavailable | a required check is unverified, acceptance criteria remain uncovered, or a required security audit was omitted or could not be verified | `verification_unverified` |
 | Repeated findings | one `REV-xxx` ID survived a claimed fix twice | `repeated_findings` |
 | Manual rereview not accepted | a resume's latest receipt is a [manual rereview](#manual-rereview) it cannot close on | `manual_rereview_rejected` |
 | Publication invariant failed | during any publishing stage, a change request was merged or closed, the cycle branch moved non-fast-forward or was deleted, or the default or a protected branch moved ([Publication audit](role-workspace-policy.md#publication-audit)) | `publication_violation` |
@@ -370,6 +390,12 @@ The loop stops early with `HUMAN_INTERVENTION`, before another resolution is dis
 Before the loop, an [issue review](#issue-review-before-implementation) can stop a new cycle as `needs_refinement` or `readiness_unconfirmed` without implementing anything.
 
 **A finding survives a claimed fix** when a resolution publishes its ID as `resolved` or `not_applicable` and the next review reopens it as `open` (`still_open` in a rereview's result). The claim is the status, never the disposition: a finding triaged `valid` and left `open` is no claim; one triaged `incorrect` and published `not_applicable` is one. Each claim is judged by the next review only, and within one run the last header for an ID is its position. These do not count:
+
+An ordinary comment-only resolution leaves HEAD unchanged, so the native loop
+stops with `no_progress` before another review can judge its claims. Publishing
+`not_applicable` after triaging a finding `incorrect` does not bypass that guard
+or remove the reviewed blocks. A person must decide how to continue; no survival
+is counted without a subsequent readable review rejection.
 
 | Sequence | Why not |
 |---|---|

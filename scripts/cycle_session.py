@@ -243,7 +243,8 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                 return barrier
             if self.execution_plan.objective != "merge_ready":
                 status = self.api.UNRESOLVED_END
-                stop_reason = "local_only"
+                stop_reason = ("approved" if self.execution_plan.objective == "verified_change"
+                               else "local_only")
                 because = f"objective {self.execution_plan.objective} completed before merge readiness"
         self.save_plan("stopped", stop_reason=stop_reason)
         self.control.move("stop")

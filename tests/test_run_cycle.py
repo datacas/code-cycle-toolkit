@@ -274,6 +274,40 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             execution_plan=self.plan("hotfix"), work_item_provider="github", work_item_repository="owner/api")
         self.assertEqual(report.stop_reason, "needs_refinement")
 
+    def test_verified_change_completes_without_merge_readiness_or_ci(self):
+        import cycle_session
+        import verification_plan as vp
+        spec = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                        "project", True, criteria=("AC-1",))
+        for policy in ("strict", "parallel"):
+            with self.subTest(policy=policy), mock.patch.object(
+                    cycle_session.CycleSession, "gate") as gate, mock.patch.object(
+                    cycle_session.CycleSession, "receipt_problem", return_value=None):
+                report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40,
+                    tests={"version": 2, "conclusion": "verified", "checks": [{
+                        **spec.to_dict(), "head_sha": "a" * 40, "result": "pass",
+                        "evidence": [{"command": spec.command, "exit_code": 0, "executed": 1}]}]})),
+                    Talker("claude", block("APPROVED", head_sha="a" * 40,
+                        reviewed_head_sha="a" * 40, findings=[], blocking_findings=[],
+                        security_audit_ran=True)),
+                    execution_plan=self.plan(objective="verified_change"), ci_policy=policy,
+                    work_item_provider="github", work_item_repository="owner/api")
+                self.assertEqual(report.status, "HUMAN_INTERVENTION")
+                self.assertEqual(report.stop_reason, "approved")
+                self.assertFalse(report.approved)
+                self.assertEqual([stage.role for stage in report.stages], ["implement", "review"])
+                self.assertIn("objective verified_change completed", report.stopped_because)
+                gate.assert_not_called()
+
+    def test_required_security_needs_explicit_completion_from_the_reviewer(self):
+        for fields in ({}, {"security_audit_ran": False}):
+            with self.subTest(fields=fields):
+                report = self.run_cycle(Talker("codex"), Talker("claude", block(
+                    "APPROVED", head_sha="a" * 40, **fields)), start_from="review",
+                    change_request_id="4", execution_plan=self.plan("full", "review"))
+                self.assertEqual(report.stop_reason, "verification_unverified")
+                self.assertIn("security audit was omitted", report.stopped_because)
+
     def test_passing_checks_do_not_raise_the_agents_not_verified_conclusion(self):
         import verification_plan as vp
         spec = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
@@ -364,13 +398,17 @@ class NativeExecutionPlanTests(RunCycleTestCase):
     def test_verification_only_unavailable_environment_stops_once(self):
         self.verification_resume_fixture("unverified")
 
+    def test_verified_change_resume_completes_without_merge_readiness_or_ci(self):
+        self.verification_resume_fixture("pass", objective="verified_change")
+
     def test_verifier_cannot_pass_after_editing_its_clone(self):
         self.verification_resume_fixture("pass", tamper=True)
 
     def test_new_profile_obligations_prevent_verification_only_shortcut(self):
         self.verification_resume_fixture("pass", policy_change=True)
 
-    def verification_resume_fixture(self, result, tamper=False, policy_change=False):
+    def verification_resume_fixture(self, result, tamper=False, policy_change=False,
+                                    objective="merge_ready"):
         import cycle_history as ch
         import cycle_session
         import verification_plan as vp
@@ -386,7 +424,8 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         verification = verification.record(vp.CheckResult("check-0", head, "pass", ({
             "command": commands[0], "exit_code": 0, "executed": 1},)))
         verification = verification.record(vp.CheckResult("check-1", head, "unverified", cause="environment"))
-        old = replace(self.plan(), plan_id="plan-resume", head_sha=head, verification=verification)
+        old = replace(self.plan(objective=objective), plan_id="plan-resume", head_sha=head,
+                      verification=verification)
         receipt = ch.CycleHistoryStore(self.store.path).save_plan(old, cycle_id="cycle-before",
             change_request_id="4", provenance="stopped", stop_reason="verification_unverified")
         comment = contract.ProviderComment(author="reviewer", id="1", body=contract.format_stage_evidence({
@@ -419,10 +458,10 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     agent_output=spoken, model_resolved=target.model, process_exited=True)
 
         checks = SimpleNamespace(pull=lambda *_: rc.ci_gate.PullState("OPEN", head, "main", "task", True, "clean"))
-        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=("approved", None)):
+        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=("approved", None)) as gate:
             report = self.run_cycle(Verifier("codex"), Verifier("claude"), start_from="rereview",
                 change_request_id="4", execution_plan=self.plan(
-                    "full" if policy_change else "standard", start="rereview"),
+                    "full" if policy_change else "standard", start="rereview", objective=objective),
                 allowed_verify_commands=commands, cwd=str(repo), ci_checks=checks,
                 comment_reader=lambda *_: [comment])
         if policy_change:
@@ -430,7 +469,13 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             self.assertFalse(report.approved)
             return
         self.assertEqual([stage.role for stage in report.stages], ["verify"])
-        self.assertEqual(report.status, rc.APPROVED_END if result == "pass" and not tamper else "HUMAN_INTERVENTION")
+        completed = result == "pass" and not tamper
+        self.assertEqual(report.status, rc.APPROVED_END
+                         if completed and objective == "merge_ready" else "HUMAN_INTERVENTION")
+        if completed and objective == "verified_change":
+            self.assertEqual(report.stop_reason, "approved")
+            self.assertFalse(report.approved)
+            gate.assert_not_called()
         if result == "unverified" or tamper:
             self.assertEqual(report.stop_reason, "verification_unverified")
         self.assertEqual(len(seen), 1)

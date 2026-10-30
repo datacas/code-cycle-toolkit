@@ -126,6 +126,8 @@ class StageLoop:
                                  stop_reason="verification_unverified")
             role, verdict, head, attempts = clean
             self.report.verdict = verdict
+            if self.execution_plan.objective == "verified_change":
+                return self.stop("", self.api.APPROVED_END, stop_reason="approved")
             outcome = self.gate(role, head, attempts, reported)
             if isinstance(outcome, self.api.CycleReport):
                 return outcome
@@ -137,10 +139,7 @@ class StageLoop:
             # Independent of issue-review mode/difficulty. Read once before any
             # agent iteration; provider content is data, never instructions.
             if self.policy_provider is not None:
-                try:
-                    criteria = self.state.verification_plan.criteria
-                except self.api.verification_contract.VerificationError as error:
-                    return self.stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
+                criteria = self.state.verification_plan.criteria
                 if criteria.status == "not_evaluable":
                     return self.stop(
                         f"acceptance criteria not_evaluable for {criteria.provider}: "
@@ -270,8 +269,8 @@ class StageLoop:
                     clean = (role, verdict, head, set(self.state.review_attempts))
                 head = clean[2]
                 if self.execution_plan.objective == "verified_change":
-                    return self.stop("verified_change completed with a clean review; merge is a human action",
-                                     "IN_PROGRESS", reported=reported, stop_reason="local_only")
+                    return self.stop("", self.api.APPROVED_END, reported=reported,
+                                     stop_reason="approved")
                 outcome = self.gate(clean[0], head, clean[3], reported)
                 clean = None
                 if isinstance(outcome, self.api.CycleReport):

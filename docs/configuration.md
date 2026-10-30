@@ -229,7 +229,9 @@ profile is never replaced by `standard`. Stage overrides cannot remove mandatory
 checks, security requirements, publication guarantees or human review.
 `local_change` from `--objective` or the file applies the local-only workspace
 requirements (`--cwd` linked worktree and `--workspace current`) and stops before
-merge readiness. `verified_change` stops after verification and a clean review;
+merge readiness. `verified_change` stops after verification and a clean review
+with terminal status `HUMAN_INTERVENTION` and `stop_reason: approved`, including
+after verification-only resume. It does not run the merge-readiness CI gate;
 `merge_ready` also requires the reviewed SHA's CI gate. `--dry-run` prints the
 same plan without effects. No additional configuration key or resume start point
 is needed for verification-only recovery; see [Verification](verification.md).
