@@ -68,12 +68,13 @@ class CredentialReadsTests(unittest.TestCase):
                         self.assertEqual("write", actual[str(clone)])
                     self.assertEqual(publishes, str(self.home / ".config/gh") not in actual)
 
-    def test_claude_policy_files_apply_denials_for_every_role(self):
+    def test_claude_sandbox_applies_denials_for_every_role_when_required(self):
         for role in ("implement", "resolve", "review", "rereview", "issue_review", "triage"):
             with self.subTest(role=role):
                 adapter = ex.ClaudeAdapter()
                 argv = ["claude", "--verbose", "-p", "task"]
-                policy = sp.StagePolicy(role=role, credential_publishing=role in
+                policy = sp.StagePolicy(role=role, registry_domains=("registry.npmjs.org",),
+                                        credential_publishing=role in
                                         sp.WRITING_ROLES | sp.REVIEW_ROLES)
                 with adapter.policy_files(argv, policy, scratch=str(self.root),
                                           cwd=str(self.home)) as result:

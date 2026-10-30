@@ -1233,6 +1233,24 @@ class NativeAdapter(Adapter):
         """
         return argv
 
+    def _bash_sandbox_preflight(self, command_policy: StagePolicy,
+                                evidence: dict[str, Any], *, path: str,
+                                live: bool) -> StagePolicy:
+        """Probe each effective Claude sandbox once, including late activation."""
+        if (self.name == "claude" and command_policy.uses_bash_sandbox
+                and sys.platform.startswith("linux") and live
+                and "functional_check" not in evidence):
+            ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe, path=path)
+            evidence["functional_check"] = {"probe": "bwrap", "passed": ready, "evidence": detail}
+            if not ready or any(tool in evidence["missing"] for tool in ("bwrap", "socat")):
+                # Keep static editing/reading, never run code or publish through
+                # a sandbox the host could not reproduce.
+                evidence.update(mode="static_only", status="unverified")
+                return replace(command_policy, static_only=True)
+            if evidence["status"] != "unverified":
+                evidence["status"] = "verified"
+        return command_policy
+
     def dispatch(self, target: Target, task: str, *, cwd: str | None = None,
                  timeout: int = DEFAULT_DISPATCH_TIMEOUT_SECONDS, runner=_run,
                  writes: bool = False, publishes: bool = False,
@@ -1286,27 +1304,14 @@ class NativeAdapter(Adapter):
         # dispatch. This evidence is attached to the stage attempt; a missing
         # capability must not silently turn an unrun check into a pass.
         prerequisite_path = os.environ.get("PATH", "")
+        sandbox_evidence: dict[str, Any] = {}
         if command_policy is not None:
             sandbox_evidence = native.observe(self.name, recover=runner is _run)
             prerequisite_path = native.tool_path(prerequisite_path, probes=sandbox_evidence.get("probes", []))
             missing = sandbox_evidence["missing"]
-            needs_bash_sandbox = (self.name == "claude" and policy is not None
-                                  and (policy.requires_confined_verification or policy.registry_domains
-                                       or policy.publication_commands))
-            if needs_bash_sandbox and sys.platform.startswith("linux") and runner is _run:
-                ready, detail = native.isolation_probe("bwrap", runner=_run_sandbox_probe, path=prerequisite_path)
-                sandbox_evidence["functional_check"] = {"probe": "bwrap", "passed": ready,
-                                                          "evidence": detail}
-                sandbox_evidence["status"] = "verified" if ready else "unverified"
-                if not ready or any(tool in missing for tool in ("bwrap", "socat")):
-                    # The existing hook + disposable clone remains the static
-                    # boundary. Remove code execution grants, never run tests
-                    # outside a sandbox. Writing stages may still edit, but
-                    # publication requires a working sandbox and stays denied.
-                    command_policy = replace(command_policy, static_only=True)
-                    policy = command_policy
-                    sandbox_evidence["mode"] = "static_only"
-                    sandbox_evidence["status"] = "unverified"
+            command_policy = self._bash_sandbox_preflight(
+                command_policy, sandbox_evidence, path=prerequisite_path, live=runner is _run)
+            policy = command_policy if command_policy.active else None
             if (sys.platform.startswith("linux")
                     and runner is _run and "srt" not in missing
                     and not sandbox_evidence.get("codex_socket")):
@@ -1328,7 +1333,7 @@ class NativeAdapter(Adapter):
                     "prerequisite alone is not BLOCKED. Never describe an incomplete implementation "
                     "as complete."
                 )
-        refused = self.policy_preflight(command_policy if self.name == "claude" else policy, cwd)
+        refused = self.policy_preflight(policy, cwd)
         if refused is not None:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -1415,13 +1420,32 @@ class NativeAdapter(Adapter):
                     (*dependency_setup.REGISTRIES, *command_policy.registry_domains))))
                 policy = command_policy if policy is not None else None
                 policy_note["dependency_preparation"] = preparation
+        if command_policy is not None:
+            # Preparation can activate the sandbox by adding registry domains.
+            # Recheck the final policy before emission; an earlier probe is
+            # retained rather than launched twice.
+            command_policy = self._bash_sandbox_preflight(
+                command_policy, sandbox_evidence, path=prerequisite_path, live=runner is _run)
+            policy = command_policy if command_policy.active else None
+            if command_policy.static_only:
+                task += ("\nNative Bash isolation is unavailable; keep static guards and report "
+                         "affected verification as not_verified. Do not launch a nested sandbox.")
+        refused = self.policy_preflight(policy, cwd)
+        if refused is not None:
+            return DispatchResult(
+                DispatchOutcome.FAILED, self.name, target,
+                detail=failure_excerpt(f"BLOCKED: {refused}", 600),
+                error_code="precondition", start_state="not_started", lifecycle_state="failed",
+                artifacts={**policy_note, "command_policy": f"blocked: {failure_excerpt(refused, 300)}",
+                           "policy_preflight_refusal": failure_excerpt(refused, 600)},
+            )
         argv_options = {}
         if self.name == "codex" and command_policy is not None:
             argv_options["credential_reads"] = credential_reads
-            # The owner explicitly authorizes issue-review GitHub reads with
-            # the same credentials as publishing stages (#279). Its workspace
-            # and publication contract remain read-only. Other non-publishing
-            # roles do not acquire code-host access through registry choices.
+            # The owner authorizes issue-review GitHub network reads (#279).
+            # Stored gh credentials now require an explicit credential_reads
+            # exception (#294); workspace and publication remain read-only.
+            # Other non-publishing roles gain no code-host route via registries.
             issue_domains = (("github.com", "api.github.com")
                              if command_policy.role == "issue_review"
                              and command_policy.code_host == "github" else ())
@@ -2774,7 +2798,7 @@ class ClaudeAdapter(NativeAdapter):
                         f"{', '.join(mods)}. Claude Code offers no flag that turns mods "
                         "off for one dispatch while keeping the user's other hooks, so "
                         "disable that plugin for cycle runs")
-            if not policy.static_only:
+            if policy.uses_bash_sandbox:
                 reason = sp.sandbox_override()
                 if reason:
                     return reason
@@ -2839,7 +2863,7 @@ class ClaudeAdapter(NativeAdapter):
                 "BASH_DEFAULT_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
                 "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
             })
-            if not runtime_policy.static_only:
+            if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []

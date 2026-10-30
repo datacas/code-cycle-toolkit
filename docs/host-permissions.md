@@ -258,11 +258,18 @@ credentials unless the project explicitly opts out (see
 command table still denies publication. Explicitly selected registry domains do
 not add code-host domains.
 
-Every native stage and preparation sandbox denies credential-store reads:
+Every Codex stage and preparation sandbox denies credential-store reads:
 `~/.ssh`, `~/.aws`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, and
 `~/.claude.json`. Only publishing stages retain `~/.config/gh` access by
 default. Codex uses `none` filesystem rules; Claude and preparation use
-`denyRead`. Existing paths resolve to their real targets before rules are
+`denyRead`. Claude adds these denials where its Bash sandbox already applies:
+an active GitHub policy with confined review verification, registry domains,
+publication commands or a Docker grant. Inactive policies retain their normal
+tooling; adding credential denials does not enable a sandbox for them. The same
+condition selects sandbox configuration checks and the Linux functional probe.
+Unavailable isolation selects static-only recovery with verification disabled;
+this does not establish credential confinement. Existing paths resolve to their
+real targets before rules are
 emitted; missing paths are omitted. An explicit per-project
 `code_cycle.user_choices.credential_reads` list selects exceptions and is
 reported in dispatch and preparation evidence. See

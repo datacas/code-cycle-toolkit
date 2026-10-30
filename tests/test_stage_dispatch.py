@@ -89,6 +89,62 @@ class DispatchTestCase(unittest.TestCase):
 
 
 class DependencyPreparationDispatchTests(DispatchTestCase):
+    def test_preparation_registry_grant_gets_final_sandbox_configuration_check(self):
+        for status in ("prepared", "incomplete"):
+            with self.subTest(status=status), mock.patch.object(
+                    ex.dependency_setup, "prepare", return_value={"status": status, "items": []}), mock.patch.object(
+                    sp, "sandbox_override", return_value="filesystem.allowRead could cancel denials") as override:
+                runner = mock.Mock(side_effect=AssertionError("dispatched with inherited allowRead"))
+                result = ex.ClaudeAdapter().dispatch(
+                    CLAUDE, "review", cwd=str(self.repo),
+                    command_policy=self.policy("review"), runner=runner)
+                self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome, result.detail)
+                self.assertIn("allowRead", result.detail)
+                override.assert_called_once()
+                runner.assert_not_called()
+
+    def test_preparation_registry_grant_gets_functional_probe_and_static_fallback(self):
+        for status in ("prepared", "incomplete"):
+            with self.subTest(status=status):
+                evidence = {"missing": [], "probes": [], "status": "observed"}
+                seen = []
+                def runner(argv, **options):
+                    seen.append(settings_of(argv))
+                    self.assertIn("not_verified", argv[argv.index("-p") + 1])
+                    return completed()
+                with (mock.patch.object(ex, "_run", side_effect=runner) as launch,
+                      mock.patch.object(ex.native, "observe", return_value=evidence),
+                      mock.patch.object(ex.native, "isolation_probe", side_effect=lambda kind, **kw:
+                                        (kind != "bwrap", "fixture isolation")) as probe,
+                      mock.patch.object(ex.dependency_setup, "prepare", return_value={"status": status, "items": []}),
+                      mock.patch.object(ex.sys, "platform", "linux")):
+                    result = ex.ClaudeAdapter().dispatch(
+                        CLAUDE, "review", cwd=str(self.repo),
+                        command_policy=self.policy("review"), runner=launch)
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                self.assertEqual(["srt", "bwrap"], [call.args[0] for call in probe.call_args_list])
+                self.assertEqual("static_only", result.artifacts["native_sandbox_preflight"]["mode"])
+                self.assertNotIn("sandbox", seen[0])
+
+    def test_docker_only_sandbox_uses_functional_preflight_and_static_fallback(self):
+        evidence = {"missing": [], "probes": [], "status": "observed"}
+        seen = []
+        def runner(argv, **options):
+            seen.append(settings_of(argv))
+            return completed()
+        with (mock.patch.object(ex, "_run", side_effect=runner) as launch,
+              mock.patch.object(ex.native, "observe", return_value=evidence),
+              mock.patch.object(ex.native, "isolation_probe", return_value=(False, "namespace unavailable")) as probe,
+              mock.patch.object(ex.sys, "platform", "linux")):
+            result = ex.ClaudeAdapter().dispatch(
+                CLAUDE, "inspect", cwd=str(self.repo),
+                command_policy=self.policy("issue_review", docker=True), runner=launch)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertEqual(["bwrap", "srt"], [call.args[0] for call in probe.call_args_list])
+        self.assertEqual("static_only", result.artifacts["native_sandbox_preflight"]["mode"])
+        self.assertNotIn("sandbox", seen[0])
+        self.assertEqual("not_verified", result.artifacts["docker_host_probe"]["status"])
+
     def test_claude_selected_prerequisites_reach_all_consumers(self):
         evidence = {"missing": [], "status": "observed", "probes": [
             {"name": "srt", "path": "/tools/srt", "outcome": "reused"},
@@ -294,6 +350,40 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
 
 
 class ClaudePolicyTests(DispatchTestCase):
+    def test_inactive_policies_do_not_gain_sandbox_configuration_preflight(self):
+        (self.claude_home / "settings.json").write_text(
+            json.dumps({"sandbox": {"filesystem": {"allowRead": ["/custom"]}}}),
+            encoding="utf-8")
+        for fields in ({"code_host": "bitbucket"}, {"issue_provider": "plane"},
+                       {"issue_provider": "jira"}):
+            with self.subTest(fields=fields):
+                seen = []
+                def runner(argv, **options):
+                    seen.append(settings_of(argv))
+                    return completed()
+                result = ex.ClaudeAdapter().dispatch(
+                    CLAUDE, "implement", cwd=str(self.repo), writes=True, publishes=True,
+                    command_policy=self.policy(**fields), runner=runner)
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                self.assertNotIn("sandbox", seen[0])
+
+    def test_issue_review_sandbox_is_only_added_and_checked_when_required(self):
+        with mock.patch.object(sp, "sandbox_override", return_value="widened sandbox") as override:
+            for fields, expected in (({}, False),
+                                     ({"registry_domains": ("registry.npmjs.org",)}, True),
+                                     ({"docker": True}, True),
+                                     ({"static_only": True, "docker": True}, False)):
+                with self.subTest(fields=fields):
+                    policy = self.policy("issue_review", **fields)
+                    override.reset_mock()
+                    reason = ex.ClaudeAdapter().policy_preflight(policy, str(self.repo))
+                    self.assertEqual("widened sandbox" if expected else None, reason)
+                    self.assertEqual(expected, override.called)
+                    argv = ["claude", "--verbose", "-p", "task"]
+                    with ex.ClaudeAdapter().policy_files(
+                            argv, policy, scratch=str(self.base), cwd=str(self.repo)) as result:
+                        self.assertEqual(expected, "sandbox" in settings_of(result))
+
     def test_project_choices_reach_both_barriers_and_private_registry_profile(self) -> None:
         def runner(argv, timeout=None, cwd=None, env=None):
             settings = settings_of(argv)
@@ -428,9 +518,9 @@ class ClaudePolicyTests(DispatchTestCase):
             command_policy=self.policy(code_host="bitbucket"), runner=runner)
 
         self.assertIn("Bash(gh:*)", seen["argv"])
-        # No command table, but credential confinement applies to every provider.
+        # Only the minimal foreground hook (#276): no table, no sandbox.
         settings = settings_of(seen["argv"])
-        self.assertEqual({"hooks", "env", "sandbox"}, set(settings))
+        self.assertEqual({"hooks", "env"}, set(settings))
         self.assertEqual("Bash", settings["hooks"]["PreToolUse"][0]["matcher"])
         self.assertTrue(result.artifacts["command_policy"].startswith("inactive: "))
         self.assertIn("GitHub only", result.artifacts["command_policy"])

@@ -249,6 +249,13 @@ class StagePolicy:
         """A reviewer that may run tests must do so in a confined clone."""
         return self.role in REVIEW_ROLES and bool(self.verification_commands)
 
+    @property
+    def uses_bash_sandbox(self) -> bool:
+        """Keep Claude sandbox emission and its preflight on the same scope."""
+        return self.active and not self.static_only and bool(
+            self.requires_confined_verification or self.registry_domains
+            or self.publication_commands or self.docker)
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
 

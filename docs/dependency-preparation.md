@@ -182,14 +182,18 @@ non-publishing roles receive only registry access, without a publication profile
 
 ### Credential-read exceptions
 
-Every stage and preparation sandbox denies reads of `~/.ssh`, `~/.aws`,
+Every Codex stage sandbox, existing Claude Bash sandbox and preparation sandbox
+denies reads of `~/.ssh`, `~/.aws`,
 `~/.codex/auth.json`, `~/.claude/.credentials.json` and `~/.claude.json`.
 `~/.config/gh` is readable by publishing stages only; preparation always denies
 it. These rules restrict child commands, so the agent can still authenticate
 outside its command sandbox. Rules name existing resolved targets, including
 symlink targets; absent paths are skipped to avoid sandbox mount failures and
 persistent placeholder files. A sandbox startup failure never retries without
-the denials.
+the denials. Claude's sandbox scope is unchanged: active GitHub policies with
+confined review verification, registry domains, publication commands or a Docker
+grant. Inactive policies and ordinary Claude issue review keep their earlier
+tooling. Static-only recovery disables execution and does not prove denial.
 
 A project whose tests need a particular store, or whose remote is SSH-only,
 must opt out explicitly in the trusted source checkout:
