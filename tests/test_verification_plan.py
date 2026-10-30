@@ -220,6 +220,33 @@ class ResultTests(unittest.TestCase):
                 "version": 99, "conclusion": conclusion, "passed": True}}, plan)
             self.assertEqual(rc._legacy_tests(payload)["verification"], "failed")
 
+    def test_v2_rejects_string_evidence_and_attempts_with_check_name(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        for field in ("evidence", "attempts"):
+            entry = report(**{field: ["text"]})
+            payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    vp.VerificationError, rf"check check-1 {field}\[0\].*str"):
+                vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_v1_string_evidence_rejects_with_plan_and_stays_unchanged_without_one(self):
+        legacy = {"version": 1, "conclusion": "verified", "evidence": ["text"]}
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        with self.assertRaisesRegex(vp.VerificationError, "invalid legacy evidence"):
+            vp.normalize_tests(legacy, HEAD, plan=plan)
+        unchanged, updated = vp.normalize_tests(legacy, HEAD)
+        self.assertEqual(unchanged, legacy)
+        self.assertIsNone(updated)
+
+    def test_string_check_entries_reach_cycle_as_not_verified(self):
+        for field in ("evidence", "attempts"):
+            payload, _ = rc._normalize_test_payload({"head_sha": HEAD, "tests": {
+                "version": 2, "conclusion": "verified", "passed": True,
+                "checks": [report(**{field: ["text"]})]}})
+            with self.subTest(field=field):
+                self.assertEqual(payload["tests"]["conclusion"], "not_verified")
+                self.assertFalse(payload["tests"]["passed"])
+
     def test_legacy_unmatched_failures_are_retained(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
         payload, updated = rc._normalize_test_payload({"status": "IMPLEMENTED", "head_sha": HEAD,
