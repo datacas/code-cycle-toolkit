@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .run_cycle import CycleReport, ci_gate
+    from .cycle_plan import hotfix_problem
+else:
+    from cycle_plan import hotfix_problem
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -15,6 +18,7 @@ class ControlState(str, Enum):
     RESOLVE = "resolve"
     REREVIEW = "rereview"
     CI = "ci"
+    VERIFY = "verify"
     STOPPED = "stopped"
     INTERRUPTED = "interrupted"
 
@@ -31,9 +35,10 @@ _SUCCESSORS = {
     ControlState.RESOLVE: {"resolve", "rereview"},
     ControlState.REREVIEW: {"rereview", "resolve", "ci"},
     ControlState.CI: {"ci", "resolve", "rereview"},
+    ControlState.VERIFY: {"ci", "review", "rereview"},
 }
 TRANSITIONS = {
-    state: {**{event: ControlState(event) for event in events},
+    state: {**{event: ControlState(event) for event in events | {"verify"}},
             "stop": ControlState.STOPPED, "interrupt": ControlState.INTERRUPTED}
     for state, events in _SUCCESSORS.items()
 }
@@ -105,16 +110,36 @@ class StageLoop:
             stopped = self.seed_history()
             if stopped is not None:
                 return stopped
+            try:
+                self.prepare_plan()
+            except ValueError as error:
+                return self.stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
+        if self.verification_resume:
+            stopped = self.verify_pending()
+            if stopped is not None:
+                return stopped
+            clean, stopped = self.reusable_review()
+            if stopped is not None:
+                return stopped
+            if clean is None:
+                return self.stop("pending checks completed; no reusable clean review holds",
+                                 stop_reason="verification_unverified")
+            role, verdict, head, attempts = clean
+            self.report.verdict = verdict
+            if self.execution_plan.objective == "verified_change":
+                return self.stop("", self.api.APPROVED_END, stop_reason="approved")
+            outcome = self.gate(role, head, attempts, reported)
+            if isinstance(outcome, self.api.CycleReport):
+                return outcome
+            if outcome[0] == "approved":
+                return self.stop("", self.api.APPROVED_END, stop_reason="approved")
+            return self.stop("verification completed but the current head's CI is not passing",
+                             stop_reason="ci_not_passing")
         if self.start_from == "implement":
             # Independent of issue-review mode/difficulty. Read once before any
             # agent iteration; provider content is data, never instructions.
             if self.policy_provider is not None:
-                try:
-                    criteria = (self.criteria_reader or self.api.verification_contract.read_criteria)(
-                        self.policy_provider, self.work_item_repository or self.repo_id, self.task_id, cwd=self.cwd)
-                except self.api.verification_contract.VerificationError as error:
-                    return self.stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
-                self.state.verification_plan = self.api.verification_contract.VerificationPlan(criteria)
+                criteria = self.state.verification_plan.criteria
                 if criteria.status == "not_evaluable":
                     return self.stop(
                         f"acceptance criteria not_evaluable for {criteria.provider}: "
@@ -158,6 +183,10 @@ class StageLoop:
                     f"{reported.change_request_id}, but #{published.lstrip('#')} already "
                     "carries this work; a person decides which one continues",
                     "BLOCKED", reported=reported)
+            if self.execution_plan.execution_profile == "hotfix":
+                if hotfix_problem(self.state.verification_plan, self.plan_head or "") == "missing_checks":
+                    return self.stop("Hotfix requires reproduction and focused regression commands",
+                                     reported=reported, stop_reason="needs_refinement")
             if self.local_only:
                 return self.stop(
                     "local-only run stops after implementation; no change request was created for review",
@@ -194,7 +223,8 @@ class StageLoop:
                 return stopped
             if manual is not None:
                 return self.close_manual(manual, reported)
-        if self.parallel and self.start_from == "rereview":
+        if ((self.parallel or self.plan_managed) and self.start_from == "rereview"
+                and not (self.plan_managed and self.plan_partial)):
             clean, stopped = self.reusable_review()
             if stopped is not None:
                 return stopped
@@ -227,7 +257,10 @@ class StageLoop:
         ci_failure: ci_gate.GateResult | None = None
         conflicting_round_done = False
         while True:
-            if self.parallel and verdict in self.api.CLEAN_REVIEW_STATUSES:
+            if (self.parallel or self.plan_managed) and verdict in self.api.CLEAN_REVIEW_STATUSES:
+                stopped = self.verification_barrier()
+                if stopped is not None:
+                    return stopped
                 # A clean review is no approval yet: the gate waits for its checks.
                 if clean is None:
                     head, stopped = self.clean_head(role, reported)
@@ -235,6 +268,9 @@ class StageLoop:
                         return stopped
                     clean = (role, verdict, head, set(self.state.review_attempts))
                 head = clean[2]
+                if self.execution_plan.objective == "verified_change":
+                    return self.stop("", self.api.APPROVED_END, reported=reported,
+                                     stop_reason="approved")
                 outcome = self.gate(clean[0], head, clean[3], reported)
                 clean = None
                 if isinstance(outcome, self.api.CycleReport):
@@ -349,6 +385,7 @@ class StageLoop:
                 if (self.resolve_effort is None and count >= 1
                     and open_findings.get(finding) == "open")
             )[:16])
+            review_head = (reported.payload or {}).get("head_sha")
             resolved, stopped = self.advance(
                 "resolve", instruction, change_request_id=self.state.change_request_id,
                 resolve_target=self.state.previous_resolve_target if escalation_ids else None,
@@ -358,6 +395,11 @@ class StageLoop:
                 escalation_finding_ids=escalation_ids)
             if stopped is not None:
                 return stopped
+            after_head = (resolved.payload or {}).get("head_sha")
+            if review_head is not None and after_head is not None and after_head == review_head:
+                return self.stop("resolution left the reviewed HEAD unchanged; open findings retain "
+                                 "their blocks without another review", reported=resolved,
+                                 stop_reason="no_progress")
             if ci_failure is not None and ci_failure.status == self.api.ci_gate.CI_CONFLICTING:
                 conflicting_round_done = True
             if ci_failure is not None:

@@ -295,7 +295,21 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 
 **Requires:** the runtime and an authenticated Codex and/or Claude CLI. For publishing stages, it also needs `gh` authenticated with push access, Codex CLI 0.138.0 or later, and a working tree on a named branch. Before any publishing dispatch, a readiness check verifies this and records `missing_capability=publication_access` when it fails.
 
-**Dry run:** `--dry-run` resolves the execution profile, objective, and stage policies and prints the plan without selecting a worktree, opening the telemetry database, preparing dependencies, asking for a grant, or starting an agent. Conditions that need the future change stay `pending`. A conflict, such as `--issue-review off` under `full`, is refused before anything runs. Until the driver follows the plan (#329), a run without `--dry-run` refuses any execution configuration whose behaviour differs from `standard`, naming each setting and its source. See [Execution profiles](configuration.md#execution-profiles).
+**Dry run:** `--dry-run` resolves the execution profile, objective, and stage
+policies and prints the plan without selecting a worktree, opening the telemetry
+database, preparing dependencies, asking for a grant, or starting an agent.
+Conditions that need the future change stay `pending`. A conflict, such as
+`--issue-review off` under `full`, is refused before anything runs. Live native
+cycles consume the same plan and record revisions as those conditions become
+known. See [Execution profiles](configuration.md#execution-profiles).
+
+A required unverified check stops the cycle with `verification_unverified`.
+`--from rereview --pr <n>` recovers the plan and, when HEAD and receipt match,
+runs only pending required checks through one isolated `cc-verify` dispatch.
+It reuses an unchanged clean review. It does not repeat publications or loop
+when the environment still cannot verify. Changed inputs use ordinary plan
+reconciliation. Hotfix additionally requires test-first reproduction and focused
+regression proof; see [Verification](verification.md).
 
 **Local-only rehearsal:** `--cwd /path/to/linked-worktree --workspace current --local-only` refuses the live repository. The explicit `current` policy is required so workspace selection cannot create another task worktree. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
 

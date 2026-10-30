@@ -307,6 +307,10 @@ def main(argv: list[str]) -> int:
     ) if skill in prompt), ("fake", None))
     _, role = selected
     payload = result_for_role(role or "unknown", status)
+    if role in {"review", "rereview"} and os.environ.get("FAKE_SECURITY_AUDIT") == "1":
+        # Explicit fixture evidence: omission is the default, and must never
+        # produce merge readiness. This flag lets loop tests reach resolution.
+        payload["security_audit_ran"] = True
     if os.environ.get("FAKE_SANDBOX") == NAME and role == "implement":
         payload = result_for_role(role, "BLOCKED")
         payload["environment_blocker"] = {

@@ -224,7 +224,17 @@ An objective adds obligations: publishing a `prototype` with `--objective merge_
 
 The configurable stages are `issue_review`, `implement`, `verify`, `review`, `security`, `resolve`, and `rereview`. `ci` and `merge` are controls, not stages: `--stage ci=…` is refused, and nothing makes a merge automatic. An unknown key, stage, profile, objective, or policy stops the run by name.
 
-**Before plan-driven execution (#329).** The driver follows the plan only from #329 on. Until then, a run without `--dry-run` refuses, before any effect, any execution configuration whose behaviour differs from `standard`, naming the setting and its source. No new configuration, or an explicit configuration that resolves to `standard` (including `custom` without a difference, `issue_review` off, and `local_change` through the local-only run), runs the current flow; `local_change` from `--objective` or the file applies the local-only run's own requirements (`--cwd` linked worktree, `--workspace current`). A requested profile is never silently replaced by `standard`. `--dry-run` shows the plan for every profile and override.
+The native driver executes the resolved plan for all five profiles. A requested
+profile is never replaced by `standard`. Stage overrides cannot remove mandatory
+checks, security requirements, publication guarantees or human review.
+`local_change` from `--objective` or the file applies the local-only workspace
+requirements (`--cwd` linked worktree and `--workspace current`) and stops before
+merge readiness. `verified_change` stops after verification and a clean review
+with terminal status `HUMAN_INTERVENTION` and `stop_reason: approved`, including
+after verification-only resume. It does not run the merge-readiness CI gate;
+`merge_ready` also requires the reviewed SHA's CI gate. `--dry-run` prints the
+same plan without effects. No additional configuration key or resume start point
+is needed for verification-only recovery; see [Verification](verification.md).
 
 ### Issue review
 

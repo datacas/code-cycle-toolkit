@@ -436,6 +436,21 @@ GitHub has no atomic check-and-publish, so this reduces conflicts between
 machines without excluding them. Each publishing stage costs one freshness
 check and, when something changed, one filtered comment read.
 
+### Execution plan history (schema 25)
+
+Schema 25 adds `verification_unverified` to the closed stop reasons and the
+append-only `cycle_execution_plans` history table. Each revision records cycle,
+repository, work item, change request, plan identity, revision, current HEAD,
+canonical digest and provenance (`initial`, `observed`, `recovered`, `partial`,
+`stopped`), plus a versioned metadata projection. Existing tables and history
+remain intact. The projection excludes prompts, criterion prose, command text
+and command output; it retains command/output/test/environment hashes, check
+identities, required flags, criterion links, results and cause tokens. Each
+check can retain results for several SHAs. Generic CI success does not update
+those results. Journal events correlate plan ID, revision and digest with the
+cycle. Published schema-2 receipts carry the same three references; see
+[Execution plan](execution-plan.md) for canonicalization and recovery rules.
+
 ### CI gate (schema 19)
 
 Under the `parallel` [CI policy](review-cycle.md#ci-policy) the review outcome and

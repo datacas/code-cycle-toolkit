@@ -172,6 +172,10 @@ class CheckResult:
         codes = []
         for item in self.evidence:
             code, executed = item.get("exit_code"), item.get("executed")
+            if any(key in item and (not isinstance(item[key], str)
+                   or re.fullmatch(r"[a-f0-9]{64}", item[key]) is None)
+                   for key in ("test_sha256", "context_sha256", "output_sha256")):
+                raise VerificationError("evidence fingerprints must be SHA-256 digests")
             if (type(code) is not int or "executed" not in item
                     or (executed is not None and (type(executed) is not int or executed < 0))):
                 raise VerificationError("executed evidence requires integer exit_code and count")
@@ -227,8 +231,9 @@ class VerificationPlan:
         return plan
 
     def current(self, check_id: str, head_sha: str) -> str:
-        latest = next((result for result in reversed(self.results) if result.id == check_id), None)
-        return latest.result if latest is not None and latest.head_sha == head_sha else "unverified"
+        latest = next((result for result in reversed(self.results)
+                       if result.id == check_id and result.head_sha == head_sha), None)
+        return latest.result if latest is not None else "unverified"
 
     def cap(self, conclusion: str, head_sha: str) -> str:
         """Deterministic caps never raise the agent's conclusion."""
@@ -330,6 +335,13 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         if check.criteria:
             check = replace(check, required=True)
         plan = plan.extend((check,))
+        history = entry.get("history", [])
+        if not isinstance(history, list):
+            raise VerificationError("check history must be an array")
+        for previous in history:
+            prior = CheckResult.from_dict({**previous, "id": check.id})
+            if prior not in plan.results:
+                plan = plan.record(prior)
         result = CheckResult(check.id, entry["head_sha"], entry["result"],
                              tuple(entry.get("evidence", ())), entry.get("cause", ""),
                              tuple(entry.get("attempts", ())))

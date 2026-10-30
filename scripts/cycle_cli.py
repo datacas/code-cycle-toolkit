@@ -123,8 +123,7 @@ def main(api: Any, argv: list[str] | None = None) -> int:
         repo, profiles, routing_strategy = api.plan_with_strategy(args)
         config = api.resolve_config(args, report=print)
         execution = api.execution_of(args, config)
-        api.execution_plan_of(args, config, repo, provenance="run")
-        api.check_current_flow(execution)
+        execution_plan = api.execution_plan_of(args, config, repo, provenance="run")
         if execution.objective.value == "local_change" and not args.local_only:
             # The current flow reaches local_change only as a local-only run,
             # with the same explicit worktree it requires.
@@ -258,6 +257,8 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                 ci_timeout=ci_timeout,
                 repair_approval=args.repair_approval,
                 consent=consent,
+                execution_plan=execution_plan,
+                security_rule=api.GateRule.from_config(config),
             )
     except (api.CycleDriverError, api.GrantError) as error:
         parser.error(str(error))

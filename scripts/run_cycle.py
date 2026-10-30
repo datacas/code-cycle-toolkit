@@ -66,6 +66,7 @@ else:
     import verification_plan as verification_contract
 
 import ci_gate
+from security_gate import GateRule
 try:
     from gh_environment import apply_gh_environment_defaults
 except ModuleNotFoundError:
@@ -87,7 +88,6 @@ from execution_profiles import (
     ResolvedExecution,
     Setting,
     build_plan,
-    current_flow_differences,
     invocation_settings,
     render_text as render_plan,
     repository_settings,
@@ -907,6 +907,7 @@ class CycleReport:
     #: The last publication audit's evidence (#261): refs and change-request
     #: states before and after the stage, and every breach. SHAs and names only.
     publication_audit: dict | None = None
+    execution_plan: dict[str, Any] | None = None
 
     @property
     def approved(self) -> bool:
@@ -2358,6 +2359,8 @@ def run_cycle(
     published_change_request: Callable[[], str | None] | None = None,
     publication_auditor: PublicationAuditor | None = None,
     criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
+    execution_plan: ExecutionPlan | None = None,
+    security_rule=None,
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -3061,25 +3064,6 @@ def dry_run(args) -> ExecutionPlan:
         except TelemetryError as error:
             raise CycleDriverError(str(error)) from error
     return execution_plan_of(args, config, repo)
-
-
-#: Until the driver follows the plan (#329), it runs the current flow only.
-PLAN_DRIVEN_EXECUTION = "#329"
-
-
-def check_current_flow(resolved: ResolvedExecution) -> None:
-    """Refuse an execution configuration the current flow would not honour.
-
-    A requested profile is never replaced by `standard` in silence: the run
-    stops before any effect, naming each setting and its source.
-    """
-    differences = current_flow_differences(resolved)
-    if differences:
-        raise CycleDriverError(
-            "this execution configuration differs from the standard flow: "
-            + "; ".join(differences)
-            + f". Plan-driven execution needs {PLAN_DRIVEN_EXECUTION}; until then a "
-            "run follows only the standard flow. Inspect the plan with --dry-run.")
 
 
 def _main_worktree_root(cwd: Path, run=subprocess.run) -> Path | None:

@@ -107,7 +107,9 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: `publication_violation`, an invariant on an audited ref or change request
 #: failed during a publishing stage, or `publication_unverified`, the audited
 #: state could not be read. Both payload-only.
-SCHEMA_VERSION = 24
+#: 25: execution-plan revisions and check histories; verification_unverified
+#: is a distinct stop and cannot be cleared by generic CI success.
+SCHEMA_VERSION = 25
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -155,6 +157,7 @@ STOP_REASONS = frozenset({
     "manual_rereview_rejected",
     # A publication invariant failed, or could not be read (schema 24).
     "publication_violation", "publication_unverified",
+    "verification_unverified",
 })
 
 #: Who ran the review a cycle closed on (schema 22); `review_contract` defines them.
@@ -761,6 +764,21 @@ def started_at_implement(row: dict) -> bool:
     return payload.get("started_from", "implement") == "implement"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS cycle_execution_plans (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    change_request_id TEXT,
+    cycle_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    head_sha TEXT,
+    provenance TEXT NOT NULL,
+    stop_reason TEXT,
+    payload TEXT NOT NULL,
+    UNIQUE(repo_id, plan_id, revision)
+);
 CREATE TABLE IF NOT EXISTS stages (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     schema_version     INTEGER NOT NULL,

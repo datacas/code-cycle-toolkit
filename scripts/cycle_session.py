@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .cycle_review_gate import ReviewGate
     from .cycle_loop import CycleControl, StageLoop
     from .workspace_setup import commit_setup, own_file
+    from .cycle_plan import PlanRuntime
 else:
     from cycle_state import SessionState
     from cycle_dispatch import StageDispatch
@@ -20,8 +21,9 @@ else:
     from cycle_review_gate import ReviewGate
     from cycle_loop import CycleControl, StageLoop
     from workspace_setup import commit_setup, own_file
+    from cycle_plan import PlanRuntime
 
-class CycleSession(StageDispatch, PublicationHistory, ReviewGate, StageLoop):
+class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, StageLoop):
     def __init__(self, api: Any, options: dict[str, Any]):
         # The facade supplies dependencies so existing integrations keep
         # the same public names and injection points.
@@ -188,6 +190,7 @@ class CycleSession(StageDispatch, PublicationHistory, ReviewGate, StageLoop):
             self.issue_review_fields["issue_review"] = self.api.issue_review_decision(
                 self.issue_review, self.signals)
         self.checks_provider = self.ci_checks if self.ci_checks is not None else self.api.ci_gate.GitHubChecks(self.cwd)
+        self.initialize_plan(options.get("execution_plan"), options.get("security_rule"))
 
     def progress_stage_started(self, role, decision) -> None:
         iteration = self.recorder.iteration if role in {"review", "resolve", "rereview"} else None
@@ -234,6 +237,16 @@ class CycleSession(StageDispatch, PublicationHistory, ReviewGate, StageLoop):
     def stop(self, because: str, status: str = "HUMAN_INTERVENTION",
              reported: Reported | None = None, *,
              stop_reason: str = "stage_not_completed") -> CycleReport:
+        if status == self.api.APPROVED_END:
+            barrier = self.verification_barrier()
+            if barrier is not None:
+                return barrier
+            if self.execution_plan.objective != "merge_ready":
+                status = self.api.UNRESOLVED_END
+                stop_reason = ("approved" if self.execution_plan.objective == "verified_change"
+                               else "local_only")
+                because = f"objective {self.execution_plan.objective} completed before merge readiness"
+        self.save_plan("stopped", stop_reason=stop_reason)
         self.control.move("stop")
         if self.report.stages and self.report.stage_details:
             # The exact command a permission stopped, in the stop line, so a
@@ -302,6 +315,12 @@ class CycleSession(StageDispatch, PublicationHistory, ReviewGate, StageLoop):
                                 if self.policy_host == "github" else None)
             except Exception as error:
                 self.report.note(f"  journal  cleanup failed ({type(error).__name__}); detail retained")
+            try:
+                if self.start_from not in self.api.RESUMES:
+                    self.prepare_plan()
+            except (self.api.verification_contract.VerificationError,
+                    self.api.HistoryError, ValueError) as error:
+                return self.stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
             return self.drive()
         except self.api.CycleInterrupted as interruption:
             return self.interrupted(interruption)

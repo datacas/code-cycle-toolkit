@@ -336,31 +336,6 @@ def resolve_execution(repository: ExecutionSettings, invocation: ExecutionSettin
         ci_policy or Setting("strict", "built-in default", "default"))
 
 
-def current_flow_differences(resolved: ResolvedExecution) -> list[str]:
-    """What the driver cannot honour until it follows the plan (#329).
-
-    The current flow is `standard`. It already honours an issue review that is
-    off, and the local-only run as objective `local_change`. Anything else is
-    named with its source.
-    """
-    differences = []
-    if resolved.profile.value not in {"standard", "custom"}:
-        differences.append(
-            f"execution profile {resolved.profile.value} ({resolved.profile.source})")
-    if resolved.objective.value == "verified_change":
-        differences.append(
-            f"objective verified_change ({resolved.objective.source})")
-    for stage in PLANNED_STAGES:
-        setting = resolved.stages[stage]
-        if setting.policy is _STANDARD[stage]:
-            continue
-        if stage == "issue_review" and setting.policy is StagePolicy.DISABLED:
-            continue
-        if setting.layer in EXPLICIT_LAYERS:
-            differences.append(f"{stage}={setting.policy.value} ({setting.source})")
-    return differences
-
-
 # -- plan construction -------------------------------------------------------
 
 @dataclass

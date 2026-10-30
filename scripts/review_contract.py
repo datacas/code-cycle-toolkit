@@ -111,6 +111,15 @@ def stage_evidence(text: str) -> list[dict]:
                 raise ContractError(f"stage evidence requires {key}")
         if not _FULL_SHA_RE.fullmatch(value["head_sha"]):
             raise ContractError("stage evidence requires a full head SHA")
+        plan_keys = {"plan_id", "revision", "digest"}
+        if plan_keys & value.keys():
+            if (not plan_keys <= value.keys()
+                    or not isinstance(value["plan_id"], str)
+                    or re.fullmatch(r"[A-Za-z0-9._:#/-]{1,200}", value["plan_id"]) is None
+                    or type(value["revision"]) is not int or value["revision"] < 1
+                    or not isinstance(value["digest"], str)
+                    or re.fullmatch(r"[a-f0-9]{64}", value["digest"]) is None):
+                raise ContractError("invalid execution plan receipt")
         outcomes = value.get("finding_outcomes", [])
         if not isinstance(outcomes, list):
             raise ContractError("stage evidence outcomes must be a list")

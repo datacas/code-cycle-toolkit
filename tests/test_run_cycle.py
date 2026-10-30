@@ -209,6 +209,281 @@ class RunCycleTestCase(unittest.TestCase):
         return self.store.rows("owner/api")
 
 
+class NativeExecutionPlanTests(RunCycleTestCase):
+    """The native loop consumes policy and recovers check evidence, not verdicts."""
+
+    def plan(self, profile="standard", start="implement", objective="merge_ready"):
+        import execution_profiles as ep
+        resolved = ep.resolve_execution(ep.ExecutionSettings(), ep.invocation_settings(
+            execution_profile=profile, objective=objective, issue_review="off"))
+        return ep.build_plan(resolved, repository="owner/api", work_item="API-7",
+                             start_from=start, change_request="4" if start != "implement" else None)
+
+    def test_cli_boundary_prints_full_plan_and_refuses_withdrawn_review(self):
+        argv = [sys.executable, str(ROOT / "scripts" / "run_cycle.py"), "--no-config",
+                "--repo", "owner/api", "--task", "API-7", "--execution-profile", "full",
+                "--dry-run", "--json"]
+        good = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        value = json.loads(good.stdout)
+        self.assertEqual(value["execution_profile"], "full")
+        self.assertTrue(next(stage for stage in value["stages"]
+                             if stage["stage_id"] == "issue_review")["selected"])
+        bad = subprocess.run([*argv, "--stage", "review=disabled"],
+                             capture_output=True, text=True, timeout=600)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("requires an independent review", bad.stderr)
+
+    def test_all_five_profiles_retain_blocks_without_an_identical_rereview(self):
+        for profile in ("prototype", "standard", "full", "hotfix", "custom"):
+            with self.subTest(profile=profile):
+                # Full requires readiness only on a new implementation.
+                review = block("CHANGES_REQUESTED", head_sha="a" * 40,
+                               security_audit_ran=True, findings=[{
+                                   "id": "REV-001", "status": "open", "severity": "high",
+                                   "blocks_approval": True}])
+                report = self.run_cycle(Talker("codex", block("RESOLVED", head_sha="a" * 40)),
+                    Talker("claude", review), start_from="review", change_request_id="4",
+                    execution_plan=self.plan(profile, "review"))
+                self.assertEqual([stage.role for stage in report.stages], ["review", "resolve"])
+                self.assertEqual(report.stop_reason, "no_progress")
+                self.assertFalse(report.approved)
+
+    def test_unverified_required_check_stops_before_ci_under_both_policies(self):
+        import verification_plan as vp
+        spec = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                        "project", True, criteria=("AC-1",))
+        for policy in ("strict", "parallel"):
+            with self.subTest(policy=policy):
+                report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40,
+                    tests={"version": 2, "conclusion": "not_verified", "checks": [{
+                        **spec.to_dict(), "head_sha": "a" * 40, "result": "unverified",
+                        "cause": "missing_tool"}]})), Talker("claude", block("APPROVED",
+                            head_sha="a" * 40, security_audit_ran=True)),
+                    work_item_provider="github", work_item_repository="owner/api",
+                    execution_plan=self.plan(), ci_policy=policy)
+                self.assertEqual(report.stop_reason, "verification_unverified")
+                self.assertEqual(report.status, "HUMAN_INTERVENTION")
+                self.assertEqual([stage.role for stage in report.stages], ["implement", "review"])
+                record = rc.CycleHistoryStore(self.store.path).latest_plan("owner/api", "API-7", "4")
+                self.assertEqual(record["stop_reason"], "verification_unverified")
+
+    def test_missing_hotfix_commands_need_refinement(self):
+        report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40)),
+            Talker("claude", block("APPROVED", head_sha="a" * 40, security_audit_ran=True)),
+            execution_plan=self.plan("hotfix"), work_item_provider="github", work_item_repository="owner/api")
+        self.assertEqual(report.stop_reason, "needs_refinement")
+
+    def test_verified_change_completes_without_merge_readiness_or_ci(self):
+        import cycle_session
+        import verification_plan as vp
+        spec = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                        "project", True, criteria=("AC-1",))
+        for policy in ("strict", "parallel"):
+            with self.subTest(policy=policy), mock.patch.object(
+                    cycle_session.CycleSession, "gate") as gate, mock.patch.object(
+                    cycle_session.CycleSession, "receipt_problem", return_value=None):
+                report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40,
+                    tests={"version": 2, "conclusion": "verified", "checks": [{
+                        **spec.to_dict(), "head_sha": "a" * 40, "result": "pass",
+                        "evidence": [{"command": spec.command, "exit_code": 0, "executed": 1}]}]})),
+                    Talker("claude", block("APPROVED", head_sha="a" * 40,
+                        reviewed_head_sha="a" * 40, findings=[], blocking_findings=[],
+                        security_audit_ran=True)),
+                    execution_plan=self.plan(objective="verified_change"), ci_policy=policy,
+                    work_item_provider="github", work_item_repository="owner/api")
+                self.assertEqual(report.status, "HUMAN_INTERVENTION")
+                self.assertEqual(report.stop_reason, "approved")
+                self.assertFalse(report.approved)
+                self.assertEqual([stage.role for stage in report.stages], ["implement", "review"])
+                self.assertIn("objective verified_change completed", report.stopped_because)
+                gate.assert_not_called()
+
+    def test_required_security_needs_explicit_completion_from_the_reviewer(self):
+        for fields in ({}, {"security_audit_ran": False}):
+            with self.subTest(fields=fields):
+                report = self.run_cycle(Talker("codex"), Talker("claude", block(
+                    "APPROVED", head_sha="a" * 40, **fields)), start_from="review",
+                    change_request_id="4", execution_plan=self.plan("full", "review"))
+                self.assertEqual(report.stop_reason, "verification_unverified")
+                self.assertIn("security audit was omitted", report.stopped_because)
+
+    def test_passing_checks_do_not_raise_the_agents_not_verified_conclusion(self):
+        import verification_plan as vp
+        spec = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                        "project", True, criteria=("AC-1",))
+        report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40,
+            tests={"version": 2, "conclusion": "not_verified", "checks": [{**spec.to_dict(),
+                "head_sha": "a" * 40, "result": "pass", "evidence": [{"command": spec.command,
+                    "exit_code": 0, "executed": 1}]}]})),
+            Talker("claude", block("APPROVED", head_sha="a" * 40, security_audit_ran=True)),
+            execution_plan=self.plan(), work_item_provider="github", work_item_repository="owner/api")
+        self.assertEqual(report.stop_reason, "verification_unverified")
+        self.assertFalse(report.approved)
+
+    def test_store_keeps_metadata_and_command_bindings_without_prose(self):
+        import cycle_history as ch
+        import verification_plan as vp
+        from dataclasses import replace
+        command = "python3 -m unittest tests.focused"
+        check = vp.Check("focused", command, "codex", "cheap_coder", "project", True,
+                         criteria=("AC-1",), reason="private reasoning")
+        verification = vp.VerificationPlan(vp.Criteria("github", "b" * 64, "evaluable",
+            ("sensitive acceptance text",))).extend((check,)).record(vp.CheckResult(
+                "focused", "a" * 40, "unverified", cause="missing_tool"))
+        plan = replace(self.plan(), plan_id="plan-fixture", head_sha="a" * 40,
+                       verification=verification)
+        store = ch.CycleHistoryStore(self.store.path)
+        receipt = store.save_plan(plan, cycle_id="cycle-test", change_request_id="4", provenance="initial")
+        record = store.latest_plan("owner/api", "API-7", "4")
+        serialized = json.dumps(record)
+        for private in (command, "private reasoning", "sensitive acceptance text"):
+            self.assertNotIn(private, serialized)
+        self.assertEqual(receipt["digest"], ch.plan_digest(record["payload"]))
+        with self.assertRaises(ch.HistoryError):
+            ch.restore_plan(record, ())
+        restored = ch.restore_plan(record, (command,))
+        self.assertEqual(restored.verification.checks[0].command, command)
+        self.assertEqual(restored.verification.results[0].cause, "missing_tool")
+
+    def test_journal_command_proposals_require_current_authorization(self):
+        from cycle_plan import PlanRuntime
+        from cycle_journal import Journal
+        from types import SimpleNamespace
+        journal = Journal(self.store.path, "owner/api", "API-7", "cycle-bindings")
+        safe = "python3 -m unittest tests.focused"
+        unsafe = "python3 -m unittest tests.focused; echo secret"
+        withdrawn = "pytest tests/focused.py"
+        for command in (safe, unsafe, withdrawn):
+            journal.record("stage_result", component="verification_command", command=command)
+        session = SimpleNamespace(telemetry=self.store, repo_id="owner/api", task_id="API-7",
+                                  allowed_test_command=None, allowed_verify_commands=("python3 -m unittest",))
+        candidates = PlanRuntime.authorized_bindings(session)
+        self.assertIn(safe, candidates)
+        self.assertNotIn(unsafe, candidates)
+        self.assertNotIn(withdrawn, candidates)
+
+    def test_new_sensitive_diff_promotes_a_previously_omitted_audit(self):
+        from cycle_plan import PlanRuntime
+        import execution_plan as ep
+        old = self.plan(start="review").resolve_decision("security", False, "old diff", "runtime")
+        updated = PlanRuntime().require_security(old, "new diff requires security")
+        self.assertTrue(updated.stage("security").selected)
+        self.assertIs(updated.stage("security").obligation, ep.Obligation.REQUIRED)
+        updated.validate()
+
+    def test_hotfix_requires_same_test_and_context_and_retains_prior_failure(self):
+        from cycle_plan import HOTFIX_IDS, hotfix_problem
+        import verification_plan as vp
+        proof = {"exit_code": 1, "executed": 1, "test_sha256": "c" * 64,
+                 "context_sha256": "d" * 64, "output_sha256": "e" * 64}
+        checks = tuple(vp.Check(identifier, f"python3 -m unittest tests.{identifier.replace('-', '_')}",
+            "codex", "cheap_coder", "project", True, criteria=("AC-1",)) for identifier in HOTFIX_IDS)
+        verification = vp.VerificationPlan(vp.Criteria("github", "b" * 64, "evaluable", ("works",)), checks)
+        before = vp.CheckResult(HOTFIX_IDS[0], "a" * 40, "fail", (proof,), cause="defect")
+        after = vp.CheckResult(HOTFIX_IDS[0], "b" * 40, "pass", ({**proof, "exit_code": 0},))
+        verification = verification.record(before).record(after)
+        self.assertIsNone(hotfix_problem(verification, "b" * 40))
+        self.assertEqual(verification.current(HOTFIX_IDS[0], "b" * 40), "pass")
+        self.assertEqual(verification.current(HOTFIX_IDS[0], "a" * 40), "fail")
+        changed = replace(after, evidence=({**proof, "exit_code": 0, "test_sha256": "f" * 64},))
+        self.assertEqual(hotfix_problem(verification.record(changed), "b" * 40), "incompatible_proof")
+        environment = replace(before, cause="environment")
+        self.assertEqual(hotfix_problem(replace(verification, results=(environment, after)),
+                                       "b" * 40), "missing_proof")
+
+    def test_verification_only_resume_uses_disposable_clone_and_only_pending_checks(self):
+        self.verification_resume_fixture("pass")
+
+    def test_verification_only_unavailable_environment_stops_once(self):
+        self.verification_resume_fixture("unverified")
+
+    def test_verified_change_resume_completes_without_merge_readiness_or_ci(self):
+        self.verification_resume_fixture("pass", objective="verified_change")
+
+    def test_verifier_cannot_pass_after_editing_its_clone(self):
+        self.verification_resume_fixture("pass", tamper=True)
+
+    def test_new_profile_obligations_prevent_verification_only_shortcut(self):
+        self.verification_resume_fixture("pass", policy_change=True)
+
+    def verification_resume_fixture(self, result, tamper=False, policy_change=False,
+                                    objective="merge_ready"):
+        import cycle_history as ch
+        import cycle_session
+        import verification_plan as vp
+        from types import SimpleNamespace
+        fixture = self.home / "checkout"
+        fixture.mkdir(parents=True)
+        repo = change_repository(fixture)
+        head = git(repo, "rev-parse", "HEAD").decode().strip()
+        commands = ("python3 -m unittest tests.first", "python3 -m unittest tests.pending")
+        specs = tuple(vp.Check(f"check-{i}", command, "codex", "cheap_coder", "project", True,
+                     criteria=("AC-1",)) for i, command in enumerate(commands))
+        verification = vp.VerificationPlan(vp.Criteria("github", "b" * 64, "evaluable", ("works",)), specs)
+        verification = verification.record(vp.CheckResult("check-0", head, "pass", ({
+            "command": commands[0], "exit_code": 0, "executed": 1},)))
+        verification = verification.record(vp.CheckResult("check-1", head, "unverified", cause="environment"))
+        old = replace(self.plan(objective=objective), plan_id="plan-resume", head_sha=head,
+                      verification=verification)
+        receipt = ch.CycleHistoryStore(self.store.path).save_plan(old, cycle_id="cycle-before",
+            change_request_id="4", provenance="stopped", stop_reason="verification_unverified")
+        comment = contract.ProviderComment(author="reviewer", id="1", body=contract.format_stage_evidence({
+            "schema": 2, "repo": "owner/api", "change_request_id": "4", "stage": "review",
+            "attempt_id": "attempt-review", "head_sha": head, "status": "APPROVED",
+            "finding_outcomes": [], **receipt}))
+        seen = []
+
+        class Verifier(Talker):
+            def dispatch(inner, target, task, **kw):
+                seen.append((task, kw))
+                if policy_change:
+                    self.assertIn("cc-rereview", task)
+                    return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, inner.name, target,
+                        agent_output=block("BLOCKED"), model_resolved=target.model, process_exited=True)
+                self.assertNotIn(commands[0], task)
+                self.assertIn(commands[1], task)
+                self.assertNotEqual(Path(kw["cwd"]), repo)
+                self.assertEqual(git(Path(kw["cwd"]), "rev-parse", "HEAD").decode().strip(), head)
+                self.assertEqual(git(Path(kw["cwd"]), "remote"), b"")
+                if tamper:
+                    tracked = git(Path(kw["cwd"]), "ls-files").decode().splitlines()[0]
+                    (Path(kw["cwd"]) / tracked).write_text("changed by verifier\n")
+                spoken = "VERIFICATION_RESULT\n" + json.dumps({"version": 2, "head_sha": head,
+                    "conclusion": "verified", "checks": [{**specs[1].to_dict(),
+                        "reason": "runtime", "provenance": "runtime", "head_sha": head, "result": result,
+                        "cause": "environment", "evidence": [{"command": commands[1], "exit_code": 0,
+                            "executed": 1}] if result == "pass" else []}]}) + "\nEND_VERIFICATION_RESULT"
+                return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, inner.name, target,
+                    agent_output=spoken, model_resolved=target.model, process_exited=True)
+
+        checks = SimpleNamespace(pull=lambda *_: rc.ci_gate.PullState("OPEN", head, "main", "task", True, "clean"))
+        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=("approved", None)) as gate:
+            report = self.run_cycle(Verifier("codex"), Verifier("claude"), start_from="rereview",
+                change_request_id="4", execution_plan=self.plan(
+                    "full" if policy_change else "standard", start="rereview", objective=objective),
+                allowed_verify_commands=commands, cwd=str(repo), ci_checks=checks,
+                comment_reader=lambda *_: [comment])
+        if policy_change:
+            self.assertEqual([stage.role for stage in report.stages], ["rereview"])
+            self.assertFalse(report.approved)
+            return
+        self.assertEqual([stage.role for stage in report.stages], ["verify"])
+        completed = result == "pass" and not tamper
+        self.assertEqual(report.status, rc.APPROVED_END
+                         if completed and objective == "merge_ready" else "HUMAN_INTERVENTION")
+        if completed and objective == "verified_change":
+            self.assertEqual(report.stop_reason, "approved")
+            self.assertFalse(report.approved)
+            gate.assert_not_called()
+        if result == "unverified" or tamper:
+            self.assertEqual(report.stop_reason, "verification_unverified")
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(Path(seen[0][1]["cwd"]).exists())
+        self.assertFalse(seen[0][1]["publishes"])
+        self.assertEqual(git(repo, "rev-parse", "HEAD").decode().strip(), head)
+
+
 class PublicationCompletionTests(RunCycleTestCase):
     def test_completion_normalizes_supported_change_request_references(self):
         class PublishingTalker(Talker):

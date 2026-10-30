@@ -284,9 +284,35 @@ Explicit reports (including `checks`, `evidence`, `conclusion`, `passed` or `ran
 still receive the deterministic caps, even with `no_code_change`; a required
 boundary run can still be recorded as missing for completed code work.
 
-Plan persistence, the final verification gate and verification-only resume are
-deferred to #329; see [Execution plan](execution-plan.md). CI substitution is
-out of scope: `CI_PASSED` does not turn a local unverified result into pass.
+The native driver's final barrier prevents `READY_FOR_MANUAL_MERGE` while a
+required check is `unverified`, criteria remain uncovered, or required security
+verification was omitted. It stops once with `HUMAN_INTERVENTION` and
+`stop_reason: verification_unverified`. Failed checks retain their failure;
+blocked, omitted, missing-tool, inconclusive and environment causes remain
+distinguishable metadata. `CI_PASSED` never turns an unverified local check into
+pass. See [Execution plan](execution-plan.md) for persistence and receipt identity.
+
+Resume with `--from rereview --pr <n>`. When the current HEAD, recoverable plan
+and trusted receipt agree on a verification stop, the runtime dispatches only
+`cc-verify`, once, in a detached disposable clone without remotes. It passes only
+pending required checks and retains passing results. It does not dispatch the
+rereview agent or republish a stage comment. A still-unavailable environment
+stops again without a retry loop. A moved HEAD, changed criteria, unbound command
+hash or unrecoverable plan takes ordinary reconciliation instead. This does not
+add a CLI start point or change `START_ORDER`/`CYCLE_STARTS`.
+
+Hotfix requires `hotfix-reproduction` and `hotfix-regression`, both `required`,
+with distinct focused commands proposed by the implementer. The configured
+general suite satisfies neither identity. A missing proposal stops with
+`needs_refinement`; a defined check that cannot execute stays `unverified`.
+The implementer commits the reproduction before the fix. Under the reproduction
+check's `history`, it reports the defect failure's SHA, command, environment and
+`cause: defect`, preserving its output artifact. Evidence carries `test_sha256`,
+`context_sha256` and `output_sha256`; the passing result on the fixed HEAD must
+have the same test and environment fingerprints. An import or environment
+failure is not a defect reproduction. Multiple results share one check ID;
+only evidence for the current HEAD determines its current result. Changing the
+test requires a new justified and revalidated proof, not replacing the old one.
 
 ## Evidence levels
 

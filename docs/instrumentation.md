@@ -710,7 +710,9 @@ manual rereview a resume cannot close on; see *Manual rereview* in
 `review-cycle.md`), `publication_violation` (schema 24: a publication invariant
 failed during a publishing stage, whoever caused it), `publication_unverified`
 (schema 24: the audited refs or change-request state could not be read; see
-*Publication audit* in `role-workspace-policy.md`), `worktree_dirty`, or
+*Publication audit* in `role-workspace-policy.md`), `verification_unverified`
+(schema 25: required check evidence, criteria coverage, or security audit
+completion is unverified; generic CI success cannot clear it), `worktree_dirty`, or
 `worktree_diverged`. The last two stop before changing files when a dirty tree
 or non-fast-forward prevents syncing an open pull request head. A closing row from an earlier version has none, and
 `cc-stats` reads it as unknown. A stage row's `reroute_reason` may then be

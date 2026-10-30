@@ -66,7 +66,6 @@ class ProfileMatrixTests(unittest.TestCase):
         merge = built.control("merge")
         self.assertEqual(merge.requirement, plan.ControlRequirement.REQUIRED)
         self.assertFalse(merge.automatic)
-        self.assertEqual(profiles.current_flow_differences(resolved()), [])
 
     def test_each_profile_resolves_with_its_default_objective(self) -> None:
         expected_objective = {"prototype": "local_change", "standard": "merge_ready",
@@ -364,34 +363,6 @@ class RereviewRuleTests(unittest.TestCase):
                                                   open_findings=False))
 
 
-class CurrentFlowTests(unittest.TestCase):
-    def test_standard_equivalents_run_the_current_flow(self) -> None:
-        for invocation in ({}, {"issue_review": "off"}, {"local_only": True},
-                           {"execution_profile": "standard"},
-                           {"execution_profile": "custom"},
-                           {"stages": ["issue_review=disabled", "review=required"]},
-                           {"objective": "merge_ready"}):
-            with self.subTest(invocation=invocation):
-                self.assertEqual(profiles.current_flow_differences(resolved(**invocation)), [])
-
-    def test_anything_else_is_named_with_its_source(self) -> None:
-        cases = (
-            ({"execution_profile": "full"}, "execution profile full (--execution-profile)"),
-            ({"execution_profile": "hotfix"}, "execution profile hotfix"),
-            ({"objective": "verified_change"}, "objective verified_change (--objective)"),
-            ({"execution_profile": "custom", "stages": ["security=required"]},
-             "security=required (--stage security=required)"),
-            ({"stages": ["issue_review=required"]}, "issue_review=required"),
-        )
-        for invocation, text in cases:
-            with self.subTest(invocation=invocation):
-                differences = profiles.current_flow_differences(resolved(**invocation))
-                self.assertTrue(any(text in item for item in differences), differences)
-        config = {"code_cycle": {"execution": {"profile": "prototype"}}}
-        self.assertIn("execution profile prototype (code_cycle.execution.profile in "
-                      ".code-cycle.yml)", profiles.current_flow_differences(resolved(config)))
-
-
 class DryRunTests(unittest.TestCase):
     BASE = ["--task", "328", "--repo", "datacas/code-cycle-toolkit", "--no-config"]
 
@@ -455,12 +426,15 @@ class DryRunTests(unittest.TestCase):
         code, _, err, _ = self.run_main(self.BASE + ["--dry-run", "--detach"])
         self.assertEqual(code, 2)
 
-    def test_a_run_refuses_a_non_standard_configuration_before_any_effect(self) -> None:
-        code, _, err, mocks = self.run_main(self.BASE + ["--execution-profile", "full"])
-        self.assertEqual(code, 2)
-        self.assertIn("execution profile full (--execution-profile)", err)
-        self.assertIn("#329", err)
-        self.assertFalse(any(spy.called for spy in mocks.values()))
+    def test_a_full_run_reaches_workspace_selection(self) -> None:
+        stack, mocks = self.spies()
+        mocks["select_workspace"].side_effect = run_cycle.CycleDriverError("reached full workspace")
+        stderr = io.StringIO()
+        with stack, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                run_cycle.main(self.BASE + ["--execution-profile", "full"])
+        self.assertIn("reached full workspace", stderr.getvalue())
+        self.assertFalse(mocks["run_cycle"].called)
 
     def test_a_standard_run_reaches_the_current_flow(self) -> None:
         stack, mocks = self.spies()
