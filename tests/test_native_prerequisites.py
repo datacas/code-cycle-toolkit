@@ -239,12 +239,12 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("venv", result.stdout.strip())
 
-    def test_codex_does_not_attempt_srt_recovery(self):
+    def test_both_executors_recover_srt_for_linux_preparation(self):
         for executor in ("codex", "claude"):
             with self.subTest(executor=executor), patch.object(native.sys, "platform", "linux"), patch.object(
                     native, "ensure", return_value={"path": None, "outcome": "not_verified"}) as ensure:
                 native.observe(executor)
-                self.assertEqual(["rg"] if executor == "codex" else ["srt", "rg"],
+                self.assertEqual(["srt", "rg"],
                                  [call.args[0] for call in ensure.call_args_list])
 
     def test_known_failure_rejects_unrelated_restrictions(self):
@@ -335,7 +335,8 @@ class PreflightTests(unittest.TestCase):
 
     def test_nested_preparation_is_classified_without_a_socket_or_process_probe(self):
         with patch.dict(os.environ, {"CODE_CYCLE_STAGE_EXECUTOR": "codex"}), patch.object(
-                native.subprocess, "run", side_effect=AssertionError("launched nested process")):
+                native.subprocess, "run", side_effect=AssertionError("launched nested process")), patch.object(
+                    native.sys, "platform", "darwin"):
             with self.assertRaisesRegex(OSError, "not_verified without probing"):
                 dependency_setup.sandbox_command(
                     "codex", "codex", ["npm", "ci"], writable=[], protected=[],

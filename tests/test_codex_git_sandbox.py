@@ -121,6 +121,13 @@ class LinkedRepository(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        # Exact Git-rule assertions do not inherit the developer's stores;
+        # credential profile coverage uses a populated synthetic home separately.
+        home = self.root / "home"
+        home.mkdir()
+        home_patch = patch.object(Path, "home", return_value=home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
         environment = patch.dict(os.environ, {
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "Cycle Test", "GIT_AUTHOR_EMAIL": "cycle@example.invalid",

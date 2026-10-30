@@ -267,6 +267,20 @@ def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool
         denied = base / "denied"
         secret = base / "secret"
         secret.write_text("probe")
+        credential_files = []
+        credential_denials = []
+        if kind == "srt":
+            import stage_permissions as sp
+            home = base / "home"
+            for store in (*sp.CREDENTIAL_STORES, sp.GH_CREDENTIAL_STORE):
+                target = home / store[2:]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if store in ("~/.ssh", "~/.aws", sp.GH_CREDENTIAL_STORE):
+                    target.mkdir()
+                    target = target / "probe"
+                target.write_text("synthetic credential probe")
+                credential_files.append(target)
+            credential_denials = list(sp.credential_read_denials(home=home))
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             listener.listen()
@@ -277,6 +291,9 @@ def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool
                 "except OSError: pass\nelse: sys.exit('write escaped')\n"
                 f"try: pathlib.Path({str(secret)!r}).read_text()\n"
                 "except OSError: pass\nelse: sys.exit('read escaped')\n"
+                + "".join(f"try: open({str(path)!r}, 'rb').close()\n"
+                          "except OSError: pass\nelse: sys.exit('credential read escaped')\n"
+                          for path in credential_files) +
                 "s=socket.socket(); s.settimeout(1)\n"
                 f"try: s.connect({listener.getsockname()!r})\n"
                 "except OSError: pass\nelse: sys.exit('network escaped')\n"
@@ -300,7 +317,8 @@ def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool
                 settings = base / "settings.json"
                 settings.write_text(json.dumps({
                     "filesystem": {"allowWrite": [str(allowed)],
-                                   "denyWrite": [str(denied)], "denyRead": [str(secret)]},
+                                   "denyWrite": [str(denied)],
+                                   "denyRead": [str(secret), *credential_denials]},
                     "network": {"allowedDomains": [], "deniedDomains": []},
                 }))
                 argv = [binary, "--settings", str(settings), "--", sys.executable, "-c", script]
@@ -319,7 +337,7 @@ def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool
 def observe(executor: str, *, recover: bool = True) -> dict[str, Any]:
     probes = []
     for tool in TOOLS:
-        if (tool == "rg" or tool == "srt" and executor == "claude") and recover and sys.platform.startswith("linux"):
+        if tool in {"rg", "srt"} and recover and sys.platform.startswith("linux"):
             record = ensure(tool)
         else:
             path = shutil.which(tool)
@@ -328,7 +346,7 @@ def observe(executor: str, *, recover: bool = True) -> dict[str, Any]:
     required = {"rg"}
     if sys.platform.startswith("linux"):
         required |= {"bwrap", "socat"}
-    if executor == "claude":
+    if executor == "claude" or sys.platform.startswith("linux"):
         required.add("srt")
     missing = [probe["name"] for probe in probes
                if probe["name"] in required and not probe.get("path")]

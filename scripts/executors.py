@@ -683,7 +683,7 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                         git_directories.append(str((Path(cwd) / path_value).resolve()))
                 writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
             sandbox = sp.review_sandbox_settings(
-                tuple(writable), network_domains, docker_host=True)["sandbox"]
+                tuple(writable), network_domains, docker_host=True, publishes=publishes)["sandbox"]
             network = dict(sandbox["network"])
             network.setdefault("deniedDomains", [])
             filesystem = dict(sandbox["filesystem"])
@@ -1264,11 +1264,24 @@ class NativeAdapter(Adapter):
         if command_policy is not None and dispatch_attempt_id is not None:
             # The hook records its own denials under this attempt (#306).
             command_policy = replace(command_policy, attempt_id=dispatch_attempt_id)
+        if command_policy is not None:
+            command_policy = replace(command_policy, credential_publishing=publishes)
         policy = command_policy if command_policy is not None and command_policy.active else None
         requested_verification = command_policy.verification_commands if command_policy is not None else ()
         policy_note: dict[str, Any] = ({} if command_policy is None else {"command_policy": (
             "active" if policy is not None
             else f"inactive: {command_policy.inactive_reason}")})
+        credential_reads = command_policy.credential_reads if command_policy is not None else ()
+        policy_note["credential_read_policy"] = {
+            "exceptions": list(credential_reads),
+            "denied_paths": list(sp.credential_read_denials(
+                publishes=publishes, credential_reads=credential_reads)),
+            "gh_readable": publishes or sp.GH_CREDENTIAL_STORE in credential_reads,
+        }
+        if credential_reads:
+            task += ("\nProject credential-read opt-out (explicit trusted configuration): "
+                     + json.dumps(list(credential_reads))
+                     + ". Report these exceptions in stage evidence.")
         # Record native-sandbox prerequisites before dependency setup or agent
         # dispatch. This evidence is attached to the stage attempt; a missing
         # capability must not silently turn an unrun check into a pass.
@@ -1294,8 +1307,9 @@ class NativeAdapter(Adapter):
                     policy = command_policy
                     sandbox_evidence["mode"] = "static_only"
                     sandbox_evidence["status"] = "unverified"
-            if (self.name == "claude" and sys.platform.startswith("linux")
-                    and runner is _run and "srt" not in missing):
+            if (sys.platform.startswith("linux")
+                    and runner is _run and "srt" not in missing
+                    and not sandbox_evidence.get("codex_socket")):
                 ready, detail = native.isolation_probe("srt", runner=_run_sandbox_probe, path=prerequisite_path)
                 sandbox_evidence["preparation_isolation"] = {"passed": ready, "evidence": detail}
                 if not ready:
@@ -1314,7 +1328,7 @@ class NativeAdapter(Adapter):
                     "prerequisite alone is not BLOCKED. Never describe an incomplete implementation "
                     "as complete."
                 )
-        refused = self.policy_preflight(policy, cwd)
+        refused = self.policy_preflight(command_policy if self.name == "claude" else policy, cwd)
         if refused is not None:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -1389,7 +1403,7 @@ class NativeAdapter(Adapter):
                 else:
                     preparation = dependency_setup.prepare(
                         worker_cwd, self.name, self.binary, domains=command_policy.registry_domains,
-                        prerequisite_path=prerequisite_path)
+                        prerequisite_path=prerequisite_path, credential_reads=credential_reads)
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 preparation = {"status": "incomplete", "items": [], "error": str(error)}
             if preparation["status"] != "not_required":
@@ -1403,6 +1417,7 @@ class NativeAdapter(Adapter):
                 policy_note["dependency_preparation"] = preparation
         argv_options = {}
         if self.name == "codex" and command_policy is not None:
+            argv_options["credential_reads"] = credential_reads
             # The owner explicitly authorizes issue-review GitHub reads with
             # the same credentials as publishing stages (#279). Its workspace
             # and publication contract remain read-only. Other non-publishing
@@ -1964,6 +1979,11 @@ class CodexAdapter(NativeAdapter):
         script = "\n".join(script_lines) + "\n"
         profile = "code_cycle_publish_write"
         filesystem = self._publish_filesystem_rules(writable_dirs, cwd=cwd)
+        credential_rules = ",".join(f'{json.dumps(path)}="none"' for path in
+                                    sp.credential_read_denials(publishes=True))
+        if credential_rules:
+            filesystem = (filesystem[:-1] + ("," if filesystem[1:-1].strip() else "")
+                          + credential_rules + "}")
         argv = [
             self.binary, "sandbox", "--permission-profile", profile,
             "--cd", cwd,
@@ -2075,7 +2095,8 @@ class CodexAdapter(NativeAdapter):
              sandbox_grants: tuple[str, ...] = (),
              ignore_rules: bool = False,
              review_clone: str | None = None,
-             network_domains: tuple[str, ...] | None = None) -> list[str]:
+             network_domains: tuple[str, ...] | None = None,
+             credential_reads: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -2121,7 +2142,10 @@ class CodexAdapter(NativeAdapter):
             argv += ["-c", f'default_permissions="{profile}"',
                      "-c", f'permissions.{profile}.extends=":read-only"']
         else:
-            argv += ["-s", "workspace-write" if writes else "read-only"]
+            profile = "code_cycle_write" if writes else "code_cycle_read"
+            parent = ":workspace" if writes else ":read-only"
+            argv += ["-c", f'default_permissions="{profile}"',
+                     "-c", f'permissions.{profile}.extends="{parent}"']
         if review_clone and not writes:
             # A reviewer verifies in its disposable clone (#142): the clone and,
             # added with the scratch directory later, its TMPDIR are the only
@@ -2140,6 +2164,18 @@ class CodexAdapter(NativeAdapter):
                     f"permissions.{profile}.filesystem="
                     f"{self._publish_filesystem_rules(writable_dirs, cwd=cwd)}",
                 ]
+        # A single filesystem table preserves the Git/clone grants as well as
+        # denials; a later override must never erase either side of the boundary.
+        rule = f"permissions.{profile}.filesystem="
+        existing = next((i for i, option in enumerate(argv) if option.startswith(rule)), None)
+        denied = ",".join(f'{json.dumps(path)}="none"' for path in
+                          sp.credential_read_denials(publishes=publishes,
+                                                     credential_reads=credential_reads))
+        if existing is None:
+            argv += ["-c", f"{rule}{{{denied}}}"]
+        elif denied:
+            table = argv[existing][len(rule):]
+            argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
         if ignore_rules:
             # Execpolicy rules load only from configuration layers, with no
             # per-run option, so a stage does not inherit the user's
@@ -2172,6 +2208,19 @@ class CodexAdapter(NativeAdapter):
                 if os.name != "nt":
                     (clone / "escape").symlink_to(sibling, target_is_directory=True)
                     checks.append(("a symlink out of the clone", clone / "escape" / "link", False))
+                # Synthetic E7 stores: never read real credentials, and prove
+                # denial even on a host where the corresponding store is absent.
+                home = base / "home"
+                credential_files = []
+                for store in (*sp.CREDENTIAL_STORES, sp.GH_CREDENTIAL_STORE):
+                    target = home / store[2:]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if store in ("~/.ssh", "~/.aws", sp.GH_CREDENTIAL_STORE):
+                        target.mkdir()
+                        target = target / "probe"
+                    target.write_text("synthetic credential probe", encoding="utf-8")
+                    credential_files.append(target)
+                denied = sp.credential_read_denials(home=home)
                 script = "\n".join([
                     "import sys",
                     "failed = []",
@@ -2179,11 +2228,16 @@ class CodexAdapter(NativeAdapter):
                       f"except OSError:\n ok = False\n"
                       f"if ok != {expected}: failed.append({json.dumps(label)})"
                       for label, path, expected in checks),
+                    *(f"try:\n open({json.dumps(str(path))}, 'rb').close(); readable = True\n"
+                      f"except OSError:\n readable = False\n"
+                      f"if readable: failed.append('credential read denial {index}')"
+                      for index, path in enumerate(credential_files)),
                     "sys.exit('; '.join(failed) if failed else 0)",
                 ])
                 profile = "code_cycle_review_probe"
                 filesystem = (f"{{{json.dumps(str(clone))}=\"write\","
-                              f"{json.dumps(str(scratch))}=\"write\"}}")
+                              f"{json.dumps(str(scratch))}=\"write\"," +
+                              ",".join(f'{json.dumps(path)}="none"' for path in denied) + "}")
                 argv = [self.binary, "sandbox", "--permission-profile", profile,
                         "-c", f'permissions.{profile}.extends=":read-only"',
                         "-c", f"permissions.{profile}.filesystem={filesystem}",
@@ -2720,7 +2774,7 @@ class ClaudeAdapter(NativeAdapter):
                         f"{', '.join(mods)}. Claude Code offers no flag that turns mods "
                         "off for one dispatch while keeping the user's other hooks, so "
                         "disable that plugin for cycle runs")
-            if policy.requires_confined_verification:
+            if not policy.static_only:
                 reason = sp.sandbox_override()
                 if reason:
                     return reason
@@ -2785,9 +2839,7 @@ class ClaudeAdapter(NativeAdapter):
                 "BASH_DEFAULT_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
                 "BASH_MAX_TIMEOUT_MS": str(sp.CLAUDE_VERIFICATION_TIMEOUT_MS),
             })
-            if runtime_policy.active and not runtime_policy.static_only and (runtime_policy.requires_confined_verification
-                                          or runtime_policy.registry_domains or runtime_policy.publication_commands
-                                          or runtime_policy.docker):
+            if not runtime_policy.static_only:
                 writable = [cwd, scratch]
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []
@@ -2798,7 +2850,9 @@ class ClaudeAdapter(NativeAdapter):
                     writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
                 settings.update(sp.review_sandbox_settings(
                     tuple(writable), runtime_policy.registry_domains,
-                    docker_host=runtime_policy.docker))
+                    docker_host=runtime_policy.docker,
+                    publishes=runtime_policy.credential_publishing,
+                    credential_reads=runtime_policy.credential_reads))
             if os.name != "nt":
                 for path in (script, journal_module, policy_file):
                     os.chmod(path, 0o400)

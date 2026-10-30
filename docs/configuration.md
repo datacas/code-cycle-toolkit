@@ -394,6 +394,10 @@ On Windows, the `~/.config/code-cycle-toolkit` directory is `%APPDATA%\code-cycl
 See [dependency preparation](dependency-preparation.md) for automatic frozen
 Node installs, contained lifecycle-build recovery, persistent setup evidence,
 and the `code_cycle.user_choices` configuration shared by dispatched stages.
+Its `credential_reads` list accepts explicit credential-store exceptions, such
+as `["~/.ssh"]`; the default is no exceptions. See
+[credential-read exceptions](dependency-preparation.md#credential-read-exceptions)
+for the accepted stores, evidence and sandbox scope.
 
 ---
 

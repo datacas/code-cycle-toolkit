@@ -850,7 +850,7 @@ class ReadDirectoryTests(unittest.TestCase):
                          read_dirs=("/tmp/code-cycle-diff-x",))
 
         self.assertNotIn("--add-dir", argv)
-        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', argv)
+        self.assertIn('permissions.code_cycle_read.extends=":read-only"', argv)
         self.assertEqual("review", argv[-1])
 
 
@@ -1215,8 +1215,7 @@ class PermissionTests(unittest.TestCase):
     def test_a_writing_stage_may_write_where_it_was_sent(self) -> None:
         argv = self.codex(writes=True)
 
-        self.assertIn("-s", argv)
-        self.assertEqual("workspace-write", argv[argv.index("-s") + 1])
+        self.assertIn('permissions.code_cycle_write.extends=":workspace"', argv)
 
     def test_codex_publish_profile_keeps_review_read_only_and_limits_network(self) -> None:
         argv = ex.CodexAdapter().argv(TARGET, "review", writes=False, publishes=True)
@@ -1252,8 +1251,7 @@ class PermissionTests(unittest.TestCase):
                 argv = self.codex(**options)
                 self.assertFalse(any("unix_sockets" in arg for arg in argv))
                 self.assertFalse(any("docker" in arg for arg in argv))
-        # A writer without a grant keeps the legacy workspace sandbox.
-        self.assertIn("workspace-write", self.codex(writes=True))
+        self.assertIn('permissions.code_cycle_write.extends=":workspace"', self.codex(writes=True))
 
     def test_docker_grant_allows_unix_sockets_and_keeps_publication_domains(self) -> None:
         """A filesystem rule on the socket crashes Codex's Linux helper (#239)."""
@@ -1358,10 +1356,10 @@ class PermissionTests(unittest.TestCase):
         """A default that changes is a permission nobody chose."""
         argv = self.codex(writes=False)
 
-        self.assertEqual("read-only", argv[argv.index("-s") + 1])
+        self.assertIn('permissions.code_cycle_read.extends=":read-only"', argv)
 
     def test_asking_for_nothing_asks_for_the_smaller_permission(self) -> None:
-        self.assertEqual("read-only", self.codex()[self.codex().index("-s") + 1])
+        self.assertIn('permissions.code_cycle_read.extends=":read-only"', self.codex())
 
     def test_no_argument_list_ever_asks_for_full_access(self) -> None:
         """The CLIs offer it; nothing here builds a command that requests it.
@@ -1780,7 +1778,7 @@ class PublicationPreflightTests(unittest.TestCase):
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
         self.assertEqual("enforced", result.artifacts["read_only_mode"])
-        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', seen["argv"])
+        self.assertIn('permissions.code_cycle_read.extends=":read-only"', seen["argv"])
 
     def test_disposable_dispatch_requires_an_isolated_workspace(self) -> None:
         target = router.parse_target("codex:openai/gpt-6-sol high")
@@ -2598,8 +2596,9 @@ class NativeScratchTests(unittest.TestCase):
                         if adapter.name == "codex":
                             self.assertIn(f'shell_environment_policy.set.TMPDIR={json.dumps(str(scratch))}', argv)
                             if writes and not publishes and not grants:
-                                self.assertIn(str(scratch), argv)
-                                self.assertIn("workspace-write", argv)
+                                self.assertTrue(any(f'{json.dumps(str(scratch))}="write"' in arg
+                                                    for arg in argv))
+                                self.assertIn('permissions.code_cycle_write.extends=":workspace"', argv)
                             else:
                                 self.assertTrue(any(f'{json.dumps(str(scratch))}="write"' in arg
                                                     for arg in argv))
@@ -2835,7 +2834,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertEqual(result.artifacts["workspace_fingerprint_before"],
                          result.artifacts["workspace_fingerprint_after"])
         argv = self.argv_file.read_text(encoding="utf-8").split("\0")
-        self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', argv)
+        self.assertIn('permissions.code_cycle_read.extends=":read-only"', argv)
         self.assertFalse({"--dangerously-bypass-approvals-and-sandbox", "--yolo",
                           "--full-auto"} & set(argv))
 
@@ -2918,11 +2917,11 @@ class ReadOnlyVerificationTests(unittest.TestCase):
             observed = []
 
             def capture(argv, timeout=None, cwd=None, env=None):
-                profile = "code_cycle_publish_read" if publishes else "code_cycle_review_read"
+                profile = "code_cycle_publish_read" if publishes else "code_cycle_read"
                 fs = next(option for option in argv
                           if option.startswith(f"permissions.{profile}.filesystem="))
-                self.assertEqual(f'permissions.{profile}.filesystem={{'
-                                 f'{json.dumps(env["TMPDIR"])}="write"}}', fs)
+                self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', fs)
+                self.assertEqual(1, fs.count('="write"'))
                 self.assertIn(f'permissions.{profile}.extends=":read-only"', argv)
                 self.assertIn(f'shell_environment_policy.set.TMPDIR={json.dumps(env["TMPDIR"])}', argv)
                 self.assertNotIn("--add-dir", argv)
@@ -2946,8 +2945,10 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         observed = []
 
         def capture(argv, timeout=None, cwd=None, env=None):
-            self.assertEqual([f'{rule}{{{json.dumps(env["TMPDIR"])}="write"}}'],
-                             [option for option in argv if option.startswith(rule)])
+            tables = [option for option in argv if option.startswith(rule)]
+            self.assertEqual(1, len(tables))
+            self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
+            self.assertEqual(1, tables[0].count('="write"'))
             self.assertIn("permissions.code_cycle_publish_read.network."
                           "dangerously_allow_all_unix_sockets=true", argv)
             observed.append(env["TMPDIR"])

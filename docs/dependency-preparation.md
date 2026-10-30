@@ -19,8 +19,10 @@ silently installing with another manager. Workspace package manifests determine
 the package-local dependency directories, including `apps/web/node_modules`.
 Independent nested lock roots are prepared separately. PnP outputs are supported.
 
-Preparation runs through `codex sandbox` for Codex, and the installed `srt`
-(Anthropic sandbox runtime) for Claude. Neither path falls back to a host install.
+On Linux/WSL2 preparation runs through the installed `srt` (Anthropic sandbox
+runtime) for both executors. There is no Linux Codex fallback. Until the `srt`
+path is validated on macOS and Windows, Codex retains `codex sandbox` there,
+with the same credential denials. Neither path falls back to a host install.
 The install runs in a scratch copy of the lock root's tracked files. The sandbox
 can write only that scratch directory and the download cache; the lockfile and
 manifests stay read-only there too. The checkout and its Git metadata are never
@@ -38,8 +40,8 @@ failure, not a successful install or a model failure.
 The host supplies the native executor and package manager. Before native stage
 dispatch, Linux/WSL2 recovery reuses working `srt` and `rg` binaries. Missing or
 unusable tools are installed in immutable bundles below
-`~/.local/lib/code-cycle-tools/`; `srt` recovery runs only for Claude stages.
-The stage, host isolation probe and Claude preparation process receive their
+`~/.local/lib/code-cycle-tools/`; both executors require `srt` for Linux preparation.
+The stage, host isolation probe and preparation process receive their
 managed executable directories prepended to their own `PATH`, preserving the
 original host directories in their existing order. Tools already selected from
 the host `PATH` do not promote their directories. This does not change the runtime's
@@ -172,10 +174,39 @@ Claude receives both the allowed-tool patterns and the command hook policy.
 Codex retains normal tools/MCP access and receives the matching explicit network
 profile. Default code-host domains are granted to publishing stages. Per the
 owner's #279 decision, Codex issue review also receives `github.com` and
-`api.github.com`, with the same existing gh credentials, while its workspace and
-publication contract remain read-only. This is a credential trust decision:
-the domain grant itself does not make an HTTP credential read-only. Other
+`api.github.com`. Under #294 its sandboxed commands need the explicit
+`credential_reads: ["~/.config/gh"]` exception to use stored gh credentials;
+its workspace and publication contract remain read-only. The domain grant itself
+does not make an HTTP credential read-only. Other
 non-publishing roles receive only registry access, without a publication profile.
+
+### Credential-read exceptions
+
+Every stage and preparation sandbox denies reads of `~/.ssh`, `~/.aws`,
+`~/.codex/auth.json`, `~/.claude/.credentials.json` and `~/.claude.json`.
+`~/.config/gh` is readable by publishing stages only; preparation always denies
+it. These rules restrict child commands, so the agent can still authenticate
+outside its command sandbox. Rules name existing resolved targets, including
+symlink targets; absent paths are skipped to avoid sandbox mount failures and
+persistent placeholder files. A sandbox startup failure never retries without
+the denials.
+
+A project whose tests need a particular store, or whose remote is SSH-only,
+must opt out explicitly in the trusted source checkout:
+
+```yaml
+code_cycle:
+  user_choices:
+    credential_reads: ["~/.ssh"]
+```
+
+Only the six store names above are accepted, without wildcards or arbitrary
+paths. Each exception removes only that store's denial in stages and preparation;
+it does not grant network access or make raw SSH work through the HTTPS proxy.
+The stage artifacts, preparation report and stage prompt record the exceptions.
+Never put credentials in this configuration. Review clones cannot supply their
+own exceptions. See [host permissions](host-permissions.md) for the remaining
+trust boundary around publishing credentials.
 
 When runtime preparation detects Node dependencies, the worker inherits the
 same npm/Yarn registry domains as preparation, plus explicitly selected registry

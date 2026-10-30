@@ -24,6 +24,35 @@ Herdr is optional when running the suite: with `HERDR_ENV` unset, worktree
 selection uses Git directly; dedicated Herdr tests opt into the flag and mock
 the command.
 
+### Credential-read confinement (E7)
+
+The unit suite checks every native stage profile's credential rules, explicit
+exceptions, canonical symlink targets, and each missing-denial failure in
+`probe_review_confinement`. The installed Codex confinement probe and `srt`
+prerequisite probe also test synthetic credential stores without reading host
+secrets. Claude settings with inherited `allowRead` are refused because that
+setting could cancel a denial.
+
+On a host that supports native sandbox execution, run the opt-in E7 matrix:
+
+```bash
+CODE_CYCLE_LIVE_CREDENTIAL_PROBE=1 python3 -m unittest discover -s tests -p test_credential_reads.py
+```
+
+This requires installed `codex` and `srt`. It exercises read/write, publishing,
+registry and Docker-grant profile combinations on both executors, prints only
+`READABLE`/`denied` states for synthetic stores, and fails on any unexpected
+read. Publishing profiles must allow synthetic gh credentials and deny the five
+other stores. No host credential contents are accessed. Preserve the output
+and platform/version information as boundary evidence. macOS/Windows still need
+platform validation before removing their Codex preparation fallback.
+
+Do not opt in inside a native stage whose outer sandbox cannot support nested
+Codex or `srt`. The test skips there; record that boundary as `not_verified`,
+and keep unit results separate from real sandbox evidence. Static-only recovery
+when the sandbox is unavailable does not establish credential confinement;
+verification remains disabled under the existing recovery policy.
+
 ### Codex Git metadata sandbox
 
 Writing Codex dispatches from linked worktrees need some of the worktree's Git

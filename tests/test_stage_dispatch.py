@@ -172,6 +172,7 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
                     if expected:
                         prepare.assert_called_once_with(str(self.repo), executor, executor,
                                                         domains=("packages.example.org",),
+                                                        credential_reads=(),
                                                         prerequisite_path=os.environ.get("PATH", ""))
                         self.assertEqual(report, result.artifacts["dependency_preparation"])
                     else:
@@ -427,9 +428,9 @@ class ClaudePolicyTests(DispatchTestCase):
             command_policy=self.policy(code_host="bitbucket"), runner=runner)
 
         self.assertIn("Bash(gh:*)", seen["argv"])
-        # Only the minimal foreground hook (#276): no table, no sandbox.
+        # No command table, but credential confinement applies to every provider.
         settings = settings_of(seen["argv"])
-        self.assertEqual({"hooks", "env"}, set(settings))
+        self.assertEqual({"hooks", "env", "sandbox"}, set(settings))
         self.assertEqual("Bash", settings["hooks"]["PreToolUse"][0]["matcher"])
         self.assertTrue(result.artifacts["command_policy"].startswith("inactive: "))
         self.assertIn("GitHub only", result.artifacts["command_policy"])
@@ -695,7 +696,10 @@ class CodexPolicyTests(DispatchTestCase):
                                       ignore_rules=True)
         self.assertIn('default_permissions="code_cycle_review_read"', argv)
         self.assertIn('permissions.code_cycle_review_read.extends=":read-only"', argv)
-        self.assertIn('permissions.code_cycle_review_read.filesystem={"/clone"="write"}', argv)
+        filesystem = next(option for option in argv if option.startswith(
+            "permissions.code_cycle_review_read.filesystem="))
+        self.assertIn('"/clone"="write"', filesystem)
+        self.assertEqual(1, filesystem.count('="write"'))
         self.assertNotIn("workspace-write", argv)
         self.assertIn("--ignore-rules", argv)
 

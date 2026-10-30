@@ -320,7 +320,8 @@ class IgnoredConfigurationTests(RunCycleTestCase):
         # With a file it supplies what the file says, even when that is nothing.
         self.assertEqual(("rg",), self.passed_choices(
             config="code_cycle:\n  user_choices:\n    tools: [rg]\n")["tools"])
-        self.assertEqual({"tools": (), "commands": (), "integrations": (), "registry_domains": ()},
+        self.assertEqual({"tools": (), "commands": (), "integrations": (), "registry_domains": (),
+                          "credential_reads": ()},
                          self.passed_choices(config="code_cycle: {}\n"))
         self.assertIsNone(self.passed_choices("--no-config"))
 
