@@ -181,6 +181,10 @@ class RunCycleTestCase(unittest.TestCase):
         # The original flow, which these tests describe; the issue-review stage
         # has its own tests, which ask for it.
         kw.setdefault("issue_review", "off")
+        # Provider reads are explicit fixtures; driver tests never contact GitHub.
+        kw.setdefault("criteria_reader", lambda provider, *_args, **_kw:
+                      rc.verification_contract.parse_criteria(
+                          provider, "## Acceptance criteria\n- Fixture behaviour works"))
         if kw.get("start_from", "implement") != "implement":
             # A resume rebuilds the claimed-fix history from the change
             # request's comments; these tests describe a request without any.

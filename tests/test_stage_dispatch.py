@@ -144,7 +144,9 @@ class DependencyPreparationDispatchTests(DispatchTestCase):
         self.assertEqual("IMPLEMENTED", parsed["status"])
         self.assertEqual("not_verified", parsed["tests"]["conclusion"])
         self.assertNotIn("passed", parsed["tests"])
-        self.assertEqual("pytest", parsed["tests"]["evidence"][0]["command"])
+        self.assertEqual(2, parsed["tests"]["version"])
+        self.assertEqual("pytest", parsed["tests"]["checks"][0]["command"])
+        self.assertEqual("unverified", parsed["tests"]["checks"][0]["result"])
 
     def test_preparation_role_gating_and_evidence_reach_each_native_prompt(self) -> None:
         for executor, adapter_type, target in (("codex", ex.CodexAdapter, CODEX),
@@ -877,6 +879,13 @@ class RuntimePolicyTests(unittest.TestCase):
 
 class RuntimeStopTests(unittest.TestCase):
     def setUp(self) -> None:
+        # These tests isolate command-policy stops from provider availability.
+        reader = mock.patch.object(rc.verification_contract, "read_criteria", side_effect=(
+            lambda provider, *_args, **_kw: replace(
+                rc.verification_contract.parse_criteria(
+                    "github", "## Acceptance criteria\n- Fixture behaviour works"), provider=provider)))
+        reader.start()
+        self.addCleanup(reader.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         import telemetry as tm

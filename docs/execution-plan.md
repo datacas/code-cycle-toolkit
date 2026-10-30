@@ -13,10 +13,10 @@ views `cycle.ROLE_CONTRACTS`, `run_cycle.SKILL_FOR_ROLE`, and
 keys and values. In particular, `SKILL_FOR_ROLE` remains the five-role adapter
 used by existing callers; catalog entries for other skills do not expand it.
 
-## ExecutionPlan version 2
+## ExecutionPlan version 3
 
 `ExecutionPlan` serializes the plan contract without copying the existing
-findings, verification checks, code-host checks, or evidence contracts. Its
+findings or code-host checks. Its
 identity includes `plan_id`, `revision`, repository, and work-item ID. It also
 stores the objective, execution profile, effective configuration and policy,
 plan provenance, review metadata, base/head references, and a metadata extension
@@ -73,7 +73,7 @@ rereview decision is one rule for every profile
 invalidate the review's evidence, and open findings without fixes keep their
 blocks rather than being reviewed again.
 
-**Version negotiation.** `from_dict()` reads versions 1 and 2 and rejects every
+**Version negotiation.** `from_dict()` reads versions 1, 2 and 3 and rejects every
 other value, including `"1"` and `true`; a version 1 payload is upgraded, never
 reinterpreted, and may not carry version 2 fields. `to_dict(contract_version=1)`
 writes a lossless projection for a version 1 reader: it refuses while any
@@ -82,6 +82,43 @@ obligations, controls, and stage policies under
 `effective_policy.contract_v2` instead of dropping them. On upgrade, this
 envelope is validated and its typed fields restored. A version 1 payload
 read and projected back is unchanged.
+
+Version 3 (#290) adds `verification`, a `VerificationPlan` from
+`scripts/verification_plan.py`. It belongs to the enclosing plan's `plan_id`
+and `revision`; it has no parallel identity or store. Older plans upgrade with
+`verification: null`. Versions 1 and 2 may still be written when verification
+is absent; projecting a plan that carries verification to either version is
+rejected instead of dropping obligations or history.
+
+The verification contract contains:
+
+- `criteria`: provider, content SHA-256, evaluation status, ordered criterion
+  texts and a reason. Runtime parsing assigns `AC-1`, `AC-2`, etc. within this
+  owning revision. Changed content requires an explicit revision; identifiers
+  from a previous revision must not be silently assigned new meanings.
+- `checks`: stable ID, exact command, executor, profile, execution context,
+  required flag, criterion IDs, command level, provenance and activation reason.
+  The configured test command is `configured-test` and required. Every check
+  linked to a criterion is required. An agent can add checks and promote an
+  obligation; it cannot remove or demote an existing one.
+- `results`: append-only check ID, verified HEAD, `pass|fail|unverified`,
+  evidence, cause and attempts. Unexecuted results carry an explicit cause;
+  a null HEAD is permitted only for an unverified result whose target is unknown.
+  Executed evidence requires integer exit codes and nonnegative counts or null.
+
+`extend_verification()` returns a new owning revision and preserves result
+history. `VerificationPlan.extend()` freezes command, executor, profile,
+context and provenance, allows additions/promotions, and retains omitted
+entries. `record()` appends results; `current()` invalidates an old HEAD without
+deleting history. `cap()` never raises the reported conclusion: required fail
+caps at `failed`; required unverified, unavailable criteria or an unlinked
+criterion cap at `not_verified`. Code-host CI never substitutes for these
+results in #290.
+
+The contract and in-cycle normalization are implemented here. Durable revision
+and result persistence, execution of the plan, the end-of-cycle
+`verification_unverified` gate, and verification-only resume belong to #329.
+No provisional store or telemetry stop-reason schema is introduced by #290.
 
 The contract reserves identity, profile, revision, provenance, effective
 configuration, policy, and stage activation/omission reasons for later analysis

@@ -384,10 +384,16 @@ def static_result(spoken: str, commands, evidence: dict[str, Any]) -> str:
         return spoken
     if not isinstance(payload, dict):
         return spoken
-    payload["tests"] = {"ran": False, "conclusion": "not_verified",
-                        "evidence": [{"command": command, "exit_code": None,
-                                      "executed": None, "reason": "native isolation unavailable"}
-                                     for command in commands]}
+    payload["tests"] = {"version": 2, "ran": False, "conclusion": "not_verified",
+                        "checks": [{"id": f"native-{index}", "command": command,
+                                    "executor": "native", "profile": "selected",
+                                    "context": "native", "required": True, "criteria": [],
+                                    "level": "test", "provenance": "runtime",
+                                    "reason": "configured verification",
+                                    "head_sha": payload.get("head_sha"), "result": "unverified",
+                                    "evidence": [], "cause": "native isolation unavailable",
+                                    "attempts": []}
+                                   for index, command in enumerate(commands, 1)]}
     payload["native_sandbox_preflight"] = evidence
     return (spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload)
             + "\n" + spoken[end:])

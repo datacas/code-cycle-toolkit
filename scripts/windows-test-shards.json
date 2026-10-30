@@ -94,6 +94,7 @@
       "test_dispatch_failures",
       "test_execution_plan",
       "test_execution_profiles",
+      "test_verification_plan",
       "test_stats",
       "test_support",
       "test_validate_package"

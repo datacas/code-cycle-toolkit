@@ -9,17 +9,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 
 from executors import WorkspacePolicy
 from issue_review import ROLE as ISSUE_REVIEW_ROLE, SKILL as ISSUE_REVIEW_SKILL
+if TYPE_CHECKING:
+    from .verification_plan import VerificationPlan, VerificationError, Check
+else:
+    from verification_plan import VerificationPlan, VerificationError, Check
 
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 
 #: Versions `ExecutionPlan.from_dict` reads and `to_dict` can write. Version 1
 #: is read by upgrading it and written only as a lossless projection.
-SUPPORTED_CONTRACT_VERSIONS = (1, 2)
+SUPPORTED_CONTRACT_VERSIONS = (1, 2, 3)
 
 
 class ContractError(ValueError):
@@ -414,8 +418,16 @@ class ExecutionPlan:
     decisions: tuple[PendingDecision, ...] = ()
     obligations: tuple[ConditionalObligation, ...] = ()
     controls: tuple[PlannedControl, ...] = ()
+    verification: VerificationPlan | None = None
 
     def validate(self) -> None:
+        if self.verification is not None:
+            if not isinstance(self.verification, VerificationPlan):
+                raise ContractError("verification must be a verification plan")
+            try:
+                self.verification.validate()
+            except VerificationError as exc:
+                raise ContractError(str(exc)) from exc
         if type(self.contract_version) is not int:
             raise ContractError("contract version must be an integer")
         if self.contract_version != CONTRACT_VERSION:
@@ -661,6 +673,18 @@ class ExecutionPlan:
 
     # -- queries ------------------------------------------------------------
 
+    def extend_verification(self, checks: tuple[Check, ...]) -> ExecutionPlan:
+        """A new owning-plan revision; never remove a frozen check or its history."""
+        if self.verification is None:
+            raise ContractError("initialize verification with runtime criteria first")
+        try:
+            verification = self.verification.extend(checks)
+        except VerificationError as exc:
+            raise ContractError(str(exc)) from exc
+        result = replace(self, revision=self.revision + 1, verification=verification)
+        result.validate()
+        return result
+
     def stage(self, stage_id: str) -> PlannedStage:
         for item in self.stages:
             if item.stage_id == stage_id:
@@ -769,12 +793,16 @@ class ExecutionPlan:
         self.validate()
         if type(contract_version) is not int:
             raise ContractError(f"unsupported execution-plan contract version: {contract_version!r}")
-        if contract_version == CONTRACT_VERSION:
+        if contract_version in (2, CONTRACT_VERSION):
+            if contract_version == 2 and self.verification is not None:
+                raise ContractError("version 2 cannot represent verification; negotiate version 3")
             return {
                 **self._common_dict(dict(self.effective_policy), contract_version),
                 "decisions": [item.to_dict() for item in self.decisions],
                 "obligations": [item.to_dict() for item in self.obligations],
                 "controls": [item.to_dict() for item in self.controls],
+                **({"verification": self.verification.to_dict() if self.verification else None}
+                   if contract_version >= 3 else {}),
             }
         if contract_version == 1:
             return self._project_v1()
@@ -808,6 +836,8 @@ class ExecutionPlan:
         projection; settled obligations, controls, and stage policies travel
         under `effective_policy.contract_v2` rather than disappearing.
         """
+        if self.verification is not None:
+            raise ContractError("version 1 cannot represent verification; negotiate version 3")
         pending = [f"decision for {item.subject}" for item in self.decisions]
         pending += [f"obligation {item.obligation_id}" for item in self.obligations
                     if item.state is ObligationState.PENDING]
@@ -840,6 +870,8 @@ class ExecutionPlan:
             version = payload["contract_version"]
             if type(version) is not int or version not in SUPPORTED_CONTRACT_VERSIONS:
                 raise ContractError(f"unsupported execution-plan contract version: {version!r}")
+            if version < 3 and "verification" in payload:
+                raise ContractError("verification requires execution-plan version 3")
             if version == 1 and _V2_PLAN_KEYS & set(payload):
                 raise ContractError("a version 1 plan cannot carry version 2 fields")
             if version == 1:
@@ -961,6 +993,8 @@ class ExecutionPlan:
                 decisions=decisions,
                 obligations=obligations,
                 controls=controls,
+                verification=(VerificationPlan.from_dict(payload["verification"])
+                              if payload.get("verification") is not None else None),
             )
             plan.validate()
         except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
