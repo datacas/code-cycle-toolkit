@@ -55,7 +55,7 @@ class Criteria:
 _LABEL = r"(?:Acceptance criteria|Criterios de aceptación)"
 _HEADING = re.compile(rf"^\s*(?:#{{1,6}}\s+({_LABEL})\s*[:.]?\s*#*|\*\*({_LABEL})[:.]?\*\*[:.]?)\s*$", re.I)
 _ITEM = re.compile(r"^(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(\S.*)$")
-_SECTION = re.compile(r"^\s*(?:#{1,6}\s+|\*\*[^*]+\*\*[:.]?\s*$)")
+_SECTION = re.compile(r"^\s*(?:#{1,6}\s+|\*\*[^*]+\*\*[:.]?\s*$|\*\*[^*]+[.:]\*\*[:.]?\s+\S.*$)")
 
 
 def parse_criteria(provider: str, body: str | None) -> Criteria:
