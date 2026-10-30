@@ -20,12 +20,20 @@ import stage_permissions as sp
 import user_choices
 from router import Target
 
+#: The real resolver, for the test that supplies its own managed srt bundle.
+RESOLVE_EXECUTABLE = ds.native_prerequisites.executable
+
 
 class SetupTests(unittest.TestCase):
     def setUp(self):
         nested = patch.object(ds.native_prerequisites, "nested_codex", return_value=False)
         nested.start()
         self.addCleanup(nested.stop)
+        # Linux preparation runs srt for both executors (#294); a host or CI
+        # runner without it must not change these results.
+        srt = patch.object(ds.native_prerequisites, "executable", return_value="/tools/srt")
+        srt.start()
+        self.addCleanup(srt.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         # prepare() canonicalizes the checkout; Windows temp paths may be 8.3 short names.
@@ -85,9 +93,8 @@ class SetupTests(unittest.TestCase):
                 re.findall(r'("(?:[^"\\]|\\.)*")="write"', self.filesystem(argv))]
 
     def prepare(self):
-        with patch.object(ds.native_prerequisites, "executable", return_value="/tools/srt"):
-            return ds.prepare(str(self.root), "codex", "codex", runner=self.runner,
-                              evidence_root=self.evidence, sleep=lambda _: None)
+        return ds.prepare(str(self.root), "codex", "codex", runner=self.runner,
+                          evidence_root=self.evidence, sleep=lambda _: None)
 
     def test_detects_managers_and_workspace_roots(self):
         self.assertEqual("pnpm", ds.projects(self.root)[0][1])
@@ -124,7 +131,8 @@ class SetupTests(unittest.TestCase):
         srt.chmod(0o755)
         previous_path = os.environ.get("PATH")
         with patch.object(Path, "home", return_value=home), patch.dict(
-                os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}):
+                os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}), patch.object(
+                ds.native_prerequisites, "executable", RESOLVE_EXECUTABLE):
             selected_path = ds.native_prerequisites.tool_path(os.environ.get("PATH", ""), probes=[
                 {"name": tool, "path": str(tools / tool / tool), "outcome": "reused", "executable": tool}
                 for tool in ("srt", "rg")])
@@ -537,7 +545,7 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_both_sandbox_wrappers_disable_general_network_and_protect_lock(self):
-        with patch.object(ds.shutil, "which", return_value="/usr/bin/srt"):
+        with patch.object(ds.native_prerequisites, "executable", return_value="/usr/bin/srt"):
             for executor in ("claude", "codex"):
                 settings = Path(self.temp.name) / "settings.json"
                 argv = ds.sandbox_command(executor, executor, ["npm", "ci", "--ignore-scripts"],
@@ -605,7 +613,8 @@ class SetupTests(unittest.TestCase):
                         self.assertEqual("prepared", report["status"])
                         self.assertEqual(source_head, report["items"][0]["head_sha"])
                         return result
-                    with patch.object(ds.shutil, "which", return_value=str(binary)):
+                    with patch.object(ds.shutil, "which", return_value=str(binary)), patch.object(
+                            ds.native_prerequisites, "executable", return_value=str(binary)):
                         result = ex._isolated_review_dispatch(
                             adapter, target, role, cwd=str(self.root), dispatch_call=review,
                             command_policy=True)

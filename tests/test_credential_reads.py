@@ -143,6 +143,20 @@ class CredentialReadsTests(unittest.TestCase):
                 self.assertEqual({path: "none" for path in sp.credential_read_denials()}, rules(argv))
 
     def test_confinement_probe_rejects_each_missing_credential_denial(self):
+        self.assert_probe_rejects_each_missing_denial()
+
+    @unittest.skipIf(os.name == "nt", "symlink fixture")
+    def test_confinement_probe_emulation_follows_a_linked_temporary_root(self):
+        # A runner's temporary root may be reached through a symlink, as Windows
+        # runners reach it through an 8.3 short name; denials are canonical.
+        real = self.root / "real-tmp"
+        real.mkdir()
+        link = self.root / "linked-tmp"
+        link.symlink_to(real, target_is_directory=True)
+        with patch.object(tempfile, "tempdir", str(link)):
+            self.assert_probe_rejects_each_missing_denial()
+
+    def assert_probe_rejects_each_missing_denial(self):
         # Emulate the declared filesystem inside the generated probe. This is a
         # policy/probe regression test, not evidence of real OS confinement.
         for missing in (None, *range(6)):
@@ -154,7 +168,7 @@ class CredentialReadsTests(unittest.TestCase):
                 def sandbox_open(path, mode="r", *args, **kwargs):
                     resolved = str(Path(path).resolve())
                     matching = [(root, access) for root, access in table.items()
-                                if Path(resolved).is_relative_to(root)]
+                                if Path(resolved).is_relative_to(Path(root).resolve())]
                     access = max(matching, key=lambda item: len(item[0]))[1] if matching else "read"
                     if access == "none" or ("w" in mode and access != "write"):
                         raise PermissionError("synthetic policy denied")
