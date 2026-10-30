@@ -300,6 +300,31 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 **Local-only rehearsal:** `--cwd /path/to/linked-worktree --workspace current --local-only` refuses the live repository. The explicit `current` policy is required so workspace selection cannot create another task worktree. It runs implementation only, adds a no-publish boundary to the prompt, marks each row `local_only`, and ends with `HUMAN_INTERVENTION` because there is no PR to review. It is a policy, not a network sandbox.
 
 Implementation workflows use a task-specific linked Git worktree by default.
+
+Setup records each resource it creates, including the task worktree, local
+branch, fetched PR ref, and setup status or handoff files, with its identity,
+provenance and compensating action. Before the first stage dispatch starts, a
+failure rolls those resources back in reverse order and collects cleanup
+errors in the error message (CLI setup errors still exit with code 2). A
+worktree or branch that existed before the run, including one reused by
+`--continue` or opened in Herdr, is never owned by this rollback. Herdr-created
+Git worktrees are removed through Git's worktree registration. A created PR
+ref is removed only while unchanged and unused by a local branch or detached
+worktree; otherwise cleanup retains it and reports why.
+
+The first adapter invocation commits setup permanently. Routing or preflight
+failure before that boundary still rolls back; a stage failure or interruption
+after it leaves the task workspace available for continuation. With `--detach`,
+successful process handoff commits setup and a failed handoff rolls it back.
+Shared telemetry and status revision counters remain the record of the attempt.
+
+The native entry point remains `run_cycle.py`. Its CLI lives in `cycle_cli.py`,
+selection in `cycle_workspace.py`, and the stage loop in `cycle_loop.py`, whose
+control transition table includes resume entries, retries, CI, stops and
+interruptions. Session lifetime, stage dispatch, publication history and review
+gates have separate modules. Public names imported from `run_cycle` remain
+available; this split preserves the existing stage policies and reports.
+
 The implementation, resolution, and any later code-mutating stage for one
 change request share its worktree and branch. An active linked worktree is
 reused only when it belongs to the requested work item; other tasks get separate

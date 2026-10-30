@@ -393,6 +393,8 @@ class CycleRecorder:
         self.stage_started = stage_started
         self.on_progress = on_progress
         self.on_workspace: Callable[..., None] | None = None
+        # Called at the adapter invocation boundary, after routing/preflight.
+        self.on_dispatch_started: Callable[[], None] | None = None
 
     def stage(self, role: str, task: str, *, escalated: bool = False,
               effort_override: str | None = None, target_override: Target | None = None,
@@ -690,6 +692,8 @@ class CycleRecorder:
                               detail=f"{target.provider}/{target.model} {target.effort}",
                               correlation={"parent_attempt_id": parent_attempt_id,
                                            "relationship": relationship})
+                if self.on_dispatch_started is not None:
+                    self.on_dispatch_started()
                 return attempt_id
 
             tool_activity = False

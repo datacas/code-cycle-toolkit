@@ -47,6 +47,7 @@
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_dependency_setup",
+      "test_driver_characterization",
       "test_execution_profiles",
       "test_host_permissions",
       "test_manual_rereview",
@@ -58,7 +59,8 @@
       "test_stage_dispatch",
       "test_stage_permissions",
       "test_support",
-      "test_validate_workflow"
+      "test_validate_workflow",
+      "test_workspace_setup"
     ],
     "estimated_shard_seconds": {
       "windows-1": 416.4,
@@ -75,13 +77,15 @@
     "windows-2": [
       "test_behavioral",
       "test_dependency_setup",
+      "test_driver_characterization",
       "test_environment_recovery",
       "test_issue_review",
       "test_jev_shadow",
       "test_reroute",
       "test_stage_signals",
       "test_telemetry",
-      "test_validate_workflow"
+      "test_validate_workflow",
+      "test_workspace_setup"
     ],
     "windows-3": [
       "test_ci_failure_access",
