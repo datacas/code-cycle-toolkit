@@ -260,8 +260,10 @@ cycle and parses one explicit criteria section. Accepted headings are exactly
 Markdown heading (`#` through `######`) or bold label. A trailing colon or
 period is allowed inside a bold label or after it. The section is a flat list
 at column zero using `-`, `+`, `*`, `1.` or `1)` markers and optional Markdown
-checkboxes; another heading or bold label ends it. Empty, missing, duplicate,
-placeholder or unparseable sections produce deterministic `needs_refinement`
+checkboxes; another heading or a bold label ends it. Punctuated labels may
+include prose on the same line, such as `**Label.** text` or `**Label:** text`.
+Bold markup inside a list item does not end the section. Empty, missing,
+duplicate, placeholder or unparseable sections produce deterministic `needs_refinement`
 before any implementation, even with issue review off or difficulty 1. They
 are insufficient specification, never a failed test. Existing issues are not
 migrated. `.github/ISSUE_TEMPLATE/work-item.md` supplies the grammar for new work.

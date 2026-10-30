@@ -55,6 +55,40 @@ class CriteriaTests(unittest.TestCase):
                     self.assertEqual(parsed.status, "evaluable")
                     self.assertEqual(parsed.items, ("Works",))
 
+    def test_inline_bold_section_label_ends_criteria(self):
+        for label in ("**Tests.** Fixtures cover the parser.",
+                      "**Tests:** Fixtures cover the parser."):
+            with self.subTest(label=label):
+                parsed = criteria(f"## Acceptance criteria\n- A\n- B\n\n{label}\nOther prose")
+                self.assertEqual(parsed.status, "evaluable")
+                self.assertEqual(parsed.items, ("A", "B"))
+
+    def test_malformed_criteria_remain_needs_refinement(self):
+        for body, reason in (
+            ("## Acceptance criteria\nprose", "criteria must be a flat Markdown list"),
+            ("## Acceptance criteria\n- Works\n**Prose** is still prose.",
+             "criteria must be a flat Markdown list"),
+            ("## Acceptance criteria\n- Works\n  - nested", "criteria must be a flat Markdown list"),
+            ("## Acceptance criteria\n- TODO", "placeholder criterion"),
+            ("## Acceptance criteria\n", "acceptance-criteria list is empty"),
+        ):
+            with self.subTest(body=body):
+                parsed = criteria(body)
+                self.assertEqual(parsed.status, "needs_refinement")
+                self.assertEqual(parsed.reason, reason)
+
+    def test_bold_markup_inside_criterion_does_not_end_section(self):
+        parsed = criteria("## Acceptance criteria\n- Keeps **bold markup** inside the criterion\n"
+                          "**Tests.** Regression coverage follows.")
+        self.assertEqual(parsed.status, "evaluable")
+        self.assertEqual(parsed.items, ("Keeps **bold markup** inside the criterion",))
+
+    def test_issue_330_body_is_evaluable_without_remote_edit(self):
+        body = (ROOT / "tests" / "fixtures" / "issue-330.md").read_text(encoding="utf-8")
+        parsed = criteria(body)
+        self.assertEqual(parsed.status, "evaluable")
+        self.assertEqual(len(parsed.items), 8)
+
     def test_missing_empty_duplicate_unparseable_and_placeholder_stay_open(self):
         for body in ("## Problem\nWorks", "## Acceptance criteria\n", "## Acceptance criteria\nprose",
                      "## Acceptance criteria\n- Works\n  - nested",
