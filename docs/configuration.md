@@ -230,6 +230,17 @@ The configurable stages are `issue_review`, `implement`, `verify`, `review`, `se
 
 `issue_review.mode: auto` (the default) makes a new `run_cycle.py`, `cc-orchestrator`, or `cc-orca-orchestrator` cycle review its work item with `cc-issue-review` before implementing it, except a task declared trivial and not security-sensitive. `off` keeps the original flow. `--issue-review`, or `issue_review=auto|off` in an orchestrator invocation, overrides it for one run. Only a confirmed `READY` reaches implementation. See [Review lifecycle → Issue review](review-cycle.md#issue-review-before-implementation).
 
+Issue review's GitHub network grant does not grant stored credentials. Codex
+denies `~/.config/gh` in this non-publishing role. Claude ordinary issue review
+keeps its normal tooling; if registry domains or a Docker grant enable its Bash
+sandbox, that sandbox also denies the gh store. For authenticated issue reads
+on private repositories from either sandbox, set
+`code_cycle.user_choices.credential_reads: ["~/.config/gh"]` in the trusted
+project configuration. Without that exception, stored-credential authentication
+is unavailable to sandboxed gh commands; a resulting access failure does not
+mean the work item needs refinement. The exception does not authorize publication.
+See [credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
+
 ### CI policy
 
 `ci.policy` decides how a cycle treats the code host's checks. `strict`, the default, is the original serial flow: the implementation and each resolution wait for their pushed head's checks, and a review approves only once they passed. `parallel` starts the review while the checks run, sends a review that requests changes to resolution at once, and approves a clean review only after the runtime's one CI gate saw every required check of that same SHA pass. Parallel mode never disables CI; it removes the time spent waiting for it before any useful work can start.
@@ -394,6 +405,10 @@ On Windows, the `~/.config/code-cycle-toolkit` directory is `%APPDATA%\code-cycl
 See [dependency preparation](dependency-preparation.md) for automatic frozen
 Node installs, contained lifecycle-build recovery, persistent setup evidence,
 and the `code_cycle.user_choices` configuration shared by dispatched stages.
+Its `credential_reads` list accepts explicit credential-store exceptions, such
+as `["~/.ssh"]`; the default is no exceptions. See
+[credential-read exceptions](dependency-preparation.md#credential-read-exceptions)
+for the accepted stores, evidence and sandbox scope.
 
 ---
 

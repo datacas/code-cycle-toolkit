@@ -45,6 +45,29 @@ WRITING_ROLES = frozenset({"implement", "resolve"})
 REVIEW_ROLES = frozenset({"review", "rereview"})
 ISSUE_REVIEW_ROLE = "issue_review"
 
+CREDENTIAL_STORES = ("~/.ssh", "~/.aws", "~/.codex/auth.json",
+                     "~/.claude/.credentials.json", "~/.claude.json")
+GH_CREDENTIAL_STORE = "~/.config/gh"
+
+
+def credential_read_denials(*, publishes: bool = False,
+                           credential_reads: tuple[str, ...] = (),
+                           home: Path | None = None) -> tuple[str, ...]:
+    """Existing canonical targets only: bwrap cannot mask a symlink (#294).
+
+    Inspect metadata, never credential contents. An absent target needs no
+    mount, and must not be created by the sandbox as a persistent placeholder.
+    """
+    unknown = set(credential_reads) - {*CREDENTIAL_STORES, GH_CREDENTIAL_STORE}
+    if unknown:
+        raise PolicyError("credential_reads must name known credential stores")
+    root = home if home is not None else Path.home()
+    stores = (*CREDENTIAL_STORES, *((GH_CREDENTIAL_STORE,) if not publishes else ()))
+    return tuple(dict.fromkeys(
+        str(target.resolve(strict=True)) for store in stores
+        if store not in credential_reads
+        for target in (root / store[2:],) if target.exists()))
+
 #: Read-only shell tools every stage may use, and nothing else from the shell.
 READ_SHELL = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "find", "jq"})
 #: `find` primaries that run a command, delete, or write a file.
@@ -143,6 +166,8 @@ class StagePolicy:
     commands: tuple[str, ...] = ()
     integrations: tuple[str, ...] = ()
     registry_domains: tuple[str, ...] = ()
+    credential_reads: tuple[str, ...] = ()
+    credential_publishing: bool = False
     # Host-observed unavailable isolation: retain read/publication/edit guards,
     # but never allow project code execution without the required sandbox.
     static_only: bool = False
@@ -224,6 +249,13 @@ class StagePolicy:
         """A reviewer that may run tests must do so in a confined clone."""
         return self.role in REVIEW_ROLES and bool(self.verification_commands)
 
+    @property
+    def uses_bash_sandbox(self) -> bool:
+        """Keep Claude sandbox emission and its preflight on the same scope."""
+        return self.active and not self.static_only and bool(
+            self.requires_confined_verification or self.registry_domains
+            or self.publication_commands or self.docker)
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
 
@@ -237,7 +269,7 @@ class StagePolicy:
         if unknown:
             raise PolicyError(f"unknown stage policy keys: {', '.join(unknown)}")
         data["verify_prefixes"] = tuple(data.get("verify_prefixes") or ())
-        for key in ("tools", "commands", "integrations", "registry_domains"):
+        for key in ("tools", "commands", "integrations", "registry_domains", "credential_reads"):
             data[key] = tuple(data.get(key) or ())
         return cls(**data)
 
@@ -1533,7 +1565,7 @@ def prompt_note(policy: StagePolicy) -> str:
         f"available with `{'rtk ' if policy.rtk else ''}printenv TMPDIR`."
     )
     choices = {key: getattr(policy, key) for key in
-               ("tools", "commands", "integrations", "registry_domains")
+               ("tools", "commands", "integrations", "registry_domains", "credential_reads")
                if getattr(policy, key)}
     if choices:
         tmpdir_note += " Effective project choices: " + json.dumps(choices) + "."
@@ -1681,7 +1713,8 @@ def _handles_tool_check(root: Path) -> bool:
 #: User-level sandbox settings that would widen a confined review, because
 #: Claude merges arrays across settings sources.
 SANDBOX_WIDENING_KEYS = (
-    ("filesystem", "allowWrite"), ("filesystem", "disabled"), ("excludedCommands",),
+    ("filesystem", "allowWrite"), ("filesystem", "allowRead"),
+    ("filesystem", "disabled"), ("excludedCommands",),
     ("allowUnsandboxedCommands",), ("network", "allowUnixSockets"),
     ("network", "allowAllUnixSockets"), ("enableWeakerNestedSandbox",),
 )
@@ -1830,7 +1863,8 @@ REVIEW_SANDBOX_DOMAINS = ("github.com", "api.github.com", "bitbucket.org", "api.
 
 def review_sandbox_settings(writable: tuple[str, ...],
                             registry_domains: tuple[str, ...] = (), *,
-                            docker_host: bool = False) -> dict:
+                            docker_host: bool = False, publishes: bool = False,
+                            credential_reads: tuple[str, ...] = ()) -> dict:
     """Claude's Bash sandbox for a reviewer that verifies in its clone.
 
     A sandboxed command has no network route except the allowed domains, and a
@@ -1840,7 +1874,9 @@ def review_sandbox_settings(writable: tuple[str, ...],
         "enabled": True,
         "failIfUnavailable": True,
         "allowUnsandboxedCommands": False,
-        "filesystem": {"allowWrite": list(writable)},
+        "filesystem": {"allowWrite": list(writable),
+                       "denyRead": list(credential_read_denials(
+                           publishes=publishes, credential_reads=credential_reads))},
         "network": {
             "allowedDomains": list(dict.fromkeys(
                 (*REVIEW_SANDBOX_DOMAINS, *registry_domains))),

@@ -20,9 +20,20 @@ import stage_permissions as sp
 import user_choices
 from router import Target
 
+#: The real resolver, for the test that supplies its own managed srt bundle.
+RESOLVE_EXECUTABLE = ds.native_prerequisites.executable
+
 
 class SetupTests(unittest.TestCase):
     def setUp(self):
+        nested = patch.object(ds.native_prerequisites, "nested_codex", return_value=False)
+        nested.start()
+        self.addCleanup(nested.stop)
+        # Linux preparation runs srt for both executors (#294); a host or CI
+        # runner without it must not change these results.
+        srt = patch.object(ds.native_prerequisites, "executable", return_value="/tools/srt")
+        srt.start()
+        self.addCleanup(srt.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         # prepare() canonicalizes the checkout; Windows temp paths may be 8.3 short names.
@@ -38,6 +49,7 @@ class SetupTests(unittest.TestCase):
         self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                  "commit", "-qm", "fixture")
         self.calls = []
+        self.sandbox_configs = {}
         self.failures = []
 
     def git(self, *args):
@@ -51,8 +63,10 @@ class SetupTests(unittest.TestCase):
 
     def runner(self, argv, **options):
         self.calls.append((argv, options))
-        self.assertEqual("codex", argv[0])
-        self.assertIn("sandbox", argv)
+        if "--settings" in argv:
+            self.sandbox_configs[id(argv)] = json.loads(
+                Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertTrue(argv[0] == "codex" or argv[0].endswith("srt"))
         command = argv[argv.index("--") + 1:]
         if command[-1] == "--version":
             return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
@@ -63,6 +77,14 @@ class SetupTests(unittest.TestCase):
         return subprocess.CompletedProcess(argv, 0, "installed\n", "")
 
     def filesystem(self, argv):
+        if "--settings" in argv:
+            config = self.sandbox_configs.get(id(argv))
+            if config is None:
+                config = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+            filesystem = config["filesystem"]
+            return "{" + ",".join(json.dumps(path) + '=' + json.dumps(access)
+                                  for key, access in (("allowWrite", "write"), ("denyWrite", "read"))
+                                  for path in filesystem[key]) + "}"
         return next(arg for arg in argv if arg.startswith(
             "permissions.code_cycle_prepare.filesystem="))
 
@@ -109,7 +131,8 @@ class SetupTests(unittest.TestCase):
         srt.chmod(0o755)
         previous_path = os.environ.get("PATH")
         with patch.object(Path, "home", return_value=home), patch.dict(
-                os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}):
+                os.environ, {"TEST_HOST_CREDENTIAL": "fixture"}), patch.object(
+                ds.native_prerequisites, "executable", RESOLVE_EXECUTABLE):
             selected_path = ds.native_prerequisites.tool_path(os.environ.get("PATH", ""), probes=[
                 {"name": tool, "path": str(tools / tool / tool), "outcome": "reused", "executable": tool}
                 for tool in ("srt", "rg")])
@@ -158,7 +181,8 @@ class SetupTests(unittest.TestCase):
             self.assertTrue(self.writable(argv))
             self.assertFalse([path for path in self.writable(argv) if path.is_relative_to(self.root)])
             self.assertFalse(Path(options["cwd"]).is_relative_to(self.root))
-            self.assertIn("registry.npmjs.org", " ".join(argv))
+            if "--settings" not in argv:
+                self.assertIn("registry.npmjs.org", " ".join(argv))
             self.assertEqual("true", options["env"]["npm_config_ignore_scripts"])
             self.assertNotIn("GITHUB_TOKEN", options["env"])
 
@@ -269,6 +293,7 @@ class SetupTests(unittest.TestCase):
         self.assertIn("without required dependency outputs", result["items"][0]["error"])
         self.assertFalse((self.root / "node_modules").exists())
 
+    @patch.object(ds.sys, "platform", "darwin")
     def test_large_tracked_source_tree_does_not_inflate_codex_filesystem_argument(self):
         # This source listing alone exceeded Linux's 128 KiB argv-entry limit.
         source = self.root / "src"
@@ -291,6 +316,7 @@ class SetupTests(unittest.TestCase):
             self.assertIn('permissions.code_cycle_prepare.extends=":read-only"', argv)
         self.assertEqual("tracked plugin", protected.read_text())
 
+    @patch.object(ds.sys, "platform", "darwin")
     def test_codex_protects_tracked_ancestors_of_writable_outputs(self):
         ancestor = self.root / ".yarn"
         argv = ds.sandbox_command(
@@ -324,7 +350,8 @@ class SetupTests(unittest.TestCase):
                           "if sys.argv[-1] == '--version': print('9.1.0')\n"
                           "else:\n print('fixture install failed', file=sys.stderr)\n sys.exit(12)\n")
         binary.chmod(0o700)
-        result = ds.prepare(str(self.root), "codex", str(binary), evidence_root=self.evidence)
+        with patch.object(ds.native_prerequisites, "executable", return_value=str(binary)):
+            result = ds.prepare(str(self.root), "codex", str(binary), evidence_root=self.evidence)
         self.assertEqual("incomplete", result["status"])
         attempt = result["items"][0]["attempts"][-1]
         self.assertEqual(12, attempt["exit_code"])
@@ -342,6 +369,9 @@ class SetupTests(unittest.TestCase):
         def runner(argv, **options):
             command = argv[argv.index("--") + 1:]
             calls.append((command, argv, options))
+            if "--settings" in argv:
+                self.sandbox_configs[id(argv)] = json.loads(
+                    Path(argv[argv.index("--settings") + 1]).read_text())
             cwd = Path(options["cwd"])
             if command[-1] == "--version":
                 return subprocess.CompletedProcess(argv, 0, "9.1.0\n", "")
@@ -515,14 +545,14 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(self.calls)
 
     def test_both_sandbox_wrappers_disable_general_network_and_protect_lock(self):
-        with patch.object(ds.shutil, "which", return_value="/usr/bin/srt"):
+        with patch.object(ds.native_prerequisites, "executable", return_value="/usr/bin/srt"):
             for executor in ("claude", "codex"):
                 settings = Path(self.temp.name) / "settings.json"
                 argv = ds.sandbox_command(executor, executor, ["npm", "ci", "--ignore-scripts"],
                                           writable=[self.root / "node_modules"],
                                           protected=[self.root / "pnpm-lock.yaml"],
                                           domains=ds.REGISTRIES, settings=settings)
-                if executor == "claude":
+                if executor == "claude" or sys.platform.startswith("linux"):
                     config = json.loads(settings.read_text())
                     self.assertEqual(list(ds.REGISTRIES), config["network"]["allowedDomains"])
                     self.assertIn(str(self.root / "pnpm-lock.yaml"), config["filesystem"]["denyWrite"])
@@ -583,7 +613,8 @@ class SetupTests(unittest.TestCase):
                         self.assertEqual("prepared", report["status"])
                         self.assertEqual(source_head, report["items"][0]["head_sha"])
                         return result
-                    with patch.object(ds.shutil, "which", return_value=str(binary)):
+                    with patch.object(ds.shutil, "which", return_value=str(binary)), patch.object(
+                            ds.native_prerequisites, "executable", return_value=str(binary)):
                         result = ex._isolated_review_dispatch(
                             adapter, target, role, cwd=str(self.root), dispatch_call=review,
                             command_policy=True)

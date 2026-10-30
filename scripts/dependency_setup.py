@@ -13,11 +13,14 @@ import platform
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import native_prerequisites
+import stage_permissions as sp
 
 REGISTRIES = ("registry.npmjs.org", "registry.yarnpkg.com")
 LOCKS = {"pnpm-lock.yaml": "pnpm", "package-lock.json": "npm",
@@ -99,8 +102,12 @@ def _manifest(path: Path) -> dict:
 
 def sandbox_command(executor: str, binary: str, command: list[str], *,
                     writable: list[Path], protected: list[Path], domains: tuple[str, ...],
-                    settings: Path, path: str | None = None) -> list[str]:
-    if executor == "codex":
+                    settings: Path, path: str | None = None,
+                    credential_reads: tuple[str, ...] = ()) -> list[str]:
+    denied = sp.credential_read_denials(credential_reads=credential_reads)
+    # Linux/WSL2 is validated for srt on both executors. Keep the aligned
+    # Codex fallback only on platforms whose srt path is not yet validated.
+    if executor == "codex" and not sys.platform.startswith("linux"):
         if native_prerequisites.nested_codex():
             raise OSError("known nested Codex limitation (#268): app-server socket directory must be "
                           "a user-owned directory with mode 0700; check not_verified without probing")
@@ -113,6 +120,7 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
         rules.update({str(path): "read" for path in protected
                       if any(path.is_relative_to(output) or output.is_relative_to(path)
                              for output in writable)})
+        rules.update({path: "none" for path in denied})
         filesystem = "{" + ",".join(json.dumps(key) + "=" + json.dumps(value)
                                     for key, value in rules.items()) + "}"
         network = "{" + ",".join(json.dumps(host) + '=\"allow\"' for host in domains) + "}"
@@ -126,13 +134,13 @@ def sandbox_command(executor: str, binary: str, command: list[str], *,
     # bootstrap or unsandboxed fallback when the host has not installed it.
     srt = native_prerequisites.executable("srt", path=path)
     if not srt:
-        raise OSError("Claude dependency preparation needs the installed srt sandbox runtime")
+        raise OSError("dependency preparation needs the installed srt sandbox runtime")
     settings.write_text(json.dumps({
         "network": {"allowedDomains": list(domains), "deniedDomains": [],
                     "allowLocalBinding": False},
         "filesystem": {"allowWrite": [str(path) for path in writable],
                        "denyWrite": [str(path) for path in protected],
-                       "denyRead": ["~/.ssh", "~/.aws", "~/.config/gh"]},
+                       "denyRead": list(denied)},
     }), encoding="utf-8")
     # srt shell-quotes each positional argument itself, so a pre-joined string
     # would run as one word. "--" keeps srt from parsing npm's own flags, such
@@ -313,7 +321,8 @@ def _run(argv, *, timeout, **options):
 def prepare(cwd: str, executor: str, binary: str, *,
             domains: tuple[str, ...] = (), runner=_run,
             evidence_root: Path | None = None, sleep=time.sleep,
-            prerequisite_path: str | None = None) -> dict:
+            prerequisite_path: str | None = None,
+            credential_reads: tuple[str, ...] = ()) -> dict:
     """Return honest setup evidence even on failure; no verdict or CI claim.
 
     Logs outlive the disposable clone. Failure is given to the stage so it can
@@ -327,7 +336,10 @@ def prepare(cwd: str, executor: str, binary: str, *,
     base = evidence_root or Path.home() / ".local/state/code-cycle-toolkit/preparation"
     base.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix="setup-", dir=base))
-    report = {"status": "prepared", "items": [], "evidence": str(evidence / "report.json")}
+    report: dict[str, Any] = {"status": "prepared", "items": [], "evidence": str(evidence / "report.json"),
+              "credential_read_policy": {"exceptions": list(credential_reads),
+                                         "denied_paths": list(sp.credential_read_denials(
+                                             credential_reads=credential_reads))}}
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                           capture_output=True, text=True, timeout=30, check=True).stdout.strip()
     tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root,
@@ -357,7 +369,7 @@ def prepare(cwd: str, executor: str, binary: str, *,
                        if key in {"PATH", "SYSTEMROOT", "LANG", "LC_ALL",
                                   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
                                   "http_proxy", "https_proxy", "no_proxy"}}
-                if executor == "claude":
+                if executor == "claude" or sys.platform.startswith("linux"):
                     env["PATH"] = (native_prerequisites.tool_path(env.get("PATH", ""))
                                    if prerequisite_path is None else prerequisite_path)
                 env.update(HOME=str(scratch), TMPDIR=str(scratch), CI="true",
@@ -376,7 +388,8 @@ def prepare(cwd: str, executor: str, binary: str, *,
                         argv = sandbox_command(executor, binary, command, writable=allowed,
                                                protected=protected, domains=tuple(dict.fromkeys(
                                                    (*REGISTRIES, *domains))), settings=scratch / "sandbox.json",
-                                               path=environment.get("PATH") if executor == "claude" else None)
+                                               path=environment.get("PATH"),
+                                               credential_reads=credential_reads)
                         record["sandbox_command"] = argv
                         result = runner(argv, cwd=cwd, env=environment, capture_output=True,
                                         text=True, timeout=timeout, stdin=subprocess.DEVNULL)

@@ -251,12 +251,29 @@ an install with lifecycle scripts disabled, a separate contained lifecycle build
 only when one is required, persistent evidence and bounded retries; it never
 inherits another revision's `node_modules`. Non-publishing Codex stages receive
 no default code-host network route, because readable credentials would permit
-writes as well as reads. The exception is Codex issue review, which by the
-owner's #279 decision receives `github.com` and `api.github.com` with the
-existing `gh` credentials (see
+writes as well as reads. Codex issue review, by the owner's #279 decision,
+receives `github.com` and `api.github.com`; #294 denies its stored gh
+credentials unless the project explicitly opts out (see
 [dependency preparation](dependency-preparation.md#explicit-user-choices)); its
 command table still denies publication. Explicitly selected registry domains do
 not add code-host domains.
+
+Every Codex stage and preparation sandbox denies credential-store reads:
+`~/.ssh`, `~/.aws`, `~/.codex/auth.json`, `~/.claude/.credentials.json`, and
+`~/.claude.json`. Only publishing stages retain `~/.config/gh` access by
+default. Codex uses `none` filesystem rules; Claude and preparation use
+`denyRead`. Claude adds these denials where its Bash sandbox already applies:
+an active GitHub policy with confined review verification, registry domains,
+publication commands or a Docker grant. Inactive policies retain their normal
+tooling; adding credential denials does not enable a sandbox for them. The same
+condition selects sandbox configuration checks and the Linux functional probe.
+Unavailable isolation selects static-only recovery with verification disabled;
+this does not establish credential confinement. Existing paths resolve to their
+real targets before rules are
+emitted; missing paths are omitted. An explicit per-project
+`code_cycle.user_choices.credential_reads` list selects exceptions and is
+reported in dispatch and preparation evidence. See
+[credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
 
 ## When a command is denied
 
