@@ -28,6 +28,9 @@ obligations.
 Each result also carries `head_sha`, `result: pass|fail|unverified`,
 `evidence` (integer `exit_code`, `executed` count or null), `cause` and
 `attempts`. The enclosing stage result names its current `head_sha` too.
+Each `evidence` and `attempts` array entry must be a JSON object. Do not send
+text entries or rely on the runtime to convert them; malformed entries make
+the report invalid and cap its conclusion at `not_verified`.
 An unexecuted check is explicitly `unverified` with a cause and the recovery
 attempts actually made; do not invent an exit code. Keep the check's identity
 when rerunning it and retain previous results. Never replace a local

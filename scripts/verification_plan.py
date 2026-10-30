@@ -342,6 +342,14 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             prior = CheckResult.from_dict({**previous, "id": check.id})
             if prior not in plan.results:
                 plan = plan.record(prior)
+        for field in ("evidence", "attempts"):
+            values = entry.get(field, ())
+            if not isinstance(values, (list, tuple)):
+                raise VerificationError(f"check {check.id} {field} must be an array")
+            for index, item in enumerate(values):
+                if not isinstance(item, Mapping):
+                    raise VerificationError(
+                        f"check {check.id} {field}[{index}] must be an object, got {type(item).__name__}")
         result = CheckResult(check.id, entry["head_sha"], entry["result"],
                              tuple(entry.get("evidence", ())), entry.get("cause", ""),
                              tuple(entry.get("attempts", ())))

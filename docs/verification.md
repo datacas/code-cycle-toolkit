@@ -236,6 +236,11 @@ top-level `tests.evidence` list. This is separate from the unchanged code-host
 }
 ```
 
+Every entry in a check's `evidence` and `attempts` arrays must be a JSON
+object. A non-object entry (including a string) is malformed; the runtime
+rejects the report and caps the conclusion at `not_verified` rather than
+coercing text into evidence.
+
 Freeze each check before execution. A result names the same check ID, command,
 executor/profile and context. The runtime supplies frozen check identities to
 later code stages. Copy that identity, including its owning executor/profile,
