@@ -1,5 +1,16 @@
 # Review lifecycle
 
+Native cycles select stages from the current execution plan. Resolution remains
+bounded by the existing iteration budget. After a resolution, identical explicit
+review and resolution HEADs stop with `no_progress`: open findings retain their
+blocks, and no rereview runs, including under Full. A changed HEAD invalidates
+incompatible review and verification evidence and activates the applicable
+controls again. A clean trusted receipt for the unchanged current HEAD can be
+reused on resume under either CI policy. Final readiness still requires valid
+`REV-*` history, required verification and the checks of that SHA; merge remains
+a human action. Verification-only recovery uses `cc-verify`, not another review;
+see [Verification](verification.md).
+
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
 **On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Resume after a failed upload](#resume-after-a-failed-upload) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)

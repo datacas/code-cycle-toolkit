@@ -315,8 +315,13 @@ class StageDispatch:
         """
         escalated = False
         while True:
+            try:
+                self.select_plan_stage(self.api.ISSUE_REVIEW_ROLE)
+            except ValueError as error:
+                return self.stop(str(error), "BLOCKED")
             outcome, reported, tampered, _ = self.run(
-                self.api.ISSUE_REVIEW_ROLE, self.api.ESCALATED_ISSUE_REVIEW if escalated else "",
+                self.api.ISSUE_REVIEW_ROLE,
+                (self.api.ESCALATED_ISSUE_REVIEW if escalated else "") + self.plan_context(),
                 escalated=escalated)
             stopped = self.unfinished(outcome, reported, tampered)
             if stopped is not None:
@@ -324,6 +329,7 @@ class StageDispatch:
             readiness = self.api.assess_readiness(reported.payload, self.task_id)
             self.report.readiness = readiness
             if reported.status:
+                self.record_plan_stage(self.api.ISSUE_REVIEW_ROLE, reported, outcome)
                 self.recorder.record_verdict(self.api.ISSUE_REVIEW_ROLE, reported.status,
                                         **readiness.telemetry_fields())
             if readiness.gate == self.api.READINESS_CONTINUE:
@@ -391,6 +397,11 @@ class StageDispatch:
                     component="runtime", status="worktree_synchronized",
                     reason="clean worktree fast-forwarded to the open pull request head",
                     correlation={"old_head_sha": old_head, "new_head_sha": new_head})
+        try:
+            self.select_plan_stage(role)
+        except ValueError as error:
+            return self.api.Reported(), self.stop(str(error), "BLOCKED")
+        instruction += self.plan_context()
         audited = None
         if self.publication_auditor is not None and role in self.api.PUBLISHING_ROLES:
             try:
@@ -523,6 +534,10 @@ class StageDispatch:
                             outcome.decision.profile if outcome.decision else "unknown"),))
                 test_payload, self.state.verification_plan = self.api._normalize_test_payload(
                     test_payload, self.state.verification_plan)
+            try:
+                self.record_plan_stage(role, reported, outcome, test_payload)
+            except ValueError as error:
+                return reported, self.stop(str(error), "BLOCKED", reported=reported)
             pull_request_id = (
                 reported.telemetry_pull_request_id(self.code_host)
                 if role == "implement" else None
@@ -547,6 +562,10 @@ class StageDispatch:
             return reported, self.stop(because,
                                   "BLOCKED" if (reported.payload or {}).get("publication_pending") is True
                                   else self.api.UNRESOLVED_END, reported=reported)
+        if (role in {"review", "rereview"} and self.execution_plan.stage("security").selected
+                and self.plan_managed and (reported.payload or {}).get("security_audit_ran") is not True):
+            return reported, self.stop("the required security audit was omitted or unverified",
+                                       reported=reported, stop_reason="verification_unverified")
         if recover and role in self.api.COMMENT_STAGES and change_request_id:
             stopped = self.after_publication(
                 role, change_request_id,

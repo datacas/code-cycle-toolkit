@@ -80,7 +80,7 @@ GIT_COMMON_READ = frozenset({"status", "diff", "log", "rev-parse", "show"})
 GIT_REVIEW_READ = frozenset({"merge-base", "ls-files", "grep", "blame"})
 #: Stages that search the repository with `GIT_REVIEW_READ`. The hook and the
 #: `--allowedTools` patterns both read this set, so the two barriers agree.
-GIT_SEARCH_ROLES = WRITING_ROLES | REVIEW_ROLES | {ISSUE_REVIEW_ROLE}
+GIT_SEARCH_ROLES = WRITING_ROLES | REVIEW_ROLES | {ISSUE_REVIEW_ROLE, "verify"}
 GIT_WRITE = frozenset({"add", "commit", "push", "fetch", "checkout", "switch", "pull",
                        "rm", "mv"})
 #: Options that make Git run another program, on any subcommand. Git also
@@ -239,7 +239,7 @@ class StagePolicy:
     @property
     def verification_commands(self) -> tuple[str, ...]:
         """The configured test and verify commands this role receives."""
-        if self.static_only or self.role not in WRITING_ROLES | REVIEW_ROLES:
+        if self.static_only or self.role not in WRITING_ROLES | REVIEW_ROLES | {"verify"}:
             return ()
         commands = (self.test_command,) if self.test_command else ()
         return commands + tuple(self.verify_prefixes)

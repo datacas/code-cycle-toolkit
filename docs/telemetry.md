@@ -1,5 +1,18 @@
 # Telemetry and `cc-stats`
 
+Schema 25 adds `verification_unverified` to the closed stop reasons and the
+append-only `cycle_execution_plans` history table. Each revision records cycle,
+repository, work item, change request, plan identity, revision, current HEAD,
+canonical digest and provenance (`initial`, `observed`, `recovered`, `partial`,
+`stopped`), plus a versioned metadata projection. Existing tables and history
+remain intact. The projection excludes prompts, criterion prose, command text
+and command output; it retains command/output/test/environment hashes, check
+identities, required flags, criterion links, results and cause tokens. Each
+check can retain results for several SHAs. Generic CI success does not update
+those results. Journal events correlate plan ID, revision and digest with the
+cycle. Published schema-2 receipts carry the same three references; see
+[Execution plan](execution-plan.md) for canonicalization and recovery rules.
+
 When the runtime drives a cycle, every stage writes rows to a local SQLite database. `cc-stats` turns those rows into a per-repository report. This page covers what is recorded, what never is, and how to read it.
 
 **On this page:** [Production delivery events](#production-delivery-events-335) · [When rows are written](#when-rows-are-written) · [Where it lives](#where-it-lives) · [What is recorded](#what-is-recorded) · [Work-item outcomes](#work-item-outcomes) · [What is never recorded](#what-is-never-recorded) · [What it is used for](#what-it-is-used-for) · [Reading it with cc-stats](#reading-it-with-cc-stats) · [Limits](#limits)

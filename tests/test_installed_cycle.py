@@ -161,18 +161,20 @@ class InstalledCycleTests(unittest.TestCase):
     def test_a_cycle_run_from_the_installation_records_every_stage(self) -> None:
         result = self.run_cycle()
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows()
         self.assertEqual(
             ["implement", "implement", "review", "review", "coordinate"],
             [row["role"] for row in rows],
         )
-        self.assertEqual("READY_FOR_MANUAL_MERGE", rows[-1]["status"])
+        self.assertEqual("HUMAN_INTERVENTION", rows[-1]["status"])
+        self.assertEqual("verification_unverified", json.loads(rows[-1]["payload"])["stop_reason"])
+        self.assertIn("security audit was omitted", result.stdout)
 
     def test_the_default_cycle_reviews_the_work_item_before_implementing(self) -> None:
         result = self.run_cycle()
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows(issue_review=True)
         self.assertEqual(
             ["issue_review", "issue_review", "implement", "implement",
@@ -196,10 +198,10 @@ class InstalledCycleTests(unittest.TestCase):
         self.assertEqual("needs_refinement", json.loads(rows[-1]["payload"])["stop_reason"])
         self.assertIn("IR-001", result.stdout)
 
-    def test_off_runs_the_original_cycle(self) -> None:
+    def test_off_skips_only_the_work_item_review(self) -> None:
         result = self.run_cycle("--issue-review", "off")
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows(issue_review=True)
         self.assertEqual(
             ["implement", "implement", "review", "review", "coordinate"],
@@ -229,7 +231,7 @@ class InstalledCycleTests(unittest.TestCase):
     def test_agent_reported_test_evidence_survives_an_installed_cycle(self) -> None:
         result = self.run_cycle(FAKE_TEST_EVIDENCE="1")
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows()
         implement_verdict = next(row for row in rows
                                  if row["role"] == "implement" and row["status"])
@@ -244,9 +246,9 @@ class InstalledCycleTests(unittest.TestCase):
 
     def test_a_second_round_is_recorded_as_a_second_round(self) -> None:
         """The review asks for changes once, so the cycle resolves and re-reviews."""
-        result = self.run_cycle(FAKE_ROUNDS=str(self.root / "rounds"))
+        result = self.run_cycle(FAKE_ROUNDS=str(self.root / "rounds"), FAKE_SECURITY_AUDIT="1")
 
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, result.returncode, result.stderr)
         rows = self.rows()
         self.assertEqual(
             ["implement", "implement", "review", "review",
@@ -351,7 +353,7 @@ class InstalledCycleTests(unittest.TestCase):
 
         verdicts = [row["status"] for row in self.rows() if row["status"]]
 
-        self.assertEqual(["IMPLEMENTED", "APPROVED", "READY_FOR_MANUAL_MERGE"],
+        self.assertEqual(["IMPLEMENTED", "APPROVED", "HUMAN_INTERVENTION"],
                          verdicts)
 
     def test_a_stopped_cycle_records_where_it_stopped_and_stops_its_agent(self) -> None:
@@ -427,7 +429,7 @@ class InstalledCycleTests(unittest.TestCase):
         (self.project / "partial.txt").write_text("half done\n", encoding="utf-8")
         continued = self.run_cycle("--continue", "--workspace", "current")
 
-        self.assertEqual(0, continued.returncode, continued.stderr)
+        self.assertEqual(1, continued.returncode, continued.stderr)
         closing = [json.loads(row["payload"]) for row in self.all_rows()
                    if row["role"] == "coordinate"]
         self.assertEqual([True], [payload.get("continued") for payload in closing])

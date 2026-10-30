@@ -114,7 +114,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan.cap("verified", OTHER), "not_verified")
         newer = plan.record(result("unverified", OTHER))
         self.assertEqual(len(newer.results), 2)
-        self.assertEqual(newer.current("check-1", HEAD), "unverified")
+        # The caller supplies the current HEAD. History for another SHA never
+        # erases proof retained for this SHA (including Hotfix test-first runs).
+        self.assertEqual(newer.current("check-1", HEAD), "pass")
         newer = newer.record(result("pass", OTHER))
         self.assertEqual(newer.cap("verified", OTHER), "verified")
         self.assertEqual(vp.VerificationPlan.from_dict(newer.to_dict()), newer)

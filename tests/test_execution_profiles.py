@@ -455,12 +455,15 @@ class DryRunTests(unittest.TestCase):
         code, _, err, _ = self.run_main(self.BASE + ["--dry-run", "--detach"])
         self.assertEqual(code, 2)
 
-    def test_a_run_refuses_a_non_standard_configuration_before_any_effect(self) -> None:
-        code, _, err, mocks = self.run_main(self.BASE + ["--execution-profile", "full"])
-        self.assertEqual(code, 2)
-        self.assertIn("execution profile full (--execution-profile)", err)
-        self.assertIn("#329", err)
-        self.assertFalse(any(spy.called for spy in mocks.values()))
+    def test_a_full_run_reaches_workspace_selection(self) -> None:
+        stack, mocks = self.spies()
+        mocks["select_workspace"].side_effect = run_cycle.CycleDriverError("reached full workspace")
+        stderr = io.StringIO()
+        with stack, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                run_cycle.main(self.BASE + ["--execution-profile", "full"])
+        self.assertIn("reached full workspace", stderr.getvalue())
+        self.assertFalse(mocks["run_cycle"].called)
 
     def test_a_standard_run_reaches_the_current_flow(self) -> None:
         stack, mocks = self.spies()

@@ -115,16 +115,42 @@ caps at `failed`; required unverified, unavailable criteria or an unlinked
 criterion cap at `not_verified`. Code-host CI never substitutes for these
 results in #290.
 
-The contract and in-cycle normalization are implemented here. Durable revision
-and result persistence, execution of the plan, the end-of-cycle
-`verification_unverified` gate, and verification-only resume belong to #329.
-No provisional store or telemetry stop-reason schema is introduced by #290.
+The native driver consumes the plan before dispatch. It resolves conditions
+from the observed diff and review outcome, records revisions after stage results
+and HEAD changes, and refuses a disabled stage when a mandatory obligation
+applies. Agent reports can add checks or request security; they cannot withdraw
+requirements. Security remains embedded in review and verification in code work.
+
+Schema 25 stores append-only revisions in `cycle_execution_plans` in the history
+database. The version-1 metadata projection removes prompts, criterion prose,
+reasoning, commands and output. Commands become SHA-256 bindings; criteria become
+stable `AC-n` identities. Check histories retain HEAD, results, closed cause
+tokens and evidence fingerprints. Canonical JSON uses sorted keys, compact
+separators and ASCII escaping; its SHA-256 is `digest`. Every stage receives
+`plan_id`, `revision` and `digest` for its schema-2 receipt. A receipt supplements
+the existing attempt, head and `REV-*` contracts; it grants no execution rights.
+
+On resume the runtime reconciles the current configuration, source criteria,
+remote receipt and local revisions. Required checks are retained across HEAD
+changes; results from another SHA cannot satisfy them. Changed criteria add new
+identities rather than reusing old coverage. Command hashes can be rebound only
+to currently authorized exact commands. Without recoverable local history the
+runtime replans with `partial` provenance and accepts no prior check as passed.
+This is partial recovery, not a fully verified continuation. Analysis such as
+#127 can read this metadata without reading prompts.
+
+The work-item journal may retain redacted command proposals, separately from
+the metadata-only history projection. A resume can use a proposal to recover a
+binding only after the current configured verification policy authorizes it
+and its hash matches the frozen check. Journal text never grants permission.
+If redaction or cleanup removed the command, the check remains unsatisfied until
+an authorized binding is supplied; it is never dropped.
 
 The contract reserves identity, profile, revision, provenance, effective
 configuration, policy, and stage activation/omission reasons for later analysis
 such as #127. `scripts/execution_profiles.py` builds the plan from the
 execution profile, objective, and stage policies described in
 [Configuration → Execution profiles](configuration.md#execution-profiles);
-`run_cycle.py --dry-run [--json]` prints it. The driver follows the plan from
-#329 on; routing, metrics, and plugin loading stay out of this contract. #330
+`run_cycle.py --dry-run [--json]` prints it. Routing, metrics, and plugin loading
+stay out of this contract. #330
 can consume the same contract in supervised Orca cycles.

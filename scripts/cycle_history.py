@@ -34,6 +34,7 @@ exclude another machine.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -42,7 +43,10 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .execution_plan import ExecutionPlan
 
 from review_contract import (
     CLAIM_STATUSES,
@@ -214,6 +218,82 @@ def _process_alive(pid: int) -> bool | None:
     return True
 
 
+def command_digest(command: str) -> str:
+    if re.fullmatch(r"sha256:[a-f0-9]{64}", command):
+        return command
+    return "sha256:" + hashlib.sha256(command.encode()).hexdigest()
+
+
+def plan_digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=True).encode()).hexdigest()
+
+
+def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
+    """Versioned metadata, without criterion prose, commands, output or prompts."""
+    def clean(value, key=""):
+        if key in {"reason", "condition", "source", "policy_source", "provenance",
+                   "plan_provenance"}:
+            return "runtime"
+        if key == "command":
+            return command_digest(value)
+        if key in {"id", "executor", "profile", "context"} and isinstance(value, str):
+            return (value if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value)
+                    else "ref-" + hashlib.sha256(value.encode()).hexdigest())
+        if key == "items":
+            return [f"AC-{i}" for i in range(1, len(value) + 1)]
+        if key == "cause":
+            if value in {"defect", "blocked", "omitted", "missing_tool", "inconclusive",
+                         "environment", "stale", "unverified", ""}:
+                return value
+            lowered = value.lower()
+            for token, phrases in {"omitted": ("no execution result", "omitted"),
+                                   "missing_tool": ("not found", "missing tool"),
+                                   "blocked": ("denied", "blocked", "permission"),
+                                   "inconclusive": ("inconclusive",),
+                                   "environment": ("sandbox", "environment",)}.items():
+                if any(phrase in lowered for phrase in phrases):
+                    return token
+            return "unverified"
+        if key == "metadata":
+            conclusion = value.get("verification_conclusion")
+            return ({"verification_conclusion": conclusion} if conclusion in {
+                "verified", "verified_with_reservations", "not_verified", "failed"} else {})
+        if key in {"attempts", "review"}:
+            return [] if key == "attempts" else {}
+        if key == "evidence":
+            return [{k: clean(v, k) for k, v in item.items()
+                     if k in {"command", "level", "exit_code", "executed", "test_sha256",
+                              "output_sha256", "context_sha256"}} for item in value]
+        if isinstance(value, dict):
+            return {k: clean(v, k) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(v) for v in value]
+        return value
+    return {"projection_version": 1, "plan": clean(plan.to_dict())}
+
+
+def restore_plan(record: dict[str, Any], commands: tuple[str, ...]) -> ExecutionPlan:
+    """Recover only checks whose command is still explicitly authorized."""
+    if not TYPE_CHECKING:
+        from execution_plan import ExecutionPlan
+    payload = record["payload"]
+    if payload.get("projection_version") != 1 or plan_digest(payload) != record["digest"]:
+        raise HistoryError("unsupported or corrupt execution plan")
+    bindings = {command_digest(command): command for command in commands}
+    def bind(value, key=""):
+        if key == "command":
+            if value not in bindings:
+                raise HistoryError("stored check has no currently authorized command binding")
+            return bindings[value]
+        if isinstance(value, dict):
+            return {k: bind(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [bind(v) for v in value]
+        return value
+    return ExecutionPlan.from_dict(bind(payload["plan"]))
+
+
 class CycleHistoryStore:
     """The cycle-history tables of a telemetry database.
 
@@ -228,6 +308,52 @@ class CycleHistoryStore:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def save_plan(self, plan: ExecutionPlan, *, cycle_id: str, change_request_id: str | None,
+                  provenance: str, stop_reason: str | None = None) -> dict[str, Any]:
+        """Append a privacy-safe revision. Commands and prose stay out of SQLite.
+
+        Digests use canonical JSON projection version 1, not a prompt or a
+        platform-dependent rendering. Rebinding command hashes on recovery
+        requires a currently authorized command; history grants no execution.
+        """
+        if provenance not in {"initial", "observed", "recovered", "partial", "stopped"}:
+            raise HistoryError("unknown plan provenance")
+        payload = plan_projection(plan)
+        digest = plan_digest(payload)
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT INTO cycle_execution_plans "
+                "(repo_id,task_id,change_request_id,cycle_id,plan_id,revision,digest,"
+                "head_sha,provenance,stop_reason,payload) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (plan.repository, plan.work_item, change_request_id, cycle_id,
+                 plan.plan_id, plan.revision, digest, plan.head_sha, provenance,
+                 stop_reason, json.dumps(payload, sort_keys=True, separators=(",", ":"))))
+            connection.commit()
+        return {"plan_id": plan.plan_id, "revision": plan.revision, "digest": digest}
+
+    def latest_plan(self, repo_id: str, task_id: str, change_request_id: str | None) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM cycle_execution_plans WHERE repo_id=? AND task_id=? "
+                "AND change_request_id IS ? ORDER BY sequence DESC LIMIT 1",
+                (repo_id, task_id, change_request_id)).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value["payload"])
+        if plan_digest(value["payload"]) != value["digest"]:
+            raise HistoryError("execution plan digest mismatch")
+        return value
+
+    def has_plan_receipt(self, repo_id: str, receipt: dict[str, Any]) -> bool:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM cycle_execution_plans WHERE repo_id=? AND plan_id=? "
+                "AND revision=? AND digest=? AND head_sha=?",
+                (repo_id, receipt.get("plan_id"), receipt.get("revision"),
+                 receipt.get("digest"), receipt.get("head_sha"))).fetchone()
+        return row is not None
 
     # -- writer lock -------------------------------------------------------
 
