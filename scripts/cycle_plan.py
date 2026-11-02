@@ -9,20 +9,22 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .cycle_journal import events as journal_events
-    from .cycle_history import HistoryError, restore_plan
+    from .cycle_history import HistoryError, command_digest, restore_plan
     from .execution_plan import ContractError, ExecutionPlan, ExecutionState, Obligation, Resolution, StagePolicy
     from .execution_profiles import ExecutionSettings, PlanSignals, build_plan, invocation_settings, resolve_execution
     from .security_gate import GateRule, evaluate
     from .stage_permissions import StagePolicy as CommandPolicy, _is_verification_command
-    from .verification_plan import CheckResult, VerificationError, VerificationPlan, configured_check
+    from .verification_plan import (CheckResult, VerificationError, VerificationPlan,
+                                    configured_check, is_manual_command)
 else:
     from cycle_journal import events as journal_events
-    from cycle_history import HistoryError, restore_plan
+    from cycle_history import HistoryError, command_digest, restore_plan
     from execution_plan import ContractError, ExecutionPlan, ExecutionState, Obligation, Resolution, StagePolicy
     from execution_profiles import ExecutionSettings, PlanSignals, build_plan, invocation_settings, resolve_execution
     from security_gate import GateRule, evaluate
     from stage_permissions import StagePolicy as CommandPolicy, _is_verification_command
-    from verification_plan import CheckResult, VerificationError, VerificationPlan, configured_check
+    from verification_plan import (CheckResult, VerificationError, VerificationPlan,
+                                   configured_check, is_manual_command)
 
 
 HOTFIX_IDS = ("hotfix-reproduction", "hotfix-regression")
@@ -220,7 +222,13 @@ class PlanRuntime:
                 self.state.verification_plan = replace(self.state.verification_plan, criteria=criteria)
         if self.start_from != "implement" and self.state.verification_plan is not None and self.allowed_test_command:
             existing = self.state.verification_plan.checks
-            if not any(check.command == self.allowed_test_command and check.required for check in existing):
+            # An unrestored plan keeps commands as fingerprints. Only the
+            # runtime's own configured-test identities may stand in by digest,
+            # so a proposed check cannot suppress the configured obligation.
+            fingerprint = command_digest(self.allowed_test_command)
+            if not any(check.required and (check.command == self.allowed_test_command
+                    or (check.command == fingerprint and check.id.startswith("configured-test")))
+                    for check in existing):
                 spec = configured_check(self.allowed_test_command, "runtime", "runtime")
                 if any(check.id == spec.id for check in existing):
                     spec = replace(spec, id="configured-test-" + hashlib.sha256(
@@ -241,8 +249,10 @@ class PlanRuntime:
         for row in journal_events(self.telemetry.path, self.repo_id, task_id=self.task_id,
                                   kinds=("stage_result",)):
             command = row.get("command")
-            if (row.get("component") == "verification_command"
-                    and isinstance(command, str) and _is_verification_command(command, policy)):
+            if (row.get("component") == "verification_command" and isinstance(command, str)
+                    and (_is_verification_command(command, policy) or is_manual_command(command))):
+                # A bound manual command only restores an identity; it stays
+                # inert because `_is_verification_command` still rejects it.
                 commands.append(command)
         return tuple(dict.fromkeys(commands))
 
@@ -418,6 +428,9 @@ class PlanRuntime:
         plan = self.state.verification_plan
         pending = [check for check in plan.checks if check.required
                    and plan.current(check.id, self.plan_head) == "unverified"] if plan else []
+        # A manual check has no command to run: it stays unverified and the
+        # barrier reports it. It never becomes a verify prefix.
+        pending = [check for check in pending if not is_manual_command(check.command)]
         if not pending:
             return self.verification_barrier()
         source = self.cwd
