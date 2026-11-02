@@ -17,6 +17,14 @@ from typing import Any
 TESTS_VERSION = 2
 CONCLUSIONS = ("failed", "not_verified", "verified_with_reservations", "verified")
 LEVELS = {"static", "test", "boundary"}
+# A manual check names evidence a person or a host supplies. It is an identity,
+# not a command: nothing may execute it, and restoring it never verifies it.
+MANUAL_COMMAND = re.compile(r"manual:[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def is_manual_command(command: Any) -> bool:
+    """Whether a check command is the fixed `manual:<name>` grammar."""
+    return isinstance(command, str) and MANUAL_COMMAND.fullmatch(command) is not None
 
 
 class VerificationError(ValueError):
