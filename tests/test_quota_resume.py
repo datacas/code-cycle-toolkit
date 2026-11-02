@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -133,6 +134,8 @@ class GitHandoffTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # Cleanups run last-in first-out, so this check precedes the removal.
+        self.addCleanup(self.assert_no_open_handles)
         self.root = Path(self.temp.name)
         self.cwd = self.root / "checkout"
         self.cwd.mkdir()
@@ -148,6 +151,34 @@ class GitHandoffTests(unittest.TestCase):
         self.snapshots = patch("cycle.effect_snapshot", side_effect=self.snapshot)
         self.snapshots.start()
         self.addCleanup(self.snapshots.stop)
+
+    def assert_no_open_handles(self):
+        """Windows cannot delete a file that still has an open handle, so a
+        leaked SQLite connection fails the temporary-directory cleanup there.
+        Where the process exposes its descriptors, fail a handle that is still
+        open here too. Since Python 3.11 an unclosed connection can outlive its
+        last name until the cyclic collector runs, so close every connection."""
+        descriptors = Path("/proc/self/fd")
+        if not descriptors.is_dir():
+            return
+        root = str(self.root.resolve()) + os.sep
+        held = []
+        for descriptor in descriptors.iterdir():
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith(root):
+                held.append(target)
+        self.assertEqual([], held, "handles left open in the fixture directory")
+
+    def database(self):
+        """Open the fixture database; the caller's ``with`` closes it."""
+        return closing(sqlite3.connect(self.store.path))
+
+    def execute(self, statement):
+        with self.database() as connection, connection:
+            connection.execute(statement)
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.cwd, capture_output=True,
@@ -191,7 +222,7 @@ class GitHandoffTests(unittest.TestCase):
         return outcome
 
     def rows(self, table):
-        with sqlite3.connect(self.store.path) as connection:
+        with self.database() as connection:
             connection.row_factory = sqlite3.Row
             return [dict(row) for row in connection.execute(f"SELECT * FROM {table}")]
 
@@ -228,8 +259,7 @@ class GitHandoffTests(unittest.TestCase):
                 if self.git("status", "--porcelain"):
                     self.git("reset", "--hard", self.head)
                     self.git("clean", "-fd")
-                with sqlite3.connect(self.store.path) as connection:
-                    connection.execute("DELETE FROM quota_exhaustions")
+                self.execute("DELETE FROM quota_exhaustions")
                 self.exhaust()
                 path = self.cwd / ("three.py" if kind == "untracked" else "two.py")
                 path.write_bytes(b"operator changed it\n")
@@ -251,8 +281,7 @@ class GitHandoffTests(unittest.TestCase):
 
     def test_expired_window_returns_to_original_executor_keeps_provenance(self):
         self.exhaust()
-        with sqlite3.connect(self.store.path) as connection:
-            connection.execute("UPDATE quota_exhaustions SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.execute("UPDATE quota_exhaustions SET expires_at='2000-01-01T00:00:00+00:00'")
         self.assertEqual([], self.store.active_quota_exhaustions("owner/repo"))
         self.assertEqual(1, len(self.rows("quota_handoffs")))
         before = ex._workspace_fingerprint(str(self.cwd))
@@ -265,8 +294,7 @@ class GitHandoffTests(unittest.TestCase):
 
     def test_repeated_exhaustion_after_expiry_records_new_checkpoint(self):
         self.exhaust()
-        with sqlite3.connect(self.store.path) as connection:
-            connection.execute("UPDATE quota_exhaustions SET expires_at='2000-01-01T00:00:00+00:00'")
+        self.execute("UPDATE quota_exhaustions SET expires_at='2000-01-01T00:00:00+00:00'")
         self.exhaust()
         self.assertEqual(2, len(self.rows("quota_history")))
         self.assertEqual(2, len(self.rows("quota_handoffs")))
@@ -335,8 +363,7 @@ class GitHandoffTests(unittest.TestCase):
         self.edit_three_files()
         self.store.record_quota_exhaustion("owner/repo", "codex", "gpt-6-luna")
         # Model a pre-#389 record, which has no new exhaustion history.
-        with sqlite3.connect(self.store.path) as connection:
-            connection.execute("DELETE FROM quota_history")
+        self.execute("DELETE FROM quota_history")
         workspace = ex._workspace_fingerprint(str(self.cwd))
         assert workspace is not None
         fingerprint = workspace["fingerprint"]
