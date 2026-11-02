@@ -308,6 +308,21 @@ stops again without a retry loop. A moved HEAD, changed criteria, unbound comman
 hash or unrecoverable plan takes ordinary reconciliation instead. This does not
 add a CLI start point or change `START_ORDER`/`CYCLE_STARTS`.
 
+A manual check, whose command is `manual:<name>` (letters, digits, `.`, `_` and
+`-`, at most 64 characters after the prefix), survives resume. Restoring binds
+that identity from its journal proposal and nothing more: the command stays
+non-executable, is never a verify prefix, and the check stays `unverified` until
+evidence for the current HEAD says otherwise, so it still caps the conclusion.
+Any other command needs today's policy to authorize it, or the plan is not
+restored.
+
+Resume is idempotent. The configured test command is recognized in a stored plan
+by its plain command or by its command digest, so an unrestored plan, whose
+commands are `sha256:` fingerprints, does not gain a second
+`configured-test-<digest>` check. Consecutive resumes of the same change request
+keep the same check identities, results and obligations, and a frozen identity is
+never rewritten.
+
 Hotfix requires `hotfix-reproduction` and `hotfix-regression`, both `required`,
 with distinct focused commands proposed by the implementer. The configured
 general suite satisfies neither identity. A missing proposal stops with
