@@ -499,13 +499,24 @@ comparison of the two policies on a controlled fake CI.
 ### Quota exhaustion windows (schema 23)
 
 The `quota_exhaustions` table persists a quota reset window per repository,
-executor, and requested model so a later production `--continue` can skip that
-exact target and use the configured fallback. A reported time of day expires at
-its next occurrence in the local timezone; an absent or unparseable reset uses a
-30-minute window. Reading active rows deletes expired entries. A successful
-production dispatch clears only its matching row. Calibration does not read,
-write, or clear these records. The table is additive; reverting the code leaves
-its rows unused.
+executor, and requested model so every production route, including `--from`,
+can skip that exact target. Schema 26 preserves expired rows: reading availability
+never deletes ownership or audit evidence. An empty projection `expires_at`
+means `reset_time_ambiguous`, with no invented reset timestamp. History uses SQL
+NULL for that unknown time. Only missing reset information uses a 30-minute
+window. Success ends matching eligibility without deleting history. Calibration
+does not read, write or clear these records.
+
+Schema 26 adds `quota_history` with an immutable exhaustion ID, executor/model,
+exhaustion time, nullable reset, closed reason and optional explicit `retry_at`.
+Each repeated exhaustion appends a new record. It also adds `quota_handoffs`,
+whose repository/work-item/stage/PR/HEAD scope, original and destination executors,
+original model, SHA-256 diff fingerprint, provenance, operator and creation time
+outlive quota availability. `claimed_at` makes operator attestations single-use;
+`used_at` marks successful resumes without removing audit rows. File contents,
+diff text and provider prose never enter these tables. The journal holds the
+redacted original message and operator actions. See [operator quota recovery](routing.md#operator-quota-recovery).
+The additive tables leave existing rows readable; rollback leaves them unused.
 
 ### Work-item outcomes (schema 14)
 

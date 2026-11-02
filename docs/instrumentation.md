@@ -766,11 +766,13 @@ resolution only when it names a merged PR in the resolving snapshot.
 
 Schema 23 adds `quota_exhaustions`, keyed by repository, executor, and requested
 model, with exhaustion and expiry timestamps, a closed reason token, and whether
-the executor reported a reset time. Production `--continue` reads active rows;
-expired rows are deleted when read, and a successful production dispatch clears
-its matching row. The additive table does not rewrite existing telemetry, and a
-code rollback leaves unused rows. The `quota_resume_reason` cycle payload field
-records when a continuation routes around a persisted exhaustion.
+the executor reported a reset time. All production routes read active rows.
+Schema 26 keeps expired records and adds independent `quota_history` and
+`quota_handoffs` audit tables; success ends availability blocking without deleting
+provenance. Unknown dated resets use `reset_time_ambiguous` and no recovery time.
+The `quota_resume_reason` cycle payload field records a route around persisted
+exhaustion. The journal records redacted messages and scoped handoff fingerprints,
+executors and operator actions. See [quota telemetry](telemetry.md#quota-exhaustion-windows-schema-23).
 
 Schema 24 adds the stop reasons `publication_violation` and
 `publication_unverified` of the [publication audit](role-workspace-policy.md#publication-audit).

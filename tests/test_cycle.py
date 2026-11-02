@@ -861,7 +861,7 @@ class FailedDispatchRerouteTests(CycleTestCase):
                     self.assertEqual("not_started", row["payload"]["reroute_start_state"])
                 self.assertEqual(ex.Availability.READY, recorder.availability["codex"])
                 recorder.stage("implement", "later stage")
-                self.assertEqual(2, len(primary.dispatched))
+                self.assertEqual(1 if code == "quota" else 2, len(primary.dispatched))
 
     def test_dirty_quota_stop_is_reused_by_a_later_continue(self):
         clean = {"dirty": False, "workspace": {"head": "old"}, "remote": "old",
@@ -907,6 +907,7 @@ class FailedDispatchRerouteTests(CycleTestCase):
         )
         for detail, expected, guidance in cases:
             with self.subTest(detail=detail):
+                self.store.clear_quota_exhaustion("owner/repo", "codex", "gpt-6-luna")
                 with patch("cycle.effect_snapshot", side_effect=[clean, dirty]):
                     _, _, _, outcome = self.run_failure(
                         code="quota", start="started", detail=detail,
@@ -927,6 +928,9 @@ class FailedDispatchRerouteTests(CycleTestCase):
         self.assertTrue(calibration_outcome.succeeded, calibration_outcome.result.detail)
         self.assertEqual(1, len(self.store.active_quota_exhaustions("owner/repo")))
 
+        # A production route now always honors active records, even without
+        # --continue. Explicit eligibility is needed before a successful retry.
+        self.store.clear_quota_exhaustion("owner/repo", "codex", "gpt-6-luna")
         production = self.recorder([ScriptedAdapter("codex")])
         self.assertTrue(production.stage("implement", "production").succeeded)
         self.assertEqual([], self.store.active_quota_exhaustions("owner/repo"))

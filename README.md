@@ -64,6 +64,7 @@ Pick the row that matches what you want to do.
 | run a recorded cycle from the command line | [`run_cycle.py`](docs/workflows.md#runtime-driver-run_cyclepy) | via its stages |
 | close a cycle whose rereview ran outside the runtime | [`manual_rereview.py`](docs/review-cycle.md#manual-rereview) | publishes one PR comment |
 | list or revoke stored sandbox permissions | [`consent_control.py`](docs/routing.md#sensitive-sandbox-grants) | — |
+| inspect quota records or attest a legacy handoff | [`quota_state.py`](docs/routing.md#operator-quota-recovery) | — |
 | review a diff or branch without a pull request | [`cc-code-review`](docs/skills.md#cc-code-review) | — |
 | audit a change for security | [`cc-security-review`](docs/skills.md#cc-security-review) | — |
 | prove a change actually works | [`cc-verify`](docs/skills.md#cc-verify) | — |
