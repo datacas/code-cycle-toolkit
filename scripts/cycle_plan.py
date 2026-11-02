@@ -222,10 +222,13 @@ class PlanRuntime:
                 self.state.verification_plan = replace(self.state.verification_plan, criteria=criteria)
         if self.start_from != "implement" and self.state.verification_plan is not None and self.allowed_test_command:
             existing = self.state.verification_plan.checks
-            # An unrestored plan keeps commands as fingerprints; the configured
-            # command is already present when its digest matches.
-            configured = {self.allowed_test_command, command_digest(self.allowed_test_command)}
-            if not any(check.command in configured and check.required for check in existing):
+            # An unrestored plan keeps commands as fingerprints. Only the
+            # runtime's own configured-test identities may stand in by digest,
+            # so a proposed check cannot suppress the configured obligation.
+            fingerprint = command_digest(self.allowed_test_command)
+            if not any(check.required and (check.command == self.allowed_test_command
+                    or (check.command == fingerprint and check.id.startswith("configured-test")))
+                    for check in existing):
                 spec = configured_check(self.allowed_test_command, "runtime", "runtime")
                 if any(check.id == spec.id for check in existing):
                     spec = replace(spec, id="configured-test-" + hashlib.sha256(

@@ -482,6 +482,25 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         with self.assertRaises(ch.HistoryError):
             ch.restore_plan(record, (test, "manual:orca-live"))
 
+    def test_a_proposed_check_cannot_stand_in_for_the_configured_test_by_digest(self):
+        import cycle_history as ch
+        import verification_plan as vp
+        test = "python3 -m unittest discover -s tests"
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works", "documented"))
+        # Unbound manual proposal: the plan is not restored and keeps fingerprints.
+        verification = vp.VerificationPlan(criteria, (
+            vp.Check("proposed", test, "codex", "cheap_coder", "project", True, criteria=("AC-1",)),
+            vp.Check("manual-orca-live", "manual:orca-live", "codex", "cheap_coder",
+                     "boundary", True, criteria=("AC-2",), level="boundary")))
+        plan = replace(self.plan(start="rereview"), plan_id="plan-alias", head_sha="a" * 40,
+                       verification=verification)
+        ch.CycleHistoryStore(self.store.path).save_plan(
+            plan, cycle_id="cycle-alias", change_request_id="4", provenance="stopped",
+            stop_reason="stage_not_completed")
+        _report, checks, _results = self.resume_once(criteria, test)
+        self.assertIn("configured-test", checks)
+        self.assertIn("proposed", checks)
+
     def test_manual_command_grammar_is_fixed(self):
         import verification_plan as vp
         self.assertTrue(vp.is_manual_command("manual:orca-live"))
