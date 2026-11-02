@@ -70,7 +70,13 @@ class ResetTests(unittest.TestCase):
     def test_ambiguity_never_becomes_an_earlier_clock_only_reset(self):
         for message in ("resets Nov 40th, 2026 3:20 PM", "resets Nov 4 3:20 PM",
                         "resets on a later date", "resets Nov 4th, 2026 3:20 PM CST",
-                        "resets 2026-14-04 15:20 UTC", "resets Nov 4 2026 3:20 PM UTC+unknown"):
+                        "resets 2026-14-04 15:20 UTC", "resets Nov 4 2026 3:20 PM UTC+unknown",
+                        "reset at 3:30pm (CST)", "reset at 3:30pm (America/Unknown)",
+                        "reset at 3:30pm (UTC", "reset at 3:30pm UTC+01:00 extra",
+                        "resets Tuesday 3:20 PM", "resets Tue 3:20 PM",
+                        "resets tomorrow 3:20 PM", "Try again in 4 hours 23 minutes",
+                        "Try again in 2 days", "Try again after 45 minutes",
+                        "Try again in 4h23m", "Try again in four hours"):
             with self.subTest(message=message):
                 self.assertEqual((None, True), Telemetry.quota_expiry(message))
 
@@ -88,9 +94,39 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(("2026-11-02T12:30:00+00:00", False),
                          Telemetry.quota_expiry("quota exceeded", now))
 
-    def test_unknown_local_zone_does_not_guess_a_dated_reset(self):
+    def test_platform_local_clock_without_iana_zone(self):
+        now = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)
+        for message, hour, minute in [("quota exhausted; reset at 9:46 PM", 21, 46),
+                                      ("resets 2:50pm", 14, 50)]:
+            wall = now.astimezone().replace(tzinfo=None, hour=hour, minute=minute)
+            expected = max(wall.replace(fold=f).astimezone(timezone.utc) for f in (0, 1))
+            if expected <= now:
+                wall += timedelta(days=1)
+                expected = max(wall.replace(fold=f).astimezone(timezone.utc) for f in (0, 1))
+            with self.subTest(message=message), patch.dict(os.environ, {"TZ": ""}), patch(
+                    "quota_state.Path.open", side_effect=FileNotFoundError):
+                self.assertEqual((expected.isoformat(), True), Telemetry.quota_expiry(message, now))
+
+    def test_platform_local_dated_reset_uses_rules_for_that_date(self):
+        wall = datetime(2026, 11, 4, 15, 20)
+        expected = max(wall.replace(fold=f).astimezone(timezone.utc) for f in (0, 1))
         with patch("quota_state.local_zone", return_value=None):
-            self.assertEqual((None, True), Telemetry.quota_expiry("resets Nov 4th, 2026 3:20 PM"))
+            self.assertEqual((expected.isoformat(), True), Telemetry.quota_expiry(
+                "resets Nov 4th, 2026 3:20 PM", datetime(2026, 7, 2, tzinfo=timezone.utc)))
+
+    def test_parenthesized_explicit_zones(self):
+        now = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)
+        for suffix, expected in [("(UTC)", "2026-11-02T15:30:00+00:00"),
+                                 ("(UTC-08:00)", "2026-11-02T23:30:00+00:00")]:
+            with self.subTest(suffix=suffix), patch("quota_state.local_zone", return_value=timezone(timedelta(hours=1))):
+                self.assertEqual((expected, True), Telemetry.quota_expiry("reset at 3:30pm " + suffix, now))
+        try:
+            ZoneInfo("America/Los_Angeles")
+        except ZoneInfoNotFoundError:
+            self.skipTest("IANA timezone database is unavailable")
+        with patch("quota_state.local_zone", return_value=timezone(timedelta(hours=1))):
+            self.assertEqual(("2026-11-02T23:30:00+00:00", True), Telemetry.quota_expiry(
+                "reset at 3:30pm (America/Los_Angeles)", now))
 
 
 class GitHandoffTests(unittest.TestCase):

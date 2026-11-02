@@ -45,8 +45,8 @@ def local_zone():
         with Path("/etc/localtime").open("rb") as handle:
             return ZoneInfo.from_file(handle)
     except (OSError, ValueError, KeyError):
-        # A fixed offset sampled today cannot safely interpret a future DST
-        # date. Refuse uncertainty rather than inventing an earlier reset.
+        # Windows normally has neither TZ nor /etc/localtime. Keep local wall
+        # times naive there so astimezone() applies OS rules for their date.
         return None
 
 
@@ -60,7 +60,8 @@ def quota_reset(detail: str | None, now: datetime | None = None):
     text = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", detail or "", flags=re.I)
     clock = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?(?!\d)", text, re.I)
     if clock is None:
-        if re.search(r"\b(reset|resets|resetting|until)\b", text, re.I):
+        if re.search(r"\b(reset|resets|resetting|until)\b|\b(?:in|after)\s+\d|"
+                     r"\b(?:try|retry)\s+again\s+(?:in|after)\b", text, re.I):
             return None, True, "reset_time_ambiguous"
         return (current + timedelta(minutes=30)).isoformat(), False, "quota"
     try:
@@ -71,11 +72,13 @@ def quota_reset(detail: str | None, now: datetime | None = None):
                 raise ValueError("invalid 12-hour clock")
             hour = hour % 12 + (12 if clock[4].upper() == "PM" else 0)
         zone = local_zone()
-        suffix = text[clock.end():].strip(" .),")
-        zone_match = re.match(r"(?:UTC|GMT)([+-]\d{1,2}(?::?\d{2})?)?|([+-]\d{2}:?\d{2})|\b(Z)\b", suffix, re.I)
+        suffix = text[clock.end():].strip(" .,")
+        if suffix.startswith("(") and suffix.endswith(")"):
+            suffix = suffix[1:-1].strip()
+            if not suffix:
+                raise ValueError("empty timezone")
+        zone_match = re.fullmatch(r"(?:UTC|GMT)([+-]\d{1,2}(?::?\d{2})?)?|([+-]\d{2}:?\d{2})|(Z)", suffix, re.I)
         if zone_match:
-            if suffix[zone_match.end():].startswith(("+", "-", ":")):
-                raise ValueError("unresolved timezone offset")
             offset = zone_match[1] or zone_match[2]
             minutes = 0
             if offset:
@@ -86,15 +89,14 @@ def quota_reset(detail: str | None, now: datetime | None = None):
                     raise ValueError("invalid zone")
                 minutes = (hours * 60 + mins) * (-1 if offset[0] == "-" else 1)
             zone = timezone(timedelta(minutes=minutes))
-        elif re.match(r"[A-Za-z_/]+", suffix):
+        elif suffix:
             # Only an actual IANA zone is unambiguous; CST, IST, etc. aren't.
-            name = suffix.split()[0]
-            if "/" not in name:
+            if not re.fullmatch(r"[A-Za-z0-9_+.-]+(?:/[A-Za-z0-9_+.-]+)+", suffix):
                 raise ValueError("ambiguous timezone")
-            zone = ZoneInfo(name)
-        if zone is None:
-            raise ValueError("local zone unavailable")
-        local = current.astimezone(zone)
+            zone = ZoneInfo(suffix)
+        # With no IANA zone, preserve naive wall time until final conversion;
+        # today's fixed UTC offset is not valid for every future date.
+        local = current.astimezone(zone).replace(tzinfo=zone)
         prefix = text[:clock.start()].strip()
         date_match = re.search(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})\b", prefix)
         iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})[T ]?$", prefix)
@@ -109,16 +111,19 @@ def quota_reset(detail: str | None, now: datetime | None = None):
             candidate = datetime.fromisoformat(iso_match[1]).replace(
                 hour=hour, minute=minute, second=second, tzinfo=zone)
         else:
-            if re.search(r"\d|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\b", prefix, re.I):
+            if re.search(r"\d|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|"
+                         r"Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*\b|\b(?:today|tomorrow|next)\b", prefix, re.I):
                 raise ValueError("unresolved date")
             candidate = local.replace(hour=hour, minute=minute, second=second, microsecond=0)
-            if candidate <= local:
-                candidate += timedelta(days=1)
         # During a repeated local hour choose the later defensible instant.
-        candidate = max(candidate.replace(fold=fold).astimezone(timezone.utc)
+        reset = max(candidate.replace(fold=fold).astimezone(timezone.utc)
+                    for fold in (0, 1))
+        if not date_match and not iso_match and reset <= current:
+            candidate += timedelta(days=1)
+            reset = max(candidate.replace(fold=fold).astimezone(timezone.utc)
                         for fold in (0, 1))
-        return candidate.isoformat(), True, "quota"
-    except (ValueError, OverflowError, KeyError):
+        return reset.isoformat(), True, "quota"
+    except (ValueError, OverflowError, KeyError, OSError):
         return None, True, "reset_time_ambiguous"
 
 
