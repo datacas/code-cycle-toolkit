@@ -53,6 +53,7 @@
       "test_host_permissions",
       "test_manual_rereview",
       "test_native_prerequisites",
+      "test_orca_plan",
       "test_permission_view",
       "test_permission_lifecycle",
       "test_publication",
@@ -101,6 +102,7 @@
       "test_execution_plan",
       "test_execution_profiles",
       "test_verification_plan",
+      "test_orca_plan",
       "test_stats",
       "test_support",
       "test_validate_package"

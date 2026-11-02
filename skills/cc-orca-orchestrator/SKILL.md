@@ -165,6 +165,63 @@ identifier stays as written. A stop that needs no decision carries no
 
 ## Responsibilities
 
+### Shared execution plan
+
+Use the installed `run_cycle.py --dry-run --json` resolver with the repository
+configuration and explicit `execution_profile`, `objective` and stage overrides.
+Do not implement an Orca activation matrix. All five profiles (Prototype,
+Standard, Full, Hotfix, Custom) consume the same `ExecutionPlan`. See
+`docs/orca-execution-plan.md` for examples and terminal obligations.
+
+Initialize that plan with the installed `orca_plan.py initialize` helper and
+the coordinator's telemetry database, cycle ID, repository, work item and
+current HEAD. Its `reconcile`, `security`, `rereview` and `spec` actions use the
+shared planner operations, validators and `CycleHistoryStore.save_plan`.
+Supply only currently authorized command bindings with `--command`; persisted
+fingerprints never authorize execution. An existing plan is reconciled, never
+replaced by initialization. Preserve plan ID, revision history, canonical
+digest, provenance, frozen checks and required controls.
+
+Before each Task, reconcile current HEAD and outstanding obligations and obtain
+the helper's `spec` for its stage. Put the complete response in the existing
+Task spec, including effective profile, plan receipt, stage, HEAD, verification
+and security requirements, workspace and publication permissions. Give the
+worker the matching `plan_id`, `revision`, `digest` and schema-2 receipt
+requirements. Construct `OrcaDispatchContext` from existing Run, Task and
+coordinator identities and that effective plan; do not invent identities or
+grant permissions from worker output. Keep the original review-workspace rules.
+Supply a verified `task_spec_reader` binding from the existing coordinator when
+using the adapter; it must read back the actual existing Task's complete bound
+spec. Without that capability the adapter blocks before launch. An expected
+spec in an artifact is not evidence that the Task received it.
+
+Before advancing, obtain the authoritative functional outcome from the existing
+coordinator and validate Run/Task identity, repository, stage, applicable HEAD,
+plan receipt, evidence validity and terminal status. A launch receipt,
+`worker_done`, a matching schema-2 receipt alone, or a partial result cannot
+complete a stage. Run the existing functional-result, finding, frozen-check,
+security and CI validators. A helper spec or recovery response is no approval.
+
+On resume reconcile persisted plan revisions, receipts, HEAD and outstanding
+checks before dispatch. Invalidate HEAD-bound verification/security completion
+without erasing old evidence or obligations. Unsupported authoritative-outcome,
+resume or cancellation interfaces in the installed Orca version stop `BLOCKED`;
+never invent a protocol or launch a duplicate worker to recover a result.
+Cancellation stays owned by the existing coordinator. The native driver's
+`--orca-action resume|cancel` fails closed until a live binding is verified.
+
+After review, call helper action `rereview` with observed relevant changes or
+invalidated review evidence (`--changes-after-review`) and open findings
+(`--open-findings`). Rereview is conditional in every profile, including Full.
+An unchanged clean review stands; unchanged open findings keep their blocks.
+Never start an identical review in search of another result. Changed evidence
+reactivates only the controls it invalidates. A planned stage is dispatched
+only after its shared decision selects it; required controls cannot be removed.
+
+Record the installed Orca version, verified capabilities and limitations with
+the evidence. The exact-HEAD host campaign `orca-live` is required and stays
+unverified until it passes; fixtures and launch success do not satisfy it.
+
 Do:
 
 - run `cc-provider-bootstrap` before creating the Orca Run;
@@ -794,9 +851,12 @@ Apply the table in *Issue review before implementation*: only a confirmed
 
 ### From `cc-resolve-comments`
 
-- `RESOLVED`: continue to a `cc-rereview` Task.
+- `RESOLVED`: reconcile the shared rereview decision against relevant changes
+  and invalidated evidence. Dispatch `cc-rereview` only when selected; retain
+  any unchanged open finding's blocks without repeating the review.
 - `PARTIALLY_RESOLVED`: continue to `cc-rereview` only when the next rereview
-  can verify what remains, that is when `blocking` is `false` and no entry in
+  can verify what remains, the shared plan selects rereview after a relevant
+  change or invalidated evidence, `blocking` is `false` and no entry in
   `unresolved_findings` states that external intervention, access, a decision,
   or an unavailable environment is required. Otherwise stop with
   `HUMAN_INTERVENTION` and list the unresolved findings.

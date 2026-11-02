@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .plan_service import invalidate_head, persist_plan, require_security
     from .cycle_journal import events as journal_events
     from .cycle_history import HistoryError, restore_plan
     from .execution_plan import ContractError, ExecutionPlan, ExecutionState, Obligation, Resolution, StagePolicy
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from .stage_permissions import StagePolicy as CommandPolicy, _is_verification_command
     from .verification_plan import CheckResult, VerificationError, VerificationPlan, configured_check
 else:
+    from plan_service import invalidate_head, persist_plan, require_security
     from cycle_journal import events as journal_events
     from cycle_history import HistoryError, restore_plan
     from execution_plan import ContractError, ExecutionPlan, ExecutionState, Obligation, Resolution, StagePolicy
@@ -111,13 +113,12 @@ class PlanRuntime:
                 if item.stage_id == "verify" and item.selected else item
                 for item in self.execution_plan.stages))
         self.execution_plan = replace(self.execution_plan,
-            revision=self.execution_plan.revision + 1,
             verification=self.state.verification_plan,
             head_sha=self.plan_head,
             metadata={"verification_conclusion": self.plan_conclusion})
         self.execution_plan.validate()
-        self.plan_receipt = self.plan_store.save_plan(
-            self.execution_plan, cycle_id=self.recorder.cycle_id,
+        self.execution_plan, self.plan_receipt = persist_plan(
+            self.execution_plan, self.plan_store, cycle_id=self.recorder.cycle_id,
             change_request_id=self.state.change_request_id,
             provenance=provenance, stop_reason=stop_reason)
         self.report.execution_plan = self.plan_receipt
@@ -293,10 +294,7 @@ class PlanRuntime:
         if observed is not None and observed != self.plan_head:
             self.plan_head = observed
             self.plan_conclusion = "not_verified"
-            self.execution_plan = replace(self.execution_plan, stages=tuple(
-                replace(item, state=ExecutionState.PLANNED, conclusion=None)
-                if item.stage_id in {"verify", "security"} and item.selected else item
-                for item in self.execution_plan.stages))
+            self.execution_plan = invalidate_head(self.execution_plan, observed)
         plan = self.execution_plan
         stage = plan.stage(role)
         if role == "resolve" and stage.resolution is Resolution.NOT_APPLICABLE:
@@ -332,18 +330,7 @@ class PlanRuntime:
         self.save_plan()
 
     def require_security(self: Any, plan, reason: str):
-        security = plan.stage("security")
-        if security.resolution is Resolution.PENDING:
-            return plan.resolve_decision("security", True, reason, "runtime")
-        if security.policy is StagePolicy.DISABLED:
-            # Existing obligation validation explains the policy conflict.
-            return plan.settle_obligation("security_policy", True, reason)
-        plan = replace(plan, stages=tuple(
-            replace(item, selected=True, obligation=Obligation.REQUIRED,
-                    state=ExecutionState.PLANNED if not item.selected else item.state,
-                    resolution=Resolution.RESOLVED)
-            if item.stage_id == "security" else item for item in plan.stages))
-        return plan.settle_obligation("security_policy", True, reason)
+        return require_security(plan, reason)
 
     def record_plan_stage(self: Any, role: str, reported, outcome, test_payload=None) -> None:
         payload = reported.payload or {}
@@ -355,10 +342,7 @@ class PlanRuntime:
                     raise ContractError("reported evidence does not match the workspace HEAD")
             if self.plan_head and head != self.plan_head:
                 self.plan_conclusion = "not_verified"
-                self.execution_plan = replace(self.execution_plan, stages=tuple(
-                    replace(item, state=ExecutionState.PLANNED, conclusion=None)
-                    if item.stage_id in {"verify", "security"} and item.selected else item
-                    for item in self.execution_plan.stages))
+                self.execution_plan = invalidate_head(self.execution_plan, head)
             self.plan_head = head
         conclusion = self.api._legacy_tests(test_payload).get("verification")
         if conclusion is not None:

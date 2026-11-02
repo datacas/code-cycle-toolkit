@@ -1,5 +1,9 @@
 # Stage registry and execution-plan contract
 
+Supervised Orca routes use the same plan operations and receipt format. See
+[Orca execution plans](orca-execution-plan.md) for helper commands, the five
+modes, asynchronous outcomes and the required live verification evidence.
+
 The runtime keeps stage descriptions in `scripts/execution_plan.py`. A stage
 names its role, responsibility, output contract, workspace policy, publication
 permissions, skill or function, and accepted completion statuses. Runtime-owned
