@@ -1,5 +1,9 @@
 {
   "groups": {
+    "orca-plan-documentation": {
+      "paths": ["docs/orca-execution-plan.md"],
+      "tests": ["test_orca_plan.OrcaPlanTests.test_modes_and_live_evidence_obligation_are_documented"]
+    },
     "repository-configuration": {
       "paths": [".code-cycle.yml"],
       "tests": [

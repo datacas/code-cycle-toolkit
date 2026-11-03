@@ -55,6 +55,9 @@ class StageDispatch:
         stage_start_clean = self.cwd is not None and self.api._clean_worktree(self.cwd)
         evidence = ""
         stage_kwargs = self.dispatch_kwargs
+        if self.orca_context is not None:
+            stage_kwargs = {**stage_kwargs, "context": self.api.replace(
+                self.orca_context, execution_plan=self.execution_plan, stage=role)}
         artifact = None
         tampered = None
         # No base to measure against means no file, so no directory either.
@@ -75,7 +78,7 @@ class StageDispatch:
                             if directory is not None else None)
                 evidence = artifact.prompt() if artifact is not None else self.api.NO_DIFF_FILE
                 if artifact is not None:
-                    stage_kwargs = {**self.dispatch_kwargs, "read_dirs": (str(directory),)}
+                    stage_kwargs = {**stage_kwargs, "read_dirs": (str(directory),)}
             if role in {"implement", "resolve"} and self.allowed_test_command:
                 stage_kwargs = {
                     **stage_kwargs,
@@ -261,9 +264,21 @@ class StageDispatch:
                             for reason in outcome.decision.reasons))
             )
             return self.stop(self.api._why(outcome), reported=reported,
-                        status="BLOCKED" if blocked_effort else self.api.UNRESOLVED_END,
+                        status="BLOCKED" if blocked_effort or (
+                            self.orca_context is not None and outcome.result is not None
+                            and outcome.result.executor == "orca"
+                            and outcome.result.outcome.value == "blocked") else self.api.UNRESOLVED_END,
                         stop_reason="dispatch_failed")
-        if self.api._started_elsewhere(outcome):
+        if self.api._started_elsewhere(outcome) and outcome.result is not None:
+            if self.orca_context is not None and outcome.result.executor == "orca":
+                self.journal.record("stage_result", component="orca_launch", status="result_pending",
+                    correlation={"run_id": self.orca_context.run_id,
+                        "task_id": self.orca_context.task_id,
+                        "head_sha": self.plan_head,
+                        "dispatch_id": outcome.result.artifacts.get("dispatchId"),
+                        **(self.plan_receipt or {})})
+                return self.stop(self.api._elsewhere(outcome), "IN_PROGRESS",
+                                 stop_reason="stage_not_completed")
             return self.stop(self.api._elsewhere(outcome), reported=reported)
         return None
 
