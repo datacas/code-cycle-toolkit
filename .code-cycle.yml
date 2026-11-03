@@ -15,6 +15,7 @@ code_cycle:
     verify:
       - python3 scripts/validate-package.py
       - python3 -m unittest
+      - basedpyright
   review:
     # The provider identities whose comments may advance recovered findings.
     # Provider logins are compared case-insensitively. An absent or empty list
