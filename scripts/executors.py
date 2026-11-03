@@ -3160,6 +3160,7 @@ class OrcaDispatchContext:
     execution_plan: Any = None
     stage: str | None = None
     task_spec_reader: Any = None
+    task_spec_installer: Any = None
 
     def task_spec(self) -> dict[str, Any]:
         if self.execution_plan is None or self.stage is None:
@@ -3247,10 +3248,6 @@ class OrcaAdapter(Adapter):
                     return self._blocked(target, "orchestration_context",
                         "no verified Orca Task-spec read interface; the coordinator must "
                         "confirm the effective plan is installed in the existing Task")
-                bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
-                if bound != task_spec:
-                    return self._blocked(target, "orchestration_context",
-                        "existing Orca Task spec does not match the effective delegation plan")
             except (ValueError, OSError, subprocess.SubprocessError, ExecutorError) as exc:
                 return self._blocked(target, "orchestration_context", str(exc))
         review_workspace = None
@@ -3282,6 +3279,21 @@ class OrcaAdapter(Adapter):
                 f"no Orca agent is known for provider {target.provider!r}; "
                 "name one in the dispatch context rather than guessing",
             )
+        if task_spec is not None:
+            try:
+                bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
+                if bound != task_spec and callable(context.task_spec_installer):
+                    # The native driver finalizes its revision just before
+                    # dispatch. Only the existing coordinator may install it;
+                    # a writer's acknowledgement never replaces readback.
+                    context.task_spec_installer(run_id=context.run_id, task_id=context.task_id,
+                        spec=json.loads(json.dumps(task_spec)))
+                    bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
+                if bound != task_spec:
+                    return self._blocked(target, "orchestration_context",
+                        "existing Orca Task spec does not match the effective delegation plan")
+            except (ValueError, OSError, subprocess.SubprocessError, ExecutorError) as exc:
+                return self._blocked(target, "orchestration_context", str(exc))
         # `task` here is the Task ID Orca already holds, not the prompt. The
         # prompt went into that Task when it was created; passing prose to
         # --task would silently create work nobody can find again.

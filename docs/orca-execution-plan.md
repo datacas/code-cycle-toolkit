@@ -38,6 +38,17 @@ this spec first; an artifact alone cannot prove the actual Task contents.
 The managed adapter requires a coordinator-supplied `task_spec_reader` that
 reads that existing Task and returns its bound spec. It compares the complete
 spec before launching. Missing or mismatched bindings block before worker-start.
+For a native driver launch the plan is finalized and persisted during stage
+selection, after the coordinator created its Task. Supply an explicit
+`task_spec_installer(run_id, task_id, spec)` capability alongside the reader to
+install that final spec in the **existing** Task when readback differs. The
+installer must be supplied by the existing coordinator; it does not create Tasks
+or define a new Orca CLI command. The adapter checks workspace and provider
+preconditions first, passes a detached copy of the final spec to the installer,
+and reads the Task again. Installation acknowledgement alone never authorizes
+worker-start: the independent reader must return the complete matching spec.
+Without an installer, a preinstalled matching spec still works; a stale one
+blocks. An installer without a reader also blocks.
 The stock CLI has no verified Task-spec reader binding and therefore blocks
 planned Orca launches until that integration is supplied; API fixtures exercise
 the successful path without inventing a command in the installed Orca CLI.

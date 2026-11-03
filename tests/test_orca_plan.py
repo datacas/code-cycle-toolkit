@@ -156,14 +156,17 @@ class OrcaPlanTests(unittest.TestCase):
         self.assertEqual(adapter.dispatch(target, "ignored", context=mismatch,
             writes=True, runner=runner).outcome, ex.DispatchOutcome.BLOCKED)
         runner.assert_not_called()
-        context = replace(context, task_spec_reader=lambda **_: context.task_spec())
+        installed = json.loads(json.dumps(context.task_spec()))
+        context = replace(context, task_spec_reader=lambda **_: installed)
         result = adapter.dispatch(target, "ignored", cwd="/tmp/source", context=context,
                                   writes=True, runner=runner)
         self.assertTrue(result.asynchronous)
         self.assertEqual(result.artifacts["functional_state"], "result_pending")
         self.assertEqual(result.artifacts["task_spec"]["revision"], plan.revision)
         self.assertFalse(result.agent_output)
-        review = replace(context, stage="review", task_spec_reader=lambda **_: review.task_spec())
+        review = replace(context, stage="review")
+        installed_review = json.loads(json.dumps(review.task_spec()))
+        review = replace(review, task_spec_reader=lambda **_: installed_review)
         refused = adapter.dispatch(target, "ignored", cwd="/tmp/source", context=review, runner=runner)
         self.assertEqual(refused.missing_capability, "review_workspace_isolation")
         review = replace(review, review_workspace=ex.OrcaReviewWorkspace(
@@ -172,6 +175,51 @@ class OrcaPlanTests(unittest.TestCase):
         self.assertTrue(launched.asynchronous)
         self.assertEqual(launched.artifacts["reviewWorkspace"]["path"], "/tmp/review")
         self.assertEqual(launched.artifacts["task_spec"]["publication_permissions"], ["comment"])
+
+    def test_installation_requires_independent_matching_readback_and_preconditions(self):
+        target = router.Target("orca", "openai", "gpt-test", "medium")
+        context = ex.OrcaDispatchContext("coordinator", "run", "task",
+            execution_plan=sample(), stage="implement")
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({"ok": True,
+            "result": {"dispatchId": "dispatch", "state": "ready"}}), ""))
+        adapter = ex.OrcaAdapter()
+        installer = Mock(return_value=True)
+        # An acknowledgement or an installer without a reader cannot launch.
+        missing = replace(context, task_spec_installer=installer)
+        self.assertEqual(adapter.dispatch(target, "ignored", context=missing,
+            writes=True, runner=runner).outcome, ex.DispatchOutcome.BLOCKED)
+        installer.assert_not_called()
+        reader = Mock(return_value={"revision": 0})
+        pending = replace(missing, task_spec_reader=reader)
+        self.assertEqual(adapter.dispatch(target, "ignored", context=pending,
+            writes=True, runner=runner).outcome, ex.DispatchOutcome.BLOCKED)
+        self.assertEqual(reader.call_count, 2)
+        installer.assert_called_once_with(run_id="run", task_id="task", spec=context.task_spec())
+        runner.assert_not_called()
+        # A failed workspace gate must not update the existing Task.
+        installer.reset_mock()
+        self.assertEqual(adapter.dispatch(target, "ignored", context=pending,
+            runner=runner).missing_capability, "review_workspace_isolation")
+        installer.assert_not_called()
+        # A callback cannot mutate the expected spec to make stale readback pass.
+        def corrupt(*, spec, **_):
+            spec.clear()
+            spec["revision"] = 0
+        self.assertEqual(adapter.dispatch(target, "ignored", context=replace(pending,
+            task_spec_installer=corrupt), writes=True, runner=runner).outcome,
+            ex.DispatchOutcome.BLOCKED)
+        # Failed installation remains blocked, and does not start a worker.
+        installer.side_effect = OSError("Task installation failed")
+        result = adapter.dispatch(target, "ignored", context=pending, writes=True, runner=runner)
+        self.assertEqual(result.outcome, ex.DispatchOutcome.BLOCKED)
+        self.assertIn("Task installation failed", result.detail)
+        runner.assert_not_called()
+        # A Task already bound to the final plan needs no write capability.
+        reader.return_value = json.loads(json.dumps(context.task_spec()))
+        installer.reset_mock()
+        self.assertTrue(adapter.dispatch(target, "ignored", context=pending,
+            writes=True, runner=runner).asynchronous)
+        installer.assert_not_called()
 
     def test_helper_boundary_and_installed_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,10 +253,18 @@ class OrcaPlanTests(unittest.TestCase):
 class FixtureOrca(ex.OrcaAdapter):
     requires_publication_preflight = False
 
-    def __init__(self, *, bound=True):
+    def __init__(self, *, bound=True, install=True):
         super().__init__()
         self.contexts = []
         self.bound = bound
+        self.install = install
+        self.installs = []
+        # An existing Task installed before the native driver selects a stage.
+        self.stored_spec = {"revision": 0}
+
+    def install_spec(self, *, run_id, task_id, spec):
+        self.installs.append((run_id, task_id, spec))
+        self.stored_spec = json.loads(json.dumps(spec))
 
     def probe(self):
         return ex.ProbeResult(self.name, ex.Availability.READY, "fixture")
@@ -220,7 +276,8 @@ class FixtureOrca(ex.OrcaAdapter):
         context = kw.get("context")
         if context is not None and self.bound:
             # Fixture of an existing coordinator reading its actual Task spec.
-            context = replace(context, task_spec_reader=lambda **_: context.task_spec())
+            context = replace(context, task_spec_reader=lambda **_: self.stored_spec,
+                task_spec_installer=self.install_spec if self.install else None)
             kw["context"] = context
         self.contexts.append(kw.get("context"))
         return super().dispatch(target, task, **kw, runner=lambda *args, **kwargs:
@@ -229,8 +286,8 @@ class FixtureOrca(ex.OrcaAdapter):
 
 
 class OrcaDriverTests(RunCycleTestCase):
-    def launch(self, *, bound=True, **kw):
-        adapter = FixtureOrca(bound=bound)
+    def launch(self, *, bound=True, install=True, **kw):
+        adapter = FixtureOrca(bound=bound, install=install)
         profiles = router.load_profiles({"code_cycle": {"profiles": {
             "cheap_coder": {"primary": "orca:openai/gpt-test medium"},
             "deep_coder": {"primary": "orca:openai/gpt-test medium"}}}})
@@ -246,10 +303,23 @@ class OrcaDriverTests(RunCycleTestCase):
         self.assertEqual(context.stage, "implement")
         self.assertEqual(context.execution_plan.repository, "owner/api")
         self.assertEqual(context.execution_plan.work_item, "API-7")
+        self.assertEqual(len(adapter.installs), 1)
+        self.assertEqual(adapter.installs[0][:2], ("run", "task"))
+        self.assertEqual(adapter.stored_spec, context.task_spec())
+        self.assertGreater(adapter.stored_spec["revision"], 0)
         launches = [row for row in events(self.store.path, "owner/api", task_id="API-7")
                     if row["component"] == "orca_launch"]
         self.assertEqual(len(launches), 1)
         self.assertEqual(launches[0]["correlation"]["dispatch_id"], "fixture-dispatch")
+        self.assertEqual(launches[0]["correlation"]["revision"], str(adapter.stored_spec["revision"]))
+        self.assertEqual(launches[0]["correlation"]["digest"], adapter.stored_spec["digest"])
+
+    def test_preinstalled_task_without_coordinator_installer_is_blocked(self):
+        report, adapter = self.launch(install=False)
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertIn("Task spec does not match", report.stopped_because or "")
+        self.assertEqual(adapter.stored_spec, {"revision": 0})
+        self.assertFalse(adapter.installs)
 
     def test_resume_and_cancellation_do_not_relaunch_or_accept_partial_results(self):
         self.launch()
