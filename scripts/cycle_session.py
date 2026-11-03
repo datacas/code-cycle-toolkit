@@ -2,6 +2,9 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
+    from .cycle_journal import events as journal_events
+    from .plan_service import reconcile_plan
+    from .orca_plan import reconcile_outcome
     from .run_cycle import CycleHistoryStore, CycleInterrupted, CycleReport, Reported, RunStatuses
     from . import verification_plan as verification_contract
 
@@ -15,6 +18,9 @@ if TYPE_CHECKING:
     from .workspace_setup import commit_setup, own_file
     from .cycle_plan import PlanRuntime
 else:
+    from cycle_journal import events as journal_events
+    from plan_service import reconcile_plan
+    from orca_plan import reconcile_outcome
     from cycle_state import SessionState
     from cycle_dispatch import StageDispatch
     from cycle_publication import PublicationHistory
@@ -28,6 +34,8 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         # The facade supplies dependencies so existing integrations keep
         # the same public names and injection points.
         self.api = api
+        self.orca_context = options.get("orca_context")
+        self.orca_action = options.get("orca_action", "launch")
         self.state = SessionState()
         self.control = CycleControl()
         self.repo_id = options["repo_id"]
@@ -307,8 +315,37 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
             "was left as it was",
             stop_reason="interrupted")
 
-    def execute(self):
+    def execute(self) -> Any:
         try:
+            if self.orca_action != "launch":
+                # Resume/cancellation belong to the existing coordinator.
+                # Reconcile durable obligations before any attempt to launch;
+                # no documented live capability is assumed by this driver.
+                try:
+                    record = self.plan_store.latest_plan(
+                        self.repo_id, self.task_id, self.state.change_request_id)
+                    if record is None or self.orca_context is None:
+                        raise ValueError("Orca resume needs an existing context and persisted plan")
+                    launches = [row["correlation"] for row in journal_events(
+                        self.telemetry.path, self.repo_id, task_id=self.task_id,
+                        kinds=("stage_result",)) if row.get("component") == "orca_launch"]
+                    launch = launches[-1] if launches else None
+                    if (launch is None
+                            or launch.get("run_id") != self.orca_context.run_id
+                            or launch.get("task_id") != self.orca_context.task_id
+                            or launch.get("plan_id") != record["plan_id"]):
+                        raise ValueError("Orca resume does not match the persisted launch identities")
+                    self.execution_plan = reconcile_plan(record, self.authorized_bindings(),
+                        head=self.plan_head)
+                    self.state.verification_plan = self.execution_plan.verification
+                    self.plan_conclusion = self.execution_plan.metadata.get("verification_conclusion")
+                    self.save_plan("recovered")
+                    outcome = reconcile_outcome(self.orca_context, self.execution_plan,
+                        cancel=self.orca_action == "cancel")
+                    return self.stop(outcome["reason"], "BLOCKED",
+                                     stop_reason="stage_not_completed")
+                except (ValueError, self.api.HistoryError) as error:
+                    return self.stop(str(error), "BLOCKED", stop_reason="readiness_unconfirmed")
             try:
                 self.api.journal_cleanup(self.telemetry.path, self.repo_id,
                                 (lambda request: self.checks_provider.pull(self.repo_id, request).state)

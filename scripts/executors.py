@@ -47,7 +47,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import stage_permissions as sp
 try:
@@ -3157,6 +3157,21 @@ class OrcaDispatchContext:
     task_id: str
     worker_agent: str | None = None
     review_workspace: OrcaReviewWorkspace | None = None
+    execution_plan: Any = None
+    stage: str | None = None
+    task_spec_reader: Any = None
+    task_spec_installer: Any = None
+
+    def task_spec(self) -> dict[str, Any]:
+        if self.execution_plan is None or self.stage is None:
+            raise ExecutorError("an Orca plan delegation needs an execution plan and stage")
+        if TYPE_CHECKING:
+            from .plan_service import delegation_spec
+        else:
+            from plan_service import delegation_spec
+        return {**delegation_spec(self.execution_plan, self.stage),
+                "run_id": self.run_id, "task_id": self.task_id,
+                "coordinator": self.coordinator}
 
     def __post_init__(self) -> None:
         for field_name in ("coordinator", "run_id", "task_id"):
@@ -3223,6 +3238,18 @@ class OrcaAdapter(Adapter):
                 "already exist; create them deliberately rather than having the "
                 "dispatcher spawn them in someone's workspace",
             )
+        # Legacy direct adapter callers remain launch-only. A managed cycle
+        # always supplies a plan and cannot dispatch an unselected stage.
+        task_spec = None
+        if context.execution_plan is not None:
+            try:
+                task_spec = context.task_spec()
+                if not callable(context.task_spec_reader):
+                    return self._blocked(target, "orchestration_context",
+                        "no verified Orca Task-spec read interface; the coordinator must "
+                        "confirm the effective plan is installed in the existing Task")
+            except (ValueError, OSError, subprocess.SubprocessError, ExecutorError) as exc:
+                return self._blocked(target, "orchestration_context", str(exc))
         review_workspace = None
         if not writes:
             review_workspace = context.review_workspace
@@ -3252,6 +3279,30 @@ class OrcaAdapter(Adapter):
                 f"no Orca agent is known for provider {target.provider!r}; "
                 "name one in the dispatch context rather than guessing",
             )
+        if task_spec is not None:
+            try:
+                bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
+                if bound != task_spec and callable(context.task_spec_installer):
+                    bound_plan = bound.get("plan") if isinstance(bound, dict) else None
+                    if (not isinstance(bound, dict) or not isinstance(bound_plan, dict)
+                            or any(bound.get(key) != task_spec[key] for key in
+                                ("run_id", "task_id", "coordinator", "stage"))
+                            or any(bound_plan.get(key) != task_spec["plan"][key] for key in
+                                ("repository", "work_item"))):
+                        return self._blocked(target, "orchestration_context",
+                            "existing Orca Task binding is incomplete or belongs to another delegation")
+                    # The native driver finalizes its revision just before
+                    # dispatch. Refresh only this delegation, including Tasks
+                    # initialized by the helper under a different plan ID.
+                    # A writer's acknowledgement never replaces readback.
+                    context.task_spec_installer(run_id=context.run_id, task_id=context.task_id,
+                        spec=json.loads(json.dumps(task_spec)))
+                    bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
+                if bound != task_spec:
+                    return self._blocked(target, "orchestration_context",
+                        "existing Orca Task spec does not match the effective delegation plan")
+            except (ValueError, OSError, subprocess.SubprocessError, ExecutorError) as exc:
+                return self._blocked(target, "orchestration_context", str(exc))
         # `task` here is the Task ID Orca already holds, not the prompt. The
         # prompt went into that Task when it was created; passing prose to
         # --task would silently create work nobody can find again.
@@ -3318,6 +3369,9 @@ class OrcaAdapter(Adapter):
         state = result.get("state")
         artifacts = {"argv": argv, "dispatchId": result.get("dispatchId"),
                      "state": state, "launch": result.get("launch")}
+        if task_spec is not None:
+            artifacts["task_spec"] = task_spec
+            artifacts["functional_state"] = "result_pending"
         start_state = "started" if result.get("dispatchId") else "unknown"
         if review_workspace is not None:
             artifacts["reviewWorkspace"] = {
@@ -3447,6 +3501,8 @@ def dispatch(
     registry = registry or Registry()
     target = decision.target
     adapter = registry.get(target.executor)
+    if not isinstance(adapter, OrcaAdapter):
+        kw.pop("context", None)
     on_progress = kw.pop("on_progress", None)
     on_workspace = kw.pop("on_workspace", None)
     dispatch_attempt_id = kw.pop("dispatch_attempt_id", None)
@@ -3564,6 +3620,10 @@ def dispatch(
         )
 
     policy_note = None
+    if isinstance(adapter, OrcaAdapter):
+        # Consumed by the shared gates above, not Orca worker-start options.
+        kw.pop("publishes", None)
+        kw.pop("publication_permissions", None)
     if command_policy is not None and isinstance(adapter, OrcaAdapter):
         # The table and hook are applied to native dispatches only (#142).
         # Orca workers keep their behaviour and are not presented as

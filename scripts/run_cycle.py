@@ -58,7 +58,7 @@ from urllib.parse import quote, urlsplit
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from . import verification_plan as verification_contract
@@ -2361,6 +2361,8 @@ def run_cycle(
     criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
     execution_plan: ExecutionPlan | None = None,
     security_rule=None,
+    orca_context=None,
+    orca_action: str = "launch",
 ) -> CycleReport:
     """[issue_review ->] implement -> review -> (resolve -> rereview)*, recorded.
 
@@ -2417,7 +2419,9 @@ def run_cycle(
     reported, or `publication_unverified` when that state cannot be read.
     """
     from cycle_session import CycleSession
-    return CycleSession(sys.modules[__name__], locals()).execute()
+    # The facade supplies this module's types; the session's static aliases
+    # may otherwise resolve through the package-qualified module name.
+    return cast(CycleReport, cast(object, CycleSession(sys.modules[__name__], locals()).execute()))
 
 def _started_elsewhere(outcome: StageOutcome) -> bool:
     """Whether this stage launched work that finishes outside this process."""

@@ -13,6 +13,10 @@ def main(api: Any, argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default=None,
                         help=("repository identifier, owner/name; defaults to "
                               f"code_cycle.repository.selector in {api.CONFIG_NAME}"))
+    parser.add_argument("--orca-coordinator")
+    parser.add_argument("--orca-run")
+    parser.add_argument("--orca-task", help="existing Orca Task ID, distinct from --task")
+    parser.add_argument("--orca-action", choices=("launch", "resume", "cancel"), default="launch")
     parser.add_argument("--task", required=True, help="work item identifier")
     parser.add_argument(
         "--work-item-repository", default=None,
@@ -105,6 +109,13 @@ def main(api: Any, argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true",
                         help="with --dry-run, print the plan as its JSON contract")
     args = parser.parse_args(argv)
+    orca_context = None
+    orca_ids = (args.orca_coordinator, args.orca_run, args.orca_task)
+    if any(orca_ids) or args.orca_action != "launch":
+        if not all(orca_ids):
+            parser.error("Orca needs all of --orca-coordinator, --orca-run and --orca-task")
+        from executors import OrcaDispatchContext
+        orca_context = OrcaDispatchContext(*orca_ids)
     if args.progress_interval <= 0:
         parser.error("--progress-interval must be greater than zero")
     if args.json and not args.dry_run:
@@ -259,6 +270,8 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                 consent=consent,
                 execution_plan=execution_plan,
                 security_rule=api.GateRule.from_config(config),
+                orca_context=orca_context,
+                orca_action=args.orca_action,
             )
     except (api.CycleDriverError, api.GrantError) as error:
         parser.error(str(error))
