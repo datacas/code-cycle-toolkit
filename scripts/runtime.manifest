@@ -33,6 +33,7 @@ usage.py
 harness.py
 router.py
 telemetry.py
+quota_state.py
 production_events.py
 cycle_status.py
 profile_config.py

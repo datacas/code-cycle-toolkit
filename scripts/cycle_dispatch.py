@@ -88,6 +88,9 @@ class StageDispatch:
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             if change_request_id:
                 self.journal.change_request_id = change_request_id
+                # The PR can first become known after implementation. Keep the
+                # quota checkpoint and its effect snapshot on that same scope.
+                self.recorder.change_request_id = change_request_id
             # A resumed or re-dispatched stage sees what earlier runs did (#306).
             redispatched = any(stage.role == role for stage in self.report.stages)
             journal_context = (self.journal.summary()

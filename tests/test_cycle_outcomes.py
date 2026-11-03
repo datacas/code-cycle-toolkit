@@ -185,17 +185,20 @@ class DispatchObservationTests(CycleTestCase):
     def test_fallbacks_and_contract_violations_are_counted(self) -> None:
         codex = ScriptedAdapter("codex", outcomes=[
             (ex.DispatchOutcome.BLOCKED, "operating_quota"),
+        ])
+        claude = ScriptedAdapter("claude", outcomes=[
+            (ex.DispatchOutcome.SUCCEEDED, None),
             (ex.DispatchOutcome.CONTRACT_VIOLATION, None),
         ])
-        recorder = self.recorder([codex, ScriptedAdapter("claude")])
+        recorder = self.recorder([codex, claude])
         recorder.stage("implement", "work")  # quota, then the fallback
         recorder.availability["codex"] = ex.Availability.READY
-        recorder.stage("implement", "again")  # the wrong model answered
+        recorder.stage("implement", "again")  # recorded quota still routes to Claude
         recorder.close("HUMAN_INTERVENTION")
 
         outcome = self.store.cycle_outcome("owner/repo", recorder.cycle_id)["outcome"]
 
-        self.assertEqual(1, outcome["fallback_stages"])
+        self.assertEqual(2, outcome["fallback_stages"])
         self.assertEqual(1, outcome["contract_violations"])
 
 

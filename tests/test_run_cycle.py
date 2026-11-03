@@ -363,6 +363,150 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         self.assertNotIn(unsafe, candidates)
         self.assertNotIn(withdrawn, candidates)
 
+    def test_manual_proposals_bind_without_gaining_execution_authority(self):
+        from cycle_plan import PlanRuntime
+        from cycle_journal import Journal
+        from stage_permissions import StagePolicy, _is_verification_command
+        from types import SimpleNamespace
+        journal = Journal(self.store.path, "owner/api", "API-7", "cycle-manual")
+        accepted = ("manual:orca-live", "manual:A1.b_c")
+        refused = ("manual:", "manual:a b", "manual:x;echo secret", "manual:$(id)",
+                   "manual:orca-live\nmanual:two", "Manual:orca-live", "manual:" + "a" * 65)
+        for command in (*accepted, *refused):
+            journal.record("stage_result", component="verification_command", command=command)
+        session = SimpleNamespace(telemetry=self.store, repo_id="owner/api", task_id="API-7",
+                                  allowed_test_command="python3 -m unittest",
+                                  allowed_verify_commands=())
+        candidates = PlanRuntime.authorized_bindings(session)
+        for command in accepted:
+            self.assertIn(command, candidates)
+            self.assertFalse(_is_verification_command(command, StagePolicy(
+                role="verify", test_command=session.allowed_test_command,
+                verify_prefixes=session.allowed_verify_commands)))
+        for command in refused:
+            self.assertNotIn(command, candidates)
+
+    def manual_plan_fixture(self, *, proposal: bool):
+        """A persisted revision shaped like the blocked one: manual and collided ids."""
+        import cycle_history as ch
+        import verification_plan as vp
+        from cycle_journal import Journal
+        test = "python3 -m unittest discover -s tests"
+        digest = hashlib.sha256(test.encode()).hexdigest()[:16]
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works", "documented"))
+        checks = (
+            vp.Check("configured-test", test, "codex", "cheap_coder", "project", True,
+                     provenance="project", reason="configured test command"),
+            vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                     "project", True, criteria=("AC-1",)),
+            vp.Check("manual-orca-live", "manual:orca-live", "codex", "cheap_coder",
+                     "boundary", True, criteria=("AC-2",), level="boundary"),
+            vp.Check("configured-test-" + digest, test, "codex", "cheap_coder", "project", True,
+                     provenance="runtime", reason="runtime"))
+        verification = vp.VerificationPlan(criteria, checks)
+        verification = verification.record(vp.CheckResult("focused", "a" * 40, "pass", ({
+            "command": "python3 -m unittest tests.focused", "exit_code": 0, "executed": 3},)))
+        verification = verification.record(vp.CheckResult(
+            "manual-orca-live", "a" * 40, "unverified", cause="unverified"))
+        plan = replace(self.plan(start="rereview"), plan_id="plan-manual", head_sha="a" * 40,
+                       verification=verification)
+        ch.CycleHistoryStore(self.store.path).save_plan(
+            plan, cycle_id="cycle-before", change_request_id="4", provenance="stopped",
+            stop_reason="stage_not_completed")
+        journal = Journal(self.store.path, "owner/api", "API-7", "cycle-before")
+        for command in (test, "python3 -m unittest tests.focused", *(
+                ("manual:orca-live",) if proposal else ())):
+            journal.record("stage_result", component="verification_command", command=command)
+        return criteria, test
+
+    def resume_once(self, criteria, test):
+        import cycle_history as ch
+        report = self.run_cycle(
+            Talker("codex"), Talker("claude", block("BLOCKED")), start_from="rereview",
+            change_request_id="4", execution_plan=self.plan(start="rereview"),
+            allowed_test_command=test, allowed_verify_commands=("python3 -m unittest",),
+            criteria_reader=lambda *_args, **_kw: criteria,
+            work_item_provider="github", work_item_repository="owner/api")
+        record = ch.CycleHistoryStore(self.store.path).latest_plan("owner/api", "API-7", "4")
+        checks = {check["id"]: check for check in record["payload"]["plan"]["verification"]["checks"]}
+        results = [(item["id"], item["head_sha"], item["result"]) for item in
+                   record["payload"]["plan"]["verification"]["results"]]
+        return report, checks, results
+
+    def test_manual_check_survives_three_resumes_with_stable_identities(self):
+        for proposal in (True, False):
+            with self.subTest(proposal=proposal):
+                self.setUp()
+                criteria, test = self.manual_plan_fixture(proposal=proposal)
+                digest = hashlib.sha256(test.encode()).hexdigest()[:16]
+                seen = []
+                for _ in range(3):
+                    report, checks, results = self.resume_once(criteria, test)
+                    self.assertNotIn("frozen", report.stopped_because or "")
+                    self.assertNotIn("identity", report.stopped_because or "")
+                    seen.append((tuple(checks), results,
+                                 {key: (value["required"], value["criteria"])
+                                  for key, value in checks.items()}))
+                self.assertEqual(seen[0][0], seen[1][0])
+                self.assertEqual(seen[0][2], seen[1][2])
+                self.assertEqual(seen[1][0], seen[2][0])
+                self.assertEqual(seen[1][2], seen[2][2])
+                if proposal:
+                    # Bound: nothing is rebuilt, so the history is untouched.
+                    self.assertEqual(seen[0][1], seen[1][1])
+                    self.assertEqual(seen[1][1], seen[2][1])
+                self.assertEqual(set(seen[0][0]), {"configured-test", "focused",
+                                                   "manual-orca-live", "configured-test-" + digest})
+                self.assertIn(("focused", "a" * 40, "pass"), seen[0][1])
+                self.assertIn(("manual-orca-live", "a" * 40, "unverified"), seen[0][1])
+                self.assertEqual(seen[0][2]["manual-orca-live"], (True, ["AC-2"]))
+
+    def test_restored_manual_check_stays_unverified_and_caps_the_conclusion(self):
+        import cycle_history as ch
+        from stage_permissions import StagePolicy, _is_verification_command
+        criteria, test = self.manual_plan_fixture(proposal=True)
+        record = ch.CycleHistoryStore(self.store.path).latest_plan("owner/api", "API-7", "4")
+        commands = (test, "python3 -m unittest tests.focused", "manual:orca-live")
+        restored = ch.restore_plan(record, commands).verification
+        manual = next(check for check in restored.checks if check.id == "manual-orca-live")
+        self.assertEqual(manual.command, "manual:orca-live")
+        self.assertEqual(restored.current("manual-orca-live", "a" * 40), "unverified")
+        self.assertEqual(restored.cap("verified", "a" * 40), "not_verified")
+        self.assertFalse(_is_verification_command("manual:orca-live", StagePolicy(
+            role="verify", test_command=test, verify_prefixes=("python3 -m unittest",))))
+
+    def test_an_unauthorized_non_manual_command_still_fails_restore(self):
+        import cycle_history as ch
+        criteria, test = self.manual_plan_fixture(proposal=True)
+        record = ch.CycleHistoryStore(self.store.path).latest_plan("owner/api", "API-7", "4")
+        with self.assertRaises(ch.HistoryError):
+            ch.restore_plan(record, (test, "manual:orca-live"))
+
+    def test_a_proposed_check_cannot_stand_in_for_the_configured_test_by_digest(self):
+        import cycle_history as ch
+        import verification_plan as vp
+        test = "python3 -m unittest discover -s tests"
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works", "documented"))
+        # Unbound manual proposal: the plan is not restored and keeps fingerprints.
+        verification = vp.VerificationPlan(criteria, (
+            vp.Check("proposed", test, "codex", "cheap_coder", "project", True, criteria=("AC-1",)),
+            vp.Check("manual-orca-live", "manual:orca-live", "codex", "cheap_coder",
+                     "boundary", True, criteria=("AC-2",), level="boundary")))
+        plan = replace(self.plan(start="rereview"), plan_id="plan-alias", head_sha="a" * 40,
+                       verification=verification)
+        ch.CycleHistoryStore(self.store.path).save_plan(
+            plan, cycle_id="cycle-alias", change_request_id="4", provenance="stopped",
+            stop_reason="stage_not_completed")
+        _report, checks, _results = self.resume_once(criteria, test)
+        self.assertIn("configured-test", checks)
+        self.assertIn("proposed", checks)
+
+    def test_manual_command_grammar_is_fixed(self):
+        import verification_plan as vp
+        self.assertTrue(vp.is_manual_command("manual:orca-live"))
+        for command in ("python3 -m unittest", "manual:", "manual:a b", None, 3):
+            self.assertFalse(vp.is_manual_command(command))
+
     def test_new_sensitive_diff_promotes_a_previously_omitted_audit(self):
         from cycle_plan import PlanRuntime
         import execution_plan as ep
