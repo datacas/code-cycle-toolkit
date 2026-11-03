@@ -45,6 +45,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
+    from quota_state import QUOTA_SCHEMA, quota_reset
+except ImportError:  # pragma: no cover
+    from .quota_state import QUOTA_SCHEMA, quota_reset
+
+try:
     from cycle_journal import JOURNAL_SCHEMA
 except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
     from .cycle_journal import JOURNAL_SCHEMA
@@ -109,7 +114,9 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: state could not be read. Both payload-only.
 #: 25: execution-plan revisions and check histories; verification_unverified
 #: is a distinct stop and cannot be cleared by generic CI success.
-SCHEMA_VERSION = 25
+#: 26: append-only quota history and worktree provenance, independent of reset
+#: eligibility. Provider prose remains exclusively in the redacted journal.
+SCHEMA_VERSION = 26
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -1311,6 +1318,7 @@ class Telemetry:
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
             connection.executescript(JOURNAL_SCHEMA)
+            connection.executescript(QUOTA_SCHEMA)
             self._migrate_dispatch_attempts(connection)
             connection.commit()
 
@@ -2099,38 +2107,28 @@ class Telemetry:
             return result
 
     @staticmethod
-    def quota_expiry(detail: str | None, now: datetime | None = None) -> tuple[str, bool]:
+    def quota_expiry(detail: str | None, now: datetime | None = None) -> tuple[str | None, bool]:
         """Return a UTC expiry and whether the executor reported a reset time."""
-        current = now or datetime.now(timezone.utc)
-        local_now = current.astimezone()
-        match = re.search(r"\b(\d{1,2}:\d{2}\s*[APap][Mm])\b", detail or "")
-        if match is not None and local_now.tzinfo is not None:
-            try:
-                reset_text = re.sub(r"(?i)(\d)(am|pm)$", r"\1 \2", match.group(1))
-                reset = datetime.strptime(reset_text.upper(), "%I:%M %p")
-                candidate = local_now.replace(
-                    hour=reset.hour, minute=reset.minute, second=0, microsecond=0,
-                )
-                if candidate <= local_now:
-                    candidate += timedelta(days=1)
-                return candidate.astimezone(timezone.utc).isoformat(), True
-            except (ValueError, OverflowError):
-                pass
-        return (current + timedelta(minutes=30)).isoformat(), False
+        expiry, reported, _ = quota_reset(detail, now)
+        return expiry, reported
 
     def record_quota_exhaustion(self, repo_id: str, executor: str, model: str,
-                                detail: str | None = None) -> str:
+                                detail: str | None = None) -> str | None:
         now = datetime.now(timezone.utc)
-        expires_at, reset_reported = self.quota_expiry(detail, now)
+        expires_at, reset_reported, reason = quota_reset(detail, now)
         with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT INTO quota_history (id,repo_id,executor,model,exhausted_at,expires_at,reason) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"quota-{uuid.uuid4().hex}", repo_id, executor, model, now.isoformat(), expires_at, reason))
             connection.execute(
                 "INSERT INTO quota_exhaustions "
                 "(repo_id, executor, model, exhausted_at, expires_at, reason, reset_reported) "
-                "VALUES (?, ?, ?, ?, ?, 'quota', ?) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(repo_id, executor, model) DO UPDATE SET "
                 "exhausted_at=excluded.exhausted_at, expires_at=excluded.expires_at, "
                 "reason=excluded.reason, reset_reported=excluded.reset_reported",
-                (repo_id, executor, model, now.isoformat(), expires_at, int(reset_reported)),
+                (repo_id, executor, model, now.isoformat(), expires_at or "", reason, int(reset_reported)),
             )
             connection.commit()
         return expires_at
@@ -2138,14 +2136,9 @@ class Telemetry:
     def active_quota_exhaustions(self, repo_id: str) -> list[dict]:
         now = datetime.now(timezone.utc).isoformat()
         with closing(self._connect()) as connection:
-            connection.execute(
-                "DELETE FROM quota_exhaustions WHERE repo_id=? AND expires_at<=?",
-                (repo_id, now),
-            )
-            connection.commit()
             rows = connection.execute(
                 "SELECT executor, model, exhausted_at, expires_at, reason, reset_reported "
-                "FROM quota_exhaustions WHERE repo_id=? AND expires_at>?",
+                "FROM quota_exhaustions WHERE repo_id=? AND (expires_at='' OR expires_at>?)",
                 (repo_id, now),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -2153,8 +2146,8 @@ class Telemetry:
     def clear_quota_exhaustion(self, repo_id: str, executor: str, model: str) -> None:
         with closing(self._connect()) as connection:
             connection.execute(
-                "DELETE FROM quota_exhaustions WHERE repo_id=? AND executor=? AND model=?",
-                (repo_id, executor, model),
+                "UPDATE quota_exhaustions SET expires_at=? WHERE repo_id=? AND executor=? AND model=?",
+                (datetime.now(timezone.utc).isoformat(), repo_id, executor, model),
             )
             connection.commit()
 

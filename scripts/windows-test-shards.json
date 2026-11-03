@@ -123,6 +123,7 @@
       "test_manual_rereview",
       "test_native_prerequisites",
       "test_profile_config",
+      "test_quota_resume",
       "test_publication",
       "test_publication_audit",
       "test_review_contract",

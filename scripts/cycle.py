@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, cast
 
-from cycle_journal import Journal
+from cycle_journal import Journal, redact
 from execution_plan import RoleContract, role_contracts
 from executors import (
     Availability,
@@ -59,6 +59,7 @@ from environment_recovery import (
     observed_sandbox_blocker, denied_result,
 )
 from reroute import effect_snapshot, reconcile
+from quota_state import Handoffs
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
     RoutingDecision,
@@ -286,11 +287,11 @@ class CycleRecorder:
         self.availability = dict(availability)
         self.quota_exhaustions: list[dict] = []
         self.exhausted_until: dict[tuple[str, str], str] = {}
-        if continue_work and mode is RoutingMode.PRODUCTION:
+        if mode is RoutingMode.PRODUCTION:
             try:
                 self.quota_exhaustions = telemetry.active_quota_exhaustions(repo_id)
                 self.exhausted_until = {
-                    (row["executor"], row["model"]): row["expires_at"]
+                    (row["executor"], row["model"]): row["expires_at"] or "operator retry required"
                     for row in self.quota_exhaustions
                 }
             except (OSError, sqlite3.Error, TelemetryError, ValueError):
@@ -527,14 +528,18 @@ class CycleRecorder:
                 if (self.mode is RoutingMode.PRODUCTION
                         and decision.used_fallback and decision.target is not None
                         and any(f"{row['executor']}/{row['model']} quota exhausted until "
-                                f"{row['expires_at']}" in decision.reasons
+                                f"{row['expires_at'] or 'operator retry required'}" in decision.reasons
                                 for row in self.quota_exhaustions)):
                     signals["quota_resume_reason"] = "recorded_quota_exhaustion"
                 return decision
 
             decision = select(eligible)
             if role == "resolve" and not decision.blocked and decision.target is not None:
-                if target_override is not None:
+                if (target_override is not None
+                        and (target_override.executor, target_override.model) in self.exhausted_until):
+                    decision = replace(decision, reasons=decision.reasons +
+                                       ("previous resolve target has recorded quota exhaustion; keep the available route",))
+                elif target_override is not None:
                     if (target_override.executor not in eligible
                             or not self.availability.get(
                                 target_override.executor, Availability.UNKNOWN).dispatchable):
@@ -632,6 +637,22 @@ class CycleRecorder:
             if attempt == 0:
                 first = (decision, signals)
                 primary_decision = decision
+            handoff = None
+            if (attempt == 0 and role == self.started_from
+                    and self.started_from != "implement"
+                    and self.mode is RoutingMode.PRODUCTION
+                    and dispatch_kwargs.get("cwd") and not decision.blocked):
+                try:
+                    from executors import _git_output, _workspace_fingerprint
+                    cwd = dispatch_kwargs["cwd"]
+                    if _git_output(cwd, "status", "--porcelain", "--untracked-files=all"):
+                        handoff = Handoffs(self.telemetry.path).match(
+                            repo=self.repo_id, task=self.task_id, stage=role,
+                            pr=self.change_request_id, workspace=_workspace_fingerprint(cwd),
+                            destination=decision.target)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    decision = replace(decision, blocked=True, target=None,
+                                       reasons=decision.reasons + (str(error),))
             if decision.blocked:
                 outcome.decision = decision
                 self._journal("failure", role=role, component="router",
@@ -711,6 +732,24 @@ class CycleRecorder:
 
             before = (snapshot() if (writes or publishes)
                       and self.mode is not RoutingMode.CALIBRATION else None)
+            if handoff is not None:
+                try:
+                    if before is None or before["workspace"]["fingerprint"] != handoff["fingerprint"]:
+                        raise ValueError("quota handoff diff changed before dispatch")
+                    Handoffs(self.telemetry.path).claim(handoff)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    raise CycleError(str(error)) from error
+                task += (
+                    "\n\nQuota worktree resume: inspect the existing staged, unstaged and untracked "
+                    "changes before editing. Preserve correct partial work; do not reset or overwrite it. "
+                    f"Original executor: {handoff['original_executor']}; continuing executor: "
+                    f"{decision.target.executor}; diff SHA-256: {handoff['fingerprint']}; "
+                    f"provenance: {handoff['provenance']}. This is not functional verification.")
+                self._journal("stage_result", role=role, component="quota", status="handoff",
+                              correlation={"original_executor": handoff["original_executor"],
+                                           "destination_executor": decision.target.executor,
+                                           "fingerprint": handoff["fingerprint"],
+                                           "provenance": handoff["provenance"]})
 
             def observe_progress(**activity):
                 nonlocal tool_activity
@@ -910,6 +949,32 @@ class CycleRecorder:
                             self.repo_id, decision.target.executor,
                             decision.target.model, result.detail,
                         )
+                        self.exhausted_until[(decision.target.executor, decision.target.model)] = (
+                            exhaustion_expiry or "operator retry required")
+                        self._journal("failure", role=role, component="quota", status="exhausted",
+                                      detail=result.detail,
+                                      correlation={"expires_at": exhaustion_expiry,
+                                                   "ambiguity": "reset_time_ambiguous" if exhaustion_expiry is None else None})
+                        after = snapshot() if self.change_request_id else None
+                        # Only a finished executor with a clean initial tree,
+                        # or a validated prior ownership record, can own edits.
+                        if (result.process_exited and not result.asynchronous
+                                and not result.needs_human_action and fallback is not None
+                                and before is not None and after is not None
+                                and (not before["dirty"] or handoff is not None)
+                                and after["dirty"]
+                                and before["workspace"]["head"] == after["workspace"]["head"]
+                                and reconcile({**before, "dirty": False},
+                                              {**after, "dirty": False, "workspace": before["workspace"]})[0] == "reroute"):
+                            record_id = Handoffs(self.telemetry.path).record(
+                                repo=self.repo_id, task=self.task_id, stage=role,
+                                pr=self.change_request_id, workspace=after["workspace"],
+                                original=decision.target, destination=fallback)
+                            self._journal("stage_result", role=role, component="quota", status="provenance_recorded",
+                                          correlation={"record_id": record_id,
+                                                       "original_executor": decision.target.executor,
+                                                       "destination_executor": fallback.executor,
+                                                       "fingerprint": after["workspace"]["fingerprint"]})
                     except (OSError, sqlite3.Error, TelemetryError, ValueError):
                         # Telemetry failure must not block the writing stage.
                         pass
@@ -939,23 +1004,25 @@ class CycleRecorder:
                         "reroute_action": action, "reroute_reason": reason,
                     }
                 else:
-                    detail = f"{result.detail}; reroute stopped: {reason}"
+                    detail = f"{redact(result.detail) if result.failure_code == 'quota' else result.detail}; reroute stopped: {reason}"
                     if (result.failure_code == "quota"
                             and self.mode is RoutingMode.PRODUCTION):
                         if exhaustion_expiry and reset_reported:
                             detail += (f"; quota exhaustion recorded until {exhaustion_expiry}; "
-                                       "wait for the reset or run --continue to use the configured fallback")
+                                       "wait for the reset or " + self._quota_resume_command(role))
                         elif exhaustion_expiry:
                             detail += ("; quota reset is unknown; retry after 30 minutes; "
                                        f"temporary quota window recorded until {exhaustion_expiry}; "
-                                       "run --continue to use the configured fallback")
+                                       + self._quota_resume_command(role))
                         else:
-                            detail += ("; quota reset is unknown; retry after 30 minutes or "
-                                       "run --continue to use the configured fallback")
+                            detail += ("; quota reset is ambiguous; executor unavailable until explicit operator retry; "
+                                       + self._quota_resume_command(role))
                     result = replace(result, detail=detail)
             elif (result.outcome is DispatchOutcome.SUCCEEDED
                     and self.mode is RoutingMode.PRODUCTION):
                 try:
+                    if handoff is not None:
+                        Handoffs(self.telemetry.path).complete(handoff)
                     self.telemetry.clear_quota_exhaustion(
                         self.repo_id, decision.target.executor, decision.target.model,
                     )
@@ -1066,6 +1133,12 @@ class CycleRecorder:
         self.stages.append(outcome)
         self._observe_shadow(role, *first)
         return outcome
+
+    def _quota_resume_command(self, role: str) -> str:
+        if self.started_from == "implement" and role == "implement":
+            return "run --continue to use the configured fallback"
+        return (f"resume with --from {role} --pr {self.change_request_id} "
+                "to use the configured fallback")
 
     def _journal(self, kind: str, **fields) -> None:
         if self.journal is not None:
