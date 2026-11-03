@@ -179,7 +179,7 @@ class OrcaPlanTests(unittest.TestCase):
     def test_installation_requires_independent_matching_readback_and_preconditions(self):
         target = router.Target("orca", "openai", "gpt-test", "medium")
         context = ex.OrcaDispatchContext("coordinator", "run", "task",
-            execution_plan=sample(), stage="implement")
+            execution_plan=replace(sample(), revision=2), stage="implement")
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({"ok": True,
             "result": {"dispatchId": "dispatch", "state": "ready"}}), ""))
         adapter = ex.OrcaAdapter()
@@ -189,7 +189,8 @@ class OrcaPlanTests(unittest.TestCase):
         self.assertEqual(adapter.dispatch(target, "ignored", context=missing,
             writes=True, runner=runner).outcome, ex.DispatchOutcome.BLOCKED)
         installer.assert_not_called()
-        reader = Mock(return_value={"revision": 0})
+        stale = replace(context, execution_plan=sample()).task_spec()
+        reader = Mock(return_value=stale)
         pending = replace(missing, task_spec_reader=reader)
         self.assertEqual(adapter.dispatch(target, "ignored", context=pending,
             writes=True, runner=runner).outcome, ex.DispatchOutcome.BLOCKED)
@@ -220,6 +221,63 @@ class OrcaPlanTests(unittest.TestCase):
         self.assertTrue(adapter.dispatch(target, "ignored", context=pending,
             writes=True, runner=runner).asynchronous)
         installer.assert_not_called()
+
+    def test_installer_rejects_foreign_and_incomplete_task_bindings(self):
+        target = router.Target("orca", "openai", "gpt-test", "medium")
+        context = ex.OrcaDispatchContext("coordinator", "run", "task",
+            execution_plan=sample(), stage="implement")
+        spec = context.task_spec()
+        foreign = [{**spec, key: "other"} for key in
+            ("run_id", "task_id", "coordinator")]
+        foreign.append({**spec, "stage": "review"})
+        foreign.extend({**spec, "plan": {**spec["plan"], key: "other"}}
+            for key in ("repository", "work_item"))
+        incomplete = [None, {}, [], False, {"revision": 0},
+            {key: value for key, value in spec.items() if key != "run_id"},
+            {**spec, "plan": None}, {**spec, "plan": {}},
+            {**spec, "plan": {"repository": spec["plan"]["repository"]}}]
+        for index, bound in enumerate([*foreign, *incomplete]):
+            with self.subTest(case=index):
+                stored = {"spec": bound}
+                runner = Mock(return_value=subprocess.CompletedProcess([], 0,
+                    json.dumps({"ok": True, "result": {"dispatchId": "dispatch",
+                        "state": "ready"}}), ""))
+                installer = Mock(side_effect=lambda **kw: stored.update(spec=kw["spec"]))
+                reader = Mock(side_effect=lambda **_: stored["spec"])
+                result = ex.OrcaAdapter().dispatch(target, "ignored", writes=True,
+                    context=replace(context, task_spec_reader=reader,
+                        task_spec_installer=installer), runner=runner)
+                self.assertEqual(result.outcome, ex.DispatchOutcome.BLOCKED)
+                installer.assert_not_called()
+                runner.assert_not_called()
+                reader.assert_called_once_with(run_id="run", task_id="task")
+
+    def test_installer_updates_only_the_same_delegation_across_plan_ids(self):
+        target = router.Target("orca", "openai", "gpt-test", "medium")
+        context = ex.OrcaDispatchContext("coordinator", "run", "task",
+            execution_plan=sample(), stage="implement")
+        # A helper-created Task predates the native driver's finalized plan.
+        original = replace(context, execution_plan=replace(sample(),
+            plan_id="run:datacas/code-cycle-toolkit#330")).task_spec()
+        stored = json.loads(json.dumps(original))
+        def install(*, run_id, task_id, spec):
+            nonlocal stored
+            self.assertEqual((run_id, task_id), ("run", "task"))
+            stored = json.loads(json.dumps(spec))
+        installer = Mock(side_effect=install)
+        reader = Mock(side_effect=lambda **_: stored)
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps({"ok": True,
+            "result": {"dispatchId": "dispatch", "state": "ready"}}), ""))
+        result = ex.OrcaAdapter().dispatch(target, "ignored", writes=True,
+            context=replace(context, task_spec_reader=reader,
+                task_spec_installer=installer), runner=runner)
+        self.assertTrue(result.asynchronous)
+        self.assertEqual(result.artifacts["functional_state"], "result_pending")
+        self.assertEqual(stored, context.task_spec())
+        self.assertNotEqual(original["plan_id"], stored["plan_id"])
+        installer.assert_called_once()
+        self.assertEqual(reader.call_count, 2)
+        runner.assert_called_once()
 
     def test_helper_boundary_and_installed_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -260,7 +318,9 @@ class FixtureOrca(ex.OrcaAdapter):
         self.install = install
         self.installs = []
         # An existing Task installed before the native driver selects a stage.
-        self.stored_spec = {"revision": 0}
+        self.stored_spec = ex.OrcaDispatchContext("coordinator", "run", "task",
+            execution_plan=replace(sample(), repository="owner/api", work_item="API-7",
+                plan_id="run:owner/api#API-7"), stage="implement").task_spec()
 
     def install_spec(self, *, run_id, task_id, spec):
         self.installs.append((run_id, task_id, spec))
@@ -318,7 +378,8 @@ class OrcaDriverTests(RunCycleTestCase):
         report, adapter = self.launch(install=False)
         self.assertEqual(report.status, "BLOCKED")
         self.assertIn("Task spec does not match", report.stopped_because or "")
-        self.assertEqual(adapter.stored_spec, {"revision": 0})
+        self.assertEqual(adapter.stored_spec["revision"], 1)
+        self.assertEqual(adapter.stored_spec["plan_id"], "run:owner/api#API-7")
         self.assertFalse(adapter.installs)
 
     def test_resume_and_cancellation_do_not_relaunch_or_accept_partial_results(self):

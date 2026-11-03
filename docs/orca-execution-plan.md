@@ -41,7 +41,14 @@ spec before launching. Missing or mismatched bindings block before worker-start.
 For a native driver launch the plan is finalized and persisted during stage
 selection, after the coordinator created its Task. Supply an explicit
 `task_spec_installer(run_id, task_id, spec)` capability alongside the reader to
-install that final spec in the **existing** Task when readback differs. The
+install that final spec in the **existing** Task when readback differs and its
+binding already matches this delegation's `run_id`, `task_id`, `coordinator`,
+`stage`, `plan.repository` and `plan.work_item`. A foreign or incomplete binding,
+including an empty binding, blocks before installation or worker-start. The
+coordinator must bind these identities when it creates the Task. A stale plan
+revision or contents may be refreshed within that binding; `plan_id` alone is
+not an ownership key, since the helper and native driver can use different plan
+IDs for the same delegation. The
 installer must be supplied by the existing coordinator; it does not create Tasks
 or define a new Orca CLI command. The adapter checks workspace and provider
 preconditions first, passes a detached copy of the final spec to the installer,

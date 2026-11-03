@@ -3283,9 +3283,18 @@ class OrcaAdapter(Adapter):
             try:
                 bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
                 if bound != task_spec and callable(context.task_spec_installer):
+                    bound_plan = bound.get("plan") if isinstance(bound, dict) else None
+                    if (not isinstance(bound, dict) or not isinstance(bound_plan, dict)
+                            or any(bound.get(key) != task_spec[key] for key in
+                                ("run_id", "task_id", "coordinator", "stage"))
+                            or any(bound_plan.get(key) != task_spec["plan"][key] for key in
+                                ("repository", "work_item"))):
+                        return self._blocked(target, "orchestration_context",
+                            "existing Orca Task binding is incomplete or belongs to another delegation")
                     # The native driver finalizes its revision just before
-                    # dispatch. Only the existing coordinator may install it;
-                    # a writer's acknowledgement never replaces readback.
+                    # dispatch. Refresh only this delegation, including Tasks
+                    # initialized by the helper under a different plan ID.
+                    # A writer's acknowledgement never replaces readback.
                     context.task_spec_installer(run_id=context.run_id, task_id=context.task_id,
                         spec=json.loads(json.dumps(task_spec)))
                     bound = context.task_spec_reader(run_id=context.run_id, task_id=context.task_id)
