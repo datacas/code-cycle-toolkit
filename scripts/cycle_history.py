@@ -48,6 +48,7 @@ from typing import Any, Iterable, Protocol, TYPE_CHECKING
 if TYPE_CHECKING:
     from .execution_plan import ExecutionPlan
 
+from verification_plan import persisted_token
 from review_contract import (
     CLAIM_STATUSES,
     RESOLUTION_RUN,
@@ -238,8 +239,7 @@ def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
         if key == "command":
             return command_digest(value)
         if key in {"id", "executor", "profile", "context"} and isinstance(value, str):
-            return (value if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value)
-                    else "ref-" + hashlib.sha256(value.encode()).hexdigest())
+            return persisted_token(value)
         if key == "items":
             return [f"AC-{i}" for i in range(1, len(value) + 1)]
         if key == "cause":
@@ -273,8 +273,14 @@ def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
     return {"projection_version": 1, "plan": clean(plan.to_dict())}
 
 
-def restore_plan(record: dict[str, Any], commands: tuple[str, ...]) -> ExecutionPlan:
-    """Recover only checks whose command is still explicitly authorized."""
+def restore_plan(record: dict[str, Any], commands: tuple[str, ...], *,
+                 partial: bool = False) -> ExecutionPlan:
+    """Recover only checks whose command is still explicitly authorized.
+
+    With `partial`, a command without a current binding stays its inert
+    fingerprint instead of failing the whole restore. Every check, obligation
+    and historical result is kept either way; a fingerprint is never executable.
+    """
     if not TYPE_CHECKING:
         from execution_plan import ExecutionPlan
     payload = record["payload"]
@@ -284,6 +290,8 @@ def restore_plan(record: dict[str, Any], commands: tuple[str, ...]) -> Execution
     def bind(value, key=""):
         if key == "command":
             if value not in bindings:
+                if partial:
+                    return value
                 raise HistoryError("stored check has no currently authorized command binding")
             return bindings[value]
         if isinstance(value, dict):
