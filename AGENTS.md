@@ -46,3 +46,4 @@
 - `priority: urgent` marks work that blocks cycles today. It is orthogonal to the milestone and the `P` label, and is removed when the blocker is fixed.
 - Add every new issue to the "Code Cycle Toolkit roadmap" GitHub Project of the repository and set its `Priority` field to match its `P` label, unless the project's auto-add workflow already did. `Order` is only set for issues in the integration sequence of `docs/ROADMAP_V2.md`.
 - A change to a milestone's content or a new milestone updates the milestone table in `docs/ROADMAP_V2.md` in the same pull request.
+- Creating or updating any issue (new issue, milestone, priority or scope change) is followed by the matching update of the milestone table in `docs/ROADMAP_V2.md`, as a task of that same piece of work and never as a later follow-up.
