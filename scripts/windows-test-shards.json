@@ -102,6 +102,7 @@
       "test_execution_plan",
       "test_execution_profiles",
       "test_verification_plan",
+      "test_verification_decisions",
       "test_orca_plan",
       "test_stats",
       "test_support",

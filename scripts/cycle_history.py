@@ -244,10 +244,11 @@ def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
             return [f"AC-{i}" for i in range(1, len(value) + 1)]
         if key == "cause":
             if value in {"defect", "blocked", "omitted", "missing_tool", "inconclusive",
-                         "environment", "stale", "unverified", ""}:
+                         "environment", "stale", "unverified", "time_limit", ""}:
                 return value
             lowered = value.lower()
-            for token, phrases in {"omitted": ("no execution result", "omitted"),
+            for token, phrases in {"time_limit": ("timeout", "time limit", "timed out"),
+                                   "omitted": ("no execution result", "omitted"),
                                    "missing_tool": ("not found", "missing tool"),
                                    "blocked": ("denied", "blocked", "permission"),
                                    "inconclusive": ("inconclusive",),
@@ -264,7 +265,7 @@ def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
         if key == "evidence":
             return [{k: clean(v, k) for k, v in item.items()
                      if k in {"command", "level", "exit_code", "executed", "test_sha256",
-                              "output_sha256", "context_sha256"}} for item in value]
+                              "output_sha256", "context_sha256", "limit_seconds"}} for item in value]
         if isinstance(value, dict):
             return {k: clean(v, k) for k, v in value.items()}
         if isinstance(value, (list, tuple)):

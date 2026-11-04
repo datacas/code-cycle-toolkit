@@ -908,6 +908,8 @@ class CycleReport:
     #: states before and after the stage, and every breach. SHAs and names only.
     publication_audit: dict | None = None
     execution_plan: dict[str, Any] | None = None
+    pending_verification: list[dict[str, Any]] = field(default_factory=list)
+    verification_questions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def approved(self) -> bool:
@@ -962,6 +964,8 @@ class CycleReport:
             lines.extend(text for position, text in self.notes if position == index + 1)
         if self.stopped_because:
             lines.append(f"  stopped: {self.stopped_because}")
+        for item in self.pending_verification:
+            lines.append(f"  not_verified: {item['check']} ({item['command']}) HEAD={item['head_sha']} cause={item['cause']} decision={item['decision']}")
         if self.review_provenance is not None:
             lines.append(f"  review_provenance: {self.review_provenance}")
         if self.reason:
@@ -982,6 +986,10 @@ class CycleReport:
         them, for whoever asks the next question or shows the details on
         request. It holds the stage's untrusted prose, never instructions.
         """
+        if self.pending_verification:
+            return {"repo": self.repo_id, "task": self.task_id, "status": self.status,
+                    "questions": self.verification_questions, "pending_verification": self.pending_verification,
+                    "journal": self.journal_explanation}
         if self.journal_explanation is not None and not self.permission_requests and self.readiness is None:
             return self.journal_explanation
         if self.permission_requests:
@@ -2356,6 +2364,7 @@ def run_cycle(
     ci_clock: Callable[[], float] | None = None,
     ci_sleep: Callable[[float], None] | None = None,
     repair_approval: str | None = None,
+    verification_answers: dict[str, str] | None = None,
     published_change_request: Callable[[], str | None] | None = None,
     publication_auditor: PublicationAuditor | None = None,
     criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
