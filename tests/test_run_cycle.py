@@ -741,6 +741,14 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         self.assertEqual(report.status, "BLOCKED")
         self.assertEqual(report.stop_reason, "verification_unverified")
 
+    def test_null_tests_payload_preserves_previous_outcome(self):
+        payload = {"status": "IMPLEMENTED", "tests": None}
+        verification = self.plan().verification
+        normalized, plan = rc._normalize_test_payload(payload, verification)
+        self.assertEqual(normalized["status"], "IMPLEMENTED")
+        self.assertIsNone(normalized["tests"])
+        self.assertIs(plan, verification)
+
     def test_rejected_report_head_source_and_discrepancy_for_each_code_stage(self):
         class ProbeFailure(Exception):
             pass
@@ -785,6 +793,32 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     reason = dispatch.rejected_report_reason(role, "checks[0].evidence", payload, "12")
                     self.assertIn(role + " report rejected: checks[0].evidence", reason)
                     self.assertIn(expected, reason)
+
+    def test_rejected_report_stops_real_advance_for_each_code_stage(self):
+        rejected_tests = {"version": 2, "conclusion": "verified", "checks": "bad"}
+        for role, status in (("implement", "IMPLEMENTED"),
+                             ("resolve", "RESOLVED"),
+                             ("rereview", "CHANGES_REQUESTED")):
+            with self.subTest(role=role):
+                body = block(status, head_sha="a" * 40, tests=rejected_tests,
+                             security_audit_ran=True)
+                checks = type("Checks", (), {"pull": staticmethod(lambda *_: rc.ci_gate.PullState(
+                    "OPEN", "a" * 40, "main", "task", True, "clean"))})()
+                implementer = Talker("codex", APPROVED if role == "rereview" else body)
+                reviewer = Talker("claude", body if role == "rereview" else APPROVED)
+                report = self.run_cycle(implementer, reviewer,
+                    start_from=role, change_request_id=None if role == "implement" else "4",
+                    execution_plan=self.plan(start=role),
+                    allowed_test_command=self.LEGACY_TEST,
+                    allowed_verify_commands=("python3 -m unittest",),
+                    ci_policy="strict",
+                    ci_checks=checks, code_host="github",
+                    work_item_provider="github", work_item_repository="owner/api")
+                self.assertEqual("BLOCKED", report.status, report.explain())
+                self.assertEqual("verification_unverified", report.stop_reason)
+                self.assertIn("published head (reported-unverified): " + "a" * 40,
+                              report.stopped_because)
+                self.assertEqual([role], [stage.role for stage in report.stages])
 
     def test_pre_dispatch_identity_stop_names_check_and_fields(self):
         import cycle_history as ch

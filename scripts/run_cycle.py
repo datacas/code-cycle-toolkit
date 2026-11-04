@@ -2689,12 +2689,10 @@ def _normalize_test_payload(
     # outcome. Explicit reports still receive the plan's deterministic caps.
     if "tests" not in payload:
         return payload, plan
-    if tests is None or (isinstance(tests, dict) and tests.get("reason") == "no_code_change"
+    if tests is None:
+        return payload, plan
+    if (isinstance(tests, dict) and tests.get("reason") == "no_code_change"
                          and not {"checks", "evidence", "conclusion", "passed", "ran"} & tests.keys()):
-        if tests is None:
-            payload["tests"] = {"conclusion": "not_verified", "passed": False,
-                                "rejected": "tests: received NoneType; expected an object"}
-            return payload, plan
         return payload, plan
     if not isinstance(tests, dict):
         payload["tests"] = {"conclusion": "not_verified", "passed": False,

@@ -287,14 +287,14 @@ class ResultTests(unittest.TestCase):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
         entry = report(evidence=None, cause=None, attempts=None)
         payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
-        with self.assertRaisesRegex(vp.VerificationError, r"evidence.*received tuple.*at least one"):
+        with self.assertRaisesRegex(vp.VerificationError, r"evidence.*received NoneType.*at least one"):
             vp.normalize_tests(payload, HEAD, plan=plan)
 
     def test_v2_unverified_still_requires_nonempty_cause(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
         entry = report(result="unverified", evidence=None, cause=None, attempts=None)
         payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
-        with self.assertRaisesRegex(vp.VerificationError, r"cause.*received str.*non-empty text"):
+        with self.assertRaisesRegex(vp.VerificationError, r"cause.*received NoneType.*non-empty text"):
             vp.normalize_tests(payload, HEAD, plan=plan)
 
     def test_v2_rejections_describe_field_received_type_and_expected_format(self):
@@ -310,10 +310,48 @@ class ResultTests(unittest.TestCase):
             self.assertIn(type(value).__name__, message)
             self.assertIn(expected, message)
 
+    def test_v2_missing_required_check_field_names_missing_value_and_format(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report()
+        del entry["command"]
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        self.assertIn("command", str(caught.exception))
+        self.assertIn("received missing", str(caught.exception))
+        self.assertIn("expected text", str(caught.exception))
+
+    def test_v2_invalid_check_validation_names_field_value_and_format(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(level="invalid")
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("check.level", message)
+        self.assertIn("received str", message)
+        self.assertIn("expected static, test, or boundary", message)
+
+    def test_v2_duplicate_and_command_mismatch_rejections_name_field_details(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(evidence=[{"command": "python3 other", "exit_code": 0, "executed": 1}])
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        self.assertIn("evidence.command", str(caught.exception))
+        self.assertIn("received str", str(caught.exception))
+        self.assertIn("expected the frozen check command", str(caught.exception))
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [report(), report()]}, HEAD, plan=plan)
+        self.assertIn("checks[1].id", str(caught.exception))
+        self.assertIn("received str", str(caught.exception))
+        self.assertIn("expected a unique reported check ID", str(caught.exception))
+
     def test_v1_string_evidence_rejects_with_plan_and_stays_unchanged_without_one(self):
         legacy = {"version": 1, "conclusion": "verified", "evidence": ["text"]}
         plan = vp.VerificationPlan(criteria()).extend((check(),))
-        with self.assertRaisesRegex(vp.VerificationError, "invalid legacy evidence"):
+        with self.assertRaisesRegex(vp.VerificationError, r"evidence.command.*received str.*expected text"):
             vp.normalize_tests(legacy, HEAD, plan=plan)
         unchanged, updated = vp.normalize_tests(legacy, HEAD)
         self.assertEqual(unchanged, legacy)
