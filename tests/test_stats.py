@@ -634,6 +634,26 @@ class StatsTests(unittest.TestCase):
         self.assertIn("Resolution rounds: **6** across 4 closed cycle(s)", markdown)
         self.assertNotIn("cycle-private", json.dumps(report))
 
+    def test_verification_incomplete_is_its_own_final_status_next_to_schema_26_rows(self) -> None:
+        import unittest.mock
+        with unittest.mock.patch.object(tm, "SCHEMA_VERSION", 26):
+            self.record_cycle(0)
+        self.record_cycle(1, status="VERIFICATION_INCOMPLETE")
+        self.store.record_stage(
+            "owner/repo", "task-private-2", "coordinate", status="VERIFICATION_INCOMPLETE",
+            cycle_id="cycle-private-2", record_kind="cycle", stop_reason="verification_unverified",
+            final_approved=False,
+        )
+
+        self.assertEqual({26, tm.SCHEMA_VERSION}, {row["schema_version"] for row in self.store.rows()})
+        rows = stats._read_rows(self.database, "owner/repo")
+        report = stats.aggregate(rows, repo_id="owner/repo", now=self.as_of())
+        outcomes = report["summary"]["cycle_outcomes"]
+
+        self.assertEqual({"HUMAN_INTERVENTION": 1, "VERIFICATION_INCOMPLETE": 2}, outcomes["status"])
+        self.assertEqual(1, outcomes["stop_reasons"].get("verification_unverified"))
+        self.assertIn("| VERIFICATION_INCOMPLETE | 2 |", stats.render_markdown(report))
+
     def test_work_item_outcomes_count_one_issue_across_cycles_and_keep_ready_unknown(self) -> None:
         for cycle_id in ("cycle-one", "cycle-two"):
             self.store.record_stage(
