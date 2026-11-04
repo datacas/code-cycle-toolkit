@@ -1074,7 +1074,8 @@ def _permission_lines(requests: list[PermissionRequest], details: Path | None) -
              f"  answer:  rerun with --grant {request.grant.id}=<"
              + "|".join(answer for answer in (("cycle", "persistent", "forever", "deny")
                                              if request.grant.operation else ("cycle", "persistent", "deny"))
-                        if answer != "cycle" or request.scope.isolated_per_dispatch)
+                        if (answer != "cycle" or request.scope.isolated_per_dispatch)
+                        and (answer != "forever" or "forever" in asked["options"]))
              + "> from the stopped stage"]
     if request.grant.operation:
         lines += ["  operation: " + json.dumps(request.record()["operation"], ensure_ascii=True),

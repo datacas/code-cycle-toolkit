@@ -293,11 +293,15 @@ destinations, sensitive paths, flags and actions are never generalized.
 An allow applies to matching operations in later dispatches and retries of the
 selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
 ID; **this repository** persists across issues and resumed runs; **forever**
-persists globally, but never applies automatically to `review` or `rereview`.
-Different stage roles require their own decisions. An answer can be supplied
-on resume as `--grant command_<sha256>=cycle|persistent|forever|deny`.
-A global writing-stage grant never authorizes a review; a reviewer must be
-shown and explicitly authorize its own role's pattern.
+persists globally for writing and issue-review roles. Different stage roles
+require their own decisions. An answer can be supplied on resume as
+`--grant command_<sha256>=cycle|persistent|forever|deny`.
+A global grant never covers `review` or `rereview`, because those stages judge
+untrusted changes in any repository: their questions offer only **this cycle /
+this repository / deny**, a `forever` answer for them is refused, and a stored
+global entry for those roles is ignored. A writing-stage grant never authorizes
+a review either; a reviewer must be shown and explicitly authorize its own
+role's pattern.
 
 **Deny** is stored too. The stage skips the operation and reports affected
 checks as `not_verified`, never passed. Its structured `permission_effects`

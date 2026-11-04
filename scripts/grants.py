@@ -97,6 +97,13 @@ class SensitiveGrant:
 
 
 COMMAND_OPTIONS = ["this cycle", "this repository", "forever", "deny"]
+#: Roles that review untrusted changes: a global grant never reaches them.
+NO_GLOBAL_ROLES = frozenset({"review", "rereview"})
+
+
+def command_options(role: str) -> list[str]:
+    return [option for option in COMMAND_OPTIONS
+            if option != "forever" or role not in NO_GLOBAL_ROLES]
 
 
 def identifier(op: dict[str, Any]) -> str:
@@ -152,7 +159,8 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
                        "Alternative: skip; affected checks stay not_verified. "
                        "Authorizes the exact pattern in the accompanying permission record.")[:600],
-            "options": list(COMMAND_OPTIONS), "recommended": None,
+            "options": command_options(str((grant.operation or {}).get("role", role))),
+            "recommended": None,
             "blocks": [f"grant:{grant.id}"]}
 
 
@@ -264,7 +272,8 @@ class ConsentStore:
         entries = (payload["repos"].get(repo_id) or {}).get(grant.id, {})
         entry = entries.get(grant.fingerprint(scope)) if isinstance(entries, dict) else None
         operation = getattr(grant, "operation", None)
-        if entry is None and operation and not repo_id.startswith("cycle:"):
+        if (entry is None and operation and not repo_id.startswith("cycle:")
+                and operation.get("role") not in NO_GLOBAL_ROLES):
             entry = (payload["repos"].get("*") or {}).get(grant.id, {}).get(grant.fingerprint(scope))
         if (not isinstance(entry, dict)
                 or entry.get("fingerprint") != grant.fingerprint(scope)
@@ -442,7 +451,7 @@ class PermissionRequest:
             **({"pattern": self.grant.operation,
                 "pros": "finish the requested operation",
                 "cons": "extra user-level access for the selected scope",
-                "global_requires_explicit_role": ["review", "rereview"]}
+                "global_never_covers": sorted(NO_GLOBAL_ROLES)}
                if getattr(self.grant, "operation", None) else {}),
         }
 
@@ -601,6 +610,10 @@ class ConsentBroker:
         if answer == ALLOW_GLOBAL:
             if grant.operation is None or self.store is None:
                 raise GrantError("global answers require an exact command and a consent store")
+            if grant.operation.get("role") in NO_GLOBAL_ROLES:
+                raise GrantError(
+                    f"{grant.id}: a global grant never covers {grant.operation['role']}; "
+                    "answer this cycle or this repository")
             if not persist:
                 return self.apply_answer(grant, scope, ALLOW_CYCLE, persist=False)
             self.store.save("*", grant, scope, "allow")

@@ -70,6 +70,23 @@ class OperationTests(unittest.TestCase):
                 self.assertEqual(answer == "forever", bool(other.command_entries("claude", "implement")))
                 self.assertFalse(other.command_entries("claude", "review"))
 
+    def test_global_grant_never_covers_review_roles(self):
+        for role in ("review", "rereview"):
+            with self.subTest(role=role):
+                grant, scope = self.grant(policy=replace(self.policy, role=role))
+                with self.assertRaises(grants.GrantError):
+                    self.broker.apply_answer(grant, scope, "forever")
+                question = grants.question(grant, scope, role=role)
+                self.assertNotIn("forever", question["options"])
+                self.assertIn("this repository", question["options"])
+                # A hand-written global entry for a review role is ignored too.
+                self.store.save("*", grant, scope, "allow")
+                other = grants.ConsentBroker("owner/other", platform="linux", store=self.store)
+                other.operations[grant.id] = grant
+                self.assertFalse(other.command_entries("claude", role))
+        grant, scope = self.grant()
+        self.assertIn("forever", grants.question(grant, scope, role="implement")["options"])
+
     def test_ac3_risky_operation_is_a_question_with_tradeoffs(self):
         blocker = cp.refused_operation(["rm -rf scratch"], self.policy, self.broker, "claude")
         self.assertIsNotNone(blocker)
