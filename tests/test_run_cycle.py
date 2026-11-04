@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import executors as ex  # noqa: E402
 import grants  # noqa: E402
 import cycle  # noqa: E402
+import cycle_dispatch  # noqa: E402
 import review_contract as contract  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
@@ -734,7 +735,56 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         notes = [line for _, line in report.notes if "report rejected" in line]
         self.assertEqual(len(notes), 1, report.notes)
         self.assertNotIn("\x1b", notes[0])
-        self.assertIn("must be an array", notes[0])
+        self.assertIn("received str", notes[0])
+        self.assertIn("expected an array", notes[0])
+        self.assertIn("published head (reported-unverified): " + "a" * 40, notes[0])
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stop_reason, "verification_unverified")
+
+    def test_rejected_report_head_source_and_discrepancy_for_each_code_stage(self):
+        class ProbeFailure(Exception):
+            pass
+
+        class FakeReported:
+            def __init__(self, payload=None):
+                self.payload = payload or {}
+
+            def telemetry_pull_request_id(self, code_host):
+                return self.payload.get("change_request_id")
+
+        heads = {
+            "probed": ("b" * 40, "a" * 40, "published head (probed): " + "b" * 40),
+            "reported": (None, "a" * 40, "published head (reported-unverified): " + "a" * 40),
+            "discrepancy": ("b" * 40, "a" * 40,
+                            "published head (probed): " + "b" * 40 + "; reported-unverified head: " + "a" * 40 + " (discrepancy)"),
+            "absent": (None, None, "published head unknown"),
+        }
+        for role in ("implement", "resolve", "rereview"):
+            for case, (probed, reported, expected) in heads.items():
+                with self.subTest(role=role, case=case):
+                    dispatch = object.__new__(cycle_dispatch.StageDispatch)
+                    dispatch.code_host = "github"
+                    dispatch.repo_id = "owner/repo"
+                    dispatch.cwd = "/work"
+                    dispatch.api = type("Api", (), {
+                        "FULL_SHA": re.compile(r"[a-fA-F0-9]{40}"),
+                        "Reported": FakeReported,
+                        "readable": staticmethod(lambda value, limit: value[:limit]),
+                        "CycleDriverError": ProbeFailure,
+                        "probe_change_request": staticmethod(
+                            lambda repo, number, cwd: type("Mark", (), {"head_sha": probed})()),
+                    })()
+                    payload = {"head_sha": reported, "change_request_id": "12"}
+                    if case == "absent":
+                        payload = {"change_request_id": "12"}
+                        dispatch.api.probe_change_request = staticmethod(
+                            lambda repo, number, cwd: (_ for _ in ()).throw(ProbeFailure()))
+                    if case == "reported":
+                        dispatch.api.probe_change_request = staticmethod(
+                            lambda repo, number, cwd: (_ for _ in ()).throw(ProbeFailure()))
+                    reason = dispatch.rejected_report_reason(role, "checks[0].evidence", payload, "12")
+                    self.assertIn(role + " report rejected: checks[0].evidence", reason)
+                    self.assertIn(expected, reason)
 
     def test_pre_dispatch_identity_stop_names_check_and_fields(self):
         import cycle_history as ch

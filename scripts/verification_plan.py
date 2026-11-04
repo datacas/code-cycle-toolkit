@@ -187,6 +187,30 @@ def safe_value(field: str, value: Any) -> str:
     return "ref-" + hashlib.sha256(repr(value).encode()).hexdigest()[:12]
 
 
+def _received(value: Any) -> str:
+    """Describe a rejected value without echoing free-form agent content."""
+    if value is _MISSING:
+        return "missing"
+    return f"{type(value).__name__}"
+
+
+_MISSING = object()
+
+
+def _invalid_field(field: str, value: Any, expected: str) -> VerificationError:
+    return VerificationError(f"{field}: received {_received(value)}; expected {expected}")
+
+
+def _as_items(value: Any, field: str, *, singleton: bool = False) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if singleton and isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    raise _invalid_field(field, value, "an array of objects" + (" or one object" if singleton else ""))
+
+
 @dataclass(frozen=True)
 class CheckResult:
     id: str
@@ -202,38 +226,51 @@ class CheckResult:
 
     @classmethod
     def from_dict(cls, item: Mapping[str, Any]) -> CheckResult:
+        evidence = _as_items(item.get("evidence"), "evidence", singleton=True)
+        attempts = _as_items(item.get("attempts"), "attempts")
+        cause = item.get("cause")
+        if cause is None:
+            cause = ""
         return cls(item["id"], item["head_sha"], item["result"],
-                   tuple(item.get("evidence", ())), item.get("cause", ""),
-                   tuple(item.get("attempts", ())))
+                   evidence, cause, attempts)
 
     def validate(self) -> None:
-        if (not isinstance(self.id, str) or not self.id.strip()
-                or (self.head_sha is None and self.result != "unverified")
-                or (self.head_sha is not None and (not isinstance(self.head_sha, str)
-                    or not re.fullmatch(r"[a-fA-F0-9]{40}", self.head_sha)))
-                or self.result not in {"pass", "fail", "unverified"}
-                or not isinstance(self.cause, str)
-                or any(not isinstance(v, Mapping) for v in (*self.evidence, *self.attempts))):
-            raise VerificationError("invalid check result")
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise _invalid_field("id", self.id, "a non-empty string")
+        if self.head_sha is None and self.result != "unverified":
+            raise _invalid_field("head_sha", self.head_sha, "a full SHA for pass/fail results")
+        if self.head_sha is not None and (not isinstance(self.head_sha, str)
+                or not re.fullmatch(r"[a-fA-F0-9]{40}", self.head_sha)):
+            raise _invalid_field("head_sha", self.head_sha, "a 40-character hexadecimal SHA")
+        if self.result not in {"pass", "fail", "unverified"}:
+            raise _invalid_field("result", self.result, "pass, fail, or unverified")
+        if not isinstance(self.cause, str):
+            raise _invalid_field("cause", self.cause, "omitted or text")
+        if any(not isinstance(v, Mapping) for v in self.evidence):
+            raise _invalid_field("evidence", self.evidence, "an array of objects")
+        if any(not isinstance(v, Mapping) for v in self.attempts):
+            raise _invalid_field("attempts", self.attempts, "an array of objects")
         if self.result == "unverified":
             if not self.cause.strip():
-                raise VerificationError("unverified result requires a cause")
+                raise _invalid_field("cause", self.cause, "non-empty text for unverified results")
             return
         if not self.evidence:
-            raise VerificationError("executed result requires evidence")
+            raise _invalid_field("evidence", self.evidence, "at least one evidence object for pass/fail results")
         codes = []
         for item in self.evidence:
             code, executed = item.get("exit_code"), item.get("executed")
             if any(key in item and (not isinstance(item[key], str)
                    or re.fullmatch(r"[a-f0-9]{64}", item[key]) is None)
                    for key in ("test_sha256", "context_sha256", "output_sha256")):
-                raise VerificationError("evidence fingerprints must be SHA-256 digests")
+                raise _invalid_field("evidence fingerprint", item, "a 64-character hexadecimal SHA-256 digest")
             if (type(code) is not int or "executed" not in item
                     or (executed is not None and (type(executed) is not int or executed < 0))):
-                raise VerificationError("executed evidence requires integer exit_code and count")
+                field = "executed" if "executed" not in item or (executed is not None and type(executed) is not int) else "exit_code"
+                value = item.get(field, _MISSING)
+                raise _invalid_field(f"evidence.{field}", value, "an integer" + (" or null" if field == "executed" else ""))
             codes.append(code)
         if (self.result == "pass") != all(code == 0 for code in codes):
-            raise VerificationError("check result contradicts evidence")
+            raise _invalid_field("result", self.result, "pass when all exit_code values are 0, otherwise fail")
 
 
 @dataclass(frozen=True)
@@ -351,11 +388,11 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
     """
     version = tests.get("version", 1)
     if type(version) is not int or version not in {1, TESTS_VERSION}:
-        raise VerificationError("unsupported tests.version")
+        raise _invalid_field("tests.version", version, "integer 1 or 2")
     if version == 1 and plan is None:
         return dict(tests), None  # legacy consumers retain their historical contract
     if not re.fullmatch(r"[a-fA-F0-9]{40}", head_sha):
-        raise VerificationError("per-check results require the verified HEAD")
+        raise _invalid_field("head_sha", head_sha, "the verified 40-character hexadecimal HEAD SHA")
     if plan is None:
         # Standalone v2 reports still need a real criterion list to claim coverage.
         plan = VerificationPlan(Criteria.from_dict(tests.get("criteria", {
@@ -363,7 +400,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             "reason": "runtime criteria unavailable"})))
     entries = tests.get("checks", []) if version == 2 else tests.get("evidence", [])
     if not isinstance(entries, list):
-        raise VerificationError("checks/evidence must be an array")
+        field = "checks" if version == 2 else "evidence"
+        raise _invalid_field(f"tests.{field}", entries, "an array of check objects")
     if version == 1:
         # Only match an exact known command. Missing evidence leaves it unverified.
         converted = []
@@ -393,10 +431,14 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         entries = converted
     seen: set[str] = set()
     evidence_view: list[dict[str, Any]] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            raise VerificationError("check must be an object")
-        check = Check.from_dict(entry)
+            raise _invalid_field(f"checks[{index}]", entry, "a check object")
+        try:
+            check = Check.from_dict(entry)
+        except (VerificationError, KeyError, TypeError, ValueError) as error:
+            detail = str(error) or type(error).__name__
+            raise VerificationError(f"checks[{index}] {detail}") from error
         if check.id in seen:
             raise VerificationError("duplicate reported check")
         seen.add(check.id)
@@ -406,22 +448,27 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         plan = plan.extend((check,))
         history = entry.get("history", [])
         if not isinstance(history, list):
-            raise VerificationError("check history must be an array")
+            raise _invalid_field(f"checks[{index}].history", history, "an array of prior check results")
         for previous in history:
             prior = CheckResult.from_dict({**previous, "id": check.id})
             if prior not in plan.results:
                 plan = plan.record(prior)
         for field in ("evidence", "attempts"):
-            values = entry.get(field, ())
-            if not isinstance(values, (list, tuple)):
-                raise VerificationError(f"check {check.id} {field} must be an array")
-            for index, item in enumerate(values):
+            values = _as_items(entry.get(field), f"checks[{index}].{field}", singleton=field == "evidence")
+            for position, item in enumerate(values):
                 if not isinstance(item, Mapping):
-                    raise VerificationError(
-                        f"check {check.id} {field}[{index}] must be an object, got {type(item).__name__}")
-        result = CheckResult(check.id, entry["head_sha"], entry["result"],
-                             tuple(entry.get("evidence", ())), entry.get("cause", ""),
-                             tuple(entry.get("attempts", ())))
+                    raise _invalid_field(f"checks[{check.id}].{field}[{position}]", item, "an object")
+        evidence = _as_items(entry.get("evidence"), f"checks[{check.id}].evidence", singleton=True)
+        attempts = _as_items(entry.get("attempts"), f"checks[{check.id}].attempts")
+        cause = entry.get("cause")
+        if cause is None:
+            cause = ""
+        result = CheckResult(check.id, entry.get("head_sha"), entry.get("result", ""),
+                             evidence, cause, attempts)
+        try:
+            result.validate()
+        except VerificationError as error:
+            raise VerificationError(f"check {check.id} {error}") from error
         for item in result.evidence:
             if item.get("command", check.command) != check.command:
                 raise VerificationError("evidence command does not match frozen check")
