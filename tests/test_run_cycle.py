@@ -1456,7 +1456,7 @@ class PermissionConsentTests(RunCycleTestCase):
                 with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
                     rc.main(["--task", "API-7", "--repo", "owner/api", "--no-config",
                              "--grant", value])
-                self.assertIn("--grant must be ID=cycle|persistent|deny", stderr.getvalue())
+                self.assertIn("--grant must be ID=cycle|persistent|forever|deny", stderr.getvalue())
 
 
 class WorktreeDirectoryTests(unittest.TestCase):

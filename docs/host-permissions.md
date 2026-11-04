@@ -54,8 +54,8 @@ its existing run-view behavior. Output is untrusted data from the change.
 Plus, for implementation, resolution, review and rereview only, the repository's
 `allowed_commands.test` (exact) and `allowed_commands.verify` (prefixes). Review
 and rereview run them **only inside their disposable clone**. Without either key
-no verification command is granted; a stage that needs one stops `BLOCKED` and
-names the command. See [Configuration → Allowed commands](configuration.md#allowed-commands).
+no verification command is preauthorized; an operation outside the table asks
+for consent. See [Configuration → Allowed commands](configuration.md#allowed-commands).
 
 The hook validates arguments, not only the program, and it is fail-closed:
 
@@ -277,11 +277,61 @@ reported in dispatch and preparation evidence. See
 
 ## When a command is denied
 
-The stage report lists each denied command (`blocked command: …`), read from
-Claude's `permission_denials` and from the hook's own denial in the stream, and
-the cycle's stop line names the first: `blocked command in the implement stage:
-\`npm test\``. Grant it once in `allowed_commands`, then resume with
-`--continue`. A denied `docker compose …` in a stage that then reports
+Operations outside the table, reads outside the worktree and forbidden edits
+enter the existing `ConsentStore` flow. The runtime asks one question at a time
+with the exact options **this cycle / this repository / forever / deny**.
+Unknown and risky operations are questions too. The record includes the full
+command or edit target, stage role, reason, exact matching pattern, risk, pros,
+cons and alternative. Until answered, an essential request is a
+`permission_required` stop, never an agent's terminal `BLOCKED` solely for
+lacking an answer.
+
+An operation ID is `command_<sha256>`, computed from its structured pattern and
+stage role. Matching is exact except for verified TMPDIR operands: membership
+is checked after resolving symlinks and `..`. Interpreter code, Git
+destinations, sensitive paths, flags and actions are never generalized.
+An allow applies to matching operations in later dispatches and retries of the
+selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
+ID; **this repository** persists across issues and resumed runs; **forever**
+persists globally, but never applies automatically to `review` or `rereview`.
+Different stage roles require their own decisions. An answer can be supplied
+on resume as `--grant command_<sha256>=cycle|persistent|forever|deny`.
+A global writing-stage grant never authorizes a review; a reviewer must be
+shown and explicitly authorize its own role's pattern.
+
+**Deny** is stored too. The stage skips the operation and reports affected
+checks as `not_verified`, never passed. Its structured `permission_effects`
+entries give `command`, `essential` and `check_ids`. Only an essential denied
+operation stops the cycle with `HUMAN_INTERVENTION` and the named decision.
+An accessory inspection does not stop completed work; a stage reporting
+`BLOCKED` can supply `completed_status` and completion references, which still
+pass the normal publication/effect guards. Agent prose is not completion
+evidence.
+
+List or revoke decisions with `consent_control.py list|revoke --repo owner/repo
+--executor claude`; revoke also needs `--grant-id command_<sha256>`, with
+`--global` to select a global record. The next dispatch reloads decisions so
+revocation takes effect from the next stage. The consent store stays outside
+the checkout; revocation retains an audit record.
+Cycle entries can be selected with `--cycle-id <id> --task-id <work-item>`.
+Resuming a work item reloads its command-consent cycle lineage; a second work
+item starts a separate lineage and does not receive cycle-only decisions.
+
+Force-push, direct pushes to base/protected branches, deletion of Git refs and
+protected credential reads cannot be granted: publication integrity and
+credential confidentiality require these boundaries. Direct command consent
+also retains argument validation, redirect and workspace/publication guards;
+Git configuration edits remain guarded because they can turn later reads into
+code execution. Foreground and verification-timeout safeguards remain in force.
+An interpreter (`python3 -c`, `bash -c`, `node -e`, etc.) can be granted for its
+concrete command. The question warns that the hook **cannot inspect or enforce
+restrictions inside that code**. Never-grant operations inside an authorized
+interpreter need external isolation: sandbox rules, filesystem permissions,
+restricted credentials and code-host protections. A command grant never widens
+that isolation.
+
+The stage report lists each refused command, read from Claude's
+`permission_denials` and the hook's stream. A denied `docker compose …` in a stage that then reports
 `BLOCKED` becomes the `docker_host` environment blocker and enters the
 [grant flow](routing.md) (`stop_reason=permission_required`,
 `--grant docker_host=…`). On Linux the Claude grant opens every reachable Unix

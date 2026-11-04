@@ -923,7 +923,7 @@ class HookTests(PolicyTestCase):
         self.assertEqual("PreToolUse", decision["hookEventName"])
         self.assertEqual("deny", decision["permissionDecision"])
         self.assertIn(sp.HOOK_DENIAL_MARKER, decision["permissionDecisionReason"])
-        self.assertIn("report BLOCKED", decision["permissionDecisionReason"])
+        self.assertIn("permission_required", decision["permissionDecisionReason"])
 
     def test_an_allowed_command_gets_no_decision_so_the_permission_layer_still_applies(self):
         self.assertEqual("", self.run_hook(self.policy("review"), {
@@ -1019,7 +1019,7 @@ class HookTests(PolicyTestCase):
                             "tool_name": tool, "tool_input": {key: target}, "cwd": clone})
                         self.assertEqual("deny", self.decision(output))
                         self.assertIn(sp.HOOK_DENIAL_MARKER, output)
-                        self.assertIn("No grant lifts this rule", output)
+                        self.assertIn("this cycle / this repository / forever / deny", output)
 
     def test_a_non_writing_stage_edits_only_inside_its_tmpdir(self) -> None:
         # #272/#273/#280: comment bodies may live in an executor subdirectory.
@@ -1152,6 +1152,8 @@ class HookTests(PolicyTestCase):
         copy = Path(self.directory.name) / "hook" / "stage_permissions.py"
         copy.parent.mkdir()
         copy.write_bytes((ROOT / "scripts" / "stage_permissions.py").read_bytes())
+        for module in ("command_permissions.py", "grants.py"):
+            (copy.parent / module).write_bytes((ROOT / "scripts" / module).read_bytes())
         policy_path = copy.parent / "policy.json"
         policy_path.write_text(self.policy("review").to_json(), encoding="utf-8")
         for command, denied in (("git push origin x", True), ("git status", False)):
@@ -1172,6 +1174,8 @@ class HookTests(PolicyTestCase):
         copy = Path(self.directory.name) / "code-cycle-policy-x" / "stage_permissions.py"
         copy.parent.mkdir()
         copy.write_bytes((ROOT / "scripts" / "stage_permissions.py").read_bytes())
+        for module in ("command_permissions.py", "grants.py"):
+            (copy.parent / module).write_bytes((ROOT / "scripts" / module).read_bytes())
         for role in ("review", "rereview", "resolve"):
             policy = self.policy(role, journal_path=str(Path(self.directory.name) / "t.sqlite"),
                                  checkout_branch="task-319")

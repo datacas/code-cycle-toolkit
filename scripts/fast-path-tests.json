@@ -1,5 +1,9 @@
 {
   "groups": {
+    "command-consent-documentation": {
+      "paths": ["docs/host-permissions.md", "docs/configuration.md"],
+      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits"]
+    },
     "orca-plan-documentation": {
       "paths": ["docs/orca-execution-plan.md"],
       "tests": ["test_orca_plan.OrcaPlanTests.test_modes_and_live_evidence_obligation_are_documented"]

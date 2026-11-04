@@ -1072,9 +1072,14 @@ def _permission_lines(requests: list[PermissionRequest], details: Path | None) -
              f"  question 1/{len(requests)} {asked['id']}: {readable(asked['prompt'], 600)}",
              "    options: " + " | ".join(readable(option, 100) for option in asked["options"]),
              f"  answer:  rerun with --grant {request.grant.id}=<"
-             + "|".join(answer for answer in ("cycle", "persistent", "deny")
+             + "|".join(answer for answer in (("cycle", "persistent", "forever", "deny")
+                                             if request.grant.operation else ("cycle", "persistent", "deny"))
                         if answer != "cycle" or request.scope.isolated_per_dispatch)
              + "> from the stopped stage"]
+    if request.grant.operation:
+        lines += ["  operation: " + json.dumps(request.record()["operation"], ensure_ascii=True),
+                  "  pattern: " + json.dumps(request.grant.operation, ensure_ascii=True),
+                  "  risk: " + request.scope.risks]
     lines.append(f"  details: {details}" if details is not None else "  details: not saved")
     return lines
 
