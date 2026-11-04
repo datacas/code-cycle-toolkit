@@ -507,6 +507,265 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         for command in ("python3 -m unittest", "manual:", "manual:a b", None, 3):
             self.assertFalse(vp.is_manual_command(command))
 
+    # -- #393: frozen identities across resumes --------------------------------
+
+    LEGACY_TEST = "python3 -m unittest discover -s tests"
+    LEGACY_UNAUTHORIZED = "npm run e2e -- --grep family"
+
+    def legacy_plan_fixture(self):
+        """A sanitized revision shaped like the blocked one (#393).
+
+        Two configured IDs share one command, both owned by the runtime and
+        stored with the projection's `runtime` provenance and reason. One agent
+        check has a command that today's policy no longer authorizes, so a
+        strict restore fails and the resume takes the partial path.
+        """
+        import cycle_history as ch
+        import verification_plan as vp
+        from cycle_journal import Journal
+        test = self.LEGACY_TEST
+        digest = hashlib.sha256(test.encode()).hexdigest()[:16]
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("unit", "browser", "integrity"))
+        checks = (
+            vp.Check("configured-test", test, "runtime", "runtime", "project", True,
+                     provenance="project", reason="configured test command"),
+            vp.Check("configured-test-" + digest, test, "runtime", "runtime", "project", True,
+                     provenance="project", reason="configured test command"),
+            vp.Check("family-unit", "python3 -m unittest tests.unit", "codex", "deep_coder",
+                     "project", True, criteria=("AC-1",)),
+            vp.Check("family-browser", self.LEGACY_UNAUTHORIZED, "codex", "deep_coder",
+                     "project", True, criteria=("AC-2",), level="boundary"),
+            vp.Check("evidence-integrity", "manual:evidence-integrity", "codex", "deep_coder",
+                     "boundary", True, criteria=("AC-3",), level="boundary"))
+        verification = vp.VerificationPlan(criteria, checks)
+        verification = verification.record(vp.CheckResult("family-unit", "a" * 40, "pass", ({
+            "command": "python3 -m unittest tests.unit", "exit_code": 0, "executed": 4},)))
+        verification = verification.record(vp.CheckResult(
+            "configured-test", "a" * 40, "unverified", cause="sandbox denied .env"))
+        plan = replace(self.plan(start="rereview"), plan_id="plan-legacy", head_sha="a" * 40,
+                       verification=verification)
+        ch.CycleHistoryStore(self.store.path).save_plan(
+            plan, cycle_id="cycle-legacy", change_request_id="4", provenance="stopped",
+            stop_reason="stage_not_completed")
+        journal = Journal(self.store.path, "owner/api", "API-7", "cycle-legacy")
+        for command in (test, "python3 -m unittest tests.unit", "manual:evidence-integrity",
+                        self.LEGACY_UNAUTHORIZED):
+            journal.record("stage_result", component="verification_command", command=command)
+        return criteria, digest
+
+    def latest_verification(self):
+        import cycle_history as ch
+        record = ch.CycleHistoryStore(self.store.path).latest_plan("owner/api", "API-7", "4")
+        return record, record["payload"]["plan"]["verification"]
+
+    def test_observed_pre_dispatch_collision_names_the_check_and_its_fields(self):
+        """Reproduces the #393 stop at the boundary that raised it.
+
+        Before #387 a resume that could not bind every command compared only
+        the plain configured command, so it derived `configured-test-<digest>`
+        again and collided with the persisted one: same executor, profile,
+        context and level, but an unbound command and the projection's
+        normalized provenance and reason.
+        """
+        import cycle_history as ch
+        import execution_plan as ep
+        import verification_plan as vp
+        self.legacy_plan_fixture()
+        record, _ = self.latest_verification()
+        with self.assertRaises(ch.HistoryError):
+            ch.restore_plan(record, (self.LEGACY_TEST,))
+        retained = ep.ExecutionPlan.from_dict(record["payload"]["plan"]).verification
+        test = self.LEGACY_TEST
+        spec = replace(vp.configured_check(test, "runtime", "runtime"),
+                       id="configured-test-" + hashlib.sha256(test.encode()).hexdigest()[:16])
+        frozen = next(check for check in retained.checks if check.id == spec.id)
+        self.assertEqual((frozen.provenance, frozen.reason), ("runtime", "runtime"))
+        self.assertEqual(vp.identity_conflict(frozen, spec), ("command",))
+        with self.assertRaises(vp.VerificationError) as caught:
+            retained.extend((spec,))
+        message = str(caught.exception)
+        fingerprint = ch.command_digest(test)[:19]
+        self.assertIn(f"check {spec.id} differs in command", message)
+        self.assertIn(f"frozen unbound {fingerprint}", message)
+        self.assertIn(f"proposed {fingerprint}", message)
+        for private in (test, "provenance", "reason"):
+            self.assertNotIn(private, message)
+        # Bound to today's authorized command, the same check is accepted and
+        # keeps its frozen description instead of being rewritten.
+        bound = ch.restore_plan(record, (test, "python3 -m unittest tests.unit",
+                                         "manual:evidence-integrity", self.LEGACY_UNAUTHORIZED))
+        extended = bound.verification.extend((spec,))
+        self.assertEqual(next(check for check in extended.checks if check.id == spec.id).provenance,
+                         "runtime")
+        self.assertEqual(len(extended.checks), len(retained.checks))
+
+    def test_three_resumes_keep_identities_obligations_and_history(self):
+        """resolve, rereview, resolve on the legacy plan: no duplicate, no throw."""
+        import verification_plan as vp
+        criteria, digest = self.legacy_plan_fixture()
+        test = self.LEGACY_TEST
+        _, before = self.latest_verification()
+        ids = [check["id"] for check in before["checks"]]
+        obligations = {check["id"]: (check["required"], check["criteria"]) for check in before["checks"]}
+        configured = vp.Check("configured-test", test, "runtime", "runtime", "project", True,
+                              provenance="project", reason="configured test command")
+        unit = vp.Check("family-unit", "python3 -m unittest tests.unit", "codex", "deep_coder",
+                        "project", True, criteria=("AC-1",))
+        history = [tuple((item["id"], item["head_sha"], item["result"]) for item in before["results"])]
+        for index, start in enumerate(("resolve", "rereview", "resolve")):
+            head = "bcd"[index] * 40
+            reported = {"version": 2, "conclusion": "verified", "checks": [
+                {**spec.to_dict(), "head_sha": head, "result": "pass",
+                 "evidence": [{"command": spec.command, "exit_code": 0, "executed": 2}]}
+                for spec in (configured, unit)]}
+            status = "RESOLVED" if start == "resolve" else "CHANGES_REQUESTED"
+            body = block(status, head_sha=head, tests=reported, security_audit_ran=True)
+            implementer = Talker("codex", body if start == "resolve" else None)
+            reviewer = Talker("claude", body if start == "rereview" else block("BLOCKED"))
+            with self.subTest(resume=index, start=start):
+                report = self.run_cycle(implementer, reviewer, start_from=start,
+                    change_request_id="4", execution_plan=self.plan(start=start),
+                    allowed_test_command=test, allowed_verify_commands=("python3 -m unittest",),
+                    criteria_reader=lambda *_args, **_kw: criteria,
+                    work_item_provider="github", work_item_repository="owner/api")
+                self.assertNotIn("frozen", report.stopped_because or "")
+                self.assertTrue(report.stages, "the resume must reach a dispatch")
+                self.assertFalse(any("report rejected" in line for _, line in report.notes), report.notes)
+                _, verification = self.latest_verification()
+                self.assertEqual([check["id"] for check in verification["checks"]], ids)
+                self.assertEqual({check["id"]: (check["required"], check["criteria"])
+                                  for check in verification["checks"]}, obligations)
+                results = tuple((item["id"], item["head_sha"], item["result"])
+                                for item in verification["results"])
+                self.assertEqual(results[:len(history[-1])], history[-1])
+                self.assertIn(("configured-test", head, "pass"), results)
+                self.assertIn(("family-unit", head, "pass"), results)
+                history.append(results)
+                restored = vp.VerificationPlan.from_dict({**verification, "criteria": criteria.to_dict()})
+                # A new HEAD keeps history but needs fresh evidence of its own;
+                # the unbound and the manual checks stay unverified on it.
+                for check_id in ("family-browser", "evidence-integrity"):
+                    self.assertEqual(restored.current(check_id, head), "unverified")
+                self.assertEqual(restored.current("configured-test-" + digest, head), "unverified")
+                self.assertEqual(restored.cap("verified", head), "not_verified")
+        self.assertIn(("family-unit", "a" * 40, "pass"), history[-1])
+        self.assertIn(("configured-test", "a" * 40, "unverified"), history[-1])
+
+    def test_partial_restore_binds_only_authorized_commands(self):
+        import cycle_history as ch
+        self.legacy_plan_fixture()
+        record, _ = self.latest_verification()
+        plan = ch.restore_plan(record, (self.LEGACY_TEST, "python3 -m unittest tests.unit"),
+                               partial=True)
+        commands = {check.id: check.command for check in plan.verification.checks}
+        self.assertEqual(commands["configured-test"], self.LEGACY_TEST)
+        self.assertEqual(commands["family-unit"], "python3 -m unittest tests.unit")
+        self.assertEqual(commands["family-browser"], ch.command_digest(self.LEGACY_UNAUTHORIZED))
+        self.assertEqual(commands["evidence-integrity"], ch.command_digest("manual:evidence-integrity"))
+        self.assertIn("pass", {result.result for result in plan.verification.results
+                               if result.id == "family-unit"})
+        with self.assertRaises(ch.HistoryError):
+            ch.restore_plan(record, (self.LEGACY_TEST,))
+
+    def test_persisted_metadata_is_not_an_identity_conflict(self):
+        import cycle_history as ch
+        import verification_plan as vp
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works",))
+        original = vp.Check("clone-suite", "python3 -m unittest tests.clone", "claude",
+                            "deep_coder", "disposable clone (no .env)", True, criteria=("AC-1",),
+                            provenance="agent", reason="private reasoning")
+        plan = replace(self.plan(start="rereview"), plan_id="plan-meta", head_sha="a" * 40,
+                       verification=vp.VerificationPlan(criteria, (original,)))
+        store = ch.CycleHistoryStore(self.store.path)
+        store.save_plan(plan, cycle_id="cycle-meta", change_request_id="4", provenance="stopped")
+        record = store.latest_plan("owner/api", "API-7", "4")
+        restored = ch.restore_plan(record, (original.command,)).verification
+        frozen = restored.checks[0]
+        self.assertTrue(frozen.context.startswith("ref-"))
+        self.assertEqual((frozen.provenance, frozen.reason), ("runtime", "runtime"))
+        for proposal in (original, frozen, replace(original, provenance="project", reason="other")):
+            with self.subTest(proposal=proposal.context[:8]):
+                self.assertEqual(restored.extend((proposal,)).checks, (frozen,))
+        # The persisted reference is the projection's own rule.
+        self.assertEqual(vp.persisted_token(original.context), frozen.context)
+
+    def test_genuine_identity_changes_are_rejected_and_borrow_no_evidence(self):
+        import verification_plan as vp
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works",))
+        frozen = vp.Check("focused", "python3 -m unittest tests.focused", "codex", "cheap_coder",
+                          "project", True, criteria=("AC-1",))
+        plan = vp.VerificationPlan(criteria, (frozen,)).record(vp.CheckResult(
+            "focused", "a" * 40, "pass", ({"command": frozen.command, "exit_code": 0, "executed": 1},)))
+        changes = {"command": "python3 -m unittest tests.other", "executor": "claude",
+                   "profile": "deep_coder", "context": "boundary", "level": "boundary"}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                changed = replace(frozen, **{field: value})
+                with self.assertRaises(vp.VerificationError) as caught:
+                    plan.extend((changed,))
+                self.assertIn(f"check focused differs in {field} (frozen ", str(caught.exception))
+                self.assertNotIn("tests.other", str(caught.exception))
+                # A report under the changed identity records nothing at all.
+                payload, updated = rc._normalize_test_payload({"head_sha": "b" * 40, "tests": {
+                    "version": 2, "conclusion": "verified", "checks": [{**changed.to_dict(),
+                        "head_sha": "b" * 40, "result": "pass", "evidence": [{
+                            "command": changed.command, "exit_code": 0, "executed": 1}]}]}}, plan)
+                self.assertIs(updated, plan)
+                self.assertEqual(updated.current("focused", "b" * 40), "unverified")
+                self.assertEqual(payload["tests"]["conclusion"], "not_verified")
+                self.assertIn("check focused differs in " + field, payload["tests"]["rejected"])
+        # An agent cannot bind a persisted fingerprint by reporting its command.
+        unbound = replace(frozen, command="sha256:" + hashlib.sha256(frozen.command.encode()).hexdigest())
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.VerificationPlan(criteria, (unbound,)).extend((frozen,))
+        self.assertIn("frozen unbound sha256:", str(caught.exception))
+        with self.assertRaises(vp.VerificationError) as caught:
+            plan.extend((replace(frozen, required=False, criteria=()),))
+        self.assertIn("check focused would lose required, criteria", str(caught.exception))
+
+    def test_rejected_report_note_is_safe_for_a_terminal(self):
+        report = self.run_cycle(Talker("codex", block("IMPLEMENTED", head_sha="a" * 40, tests={
+            "version": 2, "conclusion": "verified", "checks": [{
+                "id": "forged\x1b[2Kline", "command": "python3 -m unittest tests.focused",
+                "executor": "codex", "profile": "cheap_coder", "context": "project",
+                "required": True, "head_sha": "a" * 40, "result": "pass", "evidence": "bad"}]})),
+            Talker("claude", block("APPROVED", head_sha="a" * 40, security_audit_ran=True)),
+            execution_plan=self.plan(), work_item_provider="github", work_item_repository="owner/api")
+        notes = [line for _, line in report.notes if "report rejected" in line]
+        self.assertEqual(len(notes), 1, report.notes)
+        self.assertNotIn("\x1b", notes[0])
+        self.assertIn("must be an array", notes[0])
+
+    def test_pre_dispatch_identity_stop_names_check_and_fields(self):
+        import cycle_history as ch
+        import verification_plan as vp
+        test = self.LEGACY_TEST
+        other = "python3 -m unittest tests.legacy"
+        digest = hashlib.sha256(test.encode()).hexdigest()[:16]
+        criteria = vp.Criteria("github", "b" * 64, "evaluable", ("works",))
+        # A crafted genuine collision: the derived ID already names another command.
+        verification = vp.VerificationPlan(criteria, (
+            vp.Check("configured-test", other, "runtime", "runtime", "project", True),
+            vp.Check("configured-test-" + digest, other, "runtime", "runtime", "project", True)))
+        plan = replace(self.plan(start="rereview"), plan_id="plan-crafted", head_sha="a" * 40,
+                       verification=verification)
+        ch.CycleHistoryStore(self.store.path).save_plan(plan, cycle_id="cycle-crafted",
+            change_request_id="4", provenance="stopped", stop_reason="stage_not_completed")
+        reviewer = Talker("claude", block("APPROVED"))
+        report = self.run_cycle(Talker("codex"), reviewer, start_from="rereview",
+            change_request_id="4", execution_plan=self.plan(start="rereview"),
+            allowed_test_command=test, allowed_verify_commands=("python3 -m unittest",),
+            criteria_reader=lambda *_args, **_kw: criteria,
+            work_item_provider="github", work_item_repository="owner/api")
+        self.assertEqual(report.stages, [])
+        self.assertEqual(reviewer.dispatched, [])
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertEqual(report.stop_reason, "readiness_unconfirmed")
+        self.assertIn(f"cannot rewrite frozen check identity: check configured-test-{digest} "
+                      "differs in command (frozen unbound sha256:", report.stopped_because)
+        self.assertNotIn(test, report.stopped_because)
+        self.assertNotIn(other, report.stopped_because)
+
     def test_new_sensitive_diff_promotes_a_previously_omitted_audit(self):
         from cycle_plan import PlanRuntime
         import execution_plan as ep

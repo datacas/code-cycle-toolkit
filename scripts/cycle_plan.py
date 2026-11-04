@@ -145,6 +145,7 @@ class PlanRuntime:
             except (HistoryError, ValueError, TypeError):
                 self.plan_partial = True
         if record is not None:
+            commands: tuple[str, ...] = ()
             try:
                 commands = self.authorized_bindings()
                 recovered = restore_plan(record, commands)
@@ -187,9 +188,11 @@ class PlanRuntime:
                     # Keep unavailable command identities as obligations. A
                     # fingerprint is not executable and grants no permission.
                     # Re-authorizing its exact command permits a later resume.
+                    # Commands authorized today are still bound, so the
+                    # configured check keeps one identity across resumes (#393).
                     try:
-                        retained = ExecutionPlan.from_dict(record["payload"]["plan"])
-                    except (KeyError, TypeError, ContractError):
+                        retained = restore_plan(record, commands, partial=True)
+                    except (KeyError, TypeError, ContractError, HistoryError):
                         retained = None
                     self.state.verification_plan = retained.verification if retained is not None else None
                     if retained is not None and retained.verification is not None:
