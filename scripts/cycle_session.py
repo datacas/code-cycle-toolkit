@@ -51,6 +51,9 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.max_iterations = options["max_iterations"]
         self.cwd = options["cwd"]
         self.timeout = options["timeout"]
+        self.verification_answers = options.get("verification_answers") or {}
+        if any(value not in {"accept", "outside"} for value in self.verification_answers.values()):
+            raise ValueError("verification answers must be accept or outside")
         self.local_only = options["local_only"]
         self.change_bases = options["change_bases"]
         self.verification_available = options["verification_available"]
@@ -255,7 +258,11 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
             barrier = self.verification_barrier()
             if barrier is not None:
                 return barrier
-            if self.execution_plan.objective != "merge_ready":
+            if self.report.pending_verification:
+                status = "VERIFICATION_INCOMPLETE"
+                stop_reason = "verification_unverified"
+                because = "Required verification accepted as not_verified; other applicable stages and CI completed."
+            if status == self.api.APPROVED_END and self.execution_plan.objective != "merge_ready":
                 status = self.api.UNRESOLVED_END
                 stop_reason = ("approved" if self.execution_plan.objective == "verified_change"
                                else "local_only")

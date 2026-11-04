@@ -438,6 +438,23 @@ check and, when something changed, one filtered comment read.
 
 ### Execution plan history (schema 25)
 
+Schema 27 adds the non-successful terminal cycle status
+`VERIFICATION_INCOMPLETE`, with `stop_reason=verification_unverified`. It occurs
+only after the user expressly accepts a required check as `not_verified` and
+the other applicable stages and the current HEAD's CI gate complete. Pending
+decisions stay `HUMAN_INTERVENTION`; failing CI follows normal failure handling.
+Neither status grants merge readiness or turns CI into local test evidence.
+`cycle_status` renders incomplete verification as a warning; `stats` counts it
+as its own final status. Schema-26 records remain readable unchanged.
+
+The journal's `decision_asked` and `decision_answered` events bind the answer to
+the check, HEAD, cause and conditions, with no new execution-plan field. The
+runtime asks once and unchanged unanswered resumes stay stopped; accepted
+checks are not rerun. A changed check, HEAD or relevant condition is evaluated
+again. A time-limit overrun keeps its command, cause `time_limit`, limit and
+available evidence as unverified. See the
+[decision and terminal-state flow](execution-plan.md#required-verification-that-cannot-complete).
+
 Schema 25 adds `verification_unverified` to the closed stop reasons and the
 append-only `cycle_execution_plans` history table. Each revision records cycle,
 repository, work item, change request, plan identity, revision, current HEAD,

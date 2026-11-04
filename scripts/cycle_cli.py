@@ -91,6 +91,8 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                              "and deny are stored only for a scope an earlier run asked about")
     parser.add_argument("--repair-approval", default=None,
                         help="approve exactly one proposed comment repair: COMMENT_ID:SHA256")
+    parser.add_argument("--verification-answer", action="append", default=[], metavar="KEY=ANSWER",
+                        help="answer a journal verification decision: KEY=accept|outside (repeatable)")
     parser.add_argument("--execution-profile", choices=api.EXECUTION_PROFILES, default=None,
                         help=("how deep the cycle goes (default: code_cycle.execution.profile "
                               f"in {api.CONFIG_NAME}, else standard); separate from the model "
@@ -122,6 +124,10 @@ def main(api: Any, argv: list[str] | None = None) -> int:
         parser.error("--json needs --dry-run")
     if args.dry_run and args.detach:
         parser.error("--dry-run runs nothing to detach")
+    for answer in args.verification_answer:
+        key, separator, value = answer.rpartition("=")
+        if not separator or not key.startswith("verification:") or value not in {"accept", "outside"}:
+            parser.error("--verification-answer must be verification:<digest>=accept|outside")
 
     try:
         api.validate_start(args.start_from, args.change_request, local_only=args.local_only,
@@ -267,6 +273,7 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                 ci_policy=ci_policy,
                 ci_timeout=ci_timeout,
                 repair_approval=args.repair_approval,
+                verification_answers=dict(value.rsplit("=", 1) for value in args.verification_answer),
                 consent=consent,
                 execution_plan=execution_plan,
                 security_rule=api.GateRule.from_config(config),

@@ -258,6 +258,13 @@ class StageDispatch:
                         f"({asked.grant.resource})", reported=reported,
                         stop_reason="permission_required")
         if not outcome.succeeded:
+            # Only a stage that verifies a fixed HEAD can leave its checks
+            # unverified by a time-limit overrun; others stop as before.
+            if (outcome.role in {"review", "rereview"} and self.plan_head
+                    and outcome.result is not None and outcome.result.failure_code == "timeout"):
+                stopped = self.verification_timeout(outcome)
+                if stopped is not None:
+                    return stopped
             blocked_effort = (
                 (outcome.result is not None
                  and outcome.result.failure_code == "unsupported_effort")
