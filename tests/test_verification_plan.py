@@ -297,6 +297,28 @@ class ResultTests(unittest.TestCase):
         with self.assertRaisesRegex(vp.VerificationError, r"cause.*received NoneType.*non-empty text"):
             vp.normalize_tests(payload, HEAD, plan=plan)
 
+    def test_v2_unverified_non_text_cause_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(result="unverified", evidence=None, cause=5, attempts=None)
+        payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests(payload, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("cause", message)
+        self.assertIn("int", message)
+        self.assertIn("omitted or text", message)
+
+    def test_v2_non_text_result_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(result=[], evidence=None, cause=None, attempts=None)
+        payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests(payload, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("result", message)
+        self.assertIn("list", message)
+        self.assertIn("pass, fail, or unverified", message)
+
     def test_v2_rejections_describe_field_received_type_and_expected_format(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
         for field, value, expected in (("evidence", "bad", "array"), ("attempts", 3, "array"),

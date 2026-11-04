@@ -509,6 +509,12 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             cause = ""
         result = CheckResult(check.id, entry.get("head_sha"), entry.get("result", ""),
                              evidence, cause, attempts)
+        if not isinstance(result.result, str) or result.result not in {"pass", "fail", "unverified"}:
+            raise _invalid_field(f"checks[{check.id}].result", entry.get("result", _MISSING),
+                                 "pass, fail, or unverified")
+        if not isinstance(cause, str):
+            raise _invalid_field(f"checks[{check.id}].cause", entry.get("cause", _MISSING),
+                                 "omitted or text")
         if result.result == "unverified" and not cause.strip():
             raise _invalid_field(f"checks[{check.id}].cause", entry.get("cause", _MISSING),
                                  "non-empty text for unverified results")
