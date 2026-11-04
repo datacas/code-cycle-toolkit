@@ -4591,6 +4591,12 @@ class CompleteDiffTests(RunCycleTestCase):
         self.assertEqual(3, len(read))  # review, rereview, resolve
         paths = {self.assert_the_whole_diff(prompt, content) for prompt, content in read}
         self.assertEqual(3, len(paths))
+        for adapter in (reviewer, implementer):
+            for kwargs in adapter.dispatch_kwargs:
+                policy = kwargs.get("command_policy")
+                if policy is not None:
+                    self.assertEqual(1, len(policy.evidence_paths))
+                    self.assertIn(Path(policy.evidence_paths[0]), paths)
         self.assertEqual([], list(self.scratch.iterdir()))
         # A scripted adapter is not a CLI this layer starts: nothing to grant.
         self.assertTrue(all("read_dirs" not in kw for kw in reviewer.dispatch_kwargs))

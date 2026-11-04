@@ -185,6 +185,8 @@ class StagePolicy:
     #: instead of deriving it from its own `__file__`.
     runtime_dir: str = field(default_factory=lambda: _runtime_directory())
     command_permissions: tuple[dict[str, Any], ...] = ()
+    #: Exact read-only evidence files supplied by the runtime, outside the checkout.
+    evidence_paths: tuple[str, ...] = ()
 
     @property
     def triage_validator_path(self) -> str:
@@ -270,7 +272,7 @@ class StagePolicy:
         if unknown:
             raise PolicyError(f"unknown stage policy keys: {', '.join(unknown)}")
         data["verify_prefixes"] = tuple(data.get("verify_prefixes") or ())
-        for key in ("tools", "commands", "integrations", "registry_domains", "credential_reads", "command_permissions"):
+        for key in ("tools", "commands", "integrations", "registry_domains", "credential_reads", "command_permissions", "evidence_paths"):
             data[key] = tuple(data.get(key) or ())
         return cls(**data)
 
@@ -676,17 +678,99 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
                     raise PolicyError(f"find {word} runs, deletes or writes; it is not allowed")
         if cwd:
             root = Path(cwd).resolve()
-            for word in words[1:]:
-                operand = word.split("=", 1)[-1] if word.startswith("--") else word
-                if operand and not operand.startswith("-"):
-                    path = (root / os.path.expanduser(operand)).resolve()
-                    if path != root and root not in path.parents and not inside_tmpdir(str(path), policy.tmpdir):
-                        raise PolicyError("reading outside the stage workspace needs operation consent")
+            evidence = {Path(path).resolve() for path in policy.evidence_paths}
+            for operand in read_operands(words):
+                path = (root / os.path.expanduser(operand)).resolve()
+                if (path != root and root not in path.parents and path not in evidence
+                        and not inside_tmpdir(str(path), policy.tmpdir)):
+                    raise PolicyError("reading outside the stage workspace needs operation consent")
         return
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
 
 
-def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> None:
+def read_operands(words: list[str]) -> list[str]:
+    """File operands of the read tools, excluding filters and option data.
+
+    This is path classification, not a replacement for external read isolation.
+    """
+    program, args = words[0], words[1:]
+    paths: list[str] = []
+    pattern_seen = program not in {"grep", "jq"}
+    find_roots = True
+    options = True
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if options and word == "--":
+            options = False
+            continue
+        if program == "find":
+            if find_roots and (word in {"-H", "-L", "-P"} or re.fullmatch(r"-O[0-3]", word)):
+                continue
+            if find_roots and word == "-D":
+                index += 1
+                continue
+            if (word in {"-f", "-files0-from", "-newer", "-anewer", "-cnewer", "-samefile"}
+                    or re.fullmatch(r"-newer[aBcm][aBcm]", word)):
+                if index < len(args):
+                    paths.append(args[index])
+                    index += 1
+                find_roots &= word == "-f"
+            elif word.startswith("-") or word in {"!", "(", ")"}:
+                find_roots = False
+            elif find_roots:
+                paths.append(word)
+            continue
+        if options and word.startswith("-") and word != "-":
+            name, separator, value = word.partition("=")
+            count, path_value = 0, False
+            if program == "grep":
+                if name in {"--regexp", "--file", "--exclude-from"}:
+                    pattern_seen |= name != "--exclude-from"
+                    count, path_value = 1, name != "--regexp"
+                elif name in {"--after-context", "--before-context", "--context", "--max-count",
+                              "--include", "--exclude", "--exclude-dir", "--binary-files",
+                              "--directories", "--devices", "--label"}:
+                    count = 1
+                elif not word.startswith("--"):
+                    for offset, letter in enumerate(word[1:], 2):
+                        if letter in "efABCm":
+                            count, path_value = 1, letter == "f"
+                            pattern_seen |= letter in "ef"
+                            value = word[offset:]
+                            separator = "=" if value else ""
+                            break
+            elif program == "jq":
+                if name in {"--arg", "--argjson", "--slurpfile", "--rawfile"}:
+                    count, path_value = 2, name in {"--slurpfile", "--rawfile"}
+                elif name in {"-f", "--from-file"}:
+                    pattern_seen = True
+                    count, path_value = 1, True
+                elif name in {"-L", "--indent"}:
+                    count, path_value = 1, name == "-L"
+                elif word.startswith(("-f", "-L")):
+                    pattern_seen |= word.startswith("-f")
+                    count, path_value, separator, value = 1, True, "=", word[2:]
+            elif program in {"head", "tail"} and name in {"-n", "-c", "--lines", "--bytes", "--sleep-interval", "--pid"}:
+                count = 1
+            elif program == "wc" and name == "--files0-from":
+                count, path_value = 1, True
+            if count:
+                values = ([value] if separator else []) + args[index:index + count - bool(separator)]
+                index += count - bool(separator)
+                if path_value and len(values) == count:
+                    paths.append(values[-1])
+            continue
+        if not pattern_seen:
+            pattern_seen = True
+        elif word != "-":
+            paths.append(word)
+    return paths
+
+
+def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
+               consent: bool = False) -> None:
     while args and args[0] == "--no-pager":
         args = args[1:]
     if not args or args[0].startswith("-"):
@@ -699,6 +783,8 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
         allowed |= GIT_REVIEW_READ
     if policy.role in WRITING_ROLES:
         allowed |= GIT_WRITE
+    if consent:
+        allowed.add("ls-remote")
     if subcommand == "branch":
         if rest != ["--show-current"]:
             raise PolicyError("git branch is allowed only as git branch --show-current")
@@ -720,6 +806,20 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run) ->
         return
     if subcommand not in allowed:
         raise PolicyError(f"git {subcommand} is not in the {policy.role} stage's command table")
+    if subcommand == "ls-remote":
+        positional = []
+        options = True
+        for word in rest:
+            if options and word == "--":
+                options = False
+            elif options and word.startswith("-"):
+                if word not in {"--heads", "--tags", "--refs", "--quiet", "--symref",
+                                "--exit-code", "--get-url", "-h", "-t", "-q"}:
+                    raise PolicyError(f"git ls-remote option {word} retains its argument guard")
+            else:
+                positional.append(word)
+        if not positional or positional[0] != "origin":
+            raise PolicyError("git ls-remote may use only the origin remote")
     for word in rest:
         if (any(_names_git_option(word, option) for option in GIT_EXECUTING_OPTIONS)
                 or word.startswith("-O")
@@ -944,7 +1044,8 @@ def _same_repo(value: str, repo: str | None) -> bool:
     return bool(repo) and value.lower().removesuffix(".git") == repo.lower()
 
 
-def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> None:
+def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
+              consent: bool = False) -> None:
     if args == GH_API_USER:
         return
     # Global repository selection may appear anywhere and must be this cycle's.
@@ -967,6 +1068,14 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> 
         if policy.role != "resolve":
             raise PolicyError("gh api graphql is available only to the resolve stage")
         return _check_thread_call(remaining[2:], policy, cwd=cwd, run=run)
+    if consent and remaining[:1] == ["api"]:
+        expected = f"repos/{policy.repo}/pulls/{policy.pr_number}" if policy.repo and policy.pr_number else None
+        if len(remaining) > 1 and remaining[1] == expected:
+            # A grant lifts table membership, never API method, endpoint or input guards.
+            options = remaining[2:]
+            if options and (len(options) != 2 or options[0] != "--jq"):
+                raise PolicyError("a granted PR API read takes only --jq; GET is required")
+            return
     if remaining[:1] == ["api"] and policy.role == "resolve":
         if remaining != args:
             raise PolicyError("the annotations read takes only --jq and --paginate")
@@ -2105,9 +2214,9 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                                 word.startswith("-") and not word.startswith("--")
                                 and any(letter in word[1:] for letter in "dD") for word in words[2:])):
                     return "deletion of Git refs is never allowed"
-                _check_git(words[1:], policy, cwd=cwd, run=subprocess.run)
+                _check_git(words[1:], policy, cwd=cwd, run=subprocess.run, consent=True)
             elif program == "gh":
-                _check_gh(words[1:], policy, cwd=cwd, run=subprocess.run)
+                _check_gh(words[1:], policy, cwd=cwd, run=subprocess.run, consent=True)
             elif program == "find":
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"

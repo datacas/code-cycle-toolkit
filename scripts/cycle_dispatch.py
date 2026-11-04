@@ -85,6 +85,8 @@ class StageDispatch:
                     "claude_allowed_commands": (self.allowed_test_command,),
                 }
             command_policy = self.stage_policy(role, change_request_id)
+            if artifact is not None and command_policy is not None:
+                command_policy = self.api.replace(command_policy, evidence_paths=(str(artifact.path),))
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             if change_request_id:
                 self.journal.change_request_id = change_request_id

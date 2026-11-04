@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -96,6 +97,77 @@ class OperationTests(unittest.TestCase):
         for term in ("rm -rf scratch", "Risk:", "Pro:", "Con:", "Alternative:"):
             self.assertIn(term, question["prompt"])
 
+    def test_ac2_git_and_gh_grants_survive_retry_resume_and_second_issue(self):
+        for command in ("git ls-remote origin refs/heads/topic",
+                        "gh api repos/owner/repo/pulls/409 --jq .head.sha"):
+            for answer in ("cycle", "persistent", "forever"):
+                with self.subTest(command=command, answer=answer):
+                    store = grants.ConsentStore(self.root / (answer + command[:2] + ".json"))
+                    broker = grants.ConsentBroker("owner/repo", platform="linux", store=store,
+                                                  cycle_id="one", task_id="406")
+                    policy = replace(self.policy, change_request_id="409")
+                    self.assertFalse(sp.check(command, policy).allowed)
+                    blocker = cp.refused_operation([command], policy, broker, "claude")
+                    self.assertIsNotNone(blocker)
+                    grant = broker.grant_for(blocker)
+                    broker.apply_answer(grant, grant.scope_for("claude", "linux"), answer)
+                    for task, cycle in (("406", "one"), ("406", "one"), ("407", "two")):
+                        fresh = grants.ConsentBroker("owner/repo", platform="linux", store=store,
+                                                     cycle_id=cycle, task_id=task)
+                        allowed = replace(policy, command_permissions=fresh.command_entries("claude", "implement"))
+                        self.assertEqual(answer != "cycle" or task == "406", sp.check(command, allowed).allowed)
+                        self.assertFalse(sp.check(command.replace("origin", "other").replace("/409", "/410"),
+                                                  allowed).allowed)
+
+    def test_ac4_granted_git_gh_reads_preserve_direct_guards(self):
+        commands = ("git ls-remote --upload-pa=evil origin", "git ls-remote ext::evil",
+                    "git ls-remote --server-option origin ext::evil", "git ls-remote -o origin ext::evil",
+                    "git -c alias.x=evil x", "gh api repos/other/repo/pulls/409",
+                    "gh api repos/owner/repo/pulls/410", "gh api repos/owner/repo/pulls/409 -X DELETE",
+                    "gh api repos/owner/repo/pulls/409 -f body=changed",
+                    "gh api repos/owner/repo/pulls/409 --hostname evil.invalid",
+                    "gh pr edit 409 --body changed", "gh pr merge 409")
+        for command in commands:
+            with self.subTest(command=command):
+                policy = replace(self.policy, role="resolve", change_request_id="409")
+                grant, _ = self.grant(command, policy)
+                policy = replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+                self.assertFalse(sp.check(command, policy).allowed)
+                self.assertIsNone(cp.refused_operation([command], policy, self.broker, "claude"))
+
+    def test_ac4_read_filters_are_not_paths_but_file_options_are(self):
+        for command in ('grep -n "/api/" file.py', 'grep -rn "../" .', "jq '..' file.json",
+                        "grep -e /api/ -n file.py", "grep --regexp=/api/ file.py",
+                        'jq --arg name /api/ "." file.json', "head -n 20 file.py",
+                        "find . -name /api/"):
+            with self.subTest(command=command):
+                self.assertTrue(sp.check(command, self.policy, cwd=str(self.root)).allowed)
+        for command in ("grep -f /outside/patterns file.py", "grep -f/outside/patterns file.py",
+                        "grep -n /api/ /outside/file.py", "grep --exclude-from=/outside/patterns token .",
+                        "jq -f /outside/filter file.json",
+                        "jq --rawfile data /outside/data . file.json", "head -n 20 /outside/file.py",
+                        "find /outside -name '*.py'", "find -L /outside -name '*.py'",
+                        "find -H /outside", "find -P /outside", "find -files0-from /outside/paths",
+                        "find . -newer /outside/reference", "find . -samefile /outside/reference",
+                        "find . -neweram /outside/reference", "cat -- /outside/file"):
+            with self.subTest(command=command):
+                self.assertFalse(sp.check(command, self.policy, cwd=str(self.root)).allowed)
+
+    def test_ac4_only_runtime_supplied_evidence_file_is_exempt(self):
+        evidence = self.root.parent / "runtime-evidence" / "accumulated.diff"
+        policy = replace(self.policy, evidence_paths=(str(evidence),))
+        restored = sp.StagePolicy.from_json(policy.to_json())
+        for program in ("wc -l", "cat", "head -n 10"):
+            self.assertTrue(sp.check(program + " " + shlex.quote(str(evidence)), restored,
+                                     cwd=str(self.root)).allowed)
+        for path in (evidence.parent, evidence.with_name("other.diff")):
+            self.assertFalse(sp.check(shlex.join(["cat", str(path)]), restored, cwd=str(self.root)).allowed)
+
+    def test_quoted_windows_paths_preserve_backslashes_in_bash(self):
+        for path in (r"C:\Fixture\Runner\auth.json", r"C:\Temp\snapshot", r"C:\Temp\helper.py"):
+            command = shlex.join(["stat", path])
+            self.assertEqual(["stat", path], sp.parse_command(command, None).words)
+
     def test_ac4_interpreter_exact_code_not_arbitrary_prefix(self):
         command = "python3 -c 'print(1)'"
         grant, scope = self.grant(command)
@@ -164,18 +236,18 @@ class OperationTests(unittest.TestCase):
                                                        self.broker, "claude"))
 
     def test_ac4_protected_credentials_are_never_grantable(self):
-        command = f"cat {Path.home() / '.codex' / 'auth.json'}"
+        command = shlex.join(["cat", str(Path.home() / ".codex" / "auth.json")])
         grant, _ = self.grant(command)
         policy = replace(self.policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
         self.assertFalse(sp.check(command, policy).allowed)
         self.assertIsNone(cp.refused_operation([command], policy, self.broker, "claude"))
 
     def test_ac4_tmpdir_only_normalizes_resolved_members_not_code(self):
-        command = f"stat {self.root / 'snapshot'}"
+        command = shlex.join(["stat", str(self.root / "snapshot")])
         grant, _ = self.grant(command)
         self.assertIn({"tmpdir": "snapshot"}, grant.operation["pattern"]["words"])
         (self.root / "escape").symlink_to(self.root.parent, target_is_directory=True)
-        escaped, _ = self.grant(f"stat {self.root / 'escape' / 'snapshot'}")
+        escaped, _ = self.grant(shlex.join(["stat", str(self.root / "escape" / "snapshot")]))
         self.assertNotIn({"tmpdir": "snapshot"}, escaped.operation["pattern"]["words"])
         code, _ = self.grant(f"python3 -c 'print(\"{self.root}/snapshot\")'")
         self.assertIn(str(self.root), code.operation["pattern"]["words"][-1])
@@ -203,6 +275,33 @@ class OperationTests(unittest.TestCase):
         self.assertFalse(essential)
         self.assertIn('"status": "IMPLEMENTED"', changed)
 
+    def test_ac6_every_runtime_completion_ignores_accessory_refusal(self):
+        completions = cp.completion_statuses()
+        completions["review"] |= {"REVIEW_PASSED_AWAITING_CI"}
+        completions["rereview"] |= {"REVIEW_PASSED_AWAITING_CI"}
+        completions["issue_review"] |= {"NEEDS_REFINEMENT"}
+        for role, statuses in completions.items():
+            for status in statuses:
+                with self.subTest(role=role, status=status):
+                    grant, _ = self.grant(policy=replace(self.policy, role=role))
+                    blocker = cp.request_record(grant, "stat /opt/runtime", "table")
+                    for answer in (None, "deny"):
+                        changed, essential = cp.reconcile_result(block(status), blocker, answer, role)
+                        self.assertFalse(essential)
+                        self.assertIn(f'"status": "{status}"', changed)
+                    changed, essential = cp.reconcile_result(block("BLOCKED", completed_status=status,
+                        head_sha="a" * 40, change_request_id="409", permission_effects=[{
+                            "command": blocker["command"], "essential": False}]), blocker, "deny", role)
+                    self.assertFalse(essential)
+                    self.assertIn(f'"status": "{status}"', changed)
+
+    def test_ac6_unknown_or_failed_status_does_not_claim_completion(self):
+        grant, _ = self.grant()
+        blocker = cp.request_record(grant, "stat /opt/runtime", "table")
+        for role, status in (("review", "FAILED"), ("implement", "NEEDS_REFINEMENT"), ("unknown", "CHANGES_REQUESTED")):
+            _, essential = cp.reconcile_result(block(status), blocker, None, role)
+            self.assertTrue(essential)
+
     def test_ac7_list_and_revoke_apply_before_next_stage(self):
         for answer, repo in (("persistent", "owner/repo"), ("forever", "*"),
                              ("cycle", "cycle:cycle-one:owner/repo")):
@@ -225,8 +324,30 @@ class OperationTests(unittest.TestCase):
         self.assertEqual(0, listed.returncode, listed.stderr)
         self.assertTrue(any(item["grant"] == grant.id for item in json.loads(listed.stdout)))
         command[2] = "revoke"
+        wrong_scope = subprocess.run(command + ["--grant-id", grant.id],
+                                    cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(2, wrong_scope.returncode)
+        self.assertIn("scope 'owner/repo'", wrong_scope.stderr)
+        self.assertTrue(self.broker.command_entries("claude", "implement"))
         revoked = subprocess.run(command + ["--grant-id", grant.id, "--global"],
                                  cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(0, revoked.returncode, revoked.stderr)
+        self.assertFalse(self.broker.command_entries("claude", "implement"))
+
+    def test_ac7_cycle_cli_requires_complete_selector_and_revokes(self):
+        self.broker.cycle_id, self.broker.task_id = "one", "406"
+        grant, scope = self.grant()
+        self.broker.apply_answer(grant, scope, "cycle")
+        env = {**os.environ, "CODE_CYCLE_CONSENT_FILE": str(self.store.path)}
+        command = [sys.executable, str(ROOT / "scripts" / "consent_control.py"), "revoke",
+                   "--repo", "owner/repo", "--executor", "claude", "--platform", "linux",
+                   "--grant-id", grant.id, "--cycle-id", "one"]
+        incomplete = subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(2, incomplete.returncode)
+        self.assertIn("both --cycle-id and --task-id", incomplete.stderr)
+        self.assertTrue(self.broker.command_entries("claude", "implement"))
+        revoked = subprocess.run(command + ["--task-id", "406"], cwd=self.root, env=env,
+                                 capture_output=True, text=True)
         self.assertEqual(0, revoked.returncode, revoked.stderr)
         self.assertFalse(self.broker.command_entries("claude", "implement"))
 
@@ -244,6 +365,22 @@ class OperationTests(unittest.TestCase):
             self.assertEqual(allowed, result.stdout == "")
             if not allowed:
                 self.assertEqual("deny", json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"])
+
+    def test_ac2_git_gh_consent_reaches_the_real_hook_process(self):
+        policy = replace(self.policy, change_request_id="409")
+        for command, denied in (("git ls-remote origin", "git ls-remote other"),
+                                ("gh api repos/owner/repo/pulls/409 --jq .head.sha",
+                                 "gh api repos/owner/repo/pulls/410 --jq .head.sha")):
+            grant, scope = self.grant(command, policy)
+            self.broker.apply_answer(grant, scope, "persistent")
+            path = self.root / "policy.json"
+            path.write_text(replace(policy, command_permissions=self.broker.command_entries("claude", "implement")).to_json())
+            for candidate, allowed in ((command, True), (denied, False)):
+                event = {"tool_name": "Bash", "tool_input": {"command": candidate}, "cwd": str(self.root)}
+                result = subprocess.run([sys.executable, str(ROOT / "scripts" / "stage_permissions.py"),
+                                         "hook", str(path)], input=json.dumps(event), capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(allowed, result.stdout == "", result.stdout)
 
     def test_claude_stream_preserves_verified_tmpdir_pattern(self):
         command = 'stat "$TMPDIR/snapshot"'
@@ -270,9 +407,9 @@ class OperationTests(unittest.TestCase):
         self.assertIn({"tmpdir": "snapshot"}, grant.operation["pattern"]["words"])
 
     def test_interpreter_script_targets_and_marker_literals_never_generalize(self):
-        script, _ = self.grant(f"python3 {self.root / 'helper.py'}")
+        script, _ = self.grant(shlex.join(["python3", str(self.root / "helper.py")]))
         self.assertEqual(str(self.root / 'helper.py'), script.operation["pattern"]["words"][1])
-        actual, _ = self.grant(f"stat {self.root / 'snapshot'}")
+        actual, _ = self.grant(shlex.join(["stat", str(self.root / "snapshot")]))
         literal, _ = self.grant("stat '<TMPDIR>/snapshot'")
         self.assertNotEqual(actual.id, literal.id)
 

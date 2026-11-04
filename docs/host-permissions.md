@@ -318,15 +318,31 @@ List or revoke decisions with `consent_control.py list|revoke --repo owner/repo
 revocation takes effect from the next stage. The consent store stays outside
 the checkout; revocation retains an audit record.
 Cycle entries can be selected with `--cycle-id <id> --task-id <work-item>`.
+Both selectors are required together. Revoking a decision absent from the
+selected scope exits with an error naming that scope; it does not revoke an
+entry from another scope or report a silent success.
 Resuming a work item reloads its command-consent cycle lineage; a second work
 item starts a separate lineage and does not receive cycle-only decisions.
 
 Force-push, direct pushes to base/protected branches, deletion of Git refs and
-protected credential reads cannot be granted: publication integrity and
-credential confidentiality require these boundaries. Direct command consent
+direct reads naming a protected credential store cannot be granted: publication
+integrity and credential confidentiality require these boundaries. The hook
+recognizes a store named as a complete argument or edit target. It does not
+inspect recursive ancestor reads (`grep -r token ~`), attached option paths
+(`grep -f~/.ssh/id_ed25519 ...`, `--file=...`) or opaque program internals.
+Credential confidentiality for these forms requires the external sandbox's
+deny-read rules; operation consent never widens those rules. Direct command consent
 also retains argument validation, redirect and workspace/publication guards;
 Git configuration edits remain guarded because they can turn later reads into
 code execution. Foreground and verification-timeout safeguards remain in force.
+Exact consent permits `git ls-remote origin ...` and a GET of
+`gh api repos/<cycle-repo>/pulls/<current-pr> [--jq <filter>]`. Git execution
+options, another remote, API method overrides, input fields and other PRs
+remain guarded. Other Git/GitHub argument or publication guard failures are
+not offered as grantable questions: an answer could not override those guards.
+Read-tool validation distinguishes file operands from grep patterns, jq
+filters and option data. The runtime's exact supplied evidence file is readable
+outside the workspace without consent; its directory and siblings gain no access.
 An interpreter (`python3 -c`, `bash -c`, `node -e`, etc.) can be granted for its
 concrete command. The question warns that the hook **cannot inspect or enforce
 restrictions inside that code**. Never-grant operations inside an authorized

@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from execution_plan import completion_statuses
 from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question)
 from stage_permissions import operation, matching_answer, protected_reason, credential_reason, parse_command
 
@@ -92,7 +93,7 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                     else check_file_edit(tool, data, observed_policy, cwd=cwd))
         reason = decision.reason if not decision.allowed else "executor permission layer refused the operation"
         guard = protected_reason(tool, data, observed_policy, cwd)
-        if guard and ("never allowed" in guard or "protected credential" in guard):
+        if guard is not None:
             continue
         grant = make_grant(op, executor, broker.platform)
         broker.operations[grant.id] = grant
@@ -130,10 +131,16 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     effects = payload.get("permission_effects", [])
     effect = next((item for item in effects if isinstance(item, dict)
                    and item.get("command") == blocker["command"]), None) if isinstance(effects, list) else None
-    completed = {"implement": "IMPLEMENTED", "resolve": "RESOLVED", "review": "APPROVED",
-                 "rereview": "APPROVED", "verify": "VERIFIED", "issue_review": "READY"}.get(role)
+    completed = completion_statuses().get(role, frozenset())
+    if role in {"review", "rereview"}:
+        completed |= {"REVIEW_PASSED_AWAITING_CI"}
+    elif role == "verify":
+        completed |= {"VERIFIED"}
+    elif role == "issue_review":
+        # A finished assessment can ask for refinement without needing access.
+        completed |= {"NEEDS_REFINEMENT"}
     essential = (effect.get("essential") is not False if effect is not None
-                 else payload.get("status") not in {completed, "CHANGES_REQUESTED"})
+                 else payload.get("status") not in completed)
     tests = payload.get("tests")
     checks = tests.get("checks", []) if isinstance(tests, dict) else []
     check_ids = effect.get("check_ids", []) if effect is not None else []
@@ -158,10 +165,10 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
                        essential_permission=blocker["resource"])
     elif not essential and payload.get("status") == "BLOCKED":
         # A distinct structured completion claim is required; prose is irrelevant.
-        if (payload.get("completed_status") == completed and completed is not None
+        if (payload.get("completed_status") in completed
                 and (role != "implement" or (payload.get("head_sha") and
                      (payload.get("change_request_id") or payload.get("pr_number"))))):
-            payload["status"] = completed
+            payload["status"] = payload["completed_status"]
     outcomes = payload.get("permission_outcomes")
     if not isinstance(outcomes, list):
         outcomes = []
