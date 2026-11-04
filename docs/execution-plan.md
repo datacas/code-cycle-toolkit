@@ -138,7 +138,13 @@ On resume the runtime reconciles the current configuration, source criteria,
 remote receipt and local revisions. Required checks are retained across HEAD
 changes; results from another SHA cannot satisfy them. Changed criteria add new
 identities rather than reusing old coverage. Command hashes can be rebound only
-to currently authorized exact commands. Without recoverable local history the
+to currently authorized exact commands. When some stored commands have no
+current binding, the authorized ones are still bound, the others stay inert
+fingerprints, and every check, obligation and result is kept under `partial`
+provenance. The projection's normalized `provenance` and `reason` are not part
+of a check's identity, so a restored check is not a conflict with its original
+description. See [Verification](verification.md) for identity fields and the
+diagnostics that name a conflicting check. Without recoverable local history the
 runtime replans with `partial` provenance and accepts no prior check as passed.
 This is partial recovery, not a fully verified continuation. Analysis such as
 #127 can read this metadata without reading prompts.

@@ -552,6 +552,12 @@ class StageDispatch:
                             outcome.decision.profile if outcome.decision else "unknown"),))
                 test_payload, self.state.verification_plan = self.api._normalize_test_payload(
                     test_payload, self.state.verification_plan)
+                rejected = (test_payload.get("tests") or {}).get("rejected")
+                if isinstance(rejected, str):
+                    # The report stays unverified; say which check and field.
+                    # Some rejections quote an agent-chosen check ID verbatim.
+                    self.report.note(f"  verification  {role} report rejected: "
+                                     f"{self.api.readable(rejected, 300)}")
             try:
                 self.record_plan_stage(role, reported, outcome, test_payload)
             except ValueError as error:

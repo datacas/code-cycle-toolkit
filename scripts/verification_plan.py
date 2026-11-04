@@ -143,6 +143,50 @@ class Check:
             raise VerificationError("a criterion-dependent check must be required")
 
 
+#: What a check executes, where and by whom. Changing any of them is another
+#: check: it needs another ID and never inherits this one's evidence.
+IDENTITY_FIELDS = ("command", "executor", "profile", "context", "level")
+_FINGERPRINT = re.compile(r"sha256:[a-f0-9]{64}")
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+
+
+def persisted_token(value: str) -> str:
+    """How the history store keeps an ID, executor, profile or context value."""
+    return (value if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value)
+            else "ref-" + hashlib.sha256(value.encode()).hexdigest())
+
+
+def identity_conflict(frozen: Check, proposed: Check) -> tuple[str, ...]:
+    """The identity fields in which two checks with one ID differ.
+
+    A frozen executor, profile or context restored from history may be the
+    store's reference for the proposed value; that is the same identity. A
+    command is never matched by its fingerprint here: only today's
+    authorization may bind one (`cycle_history.restore_plan`).
+    """
+    def same(field: str, old: Any, new: Any) -> bool:
+        return old == new or (field in {"executor", "profile", "context"}
+                              and isinstance(new, str) and old == persisted_token(new))
+    return tuple(field for field in IDENTITY_FIELDS
+                 if not same(field, getattr(frozen, field), getattr(proposed, field)))
+
+
+def safe_value(field: str, value: Any) -> str:
+    """A diagnostic form that never reveals a command, path or free text.
+
+    A command is shown as a short fingerprint, marked `unbound` while it is
+    still the persisted fingerprint, so an operator can tell a missing binding
+    from a different command without the command itself.
+    """
+    if field == "command":
+        if isinstance(value, str) and _FINGERPRINT.fullmatch(value):
+            return "unbound " + value[:19]
+        return "sha256:" + hashlib.sha256(str(value).encode()).hexdigest()[:12]
+    if isinstance(value, str) and _SAFE_TOKEN.fullmatch(value):
+        return value
+    return "ref-" + hashlib.sha256(repr(value).encode()).hexdigest()[:12]
+
+
 @dataclass(frozen=True)
 class CheckResult:
     id: str
@@ -219,15 +263,32 @@ class VerificationPlan:
                 raise VerificationError("result evidence command differs from check")
 
     def extend(self, additions: tuple[Check, ...]) -> VerificationPlan:
-        """Freeze identity and obligations. Promotion and additions are allowed."""
+        """Freeze identity and obligations. Promotion and additions are allowed.
+
+        The execution identity is `IDENTITY_FIELDS`. Provenance and reason are
+        descriptive: persistence normalizes them, so the frozen values are kept
+        and a different description of the same check is not a conflict.
+        """
         checks = {check.id: check for check in self.checks}
         for check in additions:
             old = checks.get(check.id)
             if old is not None:
-                if replace(check, required=old.required, criteria=old.criteria) != old:
-                    raise VerificationError("cannot rewrite frozen check identity")
-                if (old.required and not check.required) or not set(old.criteria) <= set(check.criteria):
-                    raise VerificationError("cannot demote a frozen obligation")
+                differing = identity_conflict(old, check)
+                if differing:
+                    raise VerificationError(
+                        f"cannot rewrite frozen check identity: check {safe_value('id', old.id)} "
+                        "differs in " + ", ".join(
+                            f"{field} (frozen {safe_value(field, getattr(old, field))}, "
+                            f"proposed {safe_value(field, getattr(check, field))})"
+                            for field in differing))
+                demoted = [name for name, lost in (
+                    ("required", old.required and not check.required),
+                    ("criteria", not set(old.criteria) <= set(check.criteria))) if lost]
+                if demoted:
+                    raise VerificationError(
+                        f"cannot demote a frozen obligation: check {safe_value('id', old.id)} "
+                        "would lose " + ", ".join(demoted))
+                check = replace(old, required=check.required, criteria=check.criteria)
             checks[check.id] = check
         plan = replace(self, checks=tuple(checks.values()))
         plan.validate()

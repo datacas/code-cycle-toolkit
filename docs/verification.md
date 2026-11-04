@@ -323,6 +323,39 @@ commands are `sha256:` fingerprints, does not gain a second
 keep the same check identities, results and obligations, and a frozen identity is
 never rewritten.
 
+A check's execution identity is its `command`, `executor`, `profile`, `context`
+and `level`. `provenance` and `reason` only describe it: the history store
+normalizes them to `runtime`, so a report that describes a frozen check
+differently, such as the configured test with `provenance: project`, is the same
+check and keeps the frozen description. An executor, profile or context the store
+kept as a `ref-<sha256>` reference matches the value it was derived from. Any
+other difference in an identity field is another check: it needs a new ID, and
+its report cannot overwrite the frozen check or record evidence for it.
+
+When a resume cannot bind every stored command, for example because a proposed
+command is no longer authorized, the commands that today's policy authorizes are
+still bound and the others stay inert fingerprints. Every check, obligation and
+earlier result is kept; the plan is recorded as `partial` and each check is
+marked `unverified` on the current HEAD. An agent cannot bind a fingerprint by
+reporting the command it hides: only today's authorization can, so such a report
+is rejected like any other identity change. Existing unverified local checks
+stay unverified until evidence for the current HEAD exists; CI never supplies it.
+
+A rejected identity names the check and every differing field. Commands appear
+only as a 12-character fingerprint prefix, marked `unbound` while the frozen
+command is still a fingerprint; other values that are not plain tokens appear as
+`ref-` references. For example:
+
+```text
+cannot rewrite frozen check identity: check configured-test-8478ec11cc826f7e differs in command (frozen unbound sha256:8478ec11cc82, proposed sha256:8478ec11cc82)
+```
+
+Identical fingerprints with `unbound` on one side mean the command is the same but
+has no current authorization. Before dispatch, this text is the `BLOCKED` stop
+reason with `stop_reason: readiness_unconfirmed`. In a stage report, it is a
+report note while the report stays `not_verified`. An obligation demotion names
+the check and what it would lose (`required`, `criteria`).
+
 Hotfix requires `hotfix-reproduction` and `hotfix-regression`, both `required`,
 with distinct focused commands proposed by the implementer. The configured
 general suite satisfies neither identity. A missing proposal stops with
