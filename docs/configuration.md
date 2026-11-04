@@ -272,6 +272,21 @@ code_cycle:
 
 On a GitHub cycle (`code_host` and `issue_provider` both GitHub), every native Claude stage runs under a closed command table and a hook that denies everything outside it ([Host permissions](host-permissions.md)). `allowed_commands.test` and `allowed_commands.verify` are the only verification commands any stage receives: implementation and resolution in their worktree, review and rereview only inside their disposable clone. Without them no verification command is granted and no global permission is inherited in its place. A stage that needs one stops `BLOCKED`, and the cycle's stop line names the exact denied command. Add it here, then resume with `--continue` (or `--from`); the progress made so far is kept.
 
+### BasedPyright
+
+`pyrightconfig.json` scopes BasedPyright to `scripts/`, adds that directory to
+module resolution, and uses `basic` type checking. Its baseline at
+`.basedpyright/baseline.json` records existing diagnostics, so new diagnostics
+fail the check while existing ones do not. The repository's
+`allowed_commands.verify` entry runs `basedpyright`; to intentionally add
+diagnostics to the baseline, use `basedpyright --writebaseline` and review the
+baseline diff. Fixed diagnostics are removed from the baseline automatically.
+
+The current baseline is checked in CI in lock mode, so CI fails if resolved
+diagnostics have not been removed from the baseline. Update it locally by
+running `basedpyright` after fixing diagnostics, then commit the resulting
+baseline change.
+
 **Upgrading.** A cycle that used to run tests through a stage's inherited permissions now needs `allowed_commands.test` or `allowed_commands.verify`. A runtime older than this change refuses `verify` as an unknown key, so update the runtime before adding it.
 
 ### Security review rule
