@@ -49,6 +49,7 @@ code_cycle:
 
     auxiliary_tool:
       primary: "codex:openai/gpt-6-luna medium"
+      fallback: "claude:anthropic/claude-sonnet-5-5 medium"
 
     cheap_tool:
       primary: "claude:anthropic/claude-sonnet-5-5 low"
