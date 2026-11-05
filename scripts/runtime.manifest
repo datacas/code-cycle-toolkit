@@ -29,6 +29,7 @@ consent_control.py
 stage_permissions.py
 run_cycle.py
 executors.py
+remote_refs.py
 gh_environment.py
 usage.py
 harness.py
