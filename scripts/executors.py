@@ -2450,6 +2450,9 @@ def _inspect_remote_refs(root: str, url: str, timeout: int) -> RemoteRefInspecti
             else:
                 raise RemoteRefInspectionError(
                     "remote_refs_inspection_failed", attempt) from None
+        except Exception:
+            raise RemoteRefInspectionError(
+                "remote_refs_inspection_failed", attempt) from None
         if attempt == attempts:
             raise RemoteRefInspectionError(cause, attempt) from None
         time.sleep(backoff[attempt - 1])
@@ -2725,6 +2728,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     left = None
     after_head = after_status_fingerprint = after_remote_refs = None
     after_remote_metrics = {}
+    remote_inspection_failure = None
     try:
         result = dispatch_call(prompt, worktree)
         try:
@@ -2740,6 +2744,9 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
                 or after_status != before_status
                 or after_remote_refs != before_remote_refs
             )
+        except RemoteRefInspectionError as exc:
+            remote_inspection_failure = exc
+            source_changed = False
         except Exception as exc:
             source_changed = True
             source_error = f"could not verify the implementer checkout after review: {exc}"
@@ -2780,6 +2787,14 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
         f"the disposable review workspace could not be removed; left on disk: {left}"
         if left else None
     )
+    if remote_inspection_failure is not None:
+        detail = str(remote_inspection_failure)
+        if cleanup_error:
+            detail += f"; {cleanup_error}"
+        return replace(
+            adapter._blocked(target, "review_workspace_isolation", detail),
+            artifacts=artifacts,
+        )
     if source_changed:
         artifacts.pop("read_only_mode", None)
         detail = "read-only contract violation: " + source_error

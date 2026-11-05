@@ -1485,6 +1485,29 @@ class PermissionTests(unittest.TestCase):
         self.assertIn("remote_refs_auth_failed", str(raised.exception))
         self.assertNotIn("secret", str(raised.exception))
 
+    def test_remote_ref_unexpected_errors_have_a_safe_named_cause(self) -> None:
+        with patch.object(ex, "_git_output", side_effect=OSError("secret path details")):
+            with self.assertRaises(ex.RemoteRefInspectionError) as raised:
+                ex._inspect_remote_refs("/repo", "remote", 3)
+
+        self.assertEqual("remote_refs_inspection_failed", raised.exception.cause)
+        self.assertNotIn("secret", str(raised.exception))
+
+    def test_configured_remote_ref_timeout_reaches_ls_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, ".code-cycle.yml").write_text(
+                "code_cycle:\n  review:\n    remote_refs_timeout: 17\n",
+                encoding="utf-8",
+            )
+            url = "https://example.invalid/repo.git"
+            with patch.object(ex, "_git_output", side_effect=(
+                    "origin", url, url, "refs/heads/main")) as run:
+                ex._remote_ref_fingerprint(directory)
+
+        ls_remote_call = run.call_args_list[-1]
+        self.assertEqual("ls-remote", ls_remote_call.args[1])
+        self.assertEqual(17, ls_remote_call.kwargs["timeout"])
+
     def test_remote_ref_timeout_retries_and_continues_after_success(self) -> None:
         timeout = subprocess.TimeoutExpired("git ls-remote", 3)
         with patch.object(ex, "_git_output", side_effect=[timeout, "refs"] ) as run, \
@@ -2887,6 +2910,24 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         self.assertNotEqual(str(self.repo), observed[0][0])
         self.assertEqual(observed[0][0], observed[1][0])
         self.assertFalse(Path(observed[0][0]).exists())
+
+    def test_post_review_remote_inspection_failures_keep_the_isolation_reason(self) -> None:
+        cases = (
+            "remote_refs_timeout",
+            "remote_refs_auth_failed",
+        )
+        for cause in cases:
+            with self.subTest(cause=cause):
+                git(self.repo, "checkout", "--", "tracked.txt")
+                with patch.object(
+                        ex, "_remote_ref_fingerprint",
+                        side_effect=["before", ex.RemoteRefInspectionError(cause, 3)]):
+                    result = self.dispatch("claude", "none")
+
+                self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+                self.assertEqual("review_workspace_isolation", result.missing_capability)
+                self.assertIn(cause, result.detail)
+                self.assertNotIn("read-only contract violation", result.detail)
 
     def test_a_codex_stage_that_writes_is_a_contract_violation(self) -> None:
         """The sandbox flag confines the agent's own commands, not a process
