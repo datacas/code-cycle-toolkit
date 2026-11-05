@@ -3648,6 +3648,7 @@ class WorktreeSynchronizationTests(unittest.TestCase):
         bare.mkdir()
         subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True,
                        text=True, check=True)
+        self.git(bare, "symbolic-ref", "HEAD", "refs/heads/main")
         seed.mkdir()
         subprocess.run(["git", "init", str(seed)], capture_output=True,
                        text=True, check=True)

@@ -779,6 +779,24 @@ Schema 27 adds the terminal, non-successful cycle status
 rows are read unchanged. See
 [execution plan history](telemetry.md#execution-plan-history-schema-25).
 
+Schema 28 adds `suspected_external_change` and `review_target_changed` to
+`stop_reason` and `attempt_error_code`. The former stops on insufficient
+evidence for a protected-ref advance without calling it an agent breach; the
+latter invalidates a review whose cycle branch or change request changed.
+Source checkout mutations remain `contract_violation`. Confirmed invariant
+failures remain `publication_violation` (also an attempt error code, alongside
+`publication_unverified` for an unreadable read-only ref audit).
+These are payload vocabulary additions; existing rows stay unchanged.
+
+The [ref classifier](role-workspace-policy.md#external-advances-and-read-only-guards-421)
+keeps an `external_changes` list in publication evidence and read-only
+artifacts. Each movement produces one journal `stage_result` with its class,
+remote name, ref, before/after SHA, bounded added commits and, for protected
+advances, reachability heads and a reason. Remote URLs are excluded. An
+`external_change` does not stop the cycle. The journal, rather than a new audit
+table, retains movement evidence; telemetry rows retain only the stop/error
+vocabulary. No heuristic class asserts certain actor attribution.
+
 Schema 24 adds the stop reasons `publication_violation` and
 `publication_unverified` of the [publication audit](role-workspace-policy.md#publication-audit).
 They are payload-only. The audit's evidence is not stored in the telemetry

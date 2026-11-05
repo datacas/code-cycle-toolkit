@@ -135,9 +135,9 @@ reported (`scripts/publication_audit.py`):
    is a breach. `implement` may create the branch when it was absent. A commit
    the checkout does not have is fetched into `FETCH_HEAD` only, so the audit
    leaves no ref behind.
-3. **Default and protected branches.** They did not move, and none was deleted.
-   Any move is a breach, even a fast-forward or a legitimate push by someone
-   else.
+3. **Default and protected branches.** Deletions, non-fast-forward moves and
+   moves adding commits reachable from the cycle heads remain breaches. A
+   fast-forward can instead be classified as an external advance, as below.
 
 The audited refs are the cycle branch (the change request's head branch when
 the runtime knows it, otherwise the checkout's branch), the default branch
@@ -148,8 +148,8 @@ reported `unverified`. They are read once
 before the stage, on `origin` only, and the same set is compared after it. A
 push to any other branch never fails the check (#197).
 
-The runtime cannot tell who moved a ref during a stage. A breach stops the
-cycle with `publication_violation` whoever caused it, and the stop line says
+The runtime cannot identify an actor from Git topology alone. A breach stops the
+cycle with `publication_violation`, and the stop line says
 "changed outside the stage?" instead of blaming the stage. `publication_violation`
 means that an invariant failed, not that the stage caused it. The audit runs
 before the stage's report is read, so a breach wins over a `BLOCKED` or any
@@ -171,6 +171,59 @@ cycle branch and the default branch are still audited through Git, and the
 change-request state and protected branches are reported `unverified` in the
 cycle report, never as passed. A `--local-only` run publishes nothing and is
 not audited.
+
+### External advances and read-only guards (#421)
+
+An effectively active preventive command table (#142) is required before an
+origin default/protected-ref advance can be classified as external. The table
+blocks protected-ref pushes, merges and equivalent publication paths. Merely
+requesting a table does not establish that it ran: the executor must report it
+active. Without this evidence (including unrestricted Claude and Orca
+dispatches), every movement remains a `publication_violation`. This conservative
+fallback retains false positives for legitimate concurrent merges.
+
+With the table active, the audit requires a fast-forward, full reachability
+showing that none of the added commits is reachable from the before/after
+cycle heads or reviewed checkout HEAD, and the cycle's change request read as
+open. Such a movement is `external_change` and does not fail the stage. The
+20-commit evidence list never limits the reachability test. If those conditions
+cannot be established, the movement is `suspected_external_change`: the cycle
+stops under that distinct reason, without recording an agent breach. A
+non-fast-forward, deletion or addition of a cycle-head commit is still a
+`publication_violation` even with an active table.
+
+For `issue_review`, before a cycle branch or change request exists, reachability
+uses the checkout HEAD captured at stage start; only the open-change-request
+condition is skipped. The same exception applies to a stage without a change
+request. A missing host reader when a cycle request could exist provides no
+proof of its absence and yields a suspected change.
+
+Read-only stages use the same protected-ref classifier on `origin`. Their
+cycle branch and change-request head are guarded: movement is
+`review_target_changed`, including a newly observed head that differs from the
+reviewed checkout SHA. HEAD, index and working-tree mutations in the source
+checkout retain `contract_violation`; this primary code takes precedence when
+both checkout and target change. Neither code by itself attributes causality.
+For `issue_review`, the unchanged reviewed checkout HEAD is the target and no
+change-request guard applies. Other branches, tags and every ref on other
+configured remotes are observed and recorded as external, without failing the
+read-only stage. Disposable clone edits remain discarded and warned about as
+described above.
+
+Publication audit evidence and read-only artifacts carry `external_changes`:
+remote name, ref, before/after SHA, bounded `commits_added`, and `class`.
+Classified protected advances also carry reachability heads and a reason. No
+remote URL is recorded. The cycle journal records each movement once. Schema
+28 keeps suspected advances and changed review targets distinct from breaches
+in [instrumentation](instrumentation.md).
+
+Residual risk: a stage that merges an unrelated PR through a bypass path can
+look external. A read-only stage's own write to an observed branch or tag is
+also only recorded. The preventive command table remains essential; this
+heuristic is not certain actor attribution. #421 records the advance only:
+existing CI-gate conflict and head checks still decide whether to continue.
+Updating the cycle branch and revalidating against a new base belongs to #426;
+this classifier does not waive an existing requirement to refresh verification.
 
 Reconciling a stage that published a verified result but reported `BLOCKED` is
 #364. Until it exists, a `BLOCKED` result is never turned into a success, even
