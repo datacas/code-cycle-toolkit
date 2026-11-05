@@ -76,7 +76,8 @@
   },
   "shards": {
     "windows-1": [
-      "test_run_cycle"
+      "test_run_cycle",
+      "test_credential_read_guidance"
     ],
     "windows-2": [
       "test_behavioral",

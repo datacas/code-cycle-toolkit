@@ -24,6 +24,30 @@ Set it with `code_cycle.issue_review.mode`, or for one run with `--issue-review`
 
 Confidence is a category for evidence quality, never a calibrated probability. The stage is `read_only`, has no publication permission, and never edits, comments on, labels, or closes the work item: its proposed edits are printed for a person, and applying them needs separate authorization. Its findings are `IR-NNN`, with no `REV-xxx` identity, `status`, or `disposition`, so they never enter the change-request contract below.
 
+### GitHub credential store denied during issue review
+
+**Symptom:** `issue_review` returns `environment_restricted` and says that reading
+`~/.config/gh` was denied while trying to read a GitHub work item. This is a
+policy denial, not a finding about whether the work item is ready.
+
+**Cause:** the issue-review executor cannot read the local GitHub CLI credential
+store. A GitHub network grant does not authorize reading that local credential
+store.
+
+**Narrow fix:** the user can apply one of these remedies, in order:
+
+(a) Add `code_cycle.user_choices.credential_reads: ["~/.config/gh"]` to the
+trusted project configuration.
+(b) Prepare a one-run configuration copy that contains that exception and pass
+it with `--config`.
+(c) Skip `issue_review`, or route it to an executor whose access is already
+authorized.
+
+The user applies any configuration change; the agent does not edit its own
+sandbox exceptions. Credential-read exceptions do not grant cycle, repository,
+or forever consent, and must not be offered as those consent choices. This is
+interim guidance until the runtime-authenticated issue snapshot in [#397](https://github.com/datacas/code-cycle-toolkit/issues/397) lands.
+
 ### Asking for decisions
 
 A stop that needs a person — `NEEDS_REFINEMENT`, a decision behind `HUMAN_INTERVENTION` or `BLOCKED`, a missing provider value, a `needs_clarification` finding — does not end with everything at once. Every cycle skill and `cc-provider-bootstrap` share one *Asking the user* section: one summary line with the number of decisions, then the questions **one at a time**, the one that settles the most first. Each has one or two sentences of context, two to four options with the recommended one first, and a free-text answer. The host's interactive question tool is used when it has one (`AskUserQuestion` in Claude Code, the coordinator's question channel in an orchestrated run); otherwise one numbered question per message. Findings, evidence, and proposed edits stay available on request. `run_cycle.py` is not interactive, so it prints the first question only and writes the rest to `decisions/decisions-<stamp>-<pid>.json` beside the telemetry database, readable by its owner only; the coordinator reads the next question and the details from there.
