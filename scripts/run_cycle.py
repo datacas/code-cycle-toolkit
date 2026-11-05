@@ -66,6 +66,7 @@ else:
     import verification_plan as verification_contract
 
 import ci_gate
+import remote_refs
 from security_gate import GateRule
 try:
     from gh_environment import apply_gh_environment_defaults
@@ -500,6 +501,18 @@ def load_config(path: Path) -> dict:
                  or effort not in {"low", "medium", "high", "max"})):
         raise CycleDriverError(
             f"{path}: code_cycle.resolve.effort must be one of low, medium, high, max")
+
+    review = (config.get("code_cycle") or {}).get("review") or {}
+    unknown = sorted(str(key) for key in set(review) - {
+        "trusted_authors", "remote_refs_timeout"})
+    if unknown:
+        raise CycleDriverError(
+            f"{path}: unknown key under code_cycle.review: " + ", ".join(unknown)
+            + "; known keys are remote_refs_timeout, trusted_authors")
+    try:
+        remote_refs.timeout_of(config)
+    except ValueError as error:
+        raise CycleDriverError(f"{path}: {error}") from error
 
     ci = (config.get("code_cycle") or {}).get("ci") or {}
     unknown = sorted(str(key) for key in set(ci) - CI_KEYS)
