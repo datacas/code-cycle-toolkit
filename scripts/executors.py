@@ -2531,7 +2531,8 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
     if ref_auditor is None and cwd:
         try:
             if "origin" in _git_output(cwd, "remote").splitlines():
-                ref_auditor = pa.PublicationAuditor(cwd, "", None)
+                # No cycle auditor: this run publishes nothing (#421).
+                ref_auditor = pa.PublicationAuditor(cwd, "", None, publishes=False)
         except Exception:
             return "could not inspect remotes before read-only dispatch"
     if ref_auditor is not None:
@@ -2545,13 +2546,18 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
     result = _verified_read_only(cwd, call)
     if isinstance(result, str):
         return result
+    table_active = result.artifacts.get("command_policy") == "active"
     if before is None or ref_auditor is None:
+        # Without an origin audit no movement can be told apart from the
+        # stage's own push, so every observed one is unattributed.
         artifacts = dict(result.artifacts)
-        artifacts["external_changes"] = artifacts.pop("observed_ref_changes", [])
-        return replace(result, artifacts=artifacts)
+        observed = [{**item, "class": pa.SUSPECTED}
+                    for item in artifacts.pop("observed_ref_changes", [])]
+        artifacts["external_changes"] = observed
+        return _unattributed_read_only_movement(result, artifacts, observed)
     try:
         audit = ref_auditor.verify(
-            before, command_table_active=result.artifacts.get("command_policy") == "active",
+            before, command_table_active=table_active,
             read_only=True, change_request_id=None if issue_review else change_request_id)
     except pa.AuditUnreadable:
         if result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
@@ -2573,31 +2579,52 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
                 kind = (pa.MOVED if name == before.default_branch or name in before.protected
                         else pa.REVIEW_TARGET_CHANGED)
                 endpoint_breaches.append(pa.Breach(kind, item["ref"], item["before"], item["after"]))
-        elif item not in observed:
-            observed.append(item)
+        else:
+            # Only a stage whose command table blocked its own pushes can
+            # leave an unguarded ref movement as external (#421).
+            movement = item if table_active else {**item, "class": pa.SUSPECTED}
+            if movement not in observed:
+                observed.append(movement)
     if endpoint_breaches:
         audit = replace(audit, status=pa.VIOLATED, breaches=(*audit.breaches, *endpoint_breaches))
     artifacts = {**result.artifacts, "publication_audit": audit.evidence(),
                  "external_changes": [*observed, *audit.external_changes]}
     artifacts["publication_audit"]["external_changes"] = artifacts["external_changes"]
     artifacts.pop("observed_ref_changes", None)
-    # A checkout mutation has one primary code, even if a remote also moved.
-    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+    confirmed = any(b.kind != pa.REVIEW_TARGET_CHANGED for b in audit.breaches)
+    # A checkout mutation has one primary code, even if the reviewed target
+    # also moved; a confirmed publication breach still wins over it.
+    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and not confirmed:
         return replace(result, artifacts=artifacts)
     code = None
     if audit.breaches:
-        code = (pa.REVIEW_TARGET_CHANGED if all(b.kind == pa.REVIEW_TARGET_CHANGED
-                                               for b in audit.breaches)
-                else "publication_violation")
-    elif audit.status == pa.SUSPECTED:
+        code = "publication_violation" if confirmed else pa.REVIEW_TARGET_CHANGED
+    elif audit.status == pa.SUSPECTED or any(item["class"] == pa.SUSPECTED for item in observed):
         code = pa.SUSPECTED
     if code:
-        artifacts.pop("read_only_mode", None)
-        artifacts.pop("read_only_verification", None)
-        return replace(result, outcome=DispatchOutcome.FAILED, error_code=code,
-                       missing_capability=None, artifacts=artifacts,
-                       detail=f"read-only ref guard: {code}")
+        return _read_only_ref_failure(result, artifacts, code)
     return replace(result, artifacts=artifacts)
+
+
+def _read_only_ref_failure(result: DispatchResult, artifacts: dict, code: str) -> DispatchResult:
+    artifacts.pop("read_only_mode", None)
+    artifacts.pop("read_only_verification", None)
+    detail = f"read-only ref guard: {code}"
+    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and result.detail:
+        detail = f"{detail}; {result.detail}"
+    return replace(result, outcome=DispatchOutcome.FAILED, error_code=code,
+                   missing_capability=None, artifacts=artifacts, detail=detail)
+
+
+def _unattributed_read_only_movement(result: DispatchResult, artifacts: dict,
+                                     observed: list) -> DispatchResult:
+    """No origin audit ran: any observed remote movement fails closed (#421).
+
+    A checkout mutation keeps its primary `contract_violation`.
+    """
+    if not observed or result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+        return replace(result, artifacts=artifacts)
+    return _read_only_ref_failure(result, artifacts, pa.SUSPECTED)
 
 
 def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:

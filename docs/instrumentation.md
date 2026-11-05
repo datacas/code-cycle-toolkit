@@ -782,10 +782,12 @@ rows are read unchanged. See
 Schema 28 adds `suspected_external_change` and `review_target_changed` to
 `stop_reason` and `attempt_error_code`. The former stops on insufficient
 evidence for a protected-ref advance without calling it an agent breach; the
-latter invalidates a review whose cycle branch or change request changed.
+latter invalidates a review whose cycle branch or change-request head changed.
 Source checkout mutations remain `contract_violation`. Confirmed invariant
-failures remain `publication_violation` (also an attempt error code, alongside
-`publication_unverified` for an unreadable read-only ref audit).
+failures, including a merge or close during a read-only stage, remain
+`publication_violation` (also an attempt error code, alongside
+`publication_unverified` for an unreadable read-only ref audit) and win over a
+concurrent `contract_violation`.
 These are payload vocabulary additions; existing rows stay unchanged.
 
 The [ref classifier](role-workspace-policy.md#external-advances-and-read-only-guards-421)

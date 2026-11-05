@@ -230,6 +230,16 @@ class AuditorTests(unittest.TestCase):
         result = self.auditor.verify(before, read_only=True)
         self.assertIn((pa.REVIEW_TARGET_CHANGED, "change_request:4"), self.kinds(result))
 
+    def test_a_read_only_merge_or_close_stays_a_publication_breach(self) -> None:
+        for change, kind in ((self.gh.merge, pa.MERGED), (self.gh.close, pa.CLOSED)):
+            with self.subTest(kind=kind):
+                self.gh.open(4)
+                before = self.auditor.capture(checkout_branch=BRANCH, change_request_id="4")
+                change(4)
+                result = self.auditor.verify(before, change_request_id="4", read_only=True,
+                                             command_table_active=True)
+                self.assertEqual([(kind, "change_request:4")], self.kinds(result))
+
     def test_a_fast_forward_push_and_a_comment_pass(self) -> None:
         old = self.remote.head(BRANCH)
         result = self.audit(self.remote.push_forward)
@@ -356,15 +366,78 @@ class ReadOnlyMovementTests(unittest.TestCase):
             str(self.remote.work), REPO, pa.GitHubHostReader(run=self.gh))
         self.target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
 
-    def dispatch(self, change, *, active=True, issue_review=False):
+    def dispatch(self, change, *, active=True, issue_review=False, audited=True):
         def run(_prompt, _cwd):
             change()
             return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", self.target,
                                      artifacts={"command_policy": "active" if active else "inactive"})
-        return ex._verified_read_only_refs(str(self.remote.work), lambda:
+        result = ex._verified_read_only_refs(str(self.remote.work), lambda:
             ex._isolated_review_dispatch(ex.ClaudeAdapter(), self.target, "review",
                 cwd=str(self.remote.work), dispatch_call=run, command_policy=active),
-            self.auditor, issue_review=issue_review)
+            self.auditor if audited else None, issue_review=issue_review)
+        assert isinstance(result, ex.DispatchResult), result
+        return result
+
+    def test_a_read_only_squash_merge_of_the_reviewed_pr_is_a_breach(self) -> None:
+        def squash():
+            # The squash commit is not reachable from the cycle heads.
+            self.remote.advance_base()
+            self.gh.merge(4)
+        result = self.dispatch(squash)
+        self.assertEqual("publication_violation", result.failure_code)
+        kinds = [item["kind"] for item in result.artifacts["publication_audit"]["breaches"]]
+        self.assertIn(pa.MERGED, kinds)
+
+    def test_a_confirmed_breach_wins_over_a_checkout_violation(self) -> None:
+        def change():
+            (self.remote.work / "file.txt").write_text("dirty", encoding="utf-8")
+            self.remote.push_default()
+        result = self.dispatch(change)
+        self.assertEqual("publication_violation", result.failure_code)
+        self.assertIn("read-only contract violation", result.detail)
+
+    def test_without_a_cycle_auditor_an_external_base_advance_is_recorded(self) -> None:
+        result = self.dispatch(self.remote.advance_base, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        movement = next(item for item in result.artifacts["external_changes"]
+                        if item["ref"] == "refs/heads/main")
+        self.assertEqual(pa.EXTERNAL, movement["class"])
+
+    def test_without_a_cycle_auditor_a_stale_origin_branch_is_not_a_target_change(self) -> None:
+        self.remote.commit(self.remote.work, "local only, not pushed")
+        result = self.dispatch(lambda: None, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+
+    def test_without_a_cycle_auditor_the_reviewed_branch_is_still_guarded(self) -> None:
+        def change():
+            git(self.remote.other, "checkout", "-q", "-B", "cycle", f"origin/{BRANCH}")
+            self.remote.commit(self.remote.other, "new cycle head")
+            git(self.remote.other, "push", "-q", "origin", f"cycle:{BRANCH}")
+        result = self.dispatch(change, audited=False)
+        self.assertEqual("review_target_changed", result.failure_code)
+        pushed = self.dispatch(lambda: git(self.remote.other, "push", "-q", "origin",
+                                           "cycle:main"), audited=False)
+        self.assertEqual("publication_violation", pushed.failure_code)
+
+    def test_without_origin_an_observed_movement_fails_closed(self) -> None:
+        git(self.remote.work, "remote", "rename", "origin", "upstream")
+        quiet = self.dispatch(lambda: None, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, quiet.outcome, quiet.detail)
+        result = self.dispatch(self.remote.advance_base, audited=False)
+        self.assertEqual(pa.SUSPECTED, result.failure_code)
+        self.assertTrue(result.artifacts["external_changes"])
+        self.assertTrue(all(item["class"] == pa.SUSPECTED
+                            for item in result.artifacts["external_changes"]))
+
+    def test_without_an_active_table_an_unguarded_movement_is_unattributed(self) -> None:
+        def change():
+            git(self.remote.other, "tag", "release-candidate", "origin/main")
+            git(self.remote.other, "push", "-q", "origin", "refs/tags/release-candidate")
+        result = self.dispatch(change, active=False)
+        self.assertEqual(pa.SUSPECTED, result.failure_code)
+        tag = next(item for item in result.artifacts["external_changes"]
+                   if item["ref"] == "refs/tags/release-candidate")
+        self.assertEqual(pa.SUSPECTED, tag["class"])
 
     def test_external_advance_during_isolated_review_preserves_success(self) -> None:
         result = self.dispatch(self.remote.advance_base)
@@ -565,8 +638,38 @@ class CycleAuditTests(RunCycleTestCase):
         reviewer = Actor("claude", rereview=lambda: self.gh.merge(4))
         report, _ = self.cycle(Actor("codex"), reviewer, start_from="resolve",
                                change_request_id="4")
-        self.assertEqual("review_target_changed", report.stop_reason)
+        self.assertEqual("publication_violation", report.stop_reason)
         self.assertEqual(["resolve", "rereview"], [stage.role for stage in report.stages])
+        self.assertIn({"kind": pa.MERGED, "ref": "change_request:4"},
+                      [{"kind": item["kind"], "ref": item["ref"]}
+                       for item in (report.publication_audit or {})["breaches"]])
+
+    def drifting(self, name: str, **effects) -> Actor:
+        """An executor whose every stage also reports a contract violation."""
+        from dataclasses import replace
+
+        class Drifting(Actor):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return replace(result, outcome=ex.DispatchOutcome.CONTRACT_VIOLATION,
+                               detail="model drift")
+        return Drifting(name, **effects)
+
+    def test_a_breach_wins_over_a_contract_violation_in_a_writing_stage(self) -> None:
+        report, reviewer = self.cycle(self.drifting("codex", implement=self.remote.push_default))
+        self.assert_violation(report, reviewer, pa.MOVED, "refs/heads/main")
+
+    def test_a_breach_wins_over_a_contract_violation_in_a_review(self) -> None:
+        reviewer = self.drifting("claude", rereview=self.remote.push_default)
+        report, _ = self.cycle(Actor("codex"), reviewer, start_from="resolve",
+                               change_request_id="4")
+        self.assertEqual("publication_violation", report.stop_reason)
+        self.assertEqual("publication_violation", self.closing()["stop_reason"])
+
+    def test_an_unreadable_audit_is_not_hidden_by_a_contract_violation(self) -> None:
+        implementer = self.drifting("codex", implement=lambda: setattr(self.gh, "fail", "/pulls"))
+        report, _ = self.cycle(implementer)
+        self.assertEqual("publication_unverified", report.stop_reason)
 
     def test_an_unreadable_code_host_stops_before_the_stage(self) -> None:
         self.gh.fail = "/branches"

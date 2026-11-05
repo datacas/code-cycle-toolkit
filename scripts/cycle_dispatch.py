@@ -344,9 +344,6 @@ class StageDispatch:
             previous = (self.report.publication_audit or {}).get("external_changes", [])
             self.report.publication_audit = {"status": "unreadable", "role": role,
                                              "external_changes": previous}
-            if (outcome is not None and outcome.result is not None
-                    and outcome.result.failure_code == "contract_violation"):
-                return None
             return self.stop(f"the publication audit could not read the code host after the "
                         f"{role} stage: {error}", "BLOCKED", reported=reported,
                         stop_reason="publication_unverified")
@@ -376,7 +373,12 @@ class StageDispatch:
         if result.unverified:
             self.report.note(f"publication audit after {role}: unverified "
                         f"({', '.join(result.unverified)}); the rest was checked")
-        if (outcome is not None and outcome.result is not None
+        # A read-only checkout mutation is the primary code over a changed
+        # review target or a suspected advance, never over a confirmed breach
+        # (#261): that one, in any role, still stops as `publication_violation`.
+        confirmed = any(b.kind != "review_target_changed" for b in result.breaches)
+        if (role in {"review", "rereview"} and not confirmed and outcome is not None
+                and outcome.result is not None
                 and outcome.result.failure_code == "contract_violation"):
             return None
         if result.status == "suspected_external_change":

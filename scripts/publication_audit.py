@@ -254,12 +254,19 @@ class PublicationAuditor:
 
     def __init__(self, cwd: str, repo: str, host: HostReader | None, *,
                  default_branch: str | None = None,
-                 run: Callable = subprocess.run, timeout: float = 60) -> None:
-        """`default_branch` is the configured one; otherwise `origin`'s HEAD."""
+                 run: Callable = subprocess.run, timeout: float = 60,
+                 publishes: bool = True) -> None:
+        """`default_branch` is the configured one; otherwise `origin`'s HEAD.
+
+        `publishes=False` is the read-only guard of a run that has no cycle
+        auditor, such as `--local-only`: no change request can exist, so the
+        open-change-request condition is skipped as for `issue_review`.
+        """
         self.cwd = cwd
         self.repo = repo
         self.host = host
         self.default_branch = default_branch
+        self.publishes = publishes
         self.run = run
         self.timeout = timeout
 
@@ -360,8 +367,9 @@ class PublicationAuditor:
             was = (before.change_requests.get(number) or {}).get("state")
             now = state.get("state")
             if now != _OPEN and was in (None, _OPEN):
-                breaches.append(Breach(REVIEW_TARGET_CHANGED if read_only else
-                                       MERGED if now == "MERGED" else CLOSED,
+                # A merge or a close is a breach in every role (#261): for a
+                # reviewer it also moves the protected ref it may not move.
+                breaches.append(Breach(MERGED if now == "MERGED" else CLOSED,
                                        f"change_request:{number}", was, now))
             elif read_only and number in before.change_requests:
                 previous = before.change_requests[number]
@@ -369,13 +377,9 @@ class PublicationAuditor:
                     breaches.append(Breach(REVIEW_TARGET_CHANGED, f"change_request:{number}",
                                            previous.get("head_sha") or previous.get("head_ref"),
                                            state.get("head_sha") or state.get("head_ref")))
-        branch = before.cycle_branch
-        if (read_only and branch and branch != before.default_branch
-                and branch not in before.protected and after_refs.get(branch)
-                and after_refs[branch] != before.reviewed_head
-                and not any(b.ref == f"refs/heads/{branch}" for b in breaches)):
-            breaches.append(Breach(REVIEW_TARGET_CHANGED, f"refs/heads/{branch}",
-                                   before.reviewed_head, after_refs[branch]))
+        # The cycle branch is compared with its own value before the stage
+        # above; a remote head that already differed from the checkout (a
+        # local branch ahead of a stale origin) did not change during it.
         if not requests_readable and not breaches and not external_changes:
             raise AuditUnreadable("change request state could not be read after the stage")
         status = (VIOLATED if breaches else SUSPECTED
@@ -429,7 +433,7 @@ class PublicationAuditor:
                                          for number in guarded_requests))):
             movement["reason"] = "open change request not established"
             return movement
-        if before.cycle_branch and self.host is None:
+        if before.cycle_branch and self.host is None and self.publishes:
             movement["reason"] = "change request state unavailable"
             return movement
         movement.update({"class": EXTERNAL,

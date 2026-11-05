@@ -152,13 +152,17 @@ The runtime cannot identify an actor from Git topology alone. A breach stops the
 cycle with `publication_violation`, and the stop line says
 "changed outside the stage?" instead of blaming the stage. `publication_violation`
 means that an invariant failed, not that the stage caused it. The audit runs
-before the stage's report is read, so a breach wins over a `BLOCKED` or any
-other `stage_not_completed`. No later stage is dispatched. The evidence goes to
-the cycle report (`CycleReport.publication_audit`) and the cycle journal. It
-holds the before and after SHA of each audited ref, the before and after state
-of each change request, and for each breach its kind (`change_request_merged`,
+before the stage's report is read, so a breach wins over a `BLOCKED`, a
+`contract_violation` (in every role, model drift included) or any other
+`stage_not_completed`, and an unreadable audit stops as
+`publication_unverified` whatever the stage reported. No later stage is
+dispatched. The evidence goes to the cycle report
+(`CycleReport.publication_audit`) and the cycle journal. It holds the before
+and after SHA of each audited ref, the before and after state of each change
+request, and for each breach its kind (`change_request_merged`,
 `change_request_closed`, `non_fast_forward`, `protected_ref_moved`,
-`ref_deleted`) with up to 20 commits added and removed when they are available.
+`ref_deleted`, `review_target_changed`) with up to 20 commits added and removed
+when they are available.
 
 A state that cannot be read is never read as empty. If `origin`'s refs, its
 default branch, the protected branches or a change request cannot be read, the
@@ -170,7 +174,7 @@ Other code hosts, Bitbucket included, have no reader until #238. For those, the
 cycle branch and the default branch are still audited through Git, and the
 change-request state and protected branches are reported `unverified` in the
 cycle report, never as passed. A `--local-only` run publishes nothing and is
-not audited.
+not audited; its read-only stages still guard their refs, as described below.
 
 ### External advances and read-only guards (#421)
 
@@ -199,16 +203,37 @@ request. A missing host reader when a cycle request could exist provides no
 proof of its absence and yields a suspected change.
 
 Read-only stages use the same protected-ref classifier on `origin`. Their
-cycle branch and change-request head are guarded: movement is
-`review_target_changed`, including a newly observed head that differs from the
-reviewed checkout SHA. HEAD, index and working-tree mutations in the source
-checkout retain `contract_violation`; this primary code takes precedence when
-both checkout and target change. Neither code by itself attributes causality.
-For `issue_review`, the unchanged reviewed checkout HEAD is the target and no
-change-request guard applies. Other branches, tags and every ref on other
-configured remotes are observed and recorded as external, without failing the
-read-only stage. Disposable clone edits remain discarded and warned about as
-described above.
+cycle branch and the head of a change request that stays open are guarded:
+any movement of the cycle branch from its own value before the stage, its
+creation or its deletion, and any change of the change request's head ref or
+SHA, is `review_target_changed`. A remote branch that already differed from the
+checkout before the stage (a local branch ahead of a stale `origin`) did not
+change during it and is not a target change. A merge or a close of a change
+request stays `change_request_merged` or `change_request_closed`, a
+`publication_violation`, in read-only stages too: merging the reviewed change
+request also moves a protected ref, even when a squash or rebase merge adds no
+cycle-head commit to it. HEAD, index and working-tree mutations in the source
+checkout retain `contract_violation`; this primary code takes precedence over a
+changed review target or a suspected advance, never over a confirmed breach,
+which stops as `publication_violation`. Neither code by itself attributes
+causality. For `issue_review`, the unchanged reviewed checkout HEAD is the
+target and no change-request guard applies.
+
+Other branches, tags and every ref on other configured remotes are observed.
+With an active command table they are recorded as external without failing the
+read-only stage. Without one (an unrestricted Claude or Orca dispatch), the
+stage could have pushed them itself, so they are recorded as
+`suspected_external_change` and the stage fails under that reason, as a
+protected-ref advance would fail without a table. Disposable clone edits remain
+discarded and warned about as described above.
+
+A read-only stage dispatched without a cycle auditor (`--local-only`, or a
+direct dispatch) still audits `origin`, without a code-host reader. Such a run
+publishes nothing, so no change request can exist: as for `issue_review`, the
+open-change-request condition is skipped and a classified base advance is
+`external_change`. When the checkout has no `origin` remote, no ref can be
+audited, so any movement observed on any remote fails the stage as
+`suspected_external_change` instead of being recorded as external.
 
 Publication audit evidence and read-only artifacts carry `external_changes`:
 remote name, ref, before/after SHA, bounded `commits_added`, and `class`.
@@ -218,8 +243,9 @@ remote URL is recorded. The cycle journal records each movement once. Schema
 in [instrumentation](instrumentation.md).
 
 Residual risk: a stage that merges an unrelated PR through a bypass path can
-look external. A read-only stage's own write to an observed branch or tag is
-also only recorded. The preventive command table remains essential; this
+look external. A read-only stage with an active table that writes an observed
+branch or tag through a bypass path is also only recorded. The preventive
+command table remains essential; this
 heuristic is not certain actor attribution. #421 records the advance only:
 existing CI-gate conflict and head checks still decide whether to continue.
 Updating the cycle branch and revalidating against a new base belongs to #426;
