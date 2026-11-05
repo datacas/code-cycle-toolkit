@@ -1,0 +1,7 @@
+{
+  "include": ["scripts"],
+  "extraPaths": ["scripts"],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error",
+  "baselineFile": ".basedpyright/baseline.json"
+}

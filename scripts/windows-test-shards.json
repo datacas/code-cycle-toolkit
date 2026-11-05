@@ -44,6 +44,7 @@
       "test_work_item_outcomes": 46.5
     },
     "unmeasured_modules": [
+      "test_basedpyright_configuration",
       "test_command_permissions",
       "test_ci_failure_access",
       "test_cycle_journal",
@@ -111,6 +112,7 @@
       "test_validate_package"
     ],
     "windows-4": [
+      "test_basedpyright_configuration",
       "test_calibration_store",
       "test_ci_gate",
       "test_codex_git_sandbox",

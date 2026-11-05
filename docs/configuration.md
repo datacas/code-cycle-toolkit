@@ -280,6 +280,21 @@ Cycle revocation requires both `--cycle-id <id>` and `--task-id <work-item>`. A 
 
 Force-push, direct pushes to base/protected branches, deletion of Git refs and direct reads naming a protected credential store are never grantable: they would defeat publication integrity or expose credentials. Credential detection in the hook covers complete argument paths and edit targets; recursive ancestor reads, attached option paths and opaque program internals require the external sandbox's deny-read rules. Direct Git configuration edits remain guarded because they can make later reads execute code. Exact consent can lift table membership for `git ls-remote origin ...` and a GET of the current PR with `gh api repos/<cycle-repo>/pulls/<current-pr> [--jq <filter>]`; execution options, other remotes, method overrides and publication guards still apply. Other direct Git/GitHub guard failures are non-grantable, rather than questions whose answers cannot work. Read tools classify file operands separately from patterns and filters; the runtime supplies an exact evidence-file read exception. Interpreters such as `python3 -c`, `bash -c` and `node -e` can receive exact-operation consent, with a warning: the hook cannot enforce its restrictions inside interpreter code. That requires external isolation, filesystem permissions, restricted credentials and code-host protections. See [command consent and limits](host-permissions.md#when-a-command-is-denied).
 
+### BasedPyright
+
+`pyrightconfig.json` scopes BasedPyright to `scripts/`, adds that directory to
+module resolution, and uses `basic` type checking. Its baseline at
+`.basedpyright/baseline.json` records existing diagnostics, so new diagnostics
+fail the check while existing ones do not. The repository's
+`allowed_commands.verify` entry runs `basedpyright`; to intentionally add
+diagnostics to the baseline, use `basedpyright --writebaseline` and review the
+baseline diff. Fixed diagnostics are removed from the baseline automatically.
+
+The current baseline is checked in CI in lock mode, so CI fails if resolved
+diagnostics have not been removed from the baseline. Update it locally by
+running `basedpyright` after fixing diagnostics, then commit the resulting
+baseline change.
+
 **Upgrading.** A cycle that used to run tests through a stage's inherited permissions now needs `allowed_commands.test` or `allowed_commands.verify`. A runtime older than this change refuses `verify` as an unknown key, so update the runtime before adding it.
 
 ### Security review rule
