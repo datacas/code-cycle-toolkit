@@ -44,6 +44,7 @@ code_cycle:
   # ── Review ────────────────────────────────────────────────
   review:
     trusted_authors: [your-login]   # empty/absent → finding recovery BLOCKS
+    remote_refs_timeout: 10         # seconds per git ls-remote attempt (1–300)
 
   security_review:                  # absent → defaults; declared → replaces defaults, keeps minimum
     always_when:
@@ -123,6 +124,7 @@ All keys live under `code_cycle`. `run_cycle.py` **refuses any key not in this t
 | `execution.objective` | `local_change` · `verified_change` · `merge_ready` | the profile's | `run_cycle.py` |
 | `execution.stages.<stage_id>` | `disabled` · `auto` · `enabled` · `required` | the profile's | `run_cycle.py` |
 | `review.trusted_authors` | list of provider logins | empty (recovery blocks); `cc-provider-bootstrap` proposes the authenticated login when absent | `cc-initial-review`, `cc-rereview`, `cc-resolve-comments` |
+| `review.remote_refs_timeout` | whole seconds, 1 to 300 | `10` seconds per `git ls-remote` attempt | isolated review and reroute remote-ref inspection |
 | `security_review.always_when.paths` | glob list | built-in defaults | review and resolution skills (`scripts/security_gate.py`) |
 | `security_review.always_when.files` | filename glob list | built-in defaults | same |
 | `security_review.always_when.labels` | label terms, matched by meaning | built-in defaults | same |
@@ -267,6 +269,8 @@ code_cycle:
 ### Review
 
 `review.trusted_authors` controls which comments can create or advance recovered findings. When it is absent, `cc-provider-bootstrap` adds the authenticated code-host login to the configuration it proposes, and writes it only on confirmation. An existing list is never changed. See [Review lifecycle → Trusted authors](review-cycle.md#trusted-authors).
+
+`review.remote_refs_timeout` sets the timeout for each configured-remote ref inspection. It defaults to 10 seconds and accepts whole seconds from 1 through 300; invalid values stop configuration loading with an error. A timeout or transient connection failure is retried up to three times, with 250 ms and 500 ms delays. Authentication failures are reported separately and are not retried. A persistent failure takes at most 15 minutes and 0.75 seconds at the maximum timeout. Failures use named details such as `remote_refs_timeout` and `remote_refs_auth_failed` while keeping the existing `review_workspace_isolation` stop reason. See [Role workspace policy](role-workspace-policy.md).
 
 ### Allowed commands
 

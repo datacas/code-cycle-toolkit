@@ -1482,8 +1482,43 @@ class PermissionTests(unittest.TestCase):
             with self.assertRaises(ex.ExecutorError) as raised:
                 ex._remote_ref_fingerprint("/repo")
 
-        self.assertIn("could not inspect configured remote refs", str(raised.exception))
+        self.assertIn("remote_refs_auth_failed", str(raised.exception))
         self.assertNotIn("secret", str(raised.exception))
+
+    def test_remote_ref_timeout_retries_and_continues_after_success(self) -> None:
+        timeout = subprocess.TimeoutExpired("git ls-remote", 3)
+        with patch.object(ex, "_git_output", side_effect=[timeout, "refs"] ) as run, \
+                patch.object(ex.time, "sleep") as sleep:
+            result = ex._inspect_remote_refs("/repo", "remote", 3)
+
+        self.assertEqual("refs", result.refs)
+        self.assertEqual(2, result.attempts)
+        self.assertEqual(2, run.call_count)
+        self.assertEqual(3, run.call_args_list[0].kwargs["timeout"])
+        sleep.assert_called_once_with(0.25)
+
+    def test_remote_ref_persistent_timeout_has_named_cause(self) -> None:
+        timeout = subprocess.TimeoutExpired("git ls-remote", 3)
+        with patch.object(ex, "_git_output", side_effect=timeout) as run, \
+                patch.object(ex.time, "sleep"):
+            with self.assertRaises(ex.RemoteRefInspectionError) as raised:
+                ex._inspect_remote_refs("/repo", "remote", 3)
+
+        self.assertEqual("remote_refs_timeout", raised.exception.cause)
+        self.assertEqual(3, raised.exception.attempts)
+        self.assertEqual(3, run.call_count)
+
+    def test_remote_ref_authentication_failure_is_not_retried(self) -> None:
+        with patch.object(
+                ex, "_git_output", side_effect=ex.ExecutorError("Authentication failed")) as run, \
+                patch.object(ex.time, "sleep") as sleep:
+            with self.assertRaises(ex.RemoteRefInspectionError) as raised:
+                ex._inspect_remote_refs("/repo", "remote", 3)
+
+        self.assertEqual("remote_refs_auth_failed", raised.exception.cause)
+        self.assertEqual(1, raised.exception.attempts)
+        run.assert_called_once()
+        sleep.assert_not_called()
 
     def test_git_verification_commands_are_bounded_and_noninteractive(self) -> None:
         with patch.object(ex.subprocess, "run", return_value=completed("head" + chr(10))) as run:
