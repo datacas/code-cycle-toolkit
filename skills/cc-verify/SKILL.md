@@ -28,9 +28,12 @@ obligations.
 Each result also carries `head_sha`, `result: pass|fail|unverified`,
 `evidence` (integer `exit_code`, `executed` count or null), `cause` and
 `attempts`. The enclosing stage result names its current `head_sha` too.
-Each `evidence` and `attempts` array entry must be a JSON object. Do not send
-text entries or rely on the runtime to convert them; malformed entries make
-the report invalid and cap its conclusion at `not_verified`.
+`cause` is omitted or text. A null `cause` is normalized to empty text;
+`attempts: null` and `evidence: null` are normalized to empty arrays. A single
+object in `evidence` is normalized to a one-item array. Other evidence and
+attempts entries must be JSON objects. A pass without evidence and an
+unverified result without a non-empty cause remain invalid. Rejections identify
+the failing field, received value or type, and expected format.
 An unexecuted check is explicitly `unverified` with a cause and the recovery
 attempts actually made; do not invent an exit code. Keep the check's identity
 when rerunning it and retain previous results. Never replace a local

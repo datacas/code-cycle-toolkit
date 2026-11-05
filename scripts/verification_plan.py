@@ -46,16 +46,28 @@ class Criteria:
     def from_dict(cls, value: Mapping[str, Any]) -> Criteria:
         items = value.get("items", ())
         if not isinstance(items, (list, tuple)):
-            raise VerificationError("criteria items must be an array")
-        result = cls(value["provider"], value["content_sha256"], value["status"],
+            raise _invalid_field("criteria.items", items, "an array of criterion strings")
+        result = cls(_required(value, "provider", "text"),
+                     _required(value, "content_sha256", "a SHA-256 digest or empty text"),
+                     _required(value, "status", "evaluable, needs_refinement, or not_evaluable"),
                      tuple(items), value.get("reason", ""))
-        if (result.status not in {"evaluable", "needs_refinement", "not_evaluable"}
-                or not isinstance(result.provider, str)
-                or not isinstance(result.content_sha256, str)
-                or not isinstance(result.reason, str)
-                or any(not isinstance(item, str) or not item.strip() for item in result.items)
-                or (result.status == "evaluable") != bool(result.items)):
-            raise VerificationError("invalid criteria source")
+        if not isinstance(result.provider, str) or not result.provider.strip():
+            raise _invalid_field("criteria.provider", result.provider, "non-empty text")
+        if not isinstance(result.content_sha256, str) or (result.content_sha256 and
+                re.fullmatch(r"[a-fA-F0-9]{64}", result.content_sha256) is None):
+            raise _invalid_field("criteria.content_sha256", result.content_sha256,
+                                 "empty text or a 64-character hexadecimal SHA-256 digest")
+        if not isinstance(result.status, str) or result.status not in {
+                "evaluable", "needs_refinement", "not_evaluable"}:
+            raise _invalid_field("criteria.status", result.status,
+                                 "evaluable, needs_refinement, or not_evaluable")
+        if not isinstance(result.reason, str):
+            raise _invalid_field("criteria.reason", result.reason, "text")
+        if any(not isinstance(item, str) or not item.strip() for item in result.items):
+            raise _invalid_field("criteria.items", result.items, "an array of non-empty strings")
+        if (result.status == "evaluable") != bool(result.items):
+            raise _invalid_field("criteria.items", result.items,
+                                 "a non-empty array only for evaluable criteria")
         return result
 
 
@@ -127,20 +139,34 @@ class Check:
 
     @classmethod
     def from_dict(cls, item: Mapping[str, Any]) -> Check:
-        return cls(item["id"], item["command"], item["executor"], item["profile"],
-                   item["context"], item["required"], tuple(item.get("criteria", ())),
+        expected = {"id": "a non-empty string", "command": "text", "executor": "text",
+                    "profile": "text", "context": "text", "required": "a boolean"}
+        values = {key: _required(item, key, format_) for key, format_ in expected.items()}
+        criteria = item.get("criteria", ())
+        if not isinstance(criteria, (list, tuple)):
+            raise _invalid_field("criteria", criteria, "an array of criterion IDs")
+        return cls(values["id"], values["command"], values["executor"], values["profile"],
+                   values["context"], values["required"], tuple(criteria),
                    item.get("level", "test"), item.get("provenance", "agent"),
                    item.get("reason", "proposed verification"))
 
     def validate(self, criterion_ids: set[str]) -> None:
-        if (any(not isinstance(v, str) or not v.strip() for v in (
-                self.id, self.command, self.executor, self.profile, self.context,
-                self.provenance, self.reason)) or type(self.required) is not bool
-                or self.level not in LEVELS or len(set(self.criteria)) != len(self.criteria)
-                or not set(self.criteria) <= criterion_ids):
-            raise VerificationError("invalid check or criterion link")
+        for field in ("id", "command", "executor", "profile", "context", "provenance", "reason"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not value.strip():
+                raise _invalid_field(f"check.{field}", value, "non-empty text")
+        if type(self.required) is not bool:
+            raise _invalid_field("check.required", self.required, "a boolean")
+        if not isinstance(self.level, str) or self.level not in LEVELS:
+            raise _invalid_field("check.level", self.level, "static, test, or boundary")
+        if any(not isinstance(value, str) or not value.strip() for value in self.criteria):
+            raise _invalid_field("check.criteria", self.criteria, "an array of non-empty criterion IDs")
+        if len(set(self.criteria)) != len(self.criteria):
+            raise _invalid_field("check.criteria", self.criteria, "unique criterion IDs")
+        if not set(self.criteria) <= criterion_ids:
+            raise _invalid_field("check.criteria", self.criteria, "IDs present in the criteria list")
         if self.criteria and not self.required:
-            raise VerificationError("a criterion-dependent check must be required")
+            raise _invalid_field("check.required", self.required, "true when criteria are linked")
 
 
 #: What a check executes, where and by whom. Changing any of them is another
@@ -187,6 +213,37 @@ def safe_value(field: str, value: Any) -> str:
     return "ref-" + hashlib.sha256(repr(value).encode()).hexdigest()[:12]
 
 
+def _received(value: Any) -> str:
+    """Describe a rejected value without echoing free-form agent content."""
+    if value is _MISSING:
+        return "missing"
+    return f"{type(value).__name__}"
+
+
+_MISSING = object()
+
+
+def _invalid_field(field: str, value: Any, expected: str) -> VerificationError:
+    return VerificationError(f"{field}: received {_received(value)}; expected {expected}")
+
+
+def _required(item: Mapping[str, Any], key: str, expected: str) -> Any:
+    value = item.get(key, _MISSING)
+    if value is _MISSING:
+        raise _invalid_field(key, value, expected)
+    return value
+
+
+def _as_items(value: Any, field: str, *, singleton: bool = False) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if singleton and isinstance(value, Mapping):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    raise _invalid_field(field, value, "an array of objects" + (" or one object" if singleton else ""))
+
+
 @dataclass(frozen=True)
 class CheckResult:
     id: str
@@ -202,38 +259,53 @@ class CheckResult:
 
     @classmethod
     def from_dict(cls, item: Mapping[str, Any]) -> CheckResult:
-        return cls(item["id"], item["head_sha"], item["result"],
-                   tuple(item.get("evidence", ())), item.get("cause", ""),
-                   tuple(item.get("attempts", ())))
+        evidence = _as_items(item.get("evidence"), "evidence", singleton=True)
+        attempts = _as_items(item.get("attempts"), "attempts")
+        cause = item.get("cause")
+        if cause is None:
+            cause = ""
+        return cls(_required(item, "id", "a non-empty string"),
+                   _required(item, "head_sha", "a full SHA or null for unverified results"),
+                   _required(item, "result", "pass, fail, or unverified"),
+                   evidence, cause, attempts)
 
     def validate(self) -> None:
-        if (not isinstance(self.id, str) or not self.id.strip()
-                or (self.head_sha is None and self.result != "unverified")
-                or (self.head_sha is not None and (not isinstance(self.head_sha, str)
-                    or not re.fullmatch(r"[a-fA-F0-9]{40}", self.head_sha)))
-                or self.result not in {"pass", "fail", "unverified"}
-                or not isinstance(self.cause, str)
-                or any(not isinstance(v, Mapping) for v in (*self.evidence, *self.attempts))):
-            raise VerificationError("invalid check result")
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise _invalid_field("id", self.id, "a non-empty string")
+        if self.head_sha is None and self.result != "unverified":
+            raise _invalid_field("head_sha", self.head_sha, "a full SHA for pass/fail results")
+        if self.head_sha is not None and (not isinstance(self.head_sha, str)
+                or not re.fullmatch(r"[a-fA-F0-9]{40}", self.head_sha)):
+            raise _invalid_field("head_sha", self.head_sha, "a 40-character hexadecimal SHA")
+        if not isinstance(self.result, str) or self.result not in {"pass", "fail", "unverified"}:
+            raise _invalid_field("result", self.result, "pass, fail, or unverified")
+        if not isinstance(self.cause, str):
+            raise _invalid_field("cause", self.cause, "omitted or text")
+        if any(not isinstance(v, Mapping) for v in self.evidence):
+            raise _invalid_field("evidence", self.evidence, "an array of objects")
+        if any(not isinstance(v, Mapping) for v in self.attempts):
+            raise _invalid_field("attempts", self.attempts, "an array of objects")
         if self.result == "unverified":
             if not self.cause.strip():
-                raise VerificationError("unverified result requires a cause")
+                raise _invalid_field("cause", self.cause, "non-empty text for unverified results")
             return
         if not self.evidence:
-            raise VerificationError("executed result requires evidence")
+            raise _invalid_field("evidence", self.evidence, "at least one evidence object for pass/fail results")
         codes = []
         for item in self.evidence:
             code, executed = item.get("exit_code"), item.get("executed")
             if any(key in item and (not isinstance(item[key], str)
                    or re.fullmatch(r"[a-f0-9]{64}", item[key]) is None)
                    for key in ("test_sha256", "context_sha256", "output_sha256")):
-                raise VerificationError("evidence fingerprints must be SHA-256 digests")
+                raise _invalid_field("evidence fingerprint", item, "a 64-character hexadecimal SHA-256 digest")
             if (type(code) is not int or "executed" not in item
                     or (executed is not None and (type(executed) is not int or executed < 0))):
-                raise VerificationError("executed evidence requires integer exit_code and count")
+                field = "executed" if "executed" not in item or (executed is not None and type(executed) is not int) else "exit_code"
+                value = item.get(field, _MISSING)
+                raise _invalid_field(f"evidence.{field}", value, "an integer" + (" or null" if field == "executed" else ""))
             codes.append(code)
         if (self.result == "pass") != all(code == 0 for code in codes):
-            raise VerificationError("check result contradicts evidence")
+            raise _invalid_field("result", self.result, "pass when all exit_code values are 0, otherwise fail")
 
 
 @dataclass(frozen=True)
@@ -252,15 +324,17 @@ class VerificationPlan:
         for check in self.checks:
             check.validate(self.criterion_ids)
             if check.id in ids:
-                raise VerificationError("duplicate check identity")
+                raise _invalid_field("check.id", check.id, "a unique check ID")
             ids.add(check.id)
         for result in self.results:
             result.validate()
             if result.id not in ids:
-                raise VerificationError("result for unknown check")
+                raise _invalid_field("result.id", result.id, "an ID in the frozen checks")
             command = next(check.command for check in self.checks if check.id == result.id)
-            if any(item.get("command", command) != command for item in result.evidence):
-                raise VerificationError("result evidence command differs from check")
+            for item in result.evidence:
+                if item.get("command", command) != command:
+                    raise _invalid_field("result.evidence.command", item.get("command", _MISSING),
+                                         "the frozen check command " + safe_value("command", command))
 
     def extend(self, additions: tuple[Check, ...]) -> VerificationPlan:
         """Freeze identity and obligations. Promotion and additions are allowed.
@@ -307,7 +381,8 @@ class VerificationPlan:
     def cap(self, conclusion: str, head_sha: str) -> str:
         """Deterministic caps never raise the agent's conclusion."""
         if not isinstance(conclusion, str) or conclusion not in CONCLUSIONS:
-            raise VerificationError("unknown verification conclusion")
+            raise _invalid_field("tests.conclusion", conclusion,
+                                 "failed, not_verified, verified_with_reservations, or verified")
         required = [check for check in self.checks if check.required]
         states = [self.current(check.id, head_sha) for check in required]
         cap = "verified"
@@ -351,11 +426,11 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
     """
     version = tests.get("version", 1)
     if type(version) is not int or version not in {1, TESTS_VERSION}:
-        raise VerificationError("unsupported tests.version")
+        raise _invalid_field("tests.version", version, "integer 1 or 2")
     if version == 1 and plan is None:
         return dict(tests), None  # legacy consumers retain their historical contract
     if not re.fullmatch(r"[a-fA-F0-9]{40}", head_sha):
-        raise VerificationError("per-check results require the verified HEAD")
+        raise _invalid_field("head_sha", head_sha, "the verified 40-character hexadecimal HEAD SHA")
     if plan is None:
         # Standalone v2 reports still need a real criterion list to claim coverage.
         plan = VerificationPlan(Criteria.from_dict(tests.get("criteria", {
@@ -363,7 +438,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             "reason": "runtime criteria unavailable"})))
     entries = tests.get("checks", []) if version == 2 else tests.get("evidence", [])
     if not isinstance(entries, list):
-        raise VerificationError("checks/evidence must be an array")
+        field = "checks" if version == 2 else "evidence"
+        raise _invalid_field(f"tests.{field}", entries, "an array of check objects")
     if version == 1:
         # Only match an exact known command. Missing evidence leaves it unverified.
         converted = []
@@ -378,7 +454,9 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         # must not disappear while converting the report to per-check results.
         for entry in entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("command"), str):
-                raise VerificationError("invalid legacy evidence")
+                raise _invalid_field("evidence.command", entry.get("command", _MISSING)
+                                     if isinstance(entry, dict) else entry,
+                                     "text in each legacy evidence object")
             command = entry["command"]
             if command in known_commands:
                 continue
@@ -393,38 +471,68 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         entries = converted
     seen: set[str] = set()
     evidence_view: list[dict[str, Any]] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            raise VerificationError("check must be an object")
-        check = Check.from_dict(entry)
+            raise _invalid_field(f"checks[{index}]", entry, "a check object")
+        try:
+            check = Check.from_dict(entry)
+        except (VerificationError, KeyError, TypeError, ValueError) as error:
+            detail = str(error) or type(error).__name__
+            raise VerificationError(f"checks[{index}] {detail}") from error
+        if not isinstance(check.id, str) or not check.id.strip():
+            raise _invalid_field(f"checks[{index}].id", check.id, "a non-empty string")
         if check.id in seen:
-            raise VerificationError("duplicate reported check")
+            raise _invalid_field(f"checks[{index}].id", check.id, "a unique reported check ID")
         seen.add(check.id)
         # Runtime criteria links promote agent obligations rather than accepting a demotion.
         if check.criteria:
             check = replace(check, required=True)
+        check.validate(plan.criterion_ids)
         plan = plan.extend((check,))
         history = entry.get("history", [])
         if not isinstance(history, list):
-            raise VerificationError("check history must be an array")
-        for previous in history:
+            raise _invalid_field(f"checks[{index}].history", history, "an array of prior check results")
+        for history_index, previous in enumerate(history):
+            if not isinstance(previous, Mapping):
+                raise _invalid_field(f"checks[{index}].history[{history_index}]", previous,
+                                     "a prior check result object")
             prior = CheckResult.from_dict({**previous, "id": check.id})
             if prior not in plan.results:
                 plan = plan.record(prior)
         for field in ("evidence", "attempts"):
-            values = entry.get(field, ())
-            if not isinstance(values, (list, tuple)):
-                raise VerificationError(f"check {check.id} {field} must be an array")
-            for index, item in enumerate(values):
+            values = _as_items(entry.get(field), f"checks[{index}].{field}", singleton=field == "evidence")
+            for position, item in enumerate(values):
                 if not isinstance(item, Mapping):
-                    raise VerificationError(
-                        f"check {check.id} {field}[{index}] must be an object, got {type(item).__name__}")
-        result = CheckResult(check.id, entry["head_sha"], entry["result"],
-                             tuple(entry.get("evidence", ())), entry.get("cause", ""),
-                             tuple(entry.get("attempts", ())))
+                    raise _invalid_field(f"checks[{check.id}].{field}[{position}]", item, "an object")
+        evidence = _as_items(entry.get("evidence"), f"checks[{check.id}].evidence", singleton=True)
+        attempts = _as_items(entry.get("attempts"), f"checks[{check.id}].attempts")
+        cause = entry.get("cause")
+        if cause is None:
+            cause = ""
+        result = CheckResult(check.id, entry.get("head_sha"), entry.get("result", ""),
+                             evidence, cause, attempts)
+        if not isinstance(result.result, str) or result.result not in {"pass", "fail", "unverified"}:
+            raise _invalid_field(f"checks[{check.id}].result", entry.get("result", _MISSING),
+                                 "pass, fail, or unverified")
+        if not isinstance(cause, str):
+            raise _invalid_field(f"checks[{check.id}].cause", entry.get("cause", _MISSING),
+                                 "omitted or text")
+        if result.result == "unverified" and not cause.strip():
+            raise _invalid_field(f"checks[{check.id}].cause", entry.get("cause", _MISSING),
+                                 "non-empty text for unverified results")
+        if result.result in {"pass", "fail"} and not evidence:
+            raise _invalid_field(f"checks[{check.id}].evidence",
+                                 entry.get("evidence", _MISSING),
+                                 "at least one evidence object for pass/fail results")
+        try:
+            result.validate()
+        except VerificationError as error:
+            raise VerificationError(f"check {check.id} {error}") from error
         for item in result.evidence:
             if item.get("command", check.command) != check.command:
-                raise VerificationError("evidence command does not match frozen check")
+                raise _invalid_field(f"checks[{check.id}].evidence.command",
+                                     item.get("command", _MISSING),
+                                     "the frozen check command " + safe_value("command", check.command))
         plan = plan.record(result)
         if result.head_sha == head_sha and result.result != "unverified":
             evidence_view.extend({**item, "command": check.command, "level": check.level}

@@ -1,5 +1,9 @@
 {
   "groups": {
+    "command-consent-documentation": {
+      "paths": ["docs/host-permissions.md", "docs/configuration.md"],
+      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits"]
+    },
     "orca-plan-documentation": {
       "paths": ["docs/orca-execution-plan.md"],
       "tests": ["test_orca_plan.OrcaPlanTests.test_modes_and_live_evidence_obligation_are_documented"]
@@ -21,6 +25,7 @@
     "configuration-documentation": {
       "paths": ["docs/configuration.md"],
       "tests": [
+        "test_basedpyright_configuration.BasedpyrightConfigurationTests.test_documentation_names_configuration_and_command",
         "test_validate_package.ValidatePackageTests.test_implementation_workspace_default_and_opt_out_are_documented",
         "test_security_gate.ConfigurationTests.test_documented_mandatory_minimum_matches_the_reference_constants"
       ]

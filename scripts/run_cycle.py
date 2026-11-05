@@ -1080,9 +1080,15 @@ def _permission_lines(requests: list[PermissionRequest], details: Path | None) -
              f"  question 1/{len(requests)} {asked['id']}: {readable(asked['prompt'], 600)}",
              "    options: " + " | ".join(readable(option, 100) for option in asked["options"]),
              f"  answer:  rerun with --grant {request.grant.id}=<"
-             + "|".join(answer for answer in ("cycle", "persistent", "deny")
-                        if answer != "cycle" or request.scope.isolated_per_dispatch)
+             + "|".join(answer for answer in (("cycle", "persistent", "forever", "deny")
+                                             if request.grant.operation else ("cycle", "persistent", "deny"))
+                        if (answer != "cycle" or request.scope.isolated_per_dispatch)
+                        and (answer != "forever" or "forever" in asked["options"]))
              + "> from the stopped stage"]
+    if request.grant.operation:
+        lines += ["  operation: " + json.dumps(request.record()["operation"], ensure_ascii=True),
+                  "  pattern: " + json.dumps(request.grant.operation, ensure_ascii=True),
+                  "  risk: " + request.scope.risks]
     lines.append(f"  details: {details}" if details is not None else "  details: not saved")
     return lines
 
@@ -2696,23 +2702,36 @@ def _normalize_test_payload(
     tests = payload.get("tests")
     # A stage with no verification report must not replace the cycle's previous
     # outcome. Explicit reports still receive the plan's deterministic caps.
-    if tests is None or (isinstance(tests, dict) and tests.get("reason") == "no_code_change"
+    if "tests" not in payload:
+        return payload, plan
+    if tests is None:
+        return payload, plan
+    if (isinstance(tests, dict) and tests.get("reason") == "no_code_change"
                          and not {"checks", "evidence", "conclusion", "passed", "ran"} & tests.keys()):
         return payload, plan
-    tests = tests if isinstance(tests, dict) else {}
+    if not isinstance(tests, dict):
+        payload["tests"] = {"conclusion": "not_verified", "passed": False,
+                            "rejected": f"tests: received {type(tests).__name__}; expected an object"}
+        return payload, plan
     try:
         normalized, updated = verification_contract.normalize_tests(
             tests, payload.get("head_sha", ""), plan=plan)
-    except (verification_contract.VerificationError, KeyError, TypeError, ValueError) as error:
+    except Exception as error:
         # Invalid version/identity/evidence is insufficient verification, not
         # an executed test failure and never an exception escaping the driver.
         conclusion = "failed" if tests.get("conclusion") == "failed" else "not_verified"
         if plan is not None:
-            conclusion = plan.cap(conclusion, payload.get("head_sha", ""))
+            try:
+                conclusion = plan.cap(conclusion, payload.get("head_sha", ""))
+            except Exception:
+                conclusion = "not_verified"
         normalized, updated = {"conclusion": conclusion, "passed": False}, plan
         if isinstance(error, verification_contract.VerificationError):
-            # Its text names check IDs and field names, never commands (#393).
-            normalized["rejected"] = str(error)
+            detail = str(error)
+        else:
+            detail = (f"tests.checks: received {type(error).__name__}; expected a schema-valid "
+                      f"version-2 report ({type(error).__name__})")
+        normalized["rejected"] = detail
     payload["tests"] = normalized
     return payload, updated
 

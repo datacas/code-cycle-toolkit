@@ -260,13 +260,129 @@ class ResultTests(unittest.TestCase):
             entry = report(**{field: ["text"]})
             payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
             with self.subTest(field=field), self.assertRaisesRegex(
-                    vp.VerificationError, rf"check check-1 {field}\[0\].*str"):
+                    vp.VerificationError, rf"check-1\]\.{field}\[0\].*received str.*expected an object"):
                 vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_v2_normalizes_single_object_and_null_optional_values(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(evidence={"exit_code": 0, "executed": 1}, cause=None, attempts=None)
+        normalized, _ = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD, plan=plan)
+        self.assertEqual(normalized["checks"][0]["evidence"], [{"exit_code": 0, "executed": 1}])
+        self.assertEqual(normalized["checks"][0]["cause"], "")
+        self.assertEqual(normalized["checks"][0]["attempts"], [])
+
+    def test_issue_406_pass_checks_with_null_causes_are_accepted(self):
+        ids = ("command-permissions", "evidence-wiring", "package-validation")
+        checks = [vp.Check(**{**check(id=identifier).to_dict(), "criteria": ()}) for identifier in ids]
+        plan = vp.VerificationPlan(criteria()).extend(checks)
+        entries = [report(id=identifier, cause=None, evidence=[{"exit_code": 0, "executed": 1}])
+                   for identifier in ids]
+        normalized, _ = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": entries}, HEAD, plan=plan)
+        self.assertEqual([item["id"] for item in normalized["checks"]], list(ids))
+        self.assertTrue(all(item["cause"] == "" for item in normalized["checks"]))
+
+    def test_v2_null_evidence_is_empty_but_does_not_make_pass_valid(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(evidence=None, cause=None, attempts=None)
+        payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
+        with self.assertRaisesRegex(vp.VerificationError, r"evidence.*received NoneType.*at least one"):
+            vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_v2_unverified_still_requires_nonempty_cause(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(result="unverified", evidence=None, cause=None, attempts=None)
+        payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
+        with self.assertRaisesRegex(vp.VerificationError, r"cause.*received NoneType.*non-empty text"):
+            vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_v2_unverified_non_text_cause_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(result="unverified", evidence=None, cause=5, attempts=None)
+        payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests(payload, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("cause", message)
+        self.assertIn("int", message)
+        self.assertIn("omitted or text", message)
+
+    def test_v2_non_text_result_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(result=[], evidence=None, cause=None, attempts=None)
+        payload = {"version": 2, "conclusion": "not_verified", "checks": [entry]}
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests(payload, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("result", message)
+        self.assertIn("list", message)
+        self.assertIn("pass, fail, or unverified", message)
+
+    def test_v2_rejections_describe_field_received_type_and_expected_format(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        for field, value, expected in (("evidence", "bad", "array"), ("attempts", 3, "array"),
+                                       ("cause", [], "text")):
+            entry = report(**{field: value})
+            payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
+            with self.subTest(field=field), self.assertRaises(vp.VerificationError) as caught:
+                vp.normalize_tests(payload, HEAD, plan=plan)
+            message = str(caught.exception)
+            self.assertIn(field, message)
+            self.assertIn(type(value).__name__, message)
+            self.assertIn(expected, message)
+
+    def test_v2_missing_required_check_field_names_missing_value_and_format(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report()
+        del entry["command"]
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        self.assertIn("command", str(caught.exception))
+        self.assertIn("received missing", str(caught.exception))
+        self.assertIn("expected text", str(caught.exception))
+
+    def test_v2_invalid_check_validation_names_field_value_and_format(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(level="invalid")
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        message = str(caught.exception)
+        self.assertIn("check.level", message)
+        self.assertIn("received str", message)
+        self.assertIn("expected static, test, or boundary", message)
+
+    def test_v2_duplicate_and_command_mismatch_rejections_name_field_details(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(evidence=[{"command": "python3 other", "exit_code": 0, "executed": 1}])
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+        self.assertIn("evidence.command", str(caught.exception))
+        self.assertIn("received str", str(caught.exception))
+        self.assertIn("expected the frozen check command", str(caught.exception))
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [report(), report()]}, HEAD, plan=plan)
+        self.assertIn("checks[1].id", str(caught.exception))
+        self.assertIn("received str", str(caught.exception))
+        self.assertIn("expected a unique reported check ID", str(caught.exception))
+
+    def test_v2_unhashable_check_id_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [report(id=["x"])]}, HEAD, plan=plan)
+        self.assertIn("checks[0].id", str(caught.exception))
+        self.assertIn("received list", str(caught.exception))
+        self.assertIn("expected a non-empty string", str(caught.exception))
 
     def test_v1_string_evidence_rejects_with_plan_and_stays_unchanged_without_one(self):
         legacy = {"version": 1, "conclusion": "verified", "evidence": ["text"]}
         plan = vp.VerificationPlan(criteria()).extend((check(),))
-        with self.assertRaisesRegex(vp.VerificationError, "invalid legacy evidence"):
+        with self.assertRaisesRegex(vp.VerificationError, r"evidence.command.*received str.*expected text"):
             vp.normalize_tests(legacy, HEAD, plan=plan)
         unchanged, updated = vp.normalize_tests(legacy, HEAD)
         self.assertEqual(unchanged, legacy)

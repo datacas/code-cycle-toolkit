@@ -51,7 +51,7 @@ from executors import (
 )
 from harness import build_harness_snapshot
 from grants import (
-    ALLOW_CYCLE, ALLOW_PERSISTENT, DENY, PENDING, ConsentBroker, GRANTS,
+    ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, PENDING, ConsentBroker, GRANTS,
     denial_context, granted_context,
 )
 from environment_recovery import (
@@ -323,6 +323,9 @@ class CycleRecorder:
         self.routing_strategy = routing_strategy
         # Sensitive sandbox grants are decided by a person, never by a stage.
         self.consent = consent
+        if self.consent is not None:
+            self.consent.cycle_id = self.consent.cycle_id or self.cycle_id
+            self.consent.task_id = self.task_id
         self.first_pass_rate = (
             telemetry.first_pass_rate(self.repo_id)
             if routing_strategy is RoutingStrategy.MEASURED else None
@@ -767,12 +770,17 @@ class CycleRecorder:
             permission_context = ""
             if self.consent is not None:
                 for grant_id in granted:
-                    scope = GRANTS[grant_id].scope_for(decision.target.executor, self.consent.platform)
+                    scope = self.consent.registry[grant_id].scope_for(decision.target.executor, self.consent.platform)
                     if scope is not None:
-                        permission_context += "\n\n" + granted_context(GRANTS[grant_id], scope)
+                        permission_context += "\n\n" + granted_context(self.consent.registry[grant_id], scope)
                 permission_context += "\n\n" + "\n".join(
-                    denial_context(GRANTS[grant_id]) for grant_id in self.consent.denied_ids)
-            grant_kwargs = {"sandbox_grants": granted} if granted else {}
+                    denial_context(self.consent.registry[grant_id]) for grant_id in self.consent.denied_ids)
+                if dispatch_kwargs.get("command_policy") is not None:
+                    dispatch_kwargs["command_policy"] = replace(
+                        dispatch_kwargs["command_policy"],
+                        command_permissions=self.consent.command_entries(decision.target.executor, role))
+            sandbox_granted = tuple(grant_id for grant_id in granted if grant_id in GRANTS)
+            grant_kwargs = {"sandbox_grants": sandbox_granted} if sandbox_granted else {}
             try:
                 result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
                                   self.registry,
@@ -885,7 +893,21 @@ class CycleRecorder:
                             result,
                             detail=f"{result.detail}; {stopped_reason} for unsupported effort",
                         )
-            blocker = (observed_sandbox_blocker(result.agent_output,
+            command_blocker = None
+            command_blockers = []
+            if self.consent is not None and dispatch_kwargs.get("command_policy") is not None:
+                from command_permissions import refused_operations, reconcile_result
+                command_blockers = refused_operations(
+                    result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials"),
+                    dispatch_kwargs["command_policy"], self.consent, decision.target.executor,
+                    dispatch_kwargs.get("cwd"))
+                for refused in command_blockers:
+                    spoken, essential = reconcile_result(
+                        result.agent_output, refused, DENY if refused["resource"] in denied_before else None, role)
+                    result = replace(result, agent_output=spoken)
+                    if essential and command_blocker is None:
+                        command_blocker = refused
+            blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
                                                 result.artifacts.get("sandbox_denials"))
                        or sandbox_blocker(result.agent_output)
                        or denied_docker_blocker(result.agent_output,
@@ -1054,7 +1076,7 @@ class CycleRecorder:
                                process_exited=result.process_exited,
                                reroute_error_code="environment_restricted",
                                reroute_start_state=result.start_state)
-            elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
+            elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY}:
                 if answer == DENY:
                     denial_affected.add(grant.id)
                 # An answer permits access, not replaying effects. Reconcile
