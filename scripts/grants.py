@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -33,8 +34,9 @@ from typing import Any, Callable
 #: Answers a person can give, as `--grant ID=<answer>` spells them.
 ALLOW_CYCLE = "cycle"
 ALLOW_PERSISTENT = "persistent"
+ALLOW_GLOBAL = "forever"
 DENY = "deny"
-ANSWERS = (ALLOW_CYCLE, ALLOW_PERSISTENT, DENY)
+ANSWERS = (ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY)
 
 #: What `ConsentBroker.request` can return besides an answer.
 PENDING = "pending"
@@ -73,6 +75,7 @@ class SensitiveGrant:
     #: Words in a blocker's command or error that name this resource, for a
     #: blocker that does not carry `resource` itself.
     terms: tuple[str, ...] = ()
+    operation: dict[str, Any] | None = None
 
     def scope_for(self, executor: str, platform: str) -> GrantScope | None:
         return next((scope for scope in self.scopes
@@ -91,6 +94,75 @@ class SensitiveGrant:
         material = json.dumps([self.id, scope.executor, scope.platform, scope.effective],
                               ensure_ascii=True)
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+COMMAND_OPTIONS = ["this cycle", "this repository", "forever", "deny"]
+#: Roles that review untrusted changes: a global grant never reaches them.
+NO_GLOBAL_ROLES = frozenset({"review", "rereview"})
+
+
+def command_options(role: str) -> list[str]:
+    return [option for option in COMMAND_OPTIONS
+            if option != "forever" or role not in NO_GLOBAL_ROLES]
+
+
+def identifier(op: dict[str, Any]) -> str:
+    return "command_" + hashlib.sha256(json.dumps(
+        op, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+
+def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGrant:
+    pattern = json.dumps(op, sort_keys=True)
+    words = op["pattern"].get("words", [])
+    program = os.path.basename(words[0]) if words else "edit"
+    risks = ("Destructive deletion can permanently remove data." if program in {"rm", "rmdir", "unlink"}
+             else "Modifies the exact edit target." if program == "edit"
+             else "May read, change or execute data with the user's privileges.")
+    risks += (" An interpreter's internal operations cannot be inspected by the hook; "
+              "only external isolation enforces restrictions inside it.")
+    return SensitiveGrant(
+        identifier(op), "the exact stage operation", "outside the stage table",
+        (GrantScope(executor, platform, pattern, risks, True),),
+        operation=op)
+
+
+
+def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
+    op = entry.get("operation")
+    if (not isinstance(op, dict) or op.get("version") != 1
+            or not isinstance(op.get("role"), str) or not isinstance(op.get("pattern"), dict)
+            or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}):
+        return None
+    pattern = op["pattern"]
+    if op["tool"] == "Bash":
+        if (not isinstance(pattern.get("words"), list) or not pattern["words"]
+                or not isinstance(pattern["words"][0], str)
+                or any(not isinstance(word, str) and not (
+                    isinstance(word, dict) and set(word) == {"tmpdir"}
+                    and isinstance(word["tmpdir"], str)) for word in pattern["words"])
+                or not isinstance(pattern.get("redirects"), list)):
+            return None
+    elif not isinstance(pattern.get("target"), str):
+        return None
+    return make_grant(op, str(entry.get("executor")), str(entry.get("platform")))
+
+
+
+def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
+                     question_id: str, blocker: dict[str, Any] | None) -> dict[str, Any]:
+    command = str((blocker or {}).get("command", ""))
+    reason = str((blocker or {}).get("error", grant.reason))
+    return {"id": question_id,
+            "prompt": (f"{role}: {command[:140]}. Outside table: {reason[:100]}. "
+                       f"Risk: {scope.risks[:180]} "
+                       "Pro: finish this operation. Con: extra access persists for the selected scope. "
+                       "Alternative: skip; affected checks stay not_verified. "
+                       "Authorizes the exact pattern in the accompanying permission record.")[:600],
+            "options": command_options(str((grant.operation or {}).get("role", role))),
+            "recommended": None,
+            "blocks": [f"grant:{grant.id}"]}
+
 
 
 DOCKER_HOST = SensitiveGrant(
@@ -141,7 +213,8 @@ def parse_grant_options(values: list[str] | tuple[str, ...]) -> dict[str, str]:
     answers: dict[str, str] = {}
     for value in values:
         grant_id, separator, answer = value.partition("=")
-        if not separator or grant_id not in GRANTS or answer not in ANSWERS:
+        if (not separator or (grant_id not in GRANTS and not re.fullmatch(r"command_[0-9a-f]{64}", grant_id))
+                or answer not in ANSWERS or (answer == ALLOW_GLOBAL and grant_id in GRANTS)):
             raise GrantError(
                 f"--grant must be ID={'|'.join(ANSWERS)} with ID one of "
                 f"{', '.join(sorted(GRANTS))}, not {value!r}")
@@ -195,8 +268,13 @@ class ConsentStore:
 
     def load(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope) -> str | None:
         """`allow`, `deny`, or None (UNKNOWN), for this exact scope only."""
-        entries = (self._read()["repos"].get(repo_id) or {}).get(grant.id, {})
+        payload = self._read()
+        entries = (payload["repos"].get(repo_id) or {}).get(grant.id, {})
         entry = entries.get(grant.fingerprint(scope)) if isinstance(entries, dict) else None
+        operation = getattr(grant, "operation", None)
+        if (entry is None and operation and not repo_id.startswith("cycle:")
+                and operation.get("role") not in NO_GLOBAL_ROLES):
+            entry = (payload["repos"].get("*") or {}).get(grant.id, {}).get(grant.fingerprint(scope))
         if (not isinstance(entry, dict)
                 or entry.get("fingerprint") != grant.fingerprint(scope)
                 or entry.get("decision") not in ("allow", "deny")):
@@ -211,26 +289,55 @@ class ConsentStore:
         the file cannot be read or validated, so a caller infers nothing from it.
         """
         return {f"{entry['grant']}: {entry['effective_scope']}": entry.get("decided_at")
-                for entry in self.list(repo_id) if entry["status"] == "GRANTED"}
+                for entry in self.list(repo_id) if entry["status"] == "GRANTED"
+                and entry["repo"] in {"*", repo_id}}
 
     def list(self, repo_id: str) -> list[dict[str, Any]]:
         """Current scope-valid decisions. History never authorizes access."""
         decisions = []
-        for grant_id, entries in (self._read()["repos"].get(repo_id) or {}).items():
-            grant = GRANTS.get(grant_id)
-            if grant is None or not isinstance(entries, dict):
+        payload = self._read()
+        sources = list(dict.fromkeys(("*", repo_id)))
+        for key in payload["repos"]:
+            try:
+                identity = json.loads(key.removeprefix("cycle:")) if key.startswith("cycle:") else None
+            except ValueError:
+                continue
+            if isinstance(identity, list) and len(identity) == 3 and identity[0] == repo_id:
+                sources.append(key)
+        for source, grant_id, entries in (
+                (source, grant_id, entries) for source in dict.fromkeys(sources)
+                for grant_id, entries in (payload["repos"].get(source) or {}).items()):
+            if not isinstance(entries, dict):
                 continue
             for fingerprint, entry in entries.items():
                 if not isinstance(entry, dict) or entry.get("decision") not in ("allow", "deny"):
+                    continue
+                grant = GRANTS.get(grant_id) or from_entry(entry)
+                if grant is None or grant.id != grant_id:
                     continue
                 scope = grant.scope_for(str(entry.get("executor")), str(entry.get("platform")))
                 if (scope is None or fingerprint != grant.fingerprint(scope)
                         or entry.get("fingerprint") != fingerprint):
                     continue
-                decisions.append({**entry, "grant": grant_id, "source": "consents.json",
+                decisions.append({**entry, "grant": grant_id, "source": "consents.json", "repo": source,
                                   "status": "GRANTED" if entry["decision"] == "allow" else "DENIED",
                                   "effective_scope": scope.effective})
         return decisions
+
+    def cycle_for(self, repo_id: str, task_id: str) -> str | None:
+        """Recover the latest command-consent lineage when resuming this work item."""
+        candidates = []
+        for entry in self.list(repo_id):
+            source = entry["repo"]
+            if not source.startswith("cycle:"):
+                continue
+            try:
+                identity = json.loads(source.removeprefix("cycle:"))
+            except ValueError:
+                continue
+            if isinstance(identity, list) and len(identity) == 3 and identity[:2] == [repo_id, task_id]:
+                candidates.append((entry["decided_at"], identity[2]))
+        return max(candidates)[1] if candidates else None
 
     def revoke(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope) -> bool:
         """Return a stored decision to UNKNOWN and retain a separate audit record."""
@@ -257,6 +364,7 @@ class ConsentStore:
             "executor": scope.executor,
             "platform": scope.platform,
             "decided_at": datetime.now(timezone.utc).isoformat(),
+            **({"operation": grant.operation} if getattr(grant, "operation", None) else {}),
         }
         self._write(payload)
 
@@ -279,6 +387,8 @@ class ConsentStore:
 def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
              question_id: str = "Q-001", blocker: dict[str, Any] | None = None) -> dict:
     """The consent question, in the shape `stop_questions` defines."""
+    if getattr(grant, "operation", None):
+        return refusal_question(grant, scope, role, question_id, blocker)
     options = []
     if scope.isolated_per_dispatch:
         options.append(f"Allow for this cycle ({ALLOW_CYCLE})")
@@ -310,6 +420,10 @@ def reach(scope: GrantScope) -> str:
 
 def answer_from_option(option: str) -> str | None:
     """Map a chosen option back to its answer token."""
+    if option == "this cycle":
+        return ALLOW_CYCLE
+    if option == "this repository":
+        return ALLOW_PERSISTENT
     for answer in ANSWERS:
         if option.rstrip().endswith(f"({answer})") or option.strip() == answer:
             return answer
@@ -334,6 +448,11 @@ class PermissionRequest:
             "operation": (self.blocker or {}).get("command", self.grant.reason),
             "observed_error": (self.blocker or {}).get("error"),
             "alternative": "exact-HEAD CI; local checks remain not_verified",
+            **({"pattern": self.grant.operation,
+                "pros": "finish the requested operation",
+                "cons": "extra user-level access for the selected scope",
+                "global_never_covers": sorted(NO_GLOBAL_ROLES)}
+               if getattr(self.grant, "operation", None) else {}),
         }
 
 
@@ -362,6 +481,45 @@ class ConsentBroker:
     _cycle_answers: dict[str, str] = field(default_factory=dict)
     _consumed_answers: set[str] = field(default_factory=set)
     _observed: dict[str, str | None] = field(default_factory=dict)
+    operations: dict[str, SensitiveGrant] = field(default_factory=dict)
+    cycle_id: str | None = None
+    task_id: str | None = None
+
+    @property
+    def cycle_scope(self) -> str | None:
+        if self.cycle_id and self.task_id:
+            return "cycle:" + json.dumps([self.repo_id, self.task_id, self.cycle_id])
+        return f"cycle:{self.cycle_id}:{self.repo_id}" if self.cycle_id else None
+
+    @property
+    def registry(self) -> dict[str, SensitiveGrant]:
+        if self.store is not None:
+            try:
+                entries = self.store.list(self.repo_id) + (
+                    self.store.list(self.cycle_scope) if self.cycle_scope else [])
+            except GrantError as error:
+                self.notes.append(f"{error}; no stored authorization applied")
+                entries = []
+            for entry in entries:
+                grant = from_entry(entry)
+                if grant is not None:
+                    previous = self.operations.get(grant.id)
+                    if previous is not None:
+                        from dataclasses import replace
+                        grant = replace(grant, scopes=tuple(dict.fromkeys((*previous.scopes, *grant.scopes))))
+                    self.operations[grant.id] = grant
+        return {**GRANTS, **self.operations}
+
+    def command_entries(self, executor: str, role: str) -> tuple[dict[str, Any], ...]:
+        entries = []
+        for grant in self.registry.values():
+            op = getattr(grant, "operation", None)
+            scope = grant.scope_for(executor, self.platform)
+            if op and op["role"] == role and scope is not None:
+                answer, _ = self._resolve(grant, scope)
+                if answer is not None:
+                    entries.append({"operation": op, "decision": "deny" if answer == DENY else "allow"})
+        return tuple(entries)
 
     def _observe(self, kind, grant, scope, role, answer=None, source=None) -> None:
         if self.observer is not None:
@@ -371,17 +529,17 @@ class ConsentBroker:
                 self.notes.append(f"consent audit failed ({type(error).__name__})")
 
     def grant_for(self, blocker: dict) -> SensitiveGrant | None:
-        return next((grant for grant in GRANTS.values() if grant.matches(blocker)), None)
+        return next((grant for grant in self.registry.values() if grant.matches(blocker)), None)
 
     def granted(self, executor: str) -> tuple[str, ...]:
         """Revalidate effective decisions immediately before each dispatch."""
         granted, denied = set(), set()
-        for grant in GRANTS.values():
+        for grant in self.registry.values():
             scope = grant.scope_for(executor, self.platform)
             if scope is None:
                 continue
             answer, source = self._resolve(grant, scope)
-            if answer in (ALLOW_CYCLE, ALLOW_PERSISTENT):
+            if answer in (ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL):
                 granted.add(grant.id)
             elif answer == DENY:
                 denied.add(grant.id)
@@ -413,7 +571,16 @@ class ConsentBroker:
         if grant.id in self.preauthorized:
             return ALLOW_PERSISTENT, "project configuration"
         if key in self._cycle_answers:
-            return self._cycle_answers[key], "cycle"
+            if (getattr(grant, "operation", None) and self.cycle_scope and self.store
+                    and self._cycle_answers[key] == ALLOW_CYCLE
+                    and self.store.load(self.cycle_scope, grant, scope) is None):
+                self._cycle_answers.pop(key)
+            else:
+                return self._cycle_answers[key], "cycle"
+        if getattr(grant, "operation", None) and self.cycle_scope and self.store:
+            stored = self.store.load(self.cycle_scope, grant, scope)
+            if stored is not None:
+                return (ALLOW_CYCLE if stored == "allow" else DENY), "cycle"
         if self.store is not None:
             try:
                 stored = self.store.load(self.repo_id, grant, scope)
@@ -427,7 +594,7 @@ class ConsentBroker:
     def listing(self, executor: str) -> list[dict[str, Any]]:
         """Stored decisions plus the effective authorization and its source."""
         stored = self.store.list(self.repo_id) if self.store is not None else []
-        for grant in GRANTS.values():
+        for grant in self.registry.values():
             scope = grant.scope_for(executor, self.platform)
             if scope is None:
                 continue
@@ -440,11 +607,25 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        if answer == ALLOW_GLOBAL:
+            if grant.operation is None or self.store is None:
+                raise GrantError("global answers require an exact command and a consent store")
+            if grant.operation.get("role") in NO_GLOBAL_ROLES:
+                raise GrantError(
+                    f"{grant.id}: a global grant never covers {grant.operation['role']}; "
+                    "answer this cycle or this repository")
+            if not persist:
+                return self.apply_answer(grant, scope, ALLOW_CYCLE, persist=False)
+            self.store.save("*", grant, scope, "allow")
+            return answer
         if answer == ALLOW_CYCLE and not scope.isolated_per_dispatch:
             raise GrantError(
                 f"{grant.id} cannot be granted for one cycle on {scope.executor}/"
                 f"{scope.platform}: the grant would not stay isolated to it")
         if answer == DENY:
+            self._cycle_answers.pop(grant.fingerprint(scope), None)
+            if getattr(grant, "operation", None) and self.cycle_scope and self.store:
+                self.store.revoke(self.cycle_scope, grant, scope)
             if persist and self.store is not None:
                 self.store.save(self.repo_id, grant, scope, "deny")
             else:
@@ -456,6 +637,9 @@ class ConsentBroker:
         self.denied_ids.discard(grant.id)
         if answer == ALLOW_CYCLE or (answer == ALLOW_PERSISTENT and not persist):
             self._cycle_answers[grant.fingerprint(scope)] = answer
+            if (answer == ALLOW_CYCLE and getattr(grant, "operation", None)
+                    and self.cycle_scope and self.store):
+                self.store.save(self.cycle_scope, grant, scope, "allow")
         if answer == ALLOW_PERSISTENT and persist:
             if self.store is None:
                 raise GrantError(f"{grant.id}: no consent store to keep a persistent answer in")
@@ -478,7 +662,10 @@ class ConsentBroker:
         if answer is None and self.prompt is not None:
             self._observe("decision_asked", grant, scope, role)
             source = "interactive"
-            answer = self.prompt(question(grant, scope, role=role, blocker=blocker))
+            asked = question(grant, scope, role=role, blocker=blocker)
+            if grant.operation:
+                asked = {**asked, "permission_record": PermissionRequest(grant, scope, role, asked, blocker).record()}
+            answer = self.prompt(asked)
         if answer is None:
             self._observe("decision_asked", grant, scope, role)
             self.pending.append(PermissionRequest(
@@ -502,6 +689,11 @@ class ConsentBroker:
 
 def denial_context(grant: SensitiveGrant) -> str:
     """What a stage reruns with when a person denied the grant it needed."""
+    if grant.operation is not None:
+        return (f"The user denied {grant.id} for role {grant.operation['role']}: "
+                f"{json.dumps(grant.operation, sort_keys=True)}. Skip this operation; "
+                "affected checks stay not_verified. Only an essential denied operation "
+                "needs HUMAN_INTERVENTION naming this decision.")
     return (
         f"The user denied {grant.resource} for this stage. Do not try to reach it "
         "again or work around the sandbox. Complete every check and step that "
@@ -514,6 +706,10 @@ def denial_context(grant: SensitiveGrant) -> str:
 
 
 def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
+    if grant.operation is not None:
+        return (f"The user granted {grant.id} only for role {grant.operation['role']} "
+                f"and exact pattern {scope.effective}. This does not widen the sandbox "
+                "or authorize another stage role. Interpreter internals depend on external isolation.")
     return (
         f"The user granted {grant.resource} to this and every later "
         f"{scope.executor} stage of the cycle. The sandbox now opens "
@@ -528,6 +724,8 @@ def terminal_prompt(stream_in=None, stream_out=None) -> Callable[[dict], str | N
 
     def ask(asked: dict) -> str | None:
         print(f"\nPermission request {asked['id']}: {asked['prompt']}", file=stream_out)
+        if "permission_record" in asked:
+            print(json.dumps(asked["permission_record"], ensure_ascii=True), file=stream_out)
         for number, option in enumerate(asked["options"], start=1):
             print(f"  {number}. {option}", file=stream_out)
         while True:

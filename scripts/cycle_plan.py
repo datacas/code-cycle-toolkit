@@ -100,6 +100,7 @@ class PlanRuntime:
         self.plan_store = self.api.CycleHistoryStore(self.telemetry.path)
         self.recorded_commands = set()
         self.plan_conclusion = None
+        self.verification_retry = False
         if self.start_from == "implement" and not self.continue_work:
             if self.execution_plan.stage("issue_review").selected:
                 self.issue_review_fields["issue_review"] = "dispatched"
@@ -174,7 +175,7 @@ class PlanRuntime:
                 self.state.verification_plan = recovered.verification
                 self.plan_conclusion = recovered.metadata.get("verification_conclusion")
                 self.verification_resume = (
-                    self.start_from == "rereview" and record["stop_reason"] == "verification_unverified"
+                    self.start_from in self.api.RESUMES and record["stop_reason"] == "verification_unverified"
                     and same_policy
                     and record["head_sha"] == self.plan_head and self.plan_receipt_matches(record)
                     and (not recovered.stage("security").selected
@@ -378,6 +379,8 @@ class PlanRuntime:
 
     def verification_barrier(self: Any, head: str | None = None):
         plan = self.state.verification_plan
+        # Recomputed on every pass so an earlier decision never outlives its check.
+        self.report.pending_verification = []
         security = self.execution_plan.stage("security")
         if (self.plan_managed and security.selected
                 and security.state is not ExecutionState.COMPLETED):
@@ -404,17 +407,109 @@ class PlanRuntime:
         if self.plan_conclusion == "failed" or any(plan.current(check.id, current_head) == "fail" for check in required):
             return self.stop("a required verification check failed", stop_reason="stage_not_completed")
         if plan.cap(self.plan_conclusion or "verified", current_head) == "not_verified":
-            return self.stop("required verification remains unverified on the current HEAD; "
-                "resume with --from rereview --pr to run only pending checks",
+            return self.verification_decision(current_head)
+        return None
+
+    def verification_decision(self: Any, head: str):
+        """Ask once per check/HEAD/cause/conditions; acceptance grants no evidence."""
+        plan = self.state.verification_plan
+        pending = [check for check in plan.checks if check.required
+                   and plan.current(check.id, head) == "unverified"]
+        if not pending:
+            return self.stop("verification coverage remains incomplete", stop_reason="verification_unverified")
+        rows = journal_events(self.telemetry.path, self.repo_id, task_id=self.task_id,
+                              kinds=("decision_asked", "decision_answered"))
+        self.report.pending_verification = []
+        for check in pending:
+            results = [result for result in plan.results if result.id == check.id and result.head_sha == head]
+            cause = results[-1].cause if results else "omitted"
+            # Match the privacy-preserving persisted representation on resume.
+            from cycle_history import plan_projection
+            projected = plan_projection(replace(self.execution_plan, verification=plan))
+            stored = projected["plan"]["verification"]
+            causes = [item["cause"] for item in stored["results"]
+                      if item["id"] == check.id and item["head_sha"] == head]
+            cause_key = causes[-1] if causes else "omitted"
+            identity = next(item for item in stored["checks"] if item["id"] == check.id)
+            conditions = {"timeout": self.timeout, "commands": self.authorized_bindings(),
+                          "choices": self.user_tool_choices, "consents": self.consent_scopes}
+            digest = hashlib.sha256(json.dumps({"check": identity, "head": head,
+                "cause": cause_key, "conditions": conditions}, sort_keys=True, default=str).encode()).hexdigest()
+            key = "verification:" + digest
+            matching = [row for row in rows if row.get("decision_key") == key]
+            previous = [row for row in rows if row.get("component") == "verification"
+                        and row.get("correlation", {}).get("head_sha") == head
+                        and row.get("correlation", {}).get("check") == check.id]
+            if self.verification_resume and previous and not matching:
+                self.verification_retry = True
+                self.journal.record("decision_answered", component="verification", decision_key=key,
+                    status="retry", command=check.command, reason=cause,
+                    correlation={"head_sha": head, "check": check.id, "conditions": digest})
+                continue
+            answer = next((row["status"] for row in reversed(matching)
+                           if row["kind"] == "decision_answered"), None)
+            submitted = self.verification_answers.get(key)
+            if submitted and matching and submitted != answer:
+                if not self.journal.record("decision_answered", component="verification", decision_key=key,
+                        status=submitted, command=check.command, reason=cause,
+                        correlation={"head_sha": head, "check": check.id, "conditions": digest}):
+                    return self.stop("verification decision could not be persisted", "BLOCKED")
+                answer = submitted
+            detail = {"check": check.id, "command": check.command, "head_sha": head,
+                      "cause": cause, "decision": answer or "unanswered", "decision_key": key}
+            self.report.pending_verification.append(detail)
+            if answer == "accept":
+                continue
+            if not any(row["kind"] == "decision_asked" for row in matching):
+                if not self.journal.record("decision_asked", component="verification", decision_key=key,
+                        status="unanswered", command=check.command, reason=cause,
+                        detail=json.dumps(conditions, sort_keys=True, default=str),
+                        correlation={"head_sha": head, "check": check.id, "conditions": digest}):
+                    return self.stop("verification question could not be persisted", "BLOCKED")
+            self.report.verification_questions = [{"id": key,
+                "prompt": f"Required check {check.id} on {head} remains not_verified: {cause}. Accept it as not_verified or run outside the stage?",
+                "options": ["Accept as not_verified", "Run outside the stage (unavailable: no safe authorised evidence mechanism)"],
+                "recommended": "Accept as not_verified", "blocks": [check.id]}]
+            return self.stop(("Outside-stage verification is unavailable; no safe authorised mechanism exists. "
+                              if answer == "outside" else "")
+                + f"Required check {check.id} remains not_verified on {head}; decision {key} is pending. "
+                  "Answer with --verification-answer KEY=accept or KEY=outside; unchanged resumes stay stopped.",
                 stop_reason="verification_unverified")
         return None
+
+    def verification_timeout(self: Any, outcome):
+        """A killed stage supplies no pass, even if partial output claims one."""
+        plan = self.state.verification_plan
+        if plan is None:
+            return None
+        if self.allowed_test_command and not any(check.id == "configured-test" for check in plan.checks):
+            plan = plan.extend((configured_check(self.allowed_test_command, "runtime", "runtime"),))
+        from executors import DEFAULT_DISPATCH_TIMEOUT_SECONDS
+        limit = self.timeout or DEFAULT_DISPATCH_TIMEOUT_SECONDS
+        for check in plan.checks:
+            if check.required and plan.current(check.id, self.plan_head) == "unverified":
+                plan = plan.record(CheckResult(check.id, self.plan_head, "unverified",
+                    evidence=({"command": check.command, "limit_seconds": limit,
+                               "exit_code": None, "executed": None},),
+                    cause="time_limit", attempts=({"limit_seconds": limit,
+                        "evidence": outcome.result.failure_summary()},)))
+        self.state.verification_plan = plan
+        self.plan_conclusion = "not_verified"
+        self.save_plan()
+        return self.verification_barrier()
 
     def verify_pending(self: Any):
         """A single isolated cc-verify dispatch; no publication or review loop."""
         from executors import DisposableWorkspace, _git_output
+        stopped = self.verification_barrier()
+        if stopped is not None or (self.report.pending_verification and not self.verification_retry):
+            return stopped
         plan = self.state.verification_plan
         pending = [check for check in plan.checks if check.required
                    and plan.current(check.id, self.plan_head) == "unverified"] if plan else []
+        accepted = {item["check"] for item in self.report.pending_verification
+                    if item["decision"] == "accept"}
+        pending = [check for check in pending if check.id not in accepted]
         # A manual check has no command to run: it stays unverified and the
         # barrier reports it. It never becomes a verify prefix.
         pending = [check for check in pending if not is_manual_command(check.command)]
@@ -447,6 +542,8 @@ class PlanRuntime:
             self.report.stage_details.append(self.api.StageReportDetails(
                 self.recorder.iteration, None))
             if not outcome.succeeded or outcome.result is None or outcome.result.asynchronous:
+                if outcome.result is not None and outcome.result.failure_code == "timeout":
+                    return self.verification_timeout(outcome)
                 return self.stop("pending verification could not execute", stop_reason="verification_unverified")
             if (_git_output(directory, "rev-parse", "HEAD") != self.plan_head
                     or _git_output(directory, "diff", "--name-only", "HEAD")):

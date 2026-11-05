@@ -54,6 +54,8 @@ class DriverCharacterizationTests(RunCycleTestCase):
             (["--json"], "--json needs --dry-run"),
             (["--dry-run", "--detach"], "--dry-run runs nothing to detach"),
             (["--from", "resolve"], "--from resolve requires --pr"),
+            (["--verification-answer", "verification:abc=merge"],
+             "--verification-answer must be verification:<digest>=accept|outside"),
         ]:
             with self.subTest(flags=flags):
                 stderr = io.StringIO()

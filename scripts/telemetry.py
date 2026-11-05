@@ -116,7 +116,8 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: is a distinct stop and cannot be cleared by generic CI success.
 #: 26: append-only quota history and worktree provenance, independent of reset
 #: eligibility. Provider prose remains exclusively in the redacted journal.
-SCHEMA_VERSION = 26
+#: 27: explicit, non-successful terminal verification-incomplete cycles.
+SCHEMA_VERSION = 27
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -271,7 +272,7 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
     "status": ("token", frozenset({
         "APPROVED", "CHANGES_REQUESTED", "BLOCKED", "FAILED", "RESOLVED",
         "PARTIALLY_RESOLVED", "IMPLEMENTED", "READY_FOR_MANUAL_MERGE",
-        "HUMAN_INTERVENTION", "IN_PROGRESS", "READY", "NEEDS_REFINEMENT",
+        "HUMAN_INTERVENTION", "VERIFICATION_INCOMPLETE", "IN_PROGRESS", "READY", "NEEDS_REFINEMENT",
         AWAITING_CI_STATUS,
     })),
     "missing_capability": ("token", frozenset({

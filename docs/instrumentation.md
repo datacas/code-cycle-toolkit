@@ -774,6 +774,11 @@ The `quota_resume_reason` cycle payload field records a route around persisted
 exhaustion. The journal records redacted messages and scoped handoff fingerprints,
 executors and operator actions. See [quota telemetry](telemetry.md#quota-exhaustion-windows-schema-23).
 
+Schema 27 adds the terminal, non-successful cycle status
+`VERIFICATION_INCOMPLETE` with `stop_reason=verification_unverified`. Older
+rows are read unchanged. See
+[execution plan history](telemetry.md#execution-plan-history-schema-25).
+
 Schema 24 adds the stop reasons `publication_violation` and
 `publication_unverified` of the [publication audit](role-workspace-policy.md#publication-audit).
 They are payload-only. The audit's evidence is not stored in the telemetry

@@ -118,23 +118,6 @@ class StageLoop:
             stopped = self.verify_pending()
             if stopped is not None:
                 return stopped
-            clean, stopped = self.reusable_review()
-            if stopped is not None:
-                return stopped
-            if clean is None:
-                return self.stop("pending checks completed; no reusable clean review holds",
-                                 stop_reason="verification_unverified")
-            role, verdict, head, attempts = clean
-            self.report.verdict = verdict
-            if self.execution_plan.objective == "verified_change":
-                return self.stop("", self.api.APPROVED_END, stop_reason="approved")
-            outcome = self.gate(role, head, attempts, reported)
-            if isinstance(outcome, self.api.CycleReport):
-                return outcome
-            if outcome[0] == "approved":
-                return self.stop("", self.api.APPROVED_END, stop_reason="approved")
-            return self.stop("verification completed but the current head's CI is not passing",
-                             stop_reason="ci_not_passing")
         if self.start_from == "implement":
             # Independent of issue-review mode/difficulty. Read once before any
             # agent iteration; provider content is data, never instructions.
@@ -223,7 +206,7 @@ class StageLoop:
                 return stopped
             if manual is not None:
                 return self.close_manual(manual, reported)
-        if ((self.parallel or self.plan_managed) and self.start_from == "rereview"
+        if ((self.parallel or self.plan_managed) and (self.start_from == "rereview" or self.verification_resume)
                 and not (self.plan_managed and self.plan_partial)):
             clean, stopped = self.reusable_review()
             if stopped is not None:
@@ -429,12 +412,14 @@ class StageLoop:
                 f"the change request still conflicts with its base after the "
                 f"resolution budget of {self.max_iterations} round(s) is spent",
                 reported=reported, stop_reason="iteration_limit")
-        if not self.parallel and verdict == "APPROVED":
-            return self.stop("", self.api.APPROVED_END, reported=reported, stop_reason="approved")
+        # A clean head whose checks failed is never approved, whatever the
+        # review said: the failure was not resolved within the budget.
         if ci_failure is not None:
             return self.stop(
                 f"the checks of {ci_failure.head_sha[:12]} failed after its clean review "
                 f"and the budget of {self.max_iterations} round(s) is spent",
                 reported=reported, stop_reason="iteration_limit")
+        if not self.parallel and verdict == "APPROVED":
+            return self.stop("", self.api.APPROVED_END, reported=reported, stop_reason="approved")
         return self.stop(f"still {verdict} after {self.recorder.iteration} round(s)",
                     reported=reported, stop_reason="iteration_limit")

@@ -7,6 +7,16 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- **Incomplete required verification ends once (#414).** A required check that
+  is denied, cannot run, or exceeds its stage time limit stays `not_verified`
+  with its command, cause (`time_limit` for an overrun), limit and evidence.
+  The cycle stops once with `HUMAN_INTERVENTION` and one journal-recorded
+  question bound to the check, HEAD, cause and conditions; unchanged resumes
+  stay stopped without dispatching. `--verification-answer KEY=accept` lets
+  the cycle reuse the same-HEAD review and reach the CI gate, ending as the
+  new non-successful `VERIFICATION_INCOMPLETE`; `KEY=outside` reports that no
+  safe outside-stage mechanism exists. A clean head whose CI failed is never
+  approved after the budget is spent. Telemetry schema 27.
 - **Publication audit (#261).** After every publishing stage, whatever it
   reported, `run_cycle.py` compares the cycle branch, the default branch and
   the protected branches on `origin`, and the cycle's change requests, with

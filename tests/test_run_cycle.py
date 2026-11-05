@@ -885,6 +885,12 @@ class NativeExecutionPlanTests(RunCycleTestCase):
     def test_verification_only_unavailable_environment_stops_once(self):
         self.verification_resume_fixture("unverified")
 
+    def test_accepted_unverified_resume_reaches_ci_without_repeating_review(self):
+        self.verification_resume_fixture("unverified", accept=True)
+
+    def test_accepted_unverified_resume_keeps_normal_ci_failure_handling(self):
+        self.verification_resume_fixture("unverified", accept=True, ci_failed=True)
+
     def test_verified_change_resume_completes_without_merge_readiness_or_ci(self):
         self.verification_resume_fixture("pass", objective="verified_change")
 
@@ -895,7 +901,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         self.verification_resume_fixture("pass", policy_change=True)
 
     def verification_resume_fixture(self, result, tamper=False, policy_change=False,
-                                    objective="merge_ready"):
+                                    objective="merge_ready", accept=False, ci_failed=False):
         import cycle_history as ch
         import cycle_session
         import verification_plan as vp
@@ -945,29 +951,62 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     agent_output=spoken, model_resolved=target.model, process_exited=True)
 
         checks = SimpleNamespace(pull=lambda *_: rc.ci_gate.PullState("OPEN", head, "main", "task", True, "clean"))
-        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=("approved", None)) as gate:
+        if result == "pass" or tamper:
+            # A relevant condition changed since this check was stopped: one retry.
+            from cycle_journal import Journal
+            Journal(self.store.path, "owner/api", "API-7", "cycle-before").record(
+                "decision_asked", component="verification", decision_key="verification:old",
+                correlation={"head_sha": head, "check": specs[1].id})
+        gated = (("failed", SimpleNamespace(status="failed", head_sha=head)) if ci_failed
+                 else ("approved", None))
+        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=gated) as gate:
             report = self.run_cycle(Verifier("codex"), Verifier("claude"), start_from="rereview",
                 change_request_id="4", execution_plan=self.plan(
                     "full" if policy_change else "standard", start="rereview", objective=objective),
                 allowed_verify_commands=commands, cwd=str(repo), ci_checks=checks,
                 comment_reader=lambda *_: [comment])
+            if result == "unverified" and not policy_change and not tamper:
+                for _ in range(2):
+                    key = report.verification_questions[0]["id"]
+                    report = self.run_cycle(Verifier("codex"), Verifier("claude"), start_from="rereview",
+                        change_request_id="4", execution_plan=self.plan(start="rereview", objective=objective),
+                        allowed_verify_commands=commands, cwd=str(repo), ci_checks=checks,
+                        verification_answers={key: "accept"} if accept else None,
+                        max_iterations=0 if ci_failed else 3,
+                        comment_reader=lambda *_: [comment])
+                    if accept:
+                        break
         if policy_change:
             self.assertEqual([stage.role for stage in report.stages], ["rereview"])
             self.assertFalse(report.approved)
             return
-        self.assertEqual([stage.role for stage in report.stages], ["verify"])
+        self.assertEqual([stage.role for stage in report.stages], ["verify"] if result == "pass" or tamper else [])
+        if ci_failed:
+            # A not_verified acceptance never hides a real CI failure.
+            gate.assert_called_once()
+            self.assertEqual(report.status, "HUMAN_INTERVENTION")
+            self.assertEqual(report.stop_reason, "iteration_limit")
+            self.assertIn(f"the checks of {head[:12]} failed", report.stopped_because)
+            self.assertFalse(report.approved)
+            return
         completed = result == "pass" and not tamper
         self.assertEqual(report.status, rc.APPROVED_END
-                         if completed and objective == "merge_ready" else "HUMAN_INTERVENTION")
+                         if completed and objective == "merge_ready" else
+                         "VERIFICATION_INCOMPLETE" if accept else "HUMAN_INTERVENTION")
+        if accept:
+            gate.assert_called_once()
+            self.assertFalse(report.approved)
+            self.assertNotIn("resume with --from", report.explain())
         if completed and objective == "verified_change":
             self.assertEqual(report.stop_reason, "approved")
             self.assertFalse(report.approved)
             gate.assert_not_called()
         if result == "unverified" or tamper:
             self.assertEqual(report.stop_reason, "verification_unverified")
-        self.assertEqual(len(seen), 1)
-        self.assertFalse(Path(seen[0][1]["cwd"]).exists())
-        self.assertFalse(seen[0][1]["publishes"])
+        self.assertEqual(len(seen), 1 if result == "pass" or tamper else 0)
+        if seen:
+            self.assertFalse(Path(seen[0][1]["cwd"]).exists())
+            self.assertFalse(seen[0][1]["publishes"])
         self.assertEqual(git(repo, "rev-parse", "HEAD").decode().strip(), head)
 
 
@@ -1540,7 +1579,7 @@ class PermissionConsentTests(RunCycleTestCase):
                 with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
                     rc.main(["--task", "API-7", "--repo", "owner/api", "--no-config",
                              "--grant", value])
-                self.assertIn("--grant must be ID=cycle|persistent|deny", stderr.getvalue())
+                self.assertIn("--grant must be ID=cycle|persistent|forever|deny", stderr.getvalue())
 
 
 class WorktreeDirectoryTests(unittest.TestCase):
@@ -4675,6 +4714,12 @@ class CompleteDiffTests(RunCycleTestCase):
         self.assertEqual(3, len(read))  # review, rereview, resolve
         paths = {self.assert_the_whole_diff(prompt, content) for prompt, content in read}
         self.assertEqual(3, len(paths))
+        for adapter in (reviewer, implementer):
+            for kwargs in adapter.dispatch_kwargs:
+                policy = kwargs.get("command_policy")
+                if policy is not None:
+                    self.assertEqual(1, len(policy.evidence_paths))
+                    self.assertIn(Path(policy.evidence_paths[0]), paths)
         self.assertEqual([], list(self.scratch.iterdir()))
         # A scripted adapter is not a CLI this layer starts: nothing to grant.
         self.assertTrue(all("read_dirs" not in kw for kw in reviewer.dispatch_kwargs))

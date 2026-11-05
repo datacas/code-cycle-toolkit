@@ -19,6 +19,39 @@ used by existing callers; catalog entries for other skills do not expand it.
 
 ## ExecutionPlan version 3
 
+### Required verification that cannot complete
+
+A required check that exceeds its time limit, is denied, or cannot run remains
+`unverified` (`not_verified` as the verification conclusion). Its command, cause,
+limit and available evidence are retained; neither acceptance nor green CI is a
+local pass. A review, rereview or pending-verification stage that exceeds its
+time limit records cause `time_limit` and `limit_seconds` for each required
+check it left unverified on the HEAD it was checking.
+
+The runtime stops with `HUMAN_INTERVENTION` and asks one check at a time: accept
+it as `not_verified`, or run it through a safe authorised mechanism outside the
+stage. Outside-stage execution is currently unavailable; selecting it never
+simulates a run or authorises a command. Answer on resume with
+`--verification-answer verification:<digest>=accept` (or `=outside`), using the
+key printed in the decision. The question and answer live in the journal,
+bound to the check definition, HEAD, cause and relevant conditions (time limit,
+command policy and permissions). No plan field is added. An unanswered decision
+keeps unchanged resumes stopped before dispatch; an accepted decision is reused
+without repeating the question or the check. A changed HEAD or check invalidates
+the answer. Changed conditions allow one verification retry before another stop.
+
+After acceptance, independent stages continue and a valid review on the same
+HEAD is reused. The current HEAD still reaches the normal CI gate. Failed CI
+uses normal resolution handling. Once all other applicable work and CI complete,
+an accepted required check that remains unverified produces the terminal,
+non-successful `VERIFICATION_INCOMPLETE`, with
+`stop_reason=verification_unverified`. It never produces
+`READY_FOR_MANUAL_MERGE` or enables automatic merge. The terminal report names
+the checks, commands, causes, decisions and HEAD, without suggesting a repeat
+of the stopped stage. CI remains separate evidence and never satisfies a local
+check. An explicit decision to merge despite incomplete verification is outside
+this workflow.
+
 `ExecutionPlan` serializes the plan contract without copying the existing
 findings or code-host checks. Its
 identity includes `plan_id`, `revision`, repository, and work-item ID. It also

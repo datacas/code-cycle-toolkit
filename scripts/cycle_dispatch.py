@@ -85,6 +85,8 @@ class StageDispatch:
                     "claude_allowed_commands": (self.allowed_test_command,),
                 }
             command_policy = self.stage_policy(role, change_request_id)
+            if artifact is not None and command_policy is not None:
+                command_policy = self.api.replace(command_policy, evidence_paths=(str(artifact.path),))
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             if change_request_id:
                 self.journal.change_request_id = change_request_id
@@ -256,6 +258,13 @@ class StageDispatch:
                         f"({asked.grant.resource})", reported=reported,
                         stop_reason="permission_required")
         if not outcome.succeeded:
+            # Only a stage that verifies a fixed HEAD can leave its checks
+            # unverified by a time-limit overrun; others stop as before.
+            if (outcome.role in {"review", "rereview"} and self.plan_head
+                    and outcome.result is not None and outcome.result.failure_code == "timeout"):
+                stopped = self.verification_timeout(outcome)
+                if stopped is not None:
+                    return stopped
             blocked_effort = (
                 (outcome.result is not None
                  and outcome.result.failure_code == "unsupported_effort")
