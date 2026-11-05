@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -22,6 +23,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import publication_audit as pa  # noqa: E402
+import executors as ex  # noqa: E402
+import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 from test_run_cycle import COMPLETED, RunCycleTestCase, Talker, block  # noqa: E402
 
@@ -135,6 +138,11 @@ class Remote:
         self.commit(self.other, "elsewhere")
         git(self.other, "push", "-q", "origin", "someone-else")
 
+    def advance_base(self) -> None:
+        git(self.other, "checkout", "-q", "-B", "external", "origin/main")
+        self.commit(self.other, "external base advance")
+        git(self.other, "push", "-q", "origin", "external:main")
+
     def push_from_elsewhere(self) -> None:
         """A force-push whose commit only the code host has."""
         git(self.other, "checkout", "-q", "-B", "rewrite", "origin/main")
@@ -159,6 +167,78 @@ class AuditorTests(unittest.TestCase):
 
     def kinds(self, result) -> list[tuple[str, str]]:
         return [(breach.kind, breach.ref) for breach in result.breaches]
+
+    def test_external_advance_requires_an_effective_command_table(self) -> None:
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        self.remote.advance_base()
+        self.assertEqual(pa.VIOLATED, self.auditor.verify(before).status)
+        restricted = self.auditor.verify(before, command_table_active=True)
+        self.assertEqual(pa.PASSED, restricted.status)
+        movement, = restricted.external_changes
+        self.assertEqual(pa.EXTERNAL, movement["class"])
+        self.assertEqual(before.refs["main"], movement["before"])
+        self.assertEqual(self.remote.head("main"), movement["after"])
+        self.assertNotIn(str(self.remote.origin), json.dumps(restricted.evidence()))
+
+    def test_cycle_commit_outside_the_evidence_limit_is_still_a_breach(self) -> None:
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        git(self.remote.other, "checkout", "-q", "-B", "external", f"origin/{BRANCH}")
+        for index in range(pa.COMMIT_LIMIT + 1):
+            git(self.remote.other, "commit", "-qm", str(index), "--allow-empty")
+        git(self.remote.other, "push", "-q", "origin", "external:main")
+        result = self.auditor.verify(before, command_table_active=True)
+        self.assertEqual([(pa.MOVED, "refs/heads/main")], self.kinds(result))
+        self.assertEqual(pa.COMMIT_LIMIT, len(result.breaches[0].commits_added))
+
+    def test_protected_push_and_rewind_still_breach_with_a_table(self) -> None:
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        self.remote.push_default()
+        self.assertEqual(pa.VIOLATED, self.auditor.verify(before, command_table_active=True).status)
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        git(self.remote.work, "push", "-q", "--force", "origin", "HEAD~1:main")
+        self.assertEqual(pa.VIOLATED, self.auditor.verify(before, command_table_active=True).status)
+
+    def test_insufficient_evidence_is_suspected_and_not_a_breach(self) -> None:
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        self.remote.advance_base()
+        with patch.object(self.auditor, "_is_ancestor", side_effect=pa.AuditUnreadable("missing")):
+            result = self.auditor.verify(before, command_table_active=True)
+        self.assertEqual(pa.SUSPECTED, result.status)
+        self.assertEqual((), result.breaches)
+        unreadable_host = pa.PublicationAuditor(str(self.remote.work), REPO, None)
+        self.assertEqual(pa.SUSPECTED, unreadable_host.verify(before, command_table_active=True).status)
+        self.gh.fail = "/pulls"
+        result = self.auditor.verify(before, command_table_active=True)
+        self.assertEqual(pa.SUSPECTED, result.status)
+        self.assertEqual((), result.breaches)
+
+    def test_issue_review_uses_reviewed_head_without_a_change_request(self) -> None:
+        self.gh.pulls.clear()
+        before = self.auditor.capture(checkout_branch=None)
+        self.remote.advance_base()
+        result = self.auditor.verify(before, command_table_active=True, read_only=True)
+        self.assertEqual(pa.PASSED, result.status)
+        self.assertEqual([before.reviewed_head], result.external_changes[0]["reachability_heads"])
+
+    def test_read_only_branch_and_request_head_changes_are_target_changes(self) -> None:
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        self.remote.push_forward()
+        result = self.auditor.verify(before, read_only=True, command_table_active=True)
+        self.assertEqual([(pa.REVIEW_TARGET_CHANGED, f"refs/heads/{BRANCH}")], self.kinds(result))
+        before = self.auditor.capture(checkout_branch=BRANCH)
+        self.gh.pulls[4]["head"]["sha"] = "a" * 40
+        result = self.auditor.verify(before, read_only=True)
+        self.assertIn((pa.REVIEW_TARGET_CHANGED, "change_request:4"), self.kinds(result))
+
+    def test_a_read_only_merge_or_close_stays_a_publication_breach(self) -> None:
+        for change, kind in ((self.gh.merge, pa.MERGED), (self.gh.close, pa.CLOSED)):
+            with self.subTest(kind=kind):
+                self.gh.open(4)
+                before = self.auditor.capture(checkout_branch=BRANCH, change_request_id="4")
+                change(4)
+                result = self.auditor.verify(before, change_request_id="4", read_only=True,
+                                             command_table_active=True)
+                self.assertEqual([(kind, "change_request:4")], self.kinds(result))
 
     def test_a_fast_forward_push_and_a_comment_pass(self) -> None:
         old = self.remote.head(BRANCH)
@@ -277,6 +357,158 @@ class AuditorTests(unittest.TestCase):
         self.assertEqual([(pa.MOVED, "refs/heads/main")], self.kinds(pushed))
 
 
+class ReadOnlyMovementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.remote = Remote(self)
+        self.gh = FakeGh()
+        self.gh.open(4)
+        self.auditor = pa.PublicationAuditor(
+            str(self.remote.work), REPO, pa.GitHubHostReader(run=self.gh))
+        self.target = router.parse_target("claude:anthropic/claude-sonnet-5 high")
+
+    def dispatch(self, change, *, active=True, issue_review=False, audited=True):
+        def run(_prompt, _cwd):
+            change()
+            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", self.target,
+                                     artifacts={"command_policy": "active" if active else "inactive"})
+        result = ex._verified_read_only_refs(str(self.remote.work), lambda:
+            ex._isolated_review_dispatch(ex.ClaudeAdapter(), self.target, "review",
+                cwd=str(self.remote.work), dispatch_call=run, command_policy=active),
+            self.auditor if audited else None, issue_review=issue_review)
+        assert isinstance(result, ex.DispatchResult), result
+        return result
+
+    def test_a_read_only_squash_merge_of_the_reviewed_pr_is_a_breach(self) -> None:
+        def squash():
+            # The squash commit is not reachable from the cycle heads.
+            self.remote.advance_base()
+            self.gh.merge(4)
+        result = self.dispatch(squash)
+        self.assertEqual("publication_violation", result.failure_code)
+        kinds = [item["kind"] for item in result.artifacts["publication_audit"]["breaches"]]
+        self.assertIn(pa.MERGED, kinds)
+
+    def test_a_confirmed_breach_wins_over_a_checkout_violation(self) -> None:
+        def change():
+            (self.remote.work / "file.txt").write_text("dirty", encoding="utf-8")
+            self.remote.push_default()
+        result = self.dispatch(change)
+        self.assertEqual("publication_violation", result.failure_code)
+        self.assertIn("read-only contract violation", result.detail)
+
+    def test_without_a_cycle_auditor_an_external_base_advance_is_recorded(self) -> None:
+        result = self.dispatch(self.remote.advance_base, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        movement = next(item for item in result.artifacts["external_changes"]
+                        if item["ref"] == "refs/heads/main")
+        self.assertEqual(pa.EXTERNAL, movement["class"])
+
+    def test_without_a_cycle_auditor_a_stale_origin_branch_is_not_a_target_change(self) -> None:
+        self.remote.commit(self.remote.work, "local only, not pushed")
+        result = self.dispatch(lambda: None, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+
+    def test_without_a_cycle_auditor_the_reviewed_branch_is_still_guarded(self) -> None:
+        def change():
+            git(self.remote.other, "checkout", "-q", "-B", "cycle", f"origin/{BRANCH}")
+            self.remote.commit(self.remote.other, "new cycle head")
+            git(self.remote.other, "push", "-q", "origin", f"cycle:{BRANCH}")
+        result = self.dispatch(change, audited=False)
+        self.assertEqual("review_target_changed", result.failure_code)
+        pushed = self.dispatch(lambda: git(self.remote.other, "push", "-q", "origin",
+                                           "cycle:main"), audited=False)
+        self.assertEqual("publication_violation", pushed.failure_code)
+
+    def test_without_origin_an_observed_movement_fails_closed(self) -> None:
+        git(self.remote.work, "remote", "rename", "origin", "upstream")
+        quiet = self.dispatch(lambda: None, audited=False)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, quiet.outcome, quiet.detail)
+        result = self.dispatch(self.remote.advance_base, audited=False)
+        self.assertEqual(pa.SUSPECTED, result.failure_code)
+        self.assertTrue(result.artifacts["external_changes"])
+        self.assertTrue(all(item["class"] == pa.SUSPECTED
+                            for item in result.artifacts["external_changes"]))
+
+    def test_without_an_active_table_an_unguarded_movement_is_unattributed(self) -> None:
+        def change():
+            git(self.remote.other, "tag", "release-candidate", "origin/main")
+            git(self.remote.other, "push", "-q", "origin", "refs/tags/release-candidate")
+        result = self.dispatch(change, active=False)
+        self.assertEqual(pa.SUSPECTED, result.failure_code)
+        tag = next(item for item in result.artifacts["external_changes"]
+                   if item["ref"] == "refs/tags/release-candidate")
+        self.assertEqual(pa.SUSPECTED, tag["class"])
+
+    def test_external_advance_during_isolated_review_preserves_success(self) -> None:
+        result = self.dispatch(self.remote.advance_base)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertEqual(pa.EXTERNAL, result.artifacts["external_changes"][0]["class"])
+        self.assertEqual("verified", result.artifacts["read_only_verification"])
+
+    def test_external_merge_during_issue_review_without_pr_preserves_ready(self) -> None:
+        self.gh.pulls.clear()
+        git(self.remote.work, "checkout", "-q", "main")
+        result = self.dispatch(self.remote.advance_base, issue_review=True)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertEqual(pa.EXTERNAL, result.artifacts["external_changes"][0]["class"])
+
+    def test_claude_without_command_restrictions_keeps_conservative_breach(self) -> None:
+        result = self.dispatch(self.remote.advance_base, active=False)
+        self.assertEqual("publication_violation", result.failure_code)
+
+    def test_read_only_push_to_protected_ref_is_a_breach(self) -> None:
+        result = self.dispatch(self.remote.push_default)
+        self.assertEqual("publication_violation", result.failure_code)
+
+    def test_a_guarded_move_at_a_distinct_origin_push_url_is_not_discarded(self) -> None:
+        destination = self.remote.origin.parent / "push.git"
+        git(self.remote.work, "clone", "-q", "--bare", str(self.remote.origin), str(destination))
+        git(self.remote.work, "remote", "set-url", "--push", "origin", str(destination))
+        result = self.dispatch(lambda: git(self.remote.other, "push", "-q", str(destination),
+                                           f"origin/{BRANCH}:main"))
+        self.assertEqual("publication_violation", result.failure_code)
+        self.assertEqual("refs/heads/main", result.artifacts["publication_audit"]["breaches"][0]["ref"])
+
+    def test_source_checkout_mutations_keep_the_contract_violation(self) -> None:
+        for kind in ("worktree", "index", "head"):
+            with self.subTest(kind=kind):
+                self.remote = Remote(self)
+                self.auditor.cwd = str(self.remote.work)
+                def change():
+                    (self.remote.work / "file.txt").write_text("dirty", encoding="utf-8")
+                    if kind in {"index", "head"}:
+                        git(self.remote.work, "add", "file.txt")
+                    if kind == "head":
+                        git(self.remote.work, "commit", "-qm", "changed")
+                result = self.dispatch(change)
+                self.assertEqual("contract_violation", result.failure_code)
+
+    def test_cycle_branch_movement_is_a_target_change(self) -> None:
+        def change():
+            git(self.remote.other, "checkout", "-q", "-B", "cycle", f"origin/{BRANCH}")
+            self.remote.commit(self.remote.other, "new cycle head")
+            git(self.remote.other, "push", "-q", "origin", f"cycle:{BRANCH}")
+        result = self.dispatch(change)
+        self.assertEqual("review_target_changed", result.failure_code)
+
+    def test_checkout_violation_wins_when_target_also_changes(self) -> None:
+        result = self.dispatch(self.remote.push_forward)
+        self.assertEqual("contract_violation", result.failure_code)
+
+    def test_other_remotes_and_tags_are_observed_without_failing(self) -> None:
+        git(self.remote.work, "remote", "add", "secondary", str(self.remote.origin))
+        def change():
+            self.remote.push_unrelated()
+            git(self.remote.other, "tag", "foreign")
+            git(self.remote.other, "push", "-q", "origin", "refs/tags/foreign")
+        result = self.dispatch(change)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        records = result.artifacts["external_changes"]
+        self.assertTrue(any(item["remote"] == "secondary" for item in records))
+        self.assertTrue(any(item["ref"] == "refs/tags/foreign" for item in records))
+        self.assertNotIn(str(self.remote.origin), json.dumps(records))
+
+
 class Actor(Talker):
     """A fake executor whose stages change the code host before they answer."""
 
@@ -319,6 +551,38 @@ class CycleAuditTests(RunCycleTestCase):
     def closing(self) -> dict:
         return [row for row in self.rows()
                 if row["payload"].get("record_kind") == "cycle"][-1]["payload"]
+
+    def test_external_base_advance_during_restricted_implement_continues(self) -> None:
+        from dataclasses import replace
+
+        class RestrictedActor(Actor):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return replace(result, artifacts={**result.artifacts, "command_policy": "active"})
+
+        report, _ = self.cycle(RestrictedActor("codex", implement=self.remote.advance_base))
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertTrue(any("external_change" in line for _, line in report.notes))
+        self.assertEqual(1, len(report.publication_audit["external_changes"]))
+        self.assertEqual(pa.EXTERNAL, report.publication_audit["external_changes"][0]["class"])
+        from cycle_journal import events
+        records = [event for event in events(self.store.path, "owner/api")
+                   if event["status"] == pa.EXTERNAL]
+        self.assertEqual(1, len(records))
+        self.assertEqual("refs/heads/main", records[0]["correlation"]["ref"])
+
+    def test_suspected_advance_has_a_distinct_cycle_stop_reason(self) -> None:
+        from dataclasses import replace
+
+        class RestrictedActor(Actor):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return replace(result, artifacts={**result.artifacts, "command_policy": "active"})
+
+        report, _ = self.cycle(RestrictedActor("codex", implement=self.remote.advance_base), host=False)
+        self.assertEqual(pa.SUSPECTED, report.stop_reason)
+        self.assertEqual(pa.SUSPECTED, self.closing()["stop_reason"])
+        self.assertEqual([], report.publication_audit["breaches"])
 
     def assert_violation(self, report, reviewer, kind: str, ref: str) -> None:
         self.assertEqual("publication_violation", report.stop_reason)
@@ -376,6 +640,36 @@ class CycleAuditTests(RunCycleTestCase):
                                change_request_id="4")
         self.assertEqual("publication_violation", report.stop_reason)
         self.assertEqual(["resolve", "rereview"], [stage.role for stage in report.stages])
+        self.assertIn({"kind": pa.MERGED, "ref": "change_request:4"},
+                      [{"kind": item["kind"], "ref": item["ref"]}
+                       for item in (report.publication_audit or {})["breaches"]])
+
+    def drifting(self, name: str, **effects) -> Actor:
+        """An executor whose every stage also reports a contract violation."""
+        from dataclasses import replace
+
+        class Drifting(Actor):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return replace(result, outcome=ex.DispatchOutcome.CONTRACT_VIOLATION,
+                               detail="model drift")
+        return Drifting(name, **effects)
+
+    def test_a_breach_wins_over_a_contract_violation_in_a_writing_stage(self) -> None:
+        report, reviewer = self.cycle(self.drifting("codex", implement=self.remote.push_default))
+        self.assert_violation(report, reviewer, pa.MOVED, "refs/heads/main")
+
+    def test_a_breach_wins_over_a_contract_violation_in_a_review(self) -> None:
+        reviewer = self.drifting("claude", rereview=self.remote.push_default)
+        report, _ = self.cycle(Actor("codex"), reviewer, start_from="resolve",
+                               change_request_id="4")
+        self.assertEqual("publication_violation", report.stop_reason)
+        self.assertEqual("publication_violation", self.closing()["stop_reason"])
+
+    def test_an_unreadable_audit_is_not_hidden_by_a_contract_violation(self) -> None:
+        implementer = self.drifting("codex", implement=lambda: setattr(self.gh, "fail", "/pulls"))
+        report, _ = self.cycle(implementer)
+        self.assertEqual("publication_unverified", report.stop_reason)
 
     def test_an_unreadable_code_host_stops_before_the_stage(self) -> None:
         self.gh.fail = "/branches"

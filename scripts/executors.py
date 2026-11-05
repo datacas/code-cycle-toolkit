@@ -44,6 +44,7 @@ import time
 import uuid
 from contextlib import contextmanager
 import remote_refs
+import publication_audit as pa
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -2397,7 +2398,8 @@ def _git_output(cwd: str, *args: str, timeout: int = 10) -> str:
     return completed.stdout.rstrip("\n")
 
 
-def _remote_ref_fingerprint(root: str, metrics: dict | None = None) -> str:
+def _remote_ref_fingerprint(root: str, metrics: dict | None = None,
+                            observed: dict | None = None) -> str:
     """Fingerprint every advertised ref at each configured fetch/push URL."""
     snapshot = []
     timeout = remote_refs.timeout_from_root(root)
@@ -2407,7 +2409,7 @@ def _remote_ref_fingerprint(root: str, metrics: dict | None = None) -> str:
         for args in (("remote", "get-url", "--all", remote),
                      ("remote", "get-url", "--push", "--all", remote)):
             urls.update(filter(None, _git_output(root, *args).splitlines()))
-        for url in sorted(urls):
+        for endpoint, url in enumerate(sorted(urls)):
             try:
                 refs = _inspect_remote_refs(root, url, timeout)
             except RemoteRefInspectionError as exc:
@@ -2418,6 +2420,11 @@ def _remote_ref_fingerprint(root: str, metrics: dict | None = None) -> str:
                 raise
             total_attempts += refs.attempts
             snapshot.extend((remote, url, line) for line in refs.refs.splitlines())
+            if observed is not None:
+                for line in refs.refs.splitlines():
+                    sha, _, ref = line.partition("\t")
+                    if ref:
+                        observed[(remote, endpoint, ref)] = sha
     encoded = json.dumps(sorted(snapshot), separators=(",", ":"))
     if metrics is not None:
         metrics.update(attempts=total_attempts, cause=None, result="succeeded")
@@ -2514,6 +2521,110 @@ def _workspace_fingerprint(path: str, *, max_files: int | None = None,
     encoded = json.dumps([head, branch, status, staged, files], separators=(",", ":"))
     return {"root": root, "head": head, "branch": branch,
             "fingerprint": hashlib.sha256(encoded.encode("utf-8")).hexdigest()}
+
+
+def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
+                             issue_review: bool = False,
+                             change_request_id: str | None = None) -> DispatchResult | str:
+    """Guard checkout state and origin's reviewed/protected refs separately."""
+    before = None
+    if ref_auditor is None and cwd:
+        try:
+            if "origin" in _git_output(cwd, "remote").splitlines():
+                # No cycle auditor: this run publishes nothing (#421).
+                ref_auditor = pa.PublicationAuditor(cwd, "", None, publishes=False)
+        except Exception:
+            return "could not inspect remotes before read-only dispatch"
+    if ref_auditor is not None:
+        try:
+            branch = (None if issue_review else
+                      _git_output(ref_auditor.cwd, "branch", "--show-current") or None)
+            before = ref_auditor.capture(checkout_branch=branch,
+                                        change_request_id=None if issue_review else change_request_id)
+        except Exception:
+            return "could not capture the read-only ref audit before dispatch"
+    result = _verified_read_only(cwd, call)
+    if isinstance(result, str):
+        return result
+    table_active = result.artifacts.get("command_policy") == "active"
+    if before is None or ref_auditor is None:
+        # Without an origin audit no movement can be told apart from the
+        # stage's own push, so every observed one is unattributed.
+        artifacts = dict(result.artifacts)
+        observed = [{**item, "class": pa.SUSPECTED}
+                    for item in artifacts.pop("observed_ref_changes", [])]
+        artifacts["external_changes"] = observed
+        return _unattributed_read_only_movement(result, artifacts, observed)
+    try:
+        audit = ref_auditor.verify(
+            before, command_table_active=table_active,
+            read_only=True, change_request_id=None if issue_review else change_request_id)
+    except pa.AuditUnreadable:
+        if result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+            return result
+        artifacts = dict(result.artifacts)
+        artifacts.pop("read_only_mode", None)
+        artifacts.pop("read_only_verification", None)
+        return replace(result, outcome=DispatchOutcome.FAILED, error_code="publication_unverified",
+                       artifacts=artifacts, detail="could not read the read-only ref audit after dispatch")
+    observed = []
+    endpoint_breaches = []
+    for item in result.artifacts.get("observed_ref_changes", []):
+        name = item["ref"].removeprefix("refs/heads/")
+        if item["remote"] == pa.AUDITED_REMOTE and name in before.refs:
+            if (item["before"] != before.refs[name] or item["after"] != audit.after_refs[name]):
+                # A distinct push URL advertised different guarded state. Do
+                # not discard that movement because origin's fetch URL stayed
+                # unchanged; attribution against that endpoint is unproved.
+                kind = (pa.MOVED if name == before.default_branch or name in before.protected
+                        else pa.REVIEW_TARGET_CHANGED)
+                endpoint_breaches.append(pa.Breach(kind, item["ref"], item["before"], item["after"]))
+        else:
+            # Only a stage whose command table blocked its own pushes can
+            # leave an unguarded ref movement as external (#421).
+            movement = item if table_active else {**item, "class": pa.SUSPECTED}
+            if movement not in observed:
+                observed.append(movement)
+    if endpoint_breaches:
+        audit = replace(audit, status=pa.VIOLATED, breaches=(*audit.breaches, *endpoint_breaches))
+    artifacts = {**result.artifacts, "publication_audit": audit.evidence(),
+                 "external_changes": [*observed, *audit.external_changes]}
+    artifacts["publication_audit"]["external_changes"] = artifacts["external_changes"]
+    artifacts.pop("observed_ref_changes", None)
+    confirmed = any(b.kind != pa.REVIEW_TARGET_CHANGED for b in audit.breaches)
+    # A checkout mutation has one primary code, even if the reviewed target
+    # also moved; a confirmed publication breach still wins over it.
+    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and not confirmed:
+        return replace(result, artifacts=artifacts)
+    code = None
+    if audit.breaches:
+        code = "publication_violation" if confirmed else pa.REVIEW_TARGET_CHANGED
+    elif audit.status == pa.SUSPECTED or any(item["class"] == pa.SUSPECTED for item in observed):
+        code = pa.SUSPECTED
+    if code:
+        return _read_only_ref_failure(result, artifacts, code)
+    return replace(result, artifacts=artifacts)
+
+
+def _read_only_ref_failure(result: DispatchResult, artifacts: dict, code: str) -> DispatchResult:
+    artifacts.pop("read_only_mode", None)
+    artifacts.pop("read_only_verification", None)
+    detail = f"read-only ref guard: {code}"
+    if result.outcome is DispatchOutcome.CONTRACT_VIOLATION and result.detail:
+        detail = f"{detail}; {result.detail}"
+    return replace(result, outcome=DispatchOutcome.FAILED, error_code=code,
+                   missing_capability=None, artifacts=artifacts, detail=detail)
+
+
+def _unattributed_read_only_movement(result: DispatchResult, artifacts: dict,
+                                     observed: list) -> DispatchResult:
+    """No origin audit ran: any observed remote movement fails closed (#421).
+
+    A checkout mutation keeps its primary `contract_violation`.
+    """
+    if not observed or result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
+        return replace(result, artifacts=artifacts)
+    return _read_only_ref_failure(result, artifacts, pa.SUSPECTED)
 
 
 def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
@@ -2666,6 +2777,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     root = None
     before_head = before_status = before_branch = before_remote_refs = None
     before_remote_metrics = {}
+    before_observed = {}
     try:
         root = _git_output(cwd, "rev-parse", "--show-toplevel")
         before_head = _git_output(root, "rev-parse", "HEAD")
@@ -2677,7 +2789,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
             raise ExecutorError(
                 "the implementer checkout must be clean before an isolated review"
             )
-        before_remote_refs = _remote_ref_fingerprint(root, before_remote_metrics)
+        before_remote_refs = _remote_ref_fingerprint(root, before_remote_metrics, before_observed)
         worktree = tempfile.mkdtemp(prefix="code-cycle-review-")
         Path(worktree).rmdir()
         if _paths_overlap(worktree, root):
@@ -2728,6 +2840,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     left = None
     after_head = after_status_fingerprint = after_remote_refs = None
     after_remote_metrics = {}
+    after_observed = {}
     remote_inspection_failure = None
     try:
         result = dispatch_call(prompt, worktree)
@@ -2738,11 +2851,10 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
                 root, "status", "--porcelain", "--untracked-files=all",
             )
             after_status_fingerprint = hashlib.sha256(after_status.encode("utf-8")).hexdigest()
-            after_remote_refs = _remote_ref_fingerprint(root, after_remote_metrics)
+            after_remote_refs = _remote_ref_fingerprint(root, after_remote_metrics, after_observed)
             source_changed = (
                 after_head != before_head or after_branch != before_branch
                 or after_status != before_status
-                or after_remote_refs != before_remote_refs
             )
         except RemoteRefInspectionError as exc:
             remote_inspection_failure = exc
@@ -2765,6 +2877,15 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     if workspace_changed:
         warnings.append("the reviewer changed its disposable workspace; those edits were discarded")
     artifacts = dict(result.artifacts)
+    # Origin's cycle/base/protected refs are checked by the outer ref audit.
+    # Other remotes, tags and unrelated branches are observations, not guards.
+    for remote, endpoint, ref in sorted(before_observed.keys() | after_observed.keys()):
+        old = before_observed.get((remote, endpoint, ref))
+        new = after_observed.get((remote, endpoint, ref))
+        if old != new:
+            artifacts.setdefault("observed_ref_changes", []).append({
+                "remote": remote, "ref": ref, "before": old, "after": new,
+                "commits_added": [], "class": pa.EXTERNAL})
     artifacts["read_only_mode"] = read_only_mode
     artifacts["implementer_head_before"] = before_head
     artifacts["implementer_status_fingerprint_before"] = hashlib.sha256(
@@ -3619,6 +3740,7 @@ def dispatch(
     on_dispatch_attempt = kw.pop("on_dispatch_attempt", None)
     sandbox_grants = tuple(kw.pop("sandbox_grants", ()) or ())
     command_policy = kw.pop("command_policy", None)
+    ref_auditor = kw.pop("publication_auditor", None)
     if command_policy is not None and not isinstance(command_policy, StagePolicy):
         raise ExecutorError("a command policy must be a StagePolicy")
     if (command_policy is not None and target.executor == "claude"
@@ -3857,7 +3979,10 @@ def dispatch(
         # Every read-only stage, on every executor: the sandbox flag and the
         # isolated clone narrow what can be written, and this proves nothing
         # was. `enforced` survives only when the checkout is unchanged.
-        result = _verified_read_only(kw.get("cwd"), run_stage)
+        result = _verified_read_only_refs(
+            kw.get("cwd"), run_stage, ref_auditor,
+            issue_review=command_policy is not None and command_policy.role == "issue_review",
+            change_request_id=command_policy.pr_number if command_policy is not None else None)
         if isinstance(result, str):
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,

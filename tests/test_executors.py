@@ -1637,7 +1637,7 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual("review_workspace_isolation", result.missing_capability)
         self.assertNotIn("read_only_mode", result.artifacts)
 
-    def test_claude_review_detects_a_remote_branch_push(self) -> None:
+    def test_an_unrestricted_claude_review_fails_on_its_own_unrelated_branch_push(self) -> None:
         repo = self._git_repo()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1663,8 +1663,12 @@ class PermissionTests(unittest.TestCase):
             probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
         )
 
-        self.assertEqual(ex.DispatchOutcome.CONTRACT_VIOLATION, result.outcome)
-        self.assertIn("configured remote refs changed", result.detail)
+        # No command table: the push cannot be told apart from the stage's own.
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertEqual("suspected_external_change", result.failure_code)
+        self.assertEqual("refs/heads/review", result.artifacts["external_changes"][0]["ref"])
+        self.assertEqual("suspected_external_change",
+                         result.artifacts["external_changes"][0]["class"])
         self.assertNotIn("read_only_mode", result.artifacts)
         self.assertNotEqual(
             result.artifacts["remote_refs_fingerprint_before"],

@@ -117,7 +117,8 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: 26: append-only quota history and worktree provenance, independent of reset
 #: eligibility. Provider prose remains exclusively in the redacted journal.
 #: 27: explicit, non-successful terminal verification-incomplete cycles.
-SCHEMA_VERSION = 27
+#: 28: external ref advances, suspected attribution, and review-target changes (#421).
+SCHEMA_VERSION = 28
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -165,6 +166,7 @@ STOP_REASONS = frozenset({
     "manual_rereview_rejected",
     # A publication invariant failed, or could not be read (schema 24).
     "publication_violation", "publication_unverified",
+    "suspected_external_change", "review_target_changed",
     "verification_unverified",
 })
 
@@ -473,6 +475,8 @@ FIELD_SPECS: dict[str, tuple[str, frozenset | None]] = {
         "capacity", "quota", "auth", "transport", "timeout", "unreadable_result",
         "unavailable", "contract_violation", "interrupted", "precondition",
         "executor_error", "no_error_report", "unsupported_effort", "environment_restricted",
+        "suspected_external_change", "review_target_changed", "publication_violation",
+        "publication_unverified",
     })),
     "attempt_start_state": ("token", frozenset({"started", "not_started", "unknown"})),
     "external_dispatch_id": ("identifier", None),

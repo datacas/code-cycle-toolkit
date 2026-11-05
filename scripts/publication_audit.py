@@ -9,8 +9,9 @@ state it read before the stage:
 1. every change request of the cycle that was open is still open, and any the
    stage created is open; none was merged or closed;
 2. the cycle branch did not move, or moved fast-forward from its old head;
-3. the default branch and the branches the code host reports as protected did
-   not move, and none of the audited refs was deleted.
+3. protected/default movements are classified using the active command table,
+   full reachability and open change-request evidence (#421); deletions and
+   non-fast-forward moves remain breaches.
 
 Only the refs the invariants name are read, on `origin` only, so a push to an
 unrelated branch elsewhere never fails the check (#197). The runtime cannot
@@ -38,6 +39,8 @@ COMMIT_LIMIT = 20
 PASSED = "passed"
 VIOLATED = "violated"
 UNVERIFIED = "unverified"
+SUSPECTED = "suspected_external_change"
+EXTERNAL = "external_change"
 
 #: Breach kinds, closed vocabulary.
 MERGED = "change_request_merged"
@@ -45,6 +48,7 @@ CLOSED = "change_request_closed"
 NON_FAST_FORWARD = "non_fast_forward"
 MOVED = "protected_ref_moved"
 DELETED = "ref_deleted"
+REVIEW_TARGET_CHANGED = "review_target_changed"
 
 #: Parts of the audit a code host without a reader leaves unchecked.
 CHANGE_REQUEST_STATE = "change_request_state"
@@ -125,8 +129,10 @@ class GitHubHostReader:
                 or not isinstance(state, str) or not isinstance(head_ref, str)):
             raise AuditUnreadable("a pull request came back in an unknown shape")
         merged = pull.get("merged") is True or bool(pull.get("merged_at"))
-        return str(number), {"state": "MERGED" if merged else state.upper(),
-                             "head_ref": head_ref}
+        result = {"state": "MERGED" if merged else state.upper(), "head_ref": head_ref}
+        if isinstance(head, dict) and head.get("sha"):
+            result["head_sha"] = head["sha"]
+        return str(number), result
 
     def change_requests(self, repo: str, branch: str | None,
                         change_request_id: str | None) -> dict[str, dict]:
@@ -159,6 +165,7 @@ class Snapshot:
     refs: dict[str, str | None]
     change_requests: dict[str, dict]
     unverified: tuple[str, ...] = ()
+    reviewed_head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,9 +203,10 @@ class AuditResult:
     after_change_requests: dict[str, dict]
     breaches: tuple[Breach, ...] = ()
     unverified: tuple[str, ...] = ()
+    external_changes: tuple[dict, ...] = ()
 
     def evidence(self) -> dict:
-        """JSON-safe: SHAs, ref names, states and breach kinds, never prose."""
+        """JSON-safe ref evidence, classifications and reasons; never URLs."""
         refs = {name: {"before": sha, "after": self.after_refs.get(name)}
                 for name, sha in sorted(self.before.refs.items())}
         requests = {number: {"before": (self.before.change_requests.get(number) or {}).get("state"),
@@ -210,6 +218,7 @@ class AuditResult:
                     "protected": list(self.before.protected),
                     "refs": refs, "change_requests": requests,
                     "breaches": [breach.evidence() for breach in self.breaches]}
+        evidence["external_changes"] = list(self.external_changes)
         if self.unverified:
             evidence["unverified"] = list(self.unverified)
         return evidence
@@ -245,12 +254,19 @@ class PublicationAuditor:
 
     def __init__(self, cwd: str, repo: str, host: HostReader | None, *,
                  default_branch: str | None = None,
-                 run: Callable = subprocess.run, timeout: float = 60) -> None:
-        """`default_branch` is the configured one; otherwise `origin`'s HEAD."""
+                 run: Callable = subprocess.run, timeout: float = 60,
+                 publishes: bool = True) -> None:
+        """`default_branch` is the configured one; otherwise `origin`'s HEAD.
+
+        `publishes=False` is the read-only guard of a run that has no cycle
+        auditor, such as `--local-only`: no change request can exist, so the
+        open-change-request condition is skipped as for `issue_review`.
+        """
         self.cwd = cwd
         self.repo = repo
         self.host = host
         self.default_branch = default_branch
+        self.publishes = publishes
         self.run = run
         self.timeout = timeout
 
@@ -298,48 +314,131 @@ class PublicationAuditor:
         names = dict.fromkeys(name for name in (branch, default, *protected) if name)
         return Snapshot(cycle_branch=branch, default_branch=default, protected=protected,
                         refs={name: heads.get(name) for name in names},
-                        change_requests=requests, unverified=tuple(unverified))
+                        change_requests=requests, unverified=tuple(unverified),
+                        reviewed_head=(self._git("rev-parse", "--verify", "HEAD", check=False).strip()
+                                       or None))
 
     def verify(self, before: Snapshot, *,
-               change_request_id: str | None = None) -> AuditResult:
+               change_request_id: str | None = None,
+               command_table_active: bool = False,
+               read_only: bool = False) -> AuditResult:
         """Compare the same audited state with `before`."""
         heads = _remote_heads(self._git)
         after_refs = {name: heads.get(name) for name in before.refs}
         breaches = []
+        external_changes = []
+        requests_readable = True
+        try:
+            after_requests = self._change_requests(before.cycle_branch, change_request_id)
+            for number in before.change_requests:
+                if number not in after_requests and self.host is not None:
+                    after_requests.update(self._change_requests(None, number))
+        except AuditUnreadable:
+            after_requests = {}
+            requests_readable = False
         for name, old in before.refs.items():
             new = after_refs[name]
             if new == old:
                 continue
             ref = f"refs/heads/{name}"
-            if new is None:
-                breaches.append(Breach(DELETED, ref, old, None))
-                continue
             strict = name == before.default_branch or name in before.protected
+            if new is None:
+                breaches.append(Breach(REVIEW_TARGET_CHANGED if read_only and not strict else DELETED,
+                                       ref, old, None))
+                continue
             if old is None:
-                if strict:
-                    breaches.append(Breach(MOVED, ref, None, new))
+                if strict or read_only:
+                    breaches.append(Breach(MOVED if strict else REVIEW_TARGET_CHANGED, ref, None, new))
                 continue  # The cycle branch was created.
-            # Any move of the default or a protected branch is a breach, even
-            # a fast-forward; the cycle branch may only move forward.
-            if strict or not self._is_ancestor(old, new, name):
+            if strict and command_table_active:
+                movement = self._classify_move(before, after_refs, after_requests,
+                                               name, old, new, requests_readable=requests_readable)
+                if movement is not None:
+                    external_changes.append(movement)
+                    continue
+            # Unclassified protected moves breach; writers may advance only
+            # their cycle branch. Reviewers must retain the reviewed target.
+            if strict or read_only or not self._is_ancestor(old, new, name):
                 breaches.append(Breach(
-                    MOVED if strict else NON_FAST_FORWARD, ref, old, new,
+                    MOVED if strict else REVIEW_TARGET_CHANGED if read_only else NON_FAST_FORWARD, ref, old, new,
                     commits_added=self._commits(old, new),
                     commits_removed=self._commits(new, old)))
-        after_requests = self._change_requests(before.cycle_branch, change_request_id)
-        for number in before.change_requests:
-            if number not in after_requests and self.host is not None:
-                after_requests.update(self._change_requests(None, number))
         for number, state in sorted(after_requests.items()):
             was = (before.change_requests.get(number) or {}).get("state")
             now = state.get("state")
             if now != _OPEN and was in (None, _OPEN):
+                # A merge or a close is a breach in every role (#261): for a
+                # reviewer it also moves the protected ref it may not move.
                 breaches.append(Breach(MERGED if now == "MERGED" else CLOSED,
                                        f"change_request:{number}", was, now))
-        status = VIOLATED if breaches else UNVERIFIED if before.unverified else PASSED
+            elif read_only and number in before.change_requests:
+                previous = before.change_requests[number]
+                if any(previous.get(key) != state.get(key) for key in ("head_ref", "head_sha")):
+                    breaches.append(Breach(REVIEW_TARGET_CHANGED, f"change_request:{number}",
+                                           previous.get("head_sha") or previous.get("head_ref"),
+                                           state.get("head_sha") or state.get("head_ref")))
+        # The cycle branch is compared with its own value before the stage
+        # above; a remote head that already differed from the checkout (a
+        # local branch ahead of a stale origin) did not change during it.
+        if not requests_readable and not breaches and not external_changes:
+            raise AuditUnreadable("change request state could not be read after the stage")
+        status = (VIOLATED if breaches else SUSPECTED
+                  if any(item["class"] == SUSPECTED for item in external_changes)
+                  else UNVERIFIED if before.unverified else PASSED)
         return AuditResult(status=status, before=before, after_refs=after_refs,
                            after_change_requests=after_requests,
-                           breaches=tuple(breaches), unverified=before.unverified)
+                           breaches=tuple(breaches), unverified=before.unverified,
+                           external_changes=tuple(external_changes))
+
+    def _classify_move(self, before: Snapshot, after_refs: dict,
+                       requests: dict, name: str, old: str, new: str, *,
+                       requests_readable: bool = True) -> dict | None:
+        """Return evidence for an external/uncertain advance, or None for a breach.
+
+        Full reachability decides the class. The bounded commit list is only
+        human-readable evidence and never an attribution test.
+        """
+        reference_heads = tuple(dict.fromkeys(filter(None, (
+            before.reviewed_head,
+            before.refs.get(before.cycle_branch) if before.cycle_branch else None,
+            after_refs.get(before.cycle_branch) if before.cycle_branch else None,
+            self._git("rev-parse", "--verify", "HEAD", check=False).strip()))))
+        movement = {"remote": AUDITED_REMOTE, "ref": f"refs/heads/{name}",
+                    "before": old, "after": new, "commits_added": [],
+                    "class": SUSPECTED, "reachability_heads": list(reference_heads),
+                    "reason": "insufficient reachability evidence"}
+        try:
+            if not self._is_ancestor(old, new, name):
+                return None
+            movement["commits_added"] = list(self._commits(old, new))
+            if not reference_heads:
+                return movement
+            for head in reference_heads:
+                if not self._has(head):
+                    return movement
+            # Full-set reachability, independent of the bounded evidence list.
+            added = self._git("rev-list", "--count", new, f"^{old}").strip()
+            unrelated = self._git("rev-list", "--count", new, f"^{old}",
+                                  *(f"^{head}" for head in reference_heads)).strip()
+            if not added.isdecimal() or not unrelated.isdecimal():
+                return movement
+            if added != unrelated:
+                return None
+        except AuditUnreadable:
+            return movement
+        guarded_requests = {number for number, state in before.change_requests.items()
+                            if state.get("state") == _OPEN} | (requests.keys() - before.change_requests.keys())
+        if not requests_readable or (guarded_requests and (
+                self.host is None or any(requests.get(number, {}).get("state") != _OPEN
+                                         for number in guarded_requests))):
+            movement["reason"] = "open change request not established"
+            return movement
+        if before.cycle_branch and self.host is None and self.publishes:
+            movement["reason"] = "change request state unavailable"
+            return movement
+        movement.update({"class": EXTERNAL,
+                         "reason": "restricted dispatch; fast-forward adds no cycle-head commits"})
+        return movement
 
     def _has(self, sha: str) -> bool:
         return self._status("cat-file", "-e", f"{sha}^{{commit}}") == 0

@@ -123,7 +123,7 @@ class VerificationDecisionsTests(unittest.TestCase):
         self.assertEqual(restored.verification.results[-1].evidence[0]["limit_seconds"], 600)
 
     def test_terminal_status_is_non_successful_and_serializable(self):
-        self.assertEqual(telemetry.SCHEMA_VERSION, 27)
+        self.assertEqual(telemetry.SCHEMA_VERSION, 28)
         self.assertEqual(cycle_status._result_icon("VERIFICATION_INCOMPLETE"), "⚠️")
         self.assertNotIn("VERIFICATION_INCOMPLETE", cycle_status._SUCCESS_RESULTS)
         from run_cycle import CycleReport

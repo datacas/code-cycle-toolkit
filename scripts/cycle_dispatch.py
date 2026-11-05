@@ -1,6 +1,7 @@
 """One stage dispatch, evidence checks and bounded recovery."""
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
+from publication_audit import Breach
 if TYPE_CHECKING:
     from .run_cycle import CycleReport, Reported, StageOutcome, StagePolicy
 
@@ -88,6 +89,8 @@ class StageDispatch:
             if artifact is not None and command_policy is not None:
                 command_policy = self.api.replace(command_policy, evidence_paths=(str(artifact.path),))
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
+            if self.publication_auditor is not None:
+                stage_kwargs = {**stage_kwargs, "publication_auditor": self.publication_auditor}
             if change_request_id:
                 self.journal.change_request_id = change_request_id
                 # The PR can first become known after implementation. Keep the
@@ -152,6 +155,13 @@ class StageDispatch:
                 # Assisted repair requires this proof; absent storage stays manual.
                 pass
         reported = self.api.read_structured_result(outcome.result)
+        if role not in self.api.PUBLISHING_ROLES and outcome.result is not None:
+            audit = outcome.result.artifacts.get("publication_audit")
+            if isinstance(audit, dict):
+                previous = (self.report.publication_audit or {}).get("external_changes", [])
+                self.report.publication_audit = {"role": role, **audit, "external_changes": [
+                    *previous, *[item for item in audit.get("external_changes", []) if item not in previous]]}
+                self.record_external_changes(role, outcome.result.artifacts.get("external_changes", []))
         sandbox_startup_failures = (outcome.result.artifacts.get("sandbox_startup_failures", [])
                                     if outcome.result is not None else [])
         reported = self.api._with_sandbox_startup_failures(reported, sandbox_startup_failures)
@@ -258,6 +268,11 @@ class StageDispatch:
                         f"({asked.grant.resource})", reported=reported,
                         stop_reason="permission_required")
         if not outcome.succeeded:
+            if outcome.result is not None and outcome.result.failure_code in {
+                    "suspected_external_change", "review_target_changed", "publication_violation",
+                    "publication_unverified"}:
+                return self.stop(self.api._why(outcome), reported=reported,
+                                 stop_reason=outcome.result.failure_code)
             # Only a stage that verifies a fixed HEAD can leave its checks
             # unverified by a time-limit overrun; others stop as before.
             if (outcome.role in {"review", "rereview"} and self.plan_head
@@ -291,8 +306,16 @@ class StageDispatch:
             return self.stop(self.api._elsewhere(outcome), reported=reported)
         return None
 
+    def record_external_changes(self: Any, role: str, movements) -> None:
+        for movement in movements:
+            self.report.note(f"{movement['class']}: {movement['ref']} "
+                             f"{movement['before']} -> {movement['after']}")
+            self.journal.record("stage_result", role=role, stage_seq=self.recorder.stage_seq,
+                                component="publication_audit", status=movement["class"],
+                                correlation=movement)
+
     def audit_publication(self: Any, role: str, before, reported: Reported,
-                          request: str | None) -> CycleReport | None:
+                          request: str | None, outcome=None) -> CycleReport | None:
         """Stop when a publication invariant failed during `role` (#261).
 
         The change request the stage was given, or for `implement` the one it
@@ -303,14 +326,39 @@ class StageDispatch:
         if number is None and role == "implement":
             number = reported.telemetry_pull_request_id("github")
         try:
-            result = self.publication_auditor.verify(before, change_request_id=number)
+            result = self.publication_auditor.verify(
+                before, change_request_id=number,
+                command_table_active=(outcome is not None and outcome.result is not None
+                                      and outcome.result.artifacts.get("command_policy") == "active"),
+                read_only=role in {"review", "rereview"})
+            if role in {"review", "rereview"} and outcome is not None and outcome.result is not None:
+                inner = outcome.result.artifacts.get("publication_audit", {})
+                supplemental = [Breach(item["kind"], item["ref"], item.get("before"), item.get("after"))
+                                for item in inner.get("breaches", [])
+                                if not any(b.ref == item["ref"] and b.after == item.get("after")
+                                           for b in result.breaches)]
+                if supplemental:
+                    result = self.api.replace(result, status=self.api.AUDIT_VIOLATED,
+                                              breaches=(*result.breaches, *supplemental))
         except self.api.AuditUnreadable as error:
-            self.report.publication_audit = {"status": "unreadable", "role": role}
+            previous = (self.report.publication_audit or {}).get("external_changes", [])
+            self.report.publication_audit = {"status": "unreadable", "role": role,
+                                             "external_changes": previous}
             return self.stop(f"the publication audit could not read the code host after the "
                         f"{role} stage: {error}", "BLOCKED", reported=reported,
                         stop_reason="publication_unverified")
         evidence = {"role": role, **result.evidence()}
+        previous = (self.report.publication_audit or {}).get("external_changes", [])
+        evidence["external_changes"] = [*previous, *[item for item in result.external_changes
+                                                    if item not in previous]]
         self.report.publication_audit = evidence
+        self.record_external_changes(role, result.external_changes)
+        if outcome is not None and outcome.result is not None:
+            observed = [item for item in outcome.result.artifacts.get("external_changes", [])
+                        if not (item["remote"] == "origin" and item["ref"] in
+                                {f"refs/heads/{name}" for name in before.refs})]
+            evidence["external_changes"].extend(observed)
+            self.record_external_changes(role, observed)
         self.journal.record("stage_result", role=role, stage_seq=self.recorder.stage_seq,
                        component="publication_audit", status=result.status,
                        correlation={"cycle_branch": result.before.cycle_branch,
@@ -325,6 +373,20 @@ class StageDispatch:
         if result.unverified:
             self.report.note(f"publication audit after {role}: unverified "
                         f"({', '.join(result.unverified)}); the rest was checked")
+        # A read-only checkout mutation is the primary code over a changed
+        # review target or a suspected advance, never over a confirmed breach
+        # (#261): that one, in any role, still stops as `publication_violation`.
+        confirmed = any(b.kind != "review_target_changed" for b in result.breaches)
+        if (role in {"review", "rereview"} and not confirmed and outcome is not None
+                and outcome.result is not None
+                and outcome.result.failure_code == "contract_violation"):
+            return None
+        if result.status == "suspected_external_change":
+            return self.stop(f"protected ref advance during {role} has insufficient attribution evidence",
+                             reported=reported, stop_reason="suspected_external_change")
+        if result.breaches and all(b.kind == "review_target_changed" for b in result.breaches):
+            return self.stop(f"the reviewed target changed during {role}", reported=reported,
+                             stop_reason="review_target_changed")
         if result.status != self.api.AUDIT_VIOLATED:
             return None
         for breach in result.breaches:
@@ -476,7 +538,7 @@ class StageDispatch:
         if audited is not None:
             # Before anything the stage reported is read, whatever it reported:
             # a breach is never a `stage_not_completed` (#261, #364).
-            stopped = self.audit_publication(role, audited, reported, change_request_id)
+            stopped = self.audit_publication(role, audited, reported, change_request_id, outcome)
             if stopped is not None:
                 return reported, stopped
         if role == "resolve" and outcome.decision is not None:
