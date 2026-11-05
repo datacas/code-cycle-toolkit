@@ -31,9 +31,10 @@
       ]
     },
     "review-cycle-documentation": {
-      "paths": ["docs/review-cycle.md"],
+      "paths": ["docs/review-cycle.md", "docs/dependency-preparation.md", "docs/host-permissions.md"],
       "tests": [
-        "test_security_gate.ConfigurationTests.test_review_cycle_page_links_the_minimum_instead_of_copying_it"
+        "test_security_gate.ConfigurationTests.test_review_cycle_page_links_the_minimum_instead_of_copying_it",
+        "test_credential_read_guidance.CredentialReadGuidanceTests"
       ]
     },
     "spike-fixtures": {

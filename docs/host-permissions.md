@@ -274,6 +274,8 @@ emitted; missing paths are omitted. An explicit per-project
 `code_cycle.user_choices.credential_reads` list selects exceptions and is
 reported in dispatch and preparation evidence. See
 [credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
+For an issue-review stop caused by a denied GitHub credential-store read, use
+the [interim troubleshooting guidance](review-cycle.md#github-credential-store-denied-during-issue-review).
 
 ## When a command is denied
 
