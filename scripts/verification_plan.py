@@ -479,6 +479,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         except (VerificationError, KeyError, TypeError, ValueError) as error:
             detail = str(error) or type(error).__name__
             raise VerificationError(f"checks[{index}] {detail}") from error
+        if not isinstance(check.id, str) or not check.id.strip():
+            raise _invalid_field(f"checks[{index}].id", check.id, "a non-empty string")
         if check.id in seen:
             raise _invalid_field(f"checks[{index}].id", check.id, "a unique reported check ID")
         seen.add(check.id)

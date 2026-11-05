@@ -370,6 +370,15 @@ class ResultTests(unittest.TestCase):
         self.assertIn("received str", str(caught.exception))
         self.assertIn("expected a unique reported check ID", str(caught.exception))
 
+    def test_v2_unhashable_check_id_is_field_level_rejection(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [report(id=["x"])]}, HEAD, plan=plan)
+        self.assertIn("checks[0].id", str(caught.exception))
+        self.assertIn("received list", str(caught.exception))
+        self.assertIn("expected a non-empty string", str(caught.exception))
+
     def test_v1_string_evidence_rejects_with_plan_and_stays_unchanged_without_one(self):
         legacy = {"version": 1, "conclusion": "verified", "evidence": ["text"]}
         plan = vp.VerificationPlan(criteria()).extend((check(),))
