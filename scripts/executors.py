@@ -43,6 +43,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+import remote_refs
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -114,6 +115,23 @@ class DispatchOutcome(str, Enum):
 
 class ExecutorError(ValueError):
     """The dispatch layer was asked for something it must not do."""
+
+
+class RemoteRefInspectionError(ExecutorError):
+    """A remote-ref inspection failed with a stable, credential-safe cause."""
+
+    def __init__(self, cause: str, attempts: int):
+        self.cause = cause
+        self.attempts = attempts
+        super().__init__(f"{cause} after {attempts} attempt(s)")
+
+
+@dataclass(frozen=True)
+class RemoteRefInspection:
+    """Ref output carrying the attempt count for dispatch reporting."""
+
+    refs: str
+    attempts: int
 
 class WorkspacePolicy(str, Enum):
     """The isolation contract a dispatch must satisfy."""
@@ -2379,9 +2397,11 @@ def _git_output(cwd: str, *args: str, timeout: int = 10) -> str:
     return completed.stdout.rstrip("\n")
 
 
-def _remote_ref_fingerprint(root: str) -> str:
+def _remote_ref_fingerprint(root: str, metrics: dict | None = None) -> str:
     """Fingerprint every advertised ref at each configured fetch/push URL."""
     snapshot = []
+    timeout = remote_refs.timeout_from_root(root)
+    total_attempts = 0
     for remote in _git_output(root, "remote").splitlines():
         urls = set()
         for args in (("remote", "get-url", "--all", remote),
@@ -2389,14 +2409,54 @@ def _remote_ref_fingerprint(root: str) -> str:
             urls.update(filter(None, _git_output(root, *args).splitlines()))
         for url in sorted(urls):
             try:
-                refs = _git_output(root, "ls-remote", "--refs", url)
-            except Exception as exc:
-                raise ExecutorError(
-                    f"could not inspect configured remote refs ({type(exc).__name__})"
-                ) from None
-            snapshot.extend((remote, url, line) for line in refs.splitlines())
+                refs = _inspect_remote_refs(root, url, timeout)
+            except RemoteRefInspectionError as exc:
+                total_attempts += exc.attempts
+                if metrics is not None:
+                    metrics.update(attempts=total_attempts, cause=exc.cause,
+                                   result="failed")
+                raise
+            total_attempts += refs.attempts
+            snapshot.extend((remote, url, line) for line in refs.refs.splitlines())
     encoded = json.dumps(sorted(snapshot), separators=(",", ":"))
+    if metrics is not None:
+        metrics.update(attempts=total_attempts, cause=None, result="succeeded")
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _inspect_remote_refs(root: str, url: str, timeout: int) -> RemoteRefInspection:
+    """Inspect refs with bounded retries for timeouts and transient failures."""
+    attempts = 3
+    backoff = (0.25, 0.5)
+    for attempt in range(1, attempts + 1):
+        try:
+            refs = _git_output(root, "ls-remote", "--refs", url, timeout=timeout)
+            return RemoteRefInspection(refs, attempt)
+        except subprocess.TimeoutExpired:
+            cause = "remote_refs_timeout"
+        except ExecutorError as exc:
+            message = str(exc).lower()
+            if any(pattern in message for pattern in (
+                    "authentication failed", "could not read username",
+                    "permission denied (publickey)", "authentication required",
+                    "http basic: access denied")):
+                raise RemoteRefInspectionError(
+                    "remote_refs_auth_failed", attempt) from None
+            if any(pattern in message for pattern in (
+                    "connection reset", "connection timed out", "failed to connect",
+                    "could not resolve host", "temporary failure in name resolution",
+                    "remote end hung up unexpectedly", "network is unreachable")):
+                cause = "remote_refs_connection_failed"
+            else:
+                raise RemoteRefInspectionError(
+                    "remote_refs_inspection_failed", attempt) from None
+        except Exception:
+            raise RemoteRefInspectionError(
+                "remote_refs_inspection_failed", attempt) from None
+        if attempt == attempts:
+            raise RemoteRefInspectionError(cause, attempt) from None
+        time.sleep(backoff[attempt - 1])
+    raise RemoteRefInspectionError("remote_refs_inspection_failed", attempts)
 
 
 def _checkout_fingerprint(path: str) -> dict:
@@ -2605,6 +2665,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     worktree = None
     root = None
     before_head = before_status = before_branch = before_remote_refs = None
+    before_remote_metrics = {}
     try:
         root = _git_output(cwd, "rev-parse", "--show-toplevel")
         before_head = _git_output(root, "rev-parse", "HEAD")
@@ -2616,7 +2677,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
             raise ExecutorError(
                 "the implementer checkout must be clean before an isolated review"
             )
-        before_remote_refs = _remote_ref_fingerprint(root)
+        before_remote_refs = _remote_ref_fingerprint(root, before_remote_metrics)
         worktree = tempfile.mkdtemp(prefix="code-cycle-review-")
         Path(worktree).rmdir()
         if _paths_overlap(worktree, root):
@@ -2636,9 +2697,14 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
         detail = f"could not prepare an isolated review workspace: {exc}"
         if left:
             detail += f"; cleanup failed, left on disk: {left}"
-        return adapter._blocked(
+        blocked = adapter._blocked(
             target, "review_workspace_isolation", detail,
         )
+        if before_remote_metrics:
+            return replace(blocked, artifacts={
+                "remote_refs_inspection_before": before_remote_metrics,
+            })
+        return blocked
 
     access = (
         "Your commands are limited to this stage's table: reading, running the "
@@ -2661,6 +2727,8 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
     source_error = "the implementer branch, HEAD, working tree, or configured remote refs changed during review"
     left = None
     after_head = after_status_fingerprint = after_remote_refs = None
+    after_remote_metrics = {}
+    remote_inspection_failure = None
     try:
         result = dispatch_call(prompt, worktree)
         try:
@@ -2670,12 +2738,15 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
                 root, "status", "--porcelain", "--untracked-files=all",
             )
             after_status_fingerprint = hashlib.sha256(after_status.encode("utf-8")).hexdigest()
-            after_remote_refs = _remote_ref_fingerprint(root)
+            after_remote_refs = _remote_ref_fingerprint(root, after_remote_metrics)
             source_changed = (
                 after_head != before_head or after_branch != before_branch
                 or after_status != before_status
                 or after_remote_refs != before_remote_refs
             )
+        except RemoteRefInspectionError as exc:
+            remote_inspection_failure = exc
+            source_changed = False
         except Exception as exc:
             source_changed = True
             source_error = f"could not verify the implementer checkout after review: {exc}"
@@ -2700,18 +2771,30 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
         before_status.encode("utf-8"),
     ).hexdigest()
     artifacts["remote_refs_fingerprint_before"] = before_remote_refs
+    if before_remote_metrics:
+        artifacts["remote_refs_inspection_before"] = before_remote_metrics
     if after_head is not None:
         artifacts["implementer_head_after"] = after_head
     if after_status_fingerprint is not None:
         artifacts["implementer_status_fingerprint_after"] = after_status_fingerprint
     if after_remote_refs is not None:
         artifacts["remote_refs_fingerprint_after"] = after_remote_refs
+    if after_remote_metrics:
+        artifacts["remote_refs_inspection_after"] = after_remote_metrics
     if warnings:
         artifacts["warnings"] = warnings
     cleanup_error = (
         f"the disposable review workspace could not be removed; left on disk: {left}"
         if left else None
     )
+    if remote_inspection_failure is not None:
+        detail = str(remote_inspection_failure)
+        if cleanup_error:
+            detail += f"; {cleanup_error}"
+        return replace(
+            adapter._blocked(target, "review_workspace_isolation", detail),
+            artifacts=artifacts,
+        )
     if source_changed:
         artifacts.pop("read_only_mode", None)
         detail = "read-only contract violation: " + source_error

@@ -179,6 +179,8 @@ owner's #279 decision, Codex issue review also receives `github.com` and
 its workspace and publication contract remain read-only. The domain grant itself
 does not make an HTTP credential read-only. Other
 non-publishing roles receive only registry access, without a publication profile.
+When issue review reports `environment_restricted` because reading this store
+was denied, see the [interim troubleshooting guidance](review-cycle.md#github-credential-store-denied-during-issue-review).
 
 ### Credential-read exceptions
 
