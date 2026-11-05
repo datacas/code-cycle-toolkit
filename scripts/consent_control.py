@@ -19,7 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--executor", choices=("codex", "claude"), required=True)
     parser.add_argument("--platform", default=current_platform())
-    parser.add_argument("--grant-id", choices=tuple(GRANTS))
+    parser.add_argument("--grant-id")
+    parser.add_argument("--global", dest="global_scope", action="store_true")
+    parser.add_argument("--cycle-id")
+    parser.add_argument("--task-id")
     parser.add_argument("--config", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -28,16 +31,27 @@ def main(argv: list[str] | None = None) -> int:
         preauthorized = (frozenset({"docker_host"}) if repository_of(config) == args.repo
                          and docker_host_socket_access(config) else frozenset())
         store = ConsentStore()
+        broker = ConsentBroker(args.repo, platform=args.platform, store=store,
+                               preauthorized=preauthorized, cycle_id=args.cycle_id, task_id=args.task_id)
+        if args.global_scope and args.cycle_id:
+            parser.error("choose either --global or --cycle-id")
+        if bool(args.cycle_id) != bool(args.task_id):
+            parser.error("cycle scope requires both --cycle-id and --task-id")
         if args.action == "revoke":
             if args.grant_id is None:
                 parser.error("revoke requires --grant-id")
-            grant = GRANTS[args.grant_id]
+            grant = broker.registry.get(args.grant_id)
+            if grant is None:
+                raise GrantError("unknown grant ID; list current decisions first")
             scope = grant.scope_for(args.executor, args.platform)
             if scope is None:
                 raise GrantError("no registered scope for this executor/platform")
-            store.revoke(args.repo, grant, scope)
+            selected = "*" if args.global_scope else broker.cycle_scope or args.repo
+            if not store.revoke(selected, grant, scope):
+                raise GrantError(f"no stored decision for {grant.id} in scope {selected!r}; "
+                                 "use --global or --cycle-id with --task-id to select its scope")
         broker = ConsentBroker(args.repo, platform=args.platform, store=store,
-                               preauthorized=preauthorized)
+                               preauthorized=preauthorized, cycle_id=args.cycle_id, task_id=args.task_id)
         print(json.dumps(broker.listing(args.executor), indent=2))
         return 0
     except (GrantError, ValueError, OSError) as error:

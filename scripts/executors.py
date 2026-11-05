@@ -2850,6 +2850,8 @@ class ClaudeAdapter(NativeAdapter):
             )
             script = directory / "stage_permissions.py"
             shutil.copyfile(Path(__file__).with_name("stage_permissions.py"), script)
+            for module in ("grants.py", "command_permissions.py"):
+                shutil.copyfile(Path(__file__).with_name(module), directory / module)
             # The hook records its denials with this module beside it (#306).
             journal_module = directory / "cycle_journal.py"
             shutil.copyfile(Path(__file__).with_name("cycle_journal.py"), journal_module)
@@ -2878,7 +2880,8 @@ class ClaudeAdapter(NativeAdapter):
                     publishes=runtime_policy.credential_publishing,
                     credential_reads=runtime_policy.credential_reads))
             if os.name != "nt":
-                for path in (script, journal_module, policy_file):
+                for path in (script, journal_module, policy_file,
+                             directory / "grants.py", directory / "command_permissions.py"):
                     os.chmod(path, 0o400)
                 os.chmod(directory, 0o500)
             if runtime_policy.active:
@@ -2907,14 +2910,16 @@ class ClaudeAdapter(NativeAdapter):
         # The permission layer's own list, every tool, for the cycle journal
         # (#306). The hook records its denials itself, so it is kept apart.
         layer: list[dict[str, object]] = []
+        command_refusals: list[dict[str, Any]] = []
 
         def add(command) -> None:
             if isinstance(command, str) and command.strip():
-                text = failure_excerpt(command, 300)
+                text = command
                 if text not in denied:
                     denied.append(text)
 
         bash_calls: dict[str, str] = {}
+        operation_calls: dict[str, dict[str, Any]] = {}
         for event in _events(stdout):
             kind = event.get("type")
             if kind == "result":
@@ -2926,6 +2931,8 @@ class ClaudeAdapter(NativeAdapter):
                     tool_input = tool_input if isinstance(tool_input, dict) else {}
                     if tool == "Bash":
                         add(tool_input.get("command"))
+                    if tool == "Bash" or tool in sp.FILE_EDIT_TOOLS:
+                        command_refusals.append({"tool": tool, "input": tool_input})
                     target = (tool_input.get("command") or tool_input.get("file_path")
                               or tool_input.get("notebook_path") or tool_input.get("url"))
                     entry: dict[str, object] = {"tool": str(tool or "unknown")[:80],
@@ -2941,6 +2948,11 @@ class ClaudeAdapter(NativeAdapter):
                 if not isinstance(block, dict):
                     continue
                 if (kind == "assistant" and block.get("type") == "tool_use"
+                        and block.get("name") in {"Bash", *sp.FILE_EDIT_TOOLS}
+                        and isinstance(block.get("input"), dict)):
+                    operation_calls[str(block.get("id"))] = {
+                        "tool": block["name"], "input": block["input"]}
+                if (kind == "assistant" and block.get("type") == "tool_use"
                         and block.get("name") == "Bash"
                         and isinstance(block.get("input"), dict)):
                     bash_calls[str(block.get("id"))] = block["input"].get("command")
@@ -2951,6 +2963,19 @@ class ClaudeAdapter(NativeAdapter):
                     command = bash_calls.get(tool_use_id)
                     if sp.HOOK_DENIAL_MARKER in tool_output:
                         add(command)
+                        refusal = operation_calls.get(tool_use_id)
+                        if refusal is not None:
+                            for marker, key in (("TMPDIR", "tmpdir"), ("OPERATION", "operation")):
+                                tag = f"COMMAND_PERMISSION_{marker}="
+                                offset = tool_output.find(tag)
+                                if offset < 0:
+                                    continue
+                                try:
+                                    value, _ = json.JSONDecoder().raw_decode(tool_output[offset + len(tag):])
+                                    refusal = {**refusal, key: value}
+                                except ValueError:
+                                    pass
+                            command_refusals.append(refusal)
                     # Only an error result tied to a real Bash tool call whose whole
                     # output is the bwrap abort counts. A command that ran and merely
                     # quoted the line (a test failure, a `cat` of a file) is no
@@ -2973,6 +2998,8 @@ class ClaudeAdapter(NativeAdapter):
                         if failure not in sandbox_startup_failures:
                             sandbox_startup_failures.append(failure)
         artifacts: dict[str, object] = {"permission_denials": denied} if denied else {}
+        if command_refusals:
+            artifacts["command_refusals"] = command_refusals
         if layer:
             artifacts["claude_permission_denials"] = layer
         if sandbox_startup_failures:

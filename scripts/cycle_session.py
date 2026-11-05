@@ -103,6 +103,12 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.probes = self.registry.probe_all()
         if self.availability is None:
             self.availability = self.registry.availability(self.policy, self.probes)
+        if (self.consent is not None and self.consent.store is not None
+                and (self.continue_work or self.start_from != "implement")):
+            try:
+                self.consent.cycle_id = self.consent.store.cycle_for(self.repo_id, self.task_id)
+            except self.api.GrantError:
+                pass
         self.recorder = self.api.CycleRecorder(
             self.telemetry, self.repo_id, self.task_id, self.signals,
             availability=self.availability, registry=self.registry, mode=self.mode, policy=self.policy,

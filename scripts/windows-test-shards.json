@@ -44,6 +44,7 @@
       "test_work_item_outcomes": 46.5
     },
     "unmeasured_modules": [
+      "test_command_permissions",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_dependency_setup",
@@ -91,6 +92,7 @@
       "test_workspace_setup"
     ],
     "windows-3": [
+      "test_command_permissions",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_permission_view",
