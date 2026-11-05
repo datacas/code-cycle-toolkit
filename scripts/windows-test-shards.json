@@ -45,6 +45,7 @@
     },
     "unmeasured_modules": [
       "test_basedpyright_configuration",
+      "test_command_permissions",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_dependency_setup",
@@ -92,6 +93,7 @@
       "test_workspace_setup"
     ],
     "windows-3": [
+      "test_command_permissions",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_permission_view",
@@ -103,6 +105,7 @@
       "test_execution_plan",
       "test_execution_profiles",
       "test_verification_plan",
+      "test_verification_decisions",
       "test_orca_plan",
       "test_stats",
       "test_support",

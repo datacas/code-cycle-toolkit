@@ -236,10 +236,12 @@ top-level `tests.evidence` list. This is separate from the unchanged code-host
 }
 ```
 
-Every entry in a check's `evidence` and `attempts` arrays must be a JSON
-object. A non-object entry (including a string) is malformed; the runtime
-rejects the report and caps the conclusion at `not_verified` rather than
-coercing text into evidence.
+`cause` is omitted or text. A null cause is normalized to empty text, and null
+`attempts` or `evidence` is normalized to an empty array. A single object in
+`evidence` is normalized to a one-item array. Other entries in evidence and
+attempts must be JSON objects; malformed values are rejected with the field,
+received value or type, and expected format identified. A pass without evidence
+and an unverified result without a non-empty cause remain invalid.
 
 Freeze each check before execution. A result names the same check ID, command,
 executor/profile and context. The runtime supplies frozen check identities to

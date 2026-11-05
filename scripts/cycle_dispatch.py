@@ -85,6 +85,8 @@ class StageDispatch:
                     "claude_allowed_commands": (self.allowed_test_command,),
                 }
             command_policy = self.stage_policy(role, change_request_id)
+            if artifact is not None and command_policy is not None:
+                command_policy = self.api.replace(command_policy, evidence_paths=(str(artifact.path),))
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             if change_request_id:
                 self.journal.change_request_id = change_request_id
@@ -256,6 +258,13 @@ class StageDispatch:
                         f"({asked.grant.resource})", reported=reported,
                         stop_reason="permission_required")
         if not outcome.succeeded:
+            # Only a stage that verifies a fixed HEAD can leave its checks
+            # unverified by a time-limit overrun; others stop as before.
+            if (outcome.role in {"review", "rereview"} and self.plan_head
+                    and outcome.result is not None and outcome.result.failure_code == "timeout"):
+                stopped = self.verification_timeout(outcome)
+                if stopped is not None:
+                    return stopped
             blocked_effort = (
                 (outcome.result is not None
                  and outcome.result.failure_code == "unsupported_effort")
@@ -364,6 +373,32 @@ class StageDispatch:
                 return self.stop(readiness.explain(), reported=reported,
                             stop_reason="readiness_unconfirmed")
             escalated = True
+
+    def rejected_report_reason(self: Any, role: str, rejected: str,
+                               payload: dict[str, Any], request: str | None) -> str:
+        """Name the rejected field and any remotely probed or reported head."""
+        reported_head = payload.get("head_sha")
+        if not isinstance(reported_head, str) or not self.api.FULL_SHA.fullmatch(reported_head):
+            reported_head = None
+        request_id = (self.api.Reported(payload=payload).telemetry_pull_request_id(self.code_host)
+                      or request)
+        probed_head = None
+        if self.code_host == "github" and request_id and self.cwd:
+            try:
+                probed_head = self.api.probe_change_request(
+                    self.repo_id, request_id, self.cwd).head_sha
+            except self.api.CycleDriverError:
+                pass
+        if probed_head and reported_head and probed_head != reported_head:
+            head = (f"published head (probed): {probed_head}; reported-unverified head: "
+                    f"{reported_head} (discrepancy)")
+        elif probed_head:
+            head = f"published head (probed): {probed_head}"
+        elif reported_head:
+            head = f"published head (reported-unverified): {reported_head}"
+        else:
+            head = "published head unknown"
+        return f"{role} report rejected: {self.api.readable(rejected, 300)}; {head}"
 
     def advance(self: Any, role: str, instruction: str = "", *,
                 change_request_id: str | None = None,
@@ -554,10 +589,11 @@ class StageDispatch:
                     test_payload, self.state.verification_plan)
                 rejected = (test_payload.get("tests") or {}).get("rejected")
                 if isinstance(rejected, str):
-                    # The report stays unverified; say which check and field.
-                    # Some rejections quote an agent-chosen check ID verbatim.
-                    self.report.note(f"  verification  {role} report rejected: "
-                                     f"{self.api.readable(rejected, 300)}")
+                    reason = self.rejected_report_reason(
+                        role, rejected, reported.payload or {}, change_request_id)
+                    self.report.note(f"  verification  {reason}")
+                    return reported, self.stop(reason, "BLOCKED", reported=reported,
+                                               stop_reason="verification_unverified")
             try:
                 self.record_plan_stage(role, reported, outcome, test_payload)
             except ValueError as error:

@@ -24,6 +24,7 @@ dependency_setup.py
 native_prerequisites.py
 user_choices.py
 grants.py
+command_permissions.py
 consent_control.py
 stage_permissions.py
 run_cycle.py
