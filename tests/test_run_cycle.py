@@ -2940,6 +2940,15 @@ code_cycle:
 
         self.assertEqual(rc.KNOWN_KEYS, frozenset(config["code_cycle"]) | rc.DRIVER_KEYS)
 
+    def test_review_remote_refs_timeout_is_bounded_and_validated(self) -> None:
+        path = self.write("code_cycle:\n  review:\n    remote_refs_timeout: 301\n")
+
+        with self.assertRaises(rc.CycleDriverError) as refused:
+            rc.load_config(path)
+
+        self.assertIn("code_cycle.review.remote_refs_timeout", str(refused.exception))
+        self.assertIn("between 1 and 300", str(refused.exception))
+
     def test_this_repositorys_own_configuration_loads(self) -> None:
         config = rc.load_config(ROOT / rc.CONFIG_NAME)
 
