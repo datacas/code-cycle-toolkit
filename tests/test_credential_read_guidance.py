@@ -42,6 +42,17 @@ class CredentialReadGuidanceTests(unittest.TestCase):
             re.compile(r"do not grant cycle, repository,\s+or forever consent", re.IGNORECASE),
         )
 
+    def test_the_issue_review_skill_does_not_ask_the_stage_to_hash_the_snapshot(self) -> None:
+        # The issue-review command table has no hashing command, and the
+        # runtime verifies the file's hash after the stage (#397 review).
+        contents = (ROOT / "skills/cc-issue-review/SKILL.md").read_text()
+        section = contents.split("### Runtime issue snapshot", 1)[1].split("\n### ", 1)[0]
+        flat = " ".join(section.split())
+
+        self.assertNotIn("Confirm the file's size and SHA-256", flat)
+        self.assertIn("Do not recompute its SHA-256", flat)
+        self.assertIn("the runtime itself verifies the file's hash after the stage", flat)
+
     def test_supporting_docs_link_to_the_troubleshooting_entry(self) -> None:
         anchor = "review-cycle.md#github-credential-store-denied-during-issue-review"
         for path in ("docs/dependency-preparation.md", "docs/host-permissions.md"):

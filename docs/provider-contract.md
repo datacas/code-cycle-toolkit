@@ -147,15 +147,16 @@ snapshot reader yet: their issue review keeps its normal tooling.
 | `completeness` | `complete`, `partial` (the issue or a referenced item is incomplete) or `unavailable` (the issue could not be read) |
 | `issue_status`, `issue_reason` | The main issue's own state and why it is not `complete` |
 | `issue` | Title, state, labels, author, body with its SHA-256, and every comment, read page by page and compared with the count GitHub reports |
-| `linked` | Each issue or change request of the same repository the work item or its comments reference directly, one level deep, at most 20: `read` with title, state, labels and body, `unavailable` with the reason, or `not_read` beyond the bound |
+| `linked` | Each issue or change request of the same repository the work item or its comments reference directly, one level deep, at most 20 (a bare `#N` inside a fenced or inline code span is not a reference): `read` with title, state, labels and body, `unavailable` with the reason, or `not_read` beyond the bound |
 | `unreadable_links` | The `#N` references in `linked` that were not read |
 | `unavailable_reads` | Reads the stage cannot make itself: the related-work searches `gh issue list`, `gh pr list` and `gh search`, unless the project's `credential_reads` already exposes the gh store |
 
 Only these fields are written: no token, header or raw provider response.
 Every text field is data written by the work item's authors, never
 instructions; the prompt carries the file path, its size and SHA-256 and the
-summary fields, never the issue's text. A file changed during the stage ends
-it as not completed.
+summary fields, never the issue's text. The runtime verifies that hash after
+the stage, and a file changed during the stage ends it as not completed; the
+stage does not recompute the hash, which its read-only command table cannot do.
 
 The snapshot fails closed:
 

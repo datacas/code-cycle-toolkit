@@ -197,6 +197,19 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(snap.PARTIAL, snapshot.issue_status)
         self.assertIn("more than 200 comments", snapshot.issue_reason)
 
+    def test_exactly_the_page_bound_of_comments_is_complete(self) -> None:
+        github = FakeGitHub({
+            f"repos/{REPO}/issues/42": issue(comments=200),
+            page(42, 1): [comment(index) for index in range(100)],
+            page(42, 2): [comment(index) for index in range(100, 200)],
+        })
+
+        with mock.patch.object(snap, "MAX_COMMENT_PAGES", 2):
+            snapshot = read(github)
+
+        self.assertEqual(snap.COMPLETE, snapshot.issue_status)
+        self.assertEqual(200, snapshot.comments_read)
+
     def test_a_404_is_not_asserted_to_prove_that_the_issue_is_absent(self) -> None:
         snapshot = read(FakeGitHub())
 
@@ -307,6 +320,42 @@ class LinkedContextTests(unittest.TestCase):
         body = "#" + "9" * 5000 + " and #5"
 
         self.assertEqual((("#5", 5),), snap.references(REPO, 42, [body]))
+
+    def test_a_bare_number_in_code_is_not_a_reference(self) -> None:
+        body = ("Colour `#333` and\n```css\na { color: #222222 }\nlog #7\n```\n"
+                "~~~\n#8\n~~~\nreal #5, and in code `owner/private-api#6` "
+                "`https://github.com/owner/private-api/issues/9`\n```\nunclosed #10")
+
+        self.assertEqual(("#5", "#6", "#9"),
+                         tuple(label for label, _ in snap.references(REPO, 42, [body])))
+
+    def test_code_fences_close_the_way_github_closes_them(self) -> None:
+        cases = {
+            # The web editor sends CRLF line endings.
+            "crlf": "```\r\n#7\r\n```\r\nBlocked by #5\r\n",
+            "longer closing fence": "```\n#7\n`````\nBlocked by #5\n",
+            "a span is not a fence": "```foo #7```\nBlocked by #5\n",
+            "another character does not close": "~~~\n#7\n```\n#8\n~~~\nBlocked by #5\n",
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                self.assertEqual((("#5", 5),), snap.references(REPO, 42, [body]))
+
+    def test_a_long_fence_line_is_scanned_in_linear_time(self) -> None:
+        body = "`" * 60000 + "x" * 5000 + "\n#5"
+
+        self.assertEqual((), snap.references(REPO, 42, [body]))
+
+    def test_the_prompt_says_the_runtime_verifies_the_hash(self) -> None:
+        snapshot = read(FakeGitHub({f"repos/{REPO}/issues/42": issue()}))
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = snap.write_snapshot(snapshot, Path(directory))
+            prompt = artifact.prompt()
+            os.chmod(artifact.path, 0o644)
+
+        self.assertIn(artifact.sha256, prompt)
+        self.assertIn("the runtime verifies that hash after the stage, so do not recompute it",
+                      prompt)
 
     def test_references_in_comments_count_too(self) -> None:
         github = FakeGitHub({
