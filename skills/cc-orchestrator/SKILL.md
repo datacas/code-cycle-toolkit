@@ -469,14 +469,19 @@ including that its `issue_id` names this work item:
 
 When `issue_review` returns `environment_restricted` with wording that a read
 of `~/.config/gh` was denied, recognize a local credential-read policy denial,
-not a verdict on the work item. Explain that the GitHub network grant does not
-authorize reading the local credential store. Offer, in order: (a) the user
-adds `code_cycle.user_choices.credential_reads: ["~/.config/gh"]` to trusted
-project configuration; (b) the user prepares a one-run configuration copy
+not a verdict on the work item. It happens only when the stage received no
+runtime issue snapshot: `run_cycle.py` reads a GitHub work item with its own
+credentials and supplies one, so recommend running the stage through it first.
+Explain that the GitHub network grant does not authorize reading the local
+credential store. Otherwise offer, in order: (a) the user adds
+`code_cycle.user_choices.credential_reads: ["~/.config/gh"]` to trusted
+project configuration, which exposes the whole gh store to every sandboxed
+non-publishing stage; (b) the user prepares a one-run configuration copy
 with the exception and passes it with `--config`; (c) Skip `issue_review` or
 reroute it to an executor whose access is already authorized. The user applies
 configuration changes; the agent does not edit its own sandbox exceptions.
-Mark this as interim guidance and point to [#397](https://github.com/datacas/code-cycle-toolkit/issues/397).
+These remedies are a fallback for a stage without the runtime issue snapshot
+of [#397](https://github.com/datacas/code-cycle-toolkit/issues/397).
 Never offer cycle, repository, or forever consent for credential reads.
 
 Every stop before implementation reports `pr_number: null`. When it needs

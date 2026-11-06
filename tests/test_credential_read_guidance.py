@@ -29,7 +29,9 @@ class CredentialReadGuidanceTests(unittest.TestCase):
             "Narrow fix",
             'code_cycle.user_choices.credential_reads: ["~/.config/gh"]',
             "The user applies any configuration change; the agent does not",
-            "interim guidance",
+            "runtime issue snapshot",
+            "fallback for a stage without the",
+            "exposes the whole gh store to every",
             "[#397]",
         ):
             with self.subTest(phrase=phrase):
@@ -65,7 +67,11 @@ class CredentialReadGuidanceTests(unittest.TestCase):
                     self.assertIn(remedy, guidance)
                 self.assertIn("the user", guidance.lower())
                 self.assertIn("agent", guidance.lower())
-                self.assertIn("interim", guidance.lower())
+                # The snapshot is the default path; these remedies are its fallback.
+                self.assertIn("runtime issue snapshot", guidance)
+                self.assertIn("fallback", guidance.lower())
+                self.assertIn("whole gh store", guidance)
+                self.assertNotIn("interim", guidance.lower())
                 self.assertIn("[#397]", guidance)
                 self.assertRegex(
                     guidance,
