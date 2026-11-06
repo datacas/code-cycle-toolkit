@@ -260,6 +260,10 @@ class _StageRun:
     environment_context: str = ""
     consent_requested: bool = False
     denial_affected: set[str] = field(default_factory=set)
+    #: Codex's pre-dispatch Compose consents (#398), compared after the run.
+    compose_consents: list[dict[str, Any]] = field(default_factory=list)
+    #: The sandbox grants the latest attempt was dispatched with.
+    sandbox_grants: tuple[str, ...] = ()
     #: The first routing and its signals, for the shadow.
     first: tuple[RoutingDecision, dict[str, object]] | None = None
     decision: RoutingDecision | None = None
@@ -846,6 +850,7 @@ class CycleRecorder:
         if attempt.handoff is not None:
             self._claim_handoff(run, attempt, attempt.handoff)
         permission_context, grant_kwargs = self._permission_context(run, attempt)
+        run.sandbox_grants = tuple(grant_kwargs.get("sandbox_grants", ()))
         try:
             return dispatch(decision, f"{run.task}\n\n{run.environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
                             self.registry,
@@ -912,6 +917,15 @@ class CycleRecorder:
                 run.dispatch_kwargs["command_policy"] = replace(
                     run.dispatch_kwargs["command_policy"],
                     command_permissions=consent.command_entries(executor, run.role))
+                if executor == "codex" and "docker_host" in granted:
+                    # Codex has no command hook: its declared Compose checks get
+                    # the same #409 consent before dispatch (#398).
+                    from command_permissions import codex_compose_consent
+                    compose_context, run.compose_consents = codex_compose_consent(
+                        run.dispatch_kwargs["command_policy"], consent, executor, run.role,
+                        run.dispatch_kwargs.get("cwd"))
+                    if compose_context:
+                        context += "\n\n" + compose_context
         sandbox_granted = tuple(grant_id for grant_id in granted if grant_id in GRANTS)
         return context, ({"sandbox_grants": sandbox_granted} if sandbox_granted else {})
 
@@ -1100,6 +1114,15 @@ class CycleRecorder:
             from command_permissions import claim_runtime_keys
             result = replace(result, agent_output=claim_runtime_keys(result.agent_output))
         command_policy = run.dispatch_kwargs.get("command_policy")
+        if (command_policy is not None and attempt.target.executor == "claude"
+                and "docker_host" in run.sandbox_grants):
+            # Read the refusals as the dispatch's hook saw them: with the socket
+            # granted, a refused `compose run` is an exact-command question (#398).
+            command_policy = replace(command_policy, docker=True)
+        if run.compose_consents and isinstance(result.agent_output, str) and result.agent_output:
+            from command_permissions import add_outcomes, compose_drift
+            result = replace(result, agent_output=add_outcomes(result.agent_output, compose_drift(
+                run.compose_consents, command_policy, run.dispatch_kwargs.get("cwd"))))
         if self.consent is not None and command_policy is not None:
             from command_permissions import refused_operations, reconcile_result
             command_blockers = refused_operations(
@@ -1107,11 +1130,15 @@ class CycleRecorder:
                 command_policy, self.consent, attempt.target.executor,
                 run.dispatch_kwargs.get("cwd"))
             for refused in command_blockers:
+                denied = refused["resource"] in attempt.denied_before
                 spoken, essential = reconcile_result(
-                    result.agent_output, refused,
-                    DENY if refused["resource"] in attempt.denied_before else None, run.role)
+                    result.agent_output, refused, DENY if denied else None, run.role)
                 result = replace(result, agent_output=spoken)
-                if essential and command_blocker is None:
+                # A configured check is never essential, yet an unanswered one
+                # is still asked before it is left unverified (#398).
+                ask = (refused.get("check") and not denied
+                       and refused["resource"] not in self.consent.granted_ids)
+                if (essential or ask) and command_blocker is None:
                     command_blocker = refused
         blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
                                                                result.artifacts.get("sandbox_denials"))

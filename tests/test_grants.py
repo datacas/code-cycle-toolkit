@@ -40,11 +40,14 @@ class GrantRegistryTests(unittest.TestCase):
                           if scope.executor == "codex"},
                          {scope.platform for scope in grants.DOCKER_HOST.scopes
                           if scope.executor == "claude"})
-        self.assertIn("permits only docker compose up, down, ps, logs and build", claude.effective)
+        self.assertIn("permits docker compose up, down, ps, logs and build", claude.effective)
         self.assertIn("every reachable Unix socket", claude.effective)
         self.assertIn("ssh-agent", claude.effective)
-        self.assertIn("compose run remain denied", claude.effective)
+        # #398: the grant text says what the hook does now, and that it is dispatch-wide.
+        self.assertIn("separate exact-command consent for compose run", claude.effective)
+        self.assertIn("for the whole dispatch", claude.effective)
         self.assertIn("root", claude.risks)
+        self.assertIn("indirectly", claude.risks)
         self.assertTrue(claude.isolated_per_dispatch)
         self.assertNotEqual(grants.DOCKER_HOST.fingerprint(LINUX),
                             grants.DOCKER_HOST.fingerprint(claude))

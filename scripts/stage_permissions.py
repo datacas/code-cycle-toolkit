@@ -32,6 +32,7 @@ directory outside the agent's workspace and temporary directory.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -627,6 +628,18 @@ class _DockerDenied(PolicyError):
 
 def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *,
                  cwd: str | None, run) -> None:
+    environment, command_words = split_environment(words)
+    if environment:
+        # `NAME=value program ...`: the prefix changes what the program does, so
+        # the command is never a table entry; exact consent may still cover it.
+        # Docker keeps its separate socket permission first (#398).
+        if command_words and _program(command_words[0]) == "docker":
+            if policy.static_only:
+                raise PolicyError("native isolation unavailable: code-executing checks are not_verified")
+            if not policy.docker:
+                raise _DockerDenied("docker needs the docker_host grant, which this "
+                                    "dispatch does not have")
+        raise PolicyError("a command with environment prefixes needs exact operation consent")
     # User authorization never changes the publication or Git invariants.
     guarded_program = os.path.basename(words[0]).removesuffix(".exe")
     if guarded_program == "git":
@@ -1262,22 +1275,32 @@ def _reference_in_repo(reference: str, repo: str | None) -> bool:
 
 
 def _check_docker(args: list[str], policy: StagePolicy) -> None:
+    """The socket permission first, then the table; the rest asks for consent.
+
+    `docker_host` is its own permission (#398): without it every Docker
+    command reports `needs_docker`, and exact operation consent never stands
+    in for it. With it, only `docker compose up|down|ps|logs|build` is in the
+    table; `compose run`, `docker run` and every other form is outside the
+    table, which makes it an exact operation-consent question, not a veto.
+    """
+    if not policy.docker:
+        raise _DockerDenied("docker needs the docker_host grant, which this "
+                            "dispatch does not have")
     if args[:1] != ["compose"]:
-        raise PolicyError("only docker compose up/down/ps/logs/build is ever allowed")
+        raise PolicyError("only docker compose up/down/ps/logs/build is in the table; "
+                          "any other Docker command needs exact operation consent")
     rest = args[1:]
     index = 0
     while index < len(rest) and rest[index].startswith("-"):
         name, has_value, _ = rest[index].partition("=")
         if name not in DOCKER_COMPOSE_GLOBAL:
-            raise PolicyError(f"docker compose option {name} is not in the table")
+            raise PolicyError(f"docker compose option {name} is not in the table; "
+                              "it needs exact operation consent")
         index += 1 if has_value or not DOCKER_COMPOSE_GLOBAL[name] else 2
     subcommand = rest[index] if index < len(rest) else ""
     if subcommand not in DOCKER_COMPOSE_SUBCOMMANDS:
-        raise PolicyError(f"docker compose {subcommand or '(none)'} is never allowed; "
-                          "only up, down, ps, logs and build are")
-    if not policy.docker:
-        raise _DockerDenied("docker compose needs the docker_host grant, which this "
-                            "dispatch does not have")
+        raise PolicyError(f"docker compose {subcommand or '(none)'} is outside the table "
+                          "(up, down, ps, logs, build); it needs exact operation consent")
 
 
 # --- review-thread GraphQL ------------------------------------------------------
@@ -1622,8 +1645,9 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
                 op = entry["operation"]
                 if op["tool"] == "Bash":
                     # The broad first barrier never replaces exact hook matching.
-                    program = op["pattern"]["words"][0]
-                    if re.fullmatch(r"[A-Za-z0-9_./+-]+", program):
+                    _, command_words = split_environment(op["pattern"]["words"])
+                    program = command_words[0] if command_words else None
+                    if isinstance(program, str) and re.fullmatch(r"[A-Za-z0-9_./+-]+", program):
                         prefixes.append(program)
     if policy.docker and not policy.static_only:
         prefixes += [f"docker compose {sub}" for sub in sorted(DOCKER_COMPOSE_SUBCOMMANDS)]
@@ -2092,7 +2116,9 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
                                command, decision.reason)
         try:
-            requested_operation = operation(tool, tool_input, policy, event.get("cwd"))
+            # A missing docker_host grant is its own question, asked first (#398).
+            requested_operation = (None if decision.needs_docker
+                                   else operation(tool, tool_input, policy, event.get("cwd")))
         except (ValueError, TypeError, OSError):
             requested_operation = None
         print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
@@ -2131,11 +2157,246 @@ def _journal_note(note: str | None) -> str:
     return f" ({note})"
 
 
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+#: Prefixes that redirect git or gh to another host, repository, token or
+#: configuration, which their guards cannot see (#398).
+_GUARD_DEFEATING_ENV = re.compile(r"(GIT_.*|GH_.*|GITHUB_.*|HOME|XDG_CONFIG_HOME)\Z")
+#: Prefixes the Compose resolver never receives: they would choose which
+#: program, library, plugin or Docker configuration the host-side hook runs.
+_RESOLVER_UNSAFE_ENV = re.compile(
+    r"(PATH|HOME|ENV|BASH_ENV|IFS|LD_.*|DYLD_.*|DOCKER_.*|XDG_.*|PYTHON.*|PERL.*|NODE_.*)\Z")
+
+
+def split_environment(words: list[Any]) -> tuple[list[Any], list[Any]]:
+    """`NAME=value` prefixes, and the command they apply to.
+
+    A stored pattern spells a normalized prefix as `{"env": NAME, ...}`.
+    """
+    index = 0
+    while index < len(words) and (
+            (isinstance(words[index], str) and _ENV_ASSIGNMENT.match(words[index]))
+            or (isinstance(words[index], dict) and "env" in words[index])):
+        index += 1
+    return list(words[:index]), list(words[index:])
+
+
+def _program(word: str) -> str:
+    return os.path.basename(word).removesuffix(".exe")
+
+
+def consent_role(role: str | None) -> str | None:
+    """The role an operation consent is keyed by.
+
+    Review and rereview judge the same untrusted change of the same
+    repository, so one decision covers both (#398). Every other role keeps
+    its own decisions.
+    """
+    return "review" if role in REVIEW_ROLES else role
+
+
+def checkout_root(cwd: str | None) -> Path | None:
+    """The working tree containing `cwd`: the nearest directory holding `.git`."""
+    if not cwd:
+        return None
+    try:
+        path = Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        return None
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str] | None:
+    """A per-dispatch path as a placeholder, only when it really lies there.
+
+    The `$TMPDIR` of each dispatch and the clone of each review differ, so the
+    same command would never match its consent across cycles. Membership is
+    checked after resolving symlinks and `..`; anything else stays literal.
+    """
+    if not os.path.isabs(value):
+        return None
+    if policy.tmpdir and inside_tmpdir(value, policy.tmpdir):
+        return {"tmpdir": Path(value).resolve().relative_to(Path(policy.tmpdir).resolve()).as_posix()}
+    if root is not None:
+        try:
+            resolved = Path(value).resolve()
+        except (OSError, RuntimeError):
+            return None
+        if resolved == root or root in resolved.parents:
+            return {"checkout": resolved.relative_to(root).as_posix() or "."}
+    return None
+
+
+def configured_check_id(words: list[str], policy: Any) -> str | None:
+    """The configured check this exact command is, if any (#398).
+
+    The configured test command is `configured-test`; a configured
+    verification command is `verify:<command>`. A command is the check only
+    when it is the configured command itself, with or without environment
+    prefixes, or a verification prefix followed by more words.
+    """
+    _, command_words = split_environment(words)
+    for candidate in (words, command_words):
+        if policy.test_command:
+            try:
+                if candidate == list(parse_command(policy.test_command, None).words):
+                    return "configured-test"
+            except PolicyError:
+                pass
+        for prefix in getattr(policy, "verify_prefixes", ()) or ():
+            try:
+                expected = list(parse_command(prefix, None).words)
+            except PolicyError:
+                continue
+            if expected and candidate[:len(expected)] == expected:
+                return f"verify:{prefix}"
+    return None
+
+
+#: Effective Compose settings the consent question and the evidence disclose.
+_HOST_NAMESPACES = ("network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup")
+
+
+def compose_warnings(config: dict[str, Any], root: Path | None) -> list[str]:
+    """Host access in an effective Compose configuration, as warnings only.
+
+    Disclose, never veto (#450): nothing here refuses a run the person allowed.
+    """
+    warnings: list[str] = []
+    services = config.get("services") if isinstance(config, dict) else None
+    for name, service in sorted((services or {}).items()) if isinstance(services, dict) else ():
+        if not isinstance(service, dict):
+            continue
+        if service.get("privileged") is True:
+            warnings.append(f"service {name} runs privileged")
+        for key in _HOST_NAMESPACES:
+            if service.get(key) == "host":
+                warnings.append(f"service {name} uses the host {key.removesuffix('_mode')} namespace")
+        if service.get("cap_add"):
+            warnings.append(f"service {name} adds capabilities {', '.join(map(str, service['cap_add']))}")
+        if service.get("devices"):
+            warnings.append(f"service {name} maps host devices")
+        for volume in service.get("volumes") or ():
+            source = volume.get("source") if isinstance(volume, dict) else None
+            if not isinstance(volume, dict) or volume.get("type") != "bind" or not isinstance(source, str):
+                continue
+            if source.endswith("docker.sock"):
+                warnings.append(f"service {name} mounts the Docker socket {source}")
+                continue
+            try:
+                resolved = Path(source).resolve()
+            except (OSError, RuntimeError):
+                resolved = Path(source)
+            if root is None or not (resolved == root or root in resolved.parents):
+                warnings.append(f"service {name} mounts {source} from outside the checkout")
+    return warnings
+
+
+def _redacted(warnings: list[str], env: dict[str, str]) -> list[str]:
+    """Warnings without interpolated environment values, bounded and printable.
+
+    Compose interpolates the host environment into the configuration, so a
+    mount source can carry a token. The warnings reach the agent and the
+    consent records: each environment value becomes `<env:NAME>`.
+    """
+    values = sorted(((value, name) for name, value in env.items() if len(value) >= 6),
+                    key=lambda item: -len(item[0]))
+    cleaned = []
+    for warning in warnings:
+        for value, name in values:
+            warning = warning.replace(value, f"<env:{name}>")
+        cleaned.append(re.sub(r"[\x00-\x1f\x7f]", "?", warning)[:200])
+    return cleaned
+
+
+def _location_free(text: str, config: dict[str, Any], cwd: str | None, root: Path | None,
+                   tmpdir: str | None) -> str:
+    """The resolved configuration without the per-dispatch clone and `$TMPDIR` paths.
+
+    Compose resolves relative paths against the clone and names the project
+    after its directory; both differ per review dispatch, so the digest would
+    never match its consent again. Every other byte stays.
+    """
+    if cwd and isinstance(config.get("name"), str):
+        directory = re.sub(r"[^a-z0-9_-]", "", Path(cwd).resolve().name.lower())
+        if config["name"] == directory:
+            text = text.replace(json.dumps(directory), json.dumps("<project>"))
+    locations = []
+    for path, marker in ((root, "<checkout>"), (tmpdir, "<tmpdir>")):
+        if path:
+            locations += [(str(path), marker), (str(Path(path).resolve()), marker)]
+    for location, marker in sorted(set(locations), key=lambda item: -len(item[0])):
+        text = text.replace(location, marker)
+    return text
+
+
+def _resolve_compose(words: list[str], environment: dict[str, str], cwd: str | None,
+                     root: Path | None, tmpdir: str | None = None) -> dict[str, Any]:
+    """The SHA-256 of the effective Compose configuration and its warnings.
+
+    The same global options (files, project, profiles, env files, project
+    directory), the same environment prefixes and the same directory as the
+    real run, so the digest names what that run would use. The clone and
+    `$TMPDIR` locations are normalized as in the command words.
+    """
+    globals_end = 2
+    while globals_end < len(words) and words[globals_end].startswith("-"):
+        name, has_value, _ = words[globals_end].partition("=")
+        takes_value = DOCKER_COMPOSE_GLOBAL.get(name, False)
+        globals_end += 1 if has_value or not takes_value else 2
+    # The hook runs on the host, outside the sandbox and before any consent, so
+    # the command chooses nothing it executes: always the hook's own `docker`
+    # from its own PATH, never the command's first word, and no prefix that
+    # picks a program, library, CLI plugin or Docker configuration (#398).
+    # Git remote includes stay off; the configuration is resolved locally.
+    safe = {name: value for name, value in environment.items()
+            if not _RESOLVER_UNSAFE_ENV.match(name)}
+    base = ["docker", "compose", *words[2:globals_end], "config"]
+    env = {**os.environ, **safe, "COMPOSE_EXPERIMENTAL_GIT_REMOTE": "false"}
+    for arguments in ([*base, "--format", "json"], base):
+        try:
+            completed = subprocess.run(arguments, cwd=cwd or None, env=env, capture_output=True,
+                                       text=True, timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PolicyError("the effective Compose configuration could not be resolved "
+                              f"({type(error).__name__}); the runtime cannot identify this run") from error
+        if completed.returncode != 0:
+            continue
+        try:
+            config = json.loads(completed.stdout)
+        except ValueError:
+            config = None
+        if isinstance(config, dict):
+            warnings = _redacted(compose_warnings(config, root), env)
+            canonical = _location_free(json.dumps(config, sort_keys=True, separators=(",", ":")),
+                                       config, cwd, root, tmpdir)
+            return {"config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    "warnings": warnings}
+        canonical = _location_free(completed.stdout, {}, cwd, root, tmpdir)
+        return {"config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                "warnings": ["the effective configuration is not JSON; its mounts and "
+                             "privileges were not inspected"]}
+    raise PolicyError("the effective Compose configuration could not be resolved "
+                      f"(docker compose config exited {completed.returncode}); "
+                      "the runtime cannot identify this run")
+
+
+#: Replaced in tests; the hook calls it to identify a Compose run.
+COMPOSE_RESOLVER = _resolve_compose
+
+
 def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None) -> dict[str, Any]:
-    """Normalize only verified TMPDIR operands. Code, flags and destinations stay exact.
+    """Normalize only verified per-dispatch paths. Code, flags and destinations stay exact.
 
     A quoted interpreter argument is opaque, even if it contains a temp path.
-    Symlinks escaping TMPDIR are never replaced with a placeholder.
+    Symlinks escaping TMPDIR are never replaced with a placeholder. The value
+    of an environment prefix and a Docker argument that lie in `$TMPDIR` or in
+    the checkout become placeholders; the prefix itself stays, so a command
+    with `DOCKER_HOST` or `LD_PRELOAD` is another command (#398). A Docker
+    operation also carries its repository-relative directory, and a Compose
+    one the digest of its effective configuration.
     """
     if tool == "Bash":
         command = tool_input.get("command")
@@ -2147,12 +2408,26 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             words = words[2:] if words[1:2] == ["proxy"] else words[1:]
         if not words:
             raise ValueError("empty command")
-        normalized = []
-        data_operands = os.path.basename(words[0]) in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
-        for index, word in enumerate(words):
+        environment, command_words = split_environment(words)
+        if not command_words:
+            raise ValueError("an environment prefix needs a command")
+        docker = _program(command_words[0]) == "docker"
+        root = checkout_root(cwd)
+        normalized: list[Any] = []
+        for assignment in environment:
+            name, _, value = assignment.partition("=")
+            placeholder = _relative_value(value, policy, root)
+            normalized.append({"env": name, **placeholder} if placeholder else assignment)
+        data_operands = os.path.basename(command_words[0]) in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
+        for index, word in enumerate(command_words):
             if index and data_operands and os.path.isabs(word) and inside_tmpdir(word, policy.tmpdir):
                 normalized.append({"tmpdir": str(Path(word).resolve().relative_to(
                     Path(policy.tmpdir).resolve()))})
+            elif index and docker and (placeholder := _relative_value(word, policy, root)):
+                normalized.append(placeholder)
+            elif (index and docker and word.startswith("-") and "=" in word
+                  and (placeholder := _relative_value(word.partition("=")[2], policy, root))):
+                normalized.append({"option": word.partition("=")[0], **placeholder})
             else:
                 normalized.append(word)
         redirects = []
@@ -2162,7 +2437,23 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             redirects.append([fd, operator, None if target is None else
                               "<TMPDIR>/" + str(Path(target).resolve().relative_to(
                                   Path(policy.tmpdir).resolve()))])
-        pattern = {"words": normalized, "redirects": redirects}
+        pattern: dict[str, Any] = {"words": normalized, "redirects": redirects}
+        extra: dict[str, Any] = {}
+        if docker:
+            # The directory a Docker command runs in decides which Compose
+            # files and build contexts it reads: part of what was agreed to.
+            if root is not None and cwd:
+                pattern["cwd"] = Path(cwd).resolve().relative_to(root).as_posix() or "."
+            else:
+                pattern["cwd"] = str(Path(cwd).resolve()) if cwd else None
+            if command_words[1:2] == ["compose"]:
+                values = dict(assignment.partition("=")[::2] for assignment in environment)
+                extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
+        check_id = configured_check_id(words, policy)
+        if check_id:
+            extra["check"] = check_id
+        return {"version": 1, "role": consent_role(policy.role), "tool": tool,
+                "pattern": pattern, **extra}
     elif tool in FILE_EDIT_TOOLS:
         path = tool_input.get(FILE_EDIT_TOOLS[tool])
         if not isinstance(path, str) or not path:
@@ -2171,17 +2462,24 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         pattern = {"target": path}
     else:
         raise ValueError("unsupported tool")
-    return {"version": 1, "role": policy.role, "tool": tool, "pattern": pattern}
+    return {"version": 1, "role": consent_role(policy.role), "tool": tool, "pattern": pattern}
 
+
+def same_operation(stored: Any, op: dict[str, Any]) -> bool:
+    """Exact equality, with a stored rereview decision read as a review one."""
+    return (isinstance(stored, dict)
+            and {**stored, "role": consent_role(stored.get("role"))} == op)
 
 
 def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
+    if not policy.command_permissions:
+        return None
     try:
         op = operation(tool, tool_input, policy, cwd)
     except (ValueError, OSError, TypeError):
         return None
     for entry in policy.command_permissions:
-        if entry.get("operation") == op and entry.get("decision") in {"allow", "deny"}:
+        if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}:
             return entry["decision"]
     return None
 
@@ -2203,6 +2501,14 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 words = words[2:] if words[1:2] == ["proxy"] else words[1:]
             if not words:
                 return "empty command"
+            # An environment prefix never hides the program from its guards.
+            environment, words = split_environment(words)
+            if not words:
+                return "an environment prefix needs a command"
+            if _program(words[0]) in {"git", "gh"} and any(
+                    _GUARD_DEFEATING_ENV.match(assignment.partition("=")[0]) for assignment in environment):
+                return ("GIT_*, GH_*, GITHUB_*, HOME and XDG_CONFIG_HOME prefixes on git or gh "
+                        "defeat their argument guards")
             program = os.path.basename(words[0]).removesuffix(".exe")
             # Re-run all Git/GitHub argument, publication and workspace guards.
             # A grant is not a different stage role or a different PR context.
@@ -2220,7 +2526,7 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             elif program == "find":
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
-            paths = words[1:]
+            paths = [assignment.partition("=")[2] for assignment in environment] + words[1:]
         else:
             paths = [tool_input.get(FILE_EDIT_TOOLS[tool], "")]
         stores = [Path(os.path.expanduser(store)).resolve()

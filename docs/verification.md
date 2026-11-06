@@ -472,6 +472,69 @@ Before invoking `cc-verify`, the cycle skills **preflight** these conditions wit
 Fix applied. Verification pending: environment unavailable (PostgreSQL on :5432 not running).
 ```
 
+## Declared Docker checks and declined checks
+
+A configured check that needs Docker asks for two separate permissions, in this
+order:
+
+1. **`docker_host`**, the host Docker socket for the whole dispatch, on both
+   executors ([Routing](routing.md)). Without it every Docker command reports the
+   socket restriction, and no command consent stands in for it.
+2. **The check itself**, as an exact-operation consent of the existing store
+   ([Host permissions](host-permissions.md#when-a-command-is-denied)). With the
+   socket granted, Claude's hook still holds only `docker compose
+   up|down|ps|logs|build` in its table; a declared `docker compose ... run ...`
+   check, `docker run`, extra arguments, another Compose file or service each
+   become their own question, never a fixed refusal.
+
+The consent identity of a Docker command is the repository, its directory
+relative to the checkout, the normalized command, the SHA-256 of the effective
+Compose configuration (`docker compose <same global options> config`, with the
+same environment prefixes and directory as the run) and the check identity
+(`configured-test` or `verify:<command>`). Paths inside the per-dispatch clone
+and `$TMPDIR` are normalized, in the words, the values of environment prefixes
+and the resolved configuration; the prefixes themselves stay, so a command with
+`DOCKER_HOST`, `COMPOSE_FILE` or `LD_PRELOAD` is another command. Review and
+rereview share the identity. A change of any part asks again.
+
+The hook resolves the configuration on the host before anyone answers, so the
+command chooses nothing it executes: the hook always runs its own `docker` from
+its own `PATH`, never the command's first word, and drops prefixes such as
+`PATH`, `HOME`, `LD_*`, `DOCKER_*` and `XDG_*` from that resolution (they stay
+part of the identity). Git remote includes are switched off for it. An OCI
+remote `include` would still be fetched by `docker compose config`; a
+configuration that needs one is resolved with the user's network access.
+Interpolated environment values are replaced by `<env:NAME>` in the warnings.
+
+The question and the evidence list, as warnings, the host access of the
+effective configuration: bind mounts outside the checkout, `privileged`, host
+network, PID, IPC, UTS, user or cgroup namespaces, added capabilities, devices
+and Docker socket mounts. After consent the toolkit refuses none of them. When
+the configuration cannot be resolved at all, the run cannot be identified and
+stays refused, like shell syntax the hook cannot parse.
+
+Claude's hook recomputes the configuration before each run, so a configuration
+changed after consent is refused and asked again. A residual window remains
+between that check and Compose reading its files. Codex has no command hook: the
+runtime asks the same question before a Codex dispatch for each declared
+Compose check, states each answer to the agent, and compares the digest after
+the run; a change is recorded with both digests and a warning. On Codex nothing
+limits the dispatch to the consented command or aborts a changed configuration.
+
+A configured command that starts Docker indirectly, such as a package script,
+runs after its own consent; the consent text and evidence state that it reaches
+Docker without a per-operation check.
+
+A required configured check that is denied, skipped, still unanswered at the
+end, or accepted as unverified is recorded `unverified` with the decision, its
+identity and the SHA. It is never essential: the stage completes with the
+status the rest of its work earns, independent stages and CI continue, and CI
+never replaces the local check. The cycle ends `VERIFICATION_INCOMPLETE` with
+`stop_reason=verification_unverified` and names the pending check; authorize it
+with `--grant command_<sha256>=…` or revoke a denial with `consent_control.py`
+and resume. A denial that would break repository integrity, publication,
+credentials or security invariants may still stop the cycle.
+
 ## Where verification runs
 
 Stages that only verify or start services write their artefacts to a **disposable workspace**, never to the source tree. Reviews are read-only. See [Role workspace policy](role-workspace-policy.md).

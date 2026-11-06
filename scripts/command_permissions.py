@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from execution_plan import completion_statuses
-from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question)
-from stage_permissions import operation, matching_answer, protected_reason, credential_reason, parse_command
+from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question,
+                    ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
+from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
+                               consent_role, split_environment)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -80,12 +82,34 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
             return (bool(policy.tmpdir) and Path(raw).is_absolute()
                     and Path(raw).is_relative_to(policy.tmpdir)
                     and not Path(relative).is_absolute() and ".." not in Path(relative).parts)
-        data_read = words[0] in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
+
+        def checkout(raw: str, relative: str) -> bool:
+            # The clone is gone too; the hook verified membership while it existed.
+            path = Path(raw)
+            return (path.is_absolute() and not Path(relative).is_absolute()
+                    and ".." not in Path(relative).parts
+                    and (relative == "." or path.as_posix().endswith("/" + relative)))
+
+        def placeholder(raw: str, pattern: dict[str, str]) -> bool:
+            prefix = (f"{pattern['env']}=" if "env" in pattern
+                      else f"{pattern['option']}=" if "option" in pattern else "")
+            if not raw.startswith(prefix):
+                return False
+            value = raw[len(prefix):]
+            if "tmpdir" in pattern:
+                return temporary(value, pattern["tmpdir"])
+            return "checkout" in pattern and checkout(value, pattern["checkout"])
+        _, command_words = split_environment(words)
+        program = Path(command_words[0]).name if command_words else ""
+        data_read = program in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
         for index, (raw, pattern) in enumerate(zip(words, expected)):
             if raw == pattern:
                 continue
-            if not (index and data_read and isinstance(pattern, dict)
-                    and temporary(raw, pattern["tmpdir"])):
+            if not isinstance(pattern, dict):
+                return False
+            if set(pattern) == {"tmpdir"} and not (data_read or program == "docker"):
+                return False
+            if not (index or "env" in pattern) or not placeholder(raw, pattern):
                 return False
         redirects = op["pattern"]["redirects"]
         if len(redirects) != len(parsed.redirects):
@@ -104,10 +128,16 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
 
 
 def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str, Any]:
+    op = grant.operation or {}
+    compose = op.get("compose") if isinstance(op.get("compose"), dict) else None
     return {"kind": "command_permission", "resource": grant.id,
             "command": command, "error": reason,
             "attempted": ["stage command table refused the operation"],
-            "requires_human": False}
+            "requires_human": False,
+            # Evidence ties the decision to the exact check and configuration (#398).
+            **({"check": op["check"]} if op.get("check") else {}),
+            **({"config_sha256": compose["config_sha256"],
+                "warnings": list(compose.get("warnings") or [])} if compose else {})}
 
 
 def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
@@ -125,14 +155,18 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         if not isinstance(tool, str) or (tool == "Bash" and not isinstance(data.get("command"), str)):
             continue
+        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        if tool == "Bash" and check(data["command"], observed_policy, cwd=cwd).needs_docker:
+            # The docker_host socket permission is asked first, on its own (#398);
+            # an exact-command consent never stands in for it.
+            continue
         try:
-            observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
             # The native scratch directory is gone by the time dispatch returns.
             # Retain the pattern the hook verified while its symlinks existed.
             observed = from_entry({"operation": event.get("operation"),
                                    "executor": executor, "platform": broker.platform})
             if (observed is not None and observed.operation is not None
-                    and observed.operation["role"] == policy.role
+                    and consent_role(observed.operation["role"]) == consent_role(policy.role)
                     and observed.operation["tool"] == tool
                     and observed_pattern_matches(observed.operation, tool, data, observed_policy)):
                 op = observed.operation
@@ -191,13 +225,19 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     elif role == "issue_review":
         # A finished assessment can ask for refinement without needing access.
         completed |= {"NEEDS_REFINEMENT"}
-    essential = (effect.get("essential") is not False if effect is not None
+    configured = blocker.get("check")
+    # A configured check the person declines is recorded unverified; it never
+    # stops the cycle by itself (#398, #414): the final state names it.
+    essential = (False if configured
+                 else effect.get("essential") is not False if effect is not None
                  else payload.get("status") not in completed)
     tests = payload.get("tests")
     checks = tests.get("checks", []) if isinstance(tests, dict) else []
     check_ids = effect.get("check_ids", []) if effect is not None else []
     if not isinstance(check_ids, list):
         check_ids = []
+    if configured:
+        check_ids = [*check_ids, configured]
     affected = []
     for check in checks if isinstance(checks, list) else []:
         if isinstance(check, dict) and (same_command(check.get("command"), blocker["command"]) or
@@ -226,9 +266,108 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
         outcomes = []
     outcomes.append({
         "grant": blocker["resource"], "command": blocker["command"],
-        "answer": answer or "pending", "essential": essential, "checks": affected})
+        "answer": answer or "pending", "essential": essential, "checks": affected,
+        **{key: blocker[key] for key in ("check", "config_sha256", "warnings") if key in blocker}})
     payload["permission_outcomes"] = outcomes
     return (spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:], essential)
+
+
+def declared_compose_checks(policy: Any) -> list[str]:
+    """The configured verification commands that run `docker compose`."""
+    commands = []
+    for command in getattr(policy, "verification_commands", ()) or ():
+        try:
+            words = list(parse_command(command, None).words)
+        except ValueError:
+            continue
+        _, command_words = split_environment(words)
+        if command_words[:1] and Path(command_words[0]).name == "docker" and command_words[1:2] == ["compose"]:
+            commands.append(command)
+    return commands
+
+
+_ALLOWS = frozenset({ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL})
+
+
+def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
+                          cwd: str | None) -> tuple[str, list[dict[str, Any]]]:
+    """Ask the #409 consent before a Codex dispatch for each declared Compose check.
+
+    Codex has no command hook (#398): nothing refuses a command during its run,
+    so the runtime asks before dispatch, with the same identity the Claude hook
+    computes, and tells the agent each answer. It cannot limit the dispatch to
+    the consented command or abort when the configuration changes mid-run;
+    `compose_drift` compares the digest afterwards.
+    """
+    context: list[str] = []
+    records: list[dict[str, Any]] = []
+    for command in declared_compose_checks(policy):
+        try:
+            op = operation("Bash", {"command": command}, policy, cwd)
+        except (ValueError, OSError, TypeError) as error:
+            context.append(f"Declared Compose check `{command}` could not be identified ({error}). "
+                           "Do not run it; record it unverified with that cause.")
+            records.append({"command": command, "answer": "unidentified", "error": str(error)})
+            continue
+        grant = make_grant(op, executor, broker.platform)
+        broker.operations[grant.id] = grant
+        request = request_record(grant, command, "Codex has no command hook; consent is asked before dispatch")
+        answer = broker.request(grant, executor, role=role, blocker=request)
+        records.append({**{key: request[key] for key in ("check", "config_sha256", "warnings")
+                           if key in request},
+                        "grant": grant.id, "command": command, "answer": answer})
+        if answer in _ALLOWS:
+            scope = grant.scope_for(executor, broker.platform)
+            context.append((granted_context(grant, scope) if scope is not None else "")
+                           + f" Run the declared check exactly as `{command}`. On Codex nothing "
+                           "limits this dispatch to that command or aborts a changed configuration; "
+                           "the runtime compares the configuration digest after the run.")
+        elif answer == DENY:
+            context.append(denial_context(grant))
+        else:
+            context.append(f"Declared Compose check `{command}` awaits the user's consent ({grant.id}). "
+                           "Do not run it; record it unverified with cause "
+                           f"`permission {grant.id}: pending` and complete the other steps.")
+    return "\n\n".join(context), records
+
+
+def compose_drift(records: list[dict[str, Any]], policy: Any, cwd: str | None) -> list[dict[str, Any]]:
+    """The evidence of each pre-dispatch Codex consent, rechecked after the run.
+
+    Every consent becomes a permission outcome with its check, digest and
+    warnings. For an allowed one the configuration is resolved again; a change
+    is disclosed with both digests and a warning, and does not by itself
+    downgrade the check (#398).
+    """
+    outcomes = []
+    for record in records:
+        outcome = {"grant": record.get("grant"), "command": record["command"],
+                   "answer": record["answer"], "essential": False, "checks": [],
+                   "executor_hook": "none: consent asked before dispatch",
+                   **{key: record[key] for key in ("check", "config_sha256", "warnings", "error")
+                      if key in record}}
+        if record.get("answer") in _ALLOWS and "config_sha256" in record:
+            try:
+                after = operation("Bash", {"command": record["command"]}, policy, cwd)["compose"]["config_sha256"]
+            except (ValueError, OSError, TypeError, KeyError):
+                after = None
+            if after != record["config_sha256"]:
+                outcome.update(config_sha256_before=record["config_sha256"], config_sha256_after=after,
+                               warning="the effective Compose configuration changed during the "
+                                       "Codex run, or could no longer be resolved")
+        outcomes.append(outcome)
+    return outcomes
+
+
+def add_outcomes(spoken: str, outcomes: list[dict[str, Any]]) -> str:
+    """Append runtime-observed permission outcomes to a stage's result block."""
+    block = _result_block(spoken)
+    if block is None or not outcomes:
+        return spoken
+    begin, end, payload = block
+    existing = payload.get("permission_outcomes")
+    payload["permission_outcomes"] = [*(existing if isinstance(existing, list) else []), *outcomes]
+    return spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:]
 
 
 def same_command(left, right) -> bool:

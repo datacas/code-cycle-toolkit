@@ -81,9 +81,14 @@ The hook validates arguments, not only the program, and it is fail-closed:
   `gh api user --jq .login` and resolve's three thread calls;
 - `find -exec`, `-execdir`, `-ok`, `-okdir`, `-delete` and `-fprint*` are
   refused, and the read-only shell tools may not redirect output;
-- `docker compose up|down|ps|logs|build` only with the `docker_host` grant;
-  `docker run`, `docker exec`, `docker compose run` and every other subcommand
-  are always refused.
+- every Docker command needs the `docker_host` grant first, also with an
+  environment prefix; with it, `docker compose up|down|ps|logs|build` is in the
+  table and `docker compose run`, `docker run`, `docker exec` and every other
+  form is an exact operation-consent question
+  ([Declared Docker checks](verification.md#declared-docker-checks-and-declined-checks));
+- a command with `NAME=value` prefixes is never a table entry; consent can
+  cover it, and the Git, GitHub and credential guards still apply to the
+  program after the prefixes (`GIT_*` prefixes on `git` are refused).
 
 `rtk …` and `rtk proxy …` forms are accepted only when RTK is installed, and
 are validated as the command they wrap.
@@ -289,9 +294,16 @@ cons and alternative. Until answered, an essential request is a
 lacking an answer.
 
 An operation ID is `command_<sha256>`, computed from its structured pattern and
-stage role. Matching is exact except for verified TMPDIR operands: membership
-is checked after resolving symlinks and `..`. Interpreter code, Git
-destinations, sensitive paths, flags and actions are never generalized.
+stage role; `review` and `rereview` share one role key, and a stored `rereview`
+decision still matches. Matching is exact except for verified per-dispatch
+paths: TMPDIR operands of the read tools, the values of environment prefixes
+that lie in TMPDIR or the checkout, and Docker arguments that do. Membership is
+checked after resolving symlinks and `..`. A Docker operation also carries its
+directory relative to the checkout, a Compose one the digest and warnings of its
+effective configuration, and a configured check its check identity
+([Declared Docker checks](verification.md#declared-docker-checks-and-declined-checks)).
+Interpreter code, Git destinations, sensitive paths, flags and actions are never
+generalized.
 An allow applies to matching operations in later dispatches and retries of the
 selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
 ID; **this repository** persists across issues and resumed runs; **forever**
@@ -308,7 +320,10 @@ role's pattern.
 **Deny** is stored too. The stage skips the operation and reports affected
 checks as `not_verified`, never passed. Its structured `permission_effects`
 entries give `command`, `essential` and `check_ids`. Only an essential denied
-operation stops the cycle with `HUMAN_INTERVENTION` and the named decision.
+operation stops the cycle with `HUMAN_INTERVENTION` and the named decision. A
+configured check is never essential: an unanswered one is still asked, and a
+denied one is recorded `unverified` while the cycle continues to
+`VERIFICATION_INCOMPLETE`.
 An accessory inspection does not stop completed work; a stage reporting
 `BLOCKED` can supply `completed_status` and completion references, which still
 pass the normal publication/effect guards. Agent prose is not completion

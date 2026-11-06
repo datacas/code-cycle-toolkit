@@ -101,6 +101,11 @@ COMMAND_OPTIONS = ["this cycle", "this repository", "forever", "deny"]
 NO_GLOBAL_ROLES = frozenset({"review", "rereview"})
 
 
+def consent_role(role: str | None) -> str | None:
+    """Review and rereview share one decision; `stage_permissions` keeps the same rule."""
+    return "review" if role in NO_GLOBAL_ROLES else role
+
+
 def command_options(role: str) -> list[str]:
     return [option for option in COMMAND_OPTIONS
             if option != "forever" or role not in NO_GLOBAL_ROLES]
@@ -112,13 +117,40 @@ def identifier(op: dict[str, Any]) -> str:
 
 
 
+def _command_program(op: dict[str, Any]) -> str | None:
+    """The program a Bash operation runs, after its environment prefixes."""
+    for word in op.get("pattern", {}).get("words", []):
+        if isinstance(word, dict) and "env" in word:
+            continue
+        if isinstance(word, str) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word):
+            continue
+        return os.path.basename(word).removesuffix(".exe") if isinstance(word, str) else None
+    return None
+
+
+def compose_warnings(op: dict[str, Any] | None) -> list[str]:
+    compose = (op or {}).get("compose")
+    warnings = compose.get("warnings") if isinstance(compose, dict) else None
+    return [str(item) for item in warnings] if isinstance(warnings, list) else []
+
+
 def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGrant:
     pattern = json.dumps(op, sort_keys=True)
-    words = op["pattern"].get("words", [])
-    program = os.path.basename(words[0]) if words else "edit"
+    program = _command_program(op) if op.get("tool") == "Bash" else "edit"
     risks = ("Destructive deletion can permanently remove data." if program in {"rm", "rmdir", "unlink"}
              else "Modifies the exact edit target." if program == "edit"
+             else "Docker access is in practice root on the host." if program == "docker"
              else "May read, change or execute data with the user's privileges.")
+    warnings = compose_warnings(op)
+    if warnings:
+        risks += " Compose warnings: " + "; ".join(warnings) + "."
+    if program == "docker":
+        risks += (" The hook recomputes the effective Compose configuration before each run; "
+                  "a changed configuration asks again.") if op.get("compose") else ""
+    elif program != "edit":
+        # Indirect Docker (#398): the hook sees this command, never what it starts.
+        risks += (" With docker_host granted, this command and anything it starts reach "
+                  "Docker without a per-operation check.")
     risks += (" An interpreter's internal operations cannot be inspected by the hook; "
               "only external isolation enforces restrictions inside it.")
     return SensitiveGrant(
@@ -127,20 +159,35 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
         operation=op)
 
 
+#: The placeholder shapes a stored Bash word may take (#398).
+_WORD_SHAPES = ({"tmpdir"}, {"checkout"}, {"env", "tmpdir"}, {"env", "checkout"},
+                {"option", "tmpdir"}, {"option", "checkout"})
+
+
+def _valid_word(word: Any) -> bool:
+    return isinstance(word, str) or (
+        isinstance(word, dict) and set(word) in _WORD_SHAPES
+        and all(isinstance(value, str) for value in word.values()))
+
 
 def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
     op = entry.get("operation")
     if (not isinstance(op, dict) or op.get("version") != 1
             or not isinstance(op.get("role"), str) or not isinstance(op.get("pattern"), dict)
-            or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}):
+            or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}
+            or not set(op) <= {"version", "role", "tool", "pattern", "compose", "check"}
+            or ("check" in op and not isinstance(op["check"], str))
+            or ("compose" in op and not (isinstance(op["compose"], dict)
+                                         and isinstance(op["compose"].get("config_sha256"), str)))):
         return None
     pattern = op["pattern"]
     if op["tool"] == "Bash":
-        if (not isinstance(pattern.get("words"), list) or not pattern["words"]
-                or not isinstance(pattern["words"][0], str)
-                or any(not isinstance(word, str) and not (
-                    isinstance(word, dict) and set(word) == {"tmpdir"}
-                    and isinstance(word["tmpdir"], str)) for word in pattern["words"])
+        words = pattern.get("words")
+        if (not isinstance(words, list) or not words
+                or any(not _valid_word(word) for word in words)
+                or _command_program(op) is None
+                or not set(pattern) <= {"words", "redirects", "cwd"}
+                or ("cwd" in pattern and not isinstance(pattern["cwd"], (str, type(None))))
                 or not isinstance(pattern.get("redirects"), list)):
             return None
     elif not isinstance(pattern.get("target"), str):
@@ -153,11 +200,18 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
                      question_id: str, blocker: dict[str, Any] | None) -> dict[str, Any]:
     command = str((blocker or {}).get("command", ""))
     reason = str((blocker or {}).get("error", grant.reason))
+    op = grant.operation or {}
+    warnings = compose_warnings(op)
+    # A disclosed host access comes before the generic risk, so it is never cut.
+    warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
+    check = op.get("check")
+    skip = (f"Alternative: skip; check {str(check)[:60]} stays unverified and the cycle continues. "
+            if check else "Alternative: skip; affected checks stay not_verified. ")
     return {"id": question_id,
-            "prompt": (f"{role}: {command[:140]}. Outside table: {reason[:100]}. "
+            "prompt": (f"{role}: {command[:140]}. Outside table: {reason[:100]}. {warned}"
                        f"Risk: {scope.risks[:180]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
-                       "Alternative: skip; affected checks stay not_verified. "
+                       f"{skip}"
                        "Authorizes the exact pattern in the accompanying permission record.")[:600],
             "options": command_options(str((grant.operation or {}).get("role", role))),
             "recommended": None,
@@ -183,12 +237,13 @@ DOCKER_HOST = SensitiveGrant(
         GrantScope(
             executor="claude", platform="linux",
             effective=("every reachable Unix socket, including Docker, ssh-agent, "
-                       "D-Bus and other local service sockets; Claude's command hook "
-                       "still permits only docker compose up, down, ps, logs and build; "
-                       "docker run, exec and compose run remain denied"),
+                       "D-Bus and other local service sockets, for the whole dispatch; "
+                       "Claude's command hook permits docker compose up, down, ps, logs "
+                       "and build, and asks a separate exact-command consent for "
+                       "compose run and every other Docker command"),
             risks=("Access to the Docker daemon is in practice root on the host, and "
-                   "ssh-agent can sign with your keys. Claude's command hook still "
-                   "limits Docker commands to the listed Compose operations"),
+                   "ssh-agent can sign with your keys. A consented command that runs "
+                   "Docker indirectly reaches it without a per-operation check"),
             isolated_per_dispatch=True,
         ),
     ),
@@ -439,6 +494,7 @@ class PermissionRequest:
     blocker: dict[str, Any] | None = None
 
     def record(self) -> dict:
+        op = self.grant.operation or {}
         return {
             "grant": self.grant.id, "resource": self.grant.resource,
             "executor": self.scope.executor, "platform": self.scope.platform,
@@ -451,8 +507,12 @@ class PermissionRequest:
             **({"pattern": self.grant.operation,
                 "pros": "finish the requested operation",
                 "cons": "extra user-level access for the selected scope",
-                "global_never_covers": sorted(NO_GLOBAL_ROLES)}
-               if getattr(self.grant, "operation", None) else {}),
+                "global_never_covers": sorted(NO_GLOBAL_ROLES),
+                **({"warnings": compose_warnings(op)} if compose_warnings(op) else {}),
+                **({"check": op["check"],
+                    "alternative": "skip; the check is recorded unverified and the cycle continues"}
+                   if op.get("check") else {})}
+               if op else {}),
         }
 
 
@@ -515,7 +575,7 @@ class ConsentBroker:
         for grant in self.registry.values():
             op = getattr(grant, "operation", None)
             scope = grant.scope_for(executor, self.platform)
-            if op and op["role"] == role and scope is not None:
+            if op and consent_role(op["role"]) == consent_role(role) and scope is not None:
                 answer, _ = self._resolve(grant, scope)
                 if answer is not None:
                     entries.append({"operation": op, "decision": "deny" if answer == DENY else "allow"})
@@ -690,6 +750,15 @@ class ConsentBroker:
 def denial_context(grant: SensitiveGrant) -> str:
     """What a stage reruns with when a person denied the grant it needed."""
     if grant.operation is not None:
+        check = grant.operation.get("check")
+        if check:
+            # A declined configured check never stops the cycle (#398).
+            return (f"The user denied {grant.id} for role {grant.operation['role']}: "
+                    f"{json.dumps(grant.operation, sort_keys=True)}. It is configured check "
+                    f"{check}: do not run it, record it unverified with cause "
+                    f"`permission {grant.id}: deny`, and complete every other step with the "
+                    "status the rest of the work earns. This denial is not essential; the "
+                    "cycle continues and its final state names the pending check.")
         return (f"The user denied {grant.id} for role {grant.operation['role']}: "
                 f"{json.dumps(grant.operation, sort_keys=True)}. Skip this operation; "
                 "affected checks stay not_verified. Only an essential denied operation "
@@ -707,9 +776,15 @@ def denial_context(grant: SensitiveGrant) -> str:
 
 def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
     if grant.operation is not None:
+        warnings = compose_warnings(grant.operation)
         return (f"The user granted {grant.id} only for role {grant.operation['role']} "
                 f"and exact pattern {scope.effective}. This does not widen the sandbox "
-                "or authorize another stage role. Interpreter internals depend on external isolation.")
+                "or authorize another stage role. Interpreter internals depend on external isolation."
+                + (" The hook recomputes the effective Compose configuration before the run; "
+                   "if it changed, the run is refused and asks again. Record the check with "
+                   f"its config_sha256 {grant.operation['compose']['config_sha256']}"
+                   + (f" and these warnings: {'; '.join(warnings)}" if warnings else "") + "."
+                   if grant.operation.get("compose") else ""))
     return (
         f"The user granted {grant.resource} to this and every later "
         f"{scope.executor} stage of the cycle. The sandbox now opens "
