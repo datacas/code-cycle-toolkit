@@ -3173,7 +3173,9 @@ class ClaudeAdapter(NativeAdapter):
                                                 ("RULE", "rule"), ("ID", "operation_id"),
                                                 ("INTENT", "intent")):
                                 tag = f"COMMAND_PERMISSION_{marker}="
-                                offset = tool_output.find(tag)
+                                # The hook appends its markers last; text before
+                                # them may quote agent-controlled command text.
+                                offset = tool_output.rfind(tag)
                                 if offset < 0:
                                     continue
                                 try:

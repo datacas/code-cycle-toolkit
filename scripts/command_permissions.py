@@ -236,8 +236,11 @@ def _shell_kind(command: str) -> str:
         if words:
             kinds.append(_word_kind(words))
     kinds = [kind for kind in kinds if kind != "read_only"]
-    return next((kind for kind in kinds if kind in {"write", "unknown"}),
-                kinds[0] if kinds else "read_only")
+    if len(kinds) > 1:
+        # A chain such as `git push && gh pr edit …` has no single intent: each
+        # part would need its own check, so none is inferred from the first (#364).
+        return "write" if "write" in kinds else "unknown"
+    return kinds[0] if kinds else "read_only"
 
 
 def _word_kind(words: list[str]) -> str:
@@ -565,7 +568,11 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     # The classes that stop a stage whatever it reports. The agent's
     # `essential: false` can never downgrade them.
     hard = own_class in {ESSENTIAL_PERMISSION, ENVIRONMENT_BLOCKER}
-    if denials is not None:
+    # Only a publishing role has a published state the runtime can verify. Any
+    # other role keeps the #409 behaviour: its refusals are recorded, but a
+    # `BLOCKED` result is never completed from them (#364).
+    classified = denials is not None and role in PUBLISHING_ROLES
+    if classified:
         # A stage that reports a completed status is not stopped by a refusal
         # that is not hard; a stage that does not stays stopped until the
         # runtime has verified why it may complete (below).
@@ -595,9 +602,9 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     if answer == "deny" and essential:
         payload.update(status="BLOCKED", stop_reason="HUMAN_INTERVENTION",
                        essential_permission=blocker["resource"])
-    elif denials is not None:
+    elif classified:
         if payload.get("status") == "BLOCKED":
-            _reconcile_blocked(payload, role, completed, denials, publication)
+            _reconcile_blocked(payload, role, completed, denials or [], publication)
             essential = hard or payload.get("status") not in completed
     elif not essential and payload.get("status") == "BLOCKED":
         # A distinct structured completion claim is required; prose is irrelevant.

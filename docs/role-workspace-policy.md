@@ -262,8 +262,11 @@ request already open) and reports `BLOCKED`. The cycle used to stop with
 
 `reconcile_result` (#409) now decides this, in the same place that already
 decides whether a refusal is essential; no second mechanism exists. It acts only
-on `implement` and `resolve`. The bounded re-read of `review` and `rereview`
-publications is #446.
+on `implement` and `resolve`: any other role still has its refusals recorded and
+classified, but a `BLOCKED` result of it is never completed from them. The
+bounded re-read of `review` and `rereview` publications is #446. A refused
+command that chains several non-read-only operations (`git push && gh pr edit`)
+is classified `unknown` or `write`, never by its first part.
 
 **Every denial is recorded and classified by the runtime.** That includes
 operations that can never be granted: a heredoc, a pipeline, the `gh pr edit`
