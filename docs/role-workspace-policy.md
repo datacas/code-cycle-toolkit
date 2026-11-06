@@ -251,9 +251,71 @@ existing CI-gate conflict and head checks still decide whether to continue.
 Updating the cycle branch and revalidating against a new base belongs to #426;
 this classifier does not waive an existing requirement to refresh verification.
 
-Reconciling a stage that published a verified result but reported `BLOCKED` is
-#364. Until it exists, a `BLOCKED` result is never turned into a success, even
-when the SHAs match.
+### A publishing stage that reported `BLOCKED` after a verified publication (#364)
+
+#261 verifies that a successful stage broke no publication invariant. The
+inverse also happens: an `implement` or `resolve` stage publishes a correct
+commit and change request, meets refused auxiliary commands (a `pwd`, a
+heredoc, a `grep --include=*.py`, a `gh pr edit` the guard refuses with the pull
+request already open) and reports `BLOCKED`. The cycle used to stop with
+`stage_not_completed` as if nothing had been published.
+
+`reconcile_result` (#409) now decides this, in the same place that already
+decides whether a refusal is essential; no second mechanism exists. It acts only
+on `implement` and `resolve`. The bounded re-read of `review` and `rereview`
+publications is #446.
+
+**Every denial is recorded and classified by the runtime.** That includes
+operations that can never be granted: a heredoc, a pipeline, the `gh pr edit`
+guard. Each record carries the command, the stage, the reason, the rule that
+refused (`command_table`, `credential_guard`, `docker_host`, `edit_rule`,
+`foreground_policy`, `verification_timeout`, `user_denial`,
+`validation_error` or `executor_permission_layer`) and an operation
+identifier. Recording a refusal never authorizes the operation, and no guard is
+weakened.
+
+| Class | Meaning | Reconciles? |
+|---|---|---|
+| `auxiliary_denial` | not needed to complete the stage or a mandatory check: read-only inspection, a scratch file outside the checkout, a helper whose result is already published and verified | yes |
+| `redundant_operation` | its effect is already published and verified, including the metadata it meant to change | yes |
+| `essential_permission` | an operation still pending that the stage needs, a mandatory check, or one the stage reported as essential | no |
+| `environment_blocker` | a required resource is unreachable | no |
+| `unknown` | not enough evidence; neither assumed essential nor auxiliary | no |
+
+The classification does not depend on the agent's `permission_effects`. The
+agent can make a denial more serious (`essential: true` is honoured) and never
+less (`essential: false` is not). A `redundant_operation` is judged on what the
+command meant to change, not on a matching SHA: `git push` and `gh pr create`
+need the remote head, the local HEAD and the PR head to be one commit, and
+`gh pr edit` also needs the title, body (compared by digest, taken by the hook
+while the body file still exists), base, labels or milestone it set to be what
+the pull request already has. A flag the runtime does not know leaves the
+intent `unknown`.
+
+**A `BLOCKED` stage is completed only when all of this holds:**
+
+1. the block declares a `completed_status` valid for its role (`IMPLEMENTED`
+   for `implement`, `RESOLVED` for `resolve`);
+2. every denial of the stage is `auxiliary_denial` or `redundant_operation`;
+3. the remote head of the cycle branch, the local HEAD and the PR head are one
+   commit, the pull request is open with the cycle branch as its head, the
+   worktree is clean, and the head and change request the block reports are
+   those observed;
+4. the result does not say its publication is pending, report an environment
+   blocker or an essential permission, or carry a failed check;
+5. the #261 audit found no breach. The audit runs before the report is read, so
+   a `BLOCKED` stage that also broke an invariant stops with
+   `publication_violation` and is never reconciled.
+
+Otherwise the stage stays `BLOCKED` and stops as before; a grantable essential
+or `unknown` refusal is still asked about (`permission_required`). Reconciling
+changes the stage's status, nothing else: a pending mandatory verification stays
+`unverified`, the check linked to a refused command never keeps a pass, and
+`verification_unverified` still stops the cycle later. The cycle continues from
+the verified head and a publication is never retried. The state is read with
+`reroute.observe_publication`; when it cannot be read nothing is reconciled.
+
+The decision and its evidence are recorded in the [cycle journal](instrumentation.md#reconciling-a-blocked-publishing-stage-364).
 
 ---
 

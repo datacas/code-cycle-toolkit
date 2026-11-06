@@ -3169,7 +3169,9 @@ class ClaudeAdapter(NativeAdapter):
                         add(command)
                         refusal = operation_calls.get(tool_use_id)
                         if refusal is not None:
-                            for marker, key in (("TMPDIR", "tmpdir"), ("OPERATION", "operation")):
+                            for marker, key in (("TMPDIR", "tmpdir"), ("OPERATION", "operation"),
+                                                ("RULE", "rule"), ("ID", "operation_id"),
+                                                ("INTENT", "intent")):
                                 tag = f"COMMAND_PERMISSION_{marker}="
                                 offset = tool_output.find(tag)
                                 if offset < 0:

@@ -89,6 +89,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.repair_approval = options["repair_approval"]
         self.published_change_request = options["published_change_request"]
         self.publication_auditor = options["publication_auditor"]
+        self.publication_observer = options["publication_observer"]
         self.criteria_reader = options["criteria_reader"]
         self.api.validate_start(self.start_from, self.state.change_request_id, local_only=self.local_only,
                        continue_work=self.continue_work)
@@ -129,6 +130,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
             resolve_effort=self.resolve_effort,
             ci_policy=self.ci_policy,
             consent=self.consent,
+            publication_observer=self.publication_observer,
         )
         self.journal = self.api.Journal(self.telemetry.path, self.repo_id, self.task_id, self.recorder.cycle_id,
                           change_request_id=self.state.change_request_id)
@@ -255,6 +257,10 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                 command=item.get("command") if isinstance(item.get("command"), str) else None,
                 correlation={"grant": item.get("grant") if isinstance(item.get("grant"), str) else None,
                              "essential": str(item.get("essential")).lower(),
+                             "class": item.get("class") if isinstance(item.get("class"), str) else None,
+                             "rule": item.get("rule") if isinstance(item.get("rule"), str) else None,
+                             "operation": item.get("operation")
+                             if isinstance(item.get("operation"), str) else None,
                              "checks": ",".join(str(check) for check in checks)
                              if isinstance(checks, list) and checks else None})
         questions = payload.get("questions")
@@ -266,6 +272,39 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                                    decision_key=f"{attempt_id}:{question.get('id')}",
                                    status="unanswered", reason=question.get("prompt"),
                                    detail=self.api.json.dumps(question.get("options")))
+
+    def record_reconciliation(self, role: str, reported: Reported, outcome) -> None:
+        """Record what became of a stage that reported `BLOCKED` after refusals (#364).
+
+        The original status, the reason, the classified denials and the observed
+        SHAs go to the journal; a reconciled stage is also named in the report so
+        a person sees that its `BLOCKED` was not taken at face value.
+        """
+        record = reported.runtime.get("reconciliation")
+        if not isinstance(record, dict):
+            return
+        attempt_id = (outcome.result.artifacts.get("dispatch_attempt_id")
+                      if outcome.result is not None else None)
+        observed = record.get("shas")
+        shas: dict[str, Any] = observed if isinstance(observed, dict) else {}
+        denials = [item for item in record.get("denials") or [] if isinstance(item, dict)]
+        reconciled = record.get("reconciled") is True
+        self.journal.record(
+            "stage_result", role=role, stage_seq=self.recorder.stage_seq, attempt_id=attempt_id,
+            component="reconciliation", status="reconciled" if reconciled else "not_reconciled",
+            reason=record.get("reason"),
+            detail="; ".join(f"{item.get('class')}: {item.get('command')} "
+                             f"(rule {item.get('rule')}, operation {item.get('operation')})"
+                             for item in denials),
+            correlation={"original_status": record.get("original_status"),
+                         "completed_status": record.get("completed_status"),
+                         "local_head": shas.get("local"), "remote_head": shas.get("remote"),
+                         "pull_request_head": shas.get("pull_request"),
+                         "reported_head": shas.get("reported"),
+                         "denial_classes": ",".join(sorted({str(item.get("class")) for item in denials}))})
+        if reconciled:
+            self.report.note(f"  reconciled  the {role} stage reported BLOCKED but "
+                             f"{record.get('completed_status')} is verified: {record.get('reason')}")
 
     def stop(self, because: str, status: str = "HUMAN_INTERVENTION",
              reported: Reported | None = None, *,

@@ -1,6 +1,7 @@
 """Operation consent: Claude boundary, exact scope, denial evidence and revocation."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -651,6 +652,383 @@ class RuntimeTests(RunCycleTestCase):
         self.assertTrue(resumed.command_entries("claude", "implement"))
         self.assertFalse(grants.ConsentBroker("owner/api", platform="linux", store=store,
             cycle_id="second", task_id="407").command_entries("claude", "implement"))
+
+
+SHA = "a" * 40
+OTHER = "b" * 40
+
+
+def payload_of(spoken: str) -> dict:
+    return json.loads(spoken.split("ORCHESTRATION_RESULT\n", 1)[1].split("\nEND_ORCHESTRATION_RESULT", 1)[0])
+
+
+def published(**changes) -> dict:
+    """What the code host and the checkout show after a correct publication."""
+    pull = {"number": "442", "head_sha": SHA, "head_ref": "task-435", "state": "OPEN",
+            "title": "fix: reconcile", "body": "Closes #435\n", "base": "main",
+            "labels": ["P1"], "milestone": None}
+    if "pr" in changes:
+        override = changes.pop("pr")
+        pull = None if override is None else {**pull, **override}
+    value = {"branch": "task-435", "local_head": SHA, "remote_head": SHA, "clean": True, "pr": pull}
+    value.update(changes)
+    return value
+
+
+class BlockedReconciliationTests(unittest.TestCase):
+    """A publishing stage that reported BLOCKED after a verified publication (#364).
+
+    The cases live with `reconcile_result`, the one mechanism that decides it.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="code-cycle-tmp-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.cwd = self.root / "checkout"
+        self.cwd.mkdir()
+        self.policy = sp.StagePolicy("implement", repo="owner/repo", tmpdir=str(self.root))
+
+    def settle(self, events, publication, *, role="implement", completed="IMPLEMENTED",
+               mandatory=None, answer=None, **fields):
+        fields = {"head_sha": SHA, "change_request_id": "442", "completed_status": completed, **fields}
+        spoken = block("BLOCKED", **fields)
+        records = cp.denial_records(events, replace(self.policy, role=role), "claude", str(self.cwd))
+        cp.classify_denials(records, payload_of(spoken), publication=publication,
+                            cwd=str(self.cwd), mandatory=mandatory)
+        for record in records:
+            blocker = {"kind": "command_permission", "resource": record["operation"],
+                       "command": record["command"], "error": record["reason"],
+                       "attempted": [], "requires_human": False}
+            spoken, _ = cp.reconcile_result(spoken, blocker, answer, role,
+                                            denials=records, publication=publication)
+        return payload_of(spoken), records
+
+    def bash(self, command, **extra):
+        return {"tool": "Bash", "input": {"command": command}, **extra}
+
+    def body_edit(self, body="Closes #435\n"):
+        path = self.root / "pr-body.md"
+        path.write_text(body)
+        command = f"gh pr edit 442 --repo owner/repo --body-file {path}"
+        return self.bash(command, intent=sp.pr_edit_intent(command, self.policy),
+                         rule="command_table")
+
+    def assert_reconciled(self, payload):
+        self.assertEqual("IMPLEMENTED", payload["status"], payload.get("reconciliation"))
+        self.assertTrue(payload["reconciliation"]["reconciled"])
+
+    def assert_stopped(self, payload, contains):
+        self.assertEqual("BLOCKED", payload["status"])
+        self.assertFalse(payload["reconciliation"]["reconciled"])
+        self.assertIn(contains, payload["reconciliation"]["reason"])
+
+    def test_the_343_incident_pwd_and_a_scratch_write_are_reconciled(self):
+        payload, records = self.settle([
+            self.bash("pwd"),
+            {"tool": "Write", "input": {"file_path": str(self.root / "pr-body.md"), "content": "x"}}],
+            published())
+        self.assert_reconciled(payload)
+        self.assertEqual({cp.AUXILIARY_DENIAL}, {record["class"] for record in records})
+        recorded = payload["reconciliation"]
+        self.assertEqual("BLOCKED", recorded["original_status"])
+        self.assertEqual({"local": SHA, "remote": SHA, "pull_request": SHA, "reported": SHA}, recorded["shas"])
+        self.assertEqual(["pwd", f"Write {self.root / 'pr-body.md'}"],
+                         [item["command"] for item in recorded["denials"]])
+
+    def test_the_435_incident_heredoc_grep_and_pr_edit_are_reconciled(self):
+        events = [
+            self.bash("python3 - <<'EOF'\nprint(1)\nEOF", rule="command_table"),
+            self.bash("grep -rn foo scripts --include=*.py"),
+            self.body_edit()]
+        payload, records = self.settle(events, published())
+        self.assert_reconciled(payload)
+        classes = {record["command"].split()[0]: record["class"] for record in records}
+        self.assertEqual({"python3": cp.AUXILIARY_DENIAL, "grep": cp.AUXILIARY_DENIAL,
+                          "gh": cp.REDUNDANT_OPERATION}, classes)
+
+    def test_every_denial_has_command_stage_reason_rule_and_operation(self):
+        records = cp.denial_records([self.bash("python3 - <<'EOF'\nprint(1)\nEOF"),
+                                     self.bash("pwd")], self.policy, "claude", str(self.cwd))
+        self.assertEqual(2, len(records))
+        for record in records:
+            self.assertEqual("implement", record["stage"])
+            for key in ("command", "reason", "rule", "operation"):
+                self.assertTrue(record[key], key)
+        self.assertNotEqual(records[0]["operation"], records[1]["operation"])
+        self.assertTrue(records[0]["operation"].startswith("refused_"))
+
+    def test_a_redundant_edit_is_judged_on_the_metadata_not_the_sha(self):
+        for label, pull, contains in (
+                ("another body", {"body": "A different body"}, "essential_permission"),):
+            with self.subTest(label):
+                payload, _ = self.settle([self.body_edit()], published(pr=pull))
+                self.assert_stopped(payload, contains)
+        for label, command in (
+                ("an unknown flag", "gh pr edit 442 --repo owner/repo --reviewer someone"),
+                ("a missing body file", f"gh pr edit 442 --repo owner/repo --body-file {self.root}/gone.md")):
+            with self.subTest(label):
+                payload, _ = self.settle([self.bash(
+                    command, intent=sp.pr_edit_intent(command, self.policy))], published())
+                self.assert_stopped(payload, "unknown denial")
+
+    def test_a_title_and_labels_edit_is_redundant_only_when_already_applied(self):
+        command = "gh pr edit 442 --repo owner/repo --title 'fix: reconcile' --add-label P1"
+        event = self.bash(command, intent=sp.pr_edit_intent(command, self.policy))
+        self.assert_reconciled(self.settle([event], published())[0])
+        self.assert_stopped(self.settle([event], published(pr={"labels": []}))[0], "essential_permission")
+
+    def test_diverging_heads_are_not_reconciled(self):
+        for label, change, contains in (
+                ("remote", {"remote_head": OTHER}, "diverge"),
+                ("local", {"local_head": OTHER}, "diverge"),
+                ("pull request", {"pr": {"head_sha": OTHER}}, "diverge"),
+                ("no pull request", {"pr": None}, "pull_request"),
+                ("unobserved", None, "could not be observed"),
+                ("dirty", {"clean": False}, "uncommitted"),
+                ("closed", {"pr": {"state": "MERGED"}}, "not open"),
+                ("another branch", {"pr": {"head_ref": "other"}}, "not the cycle branch")):
+            with self.subTest(label):
+                publication = None if change is None else published(**change)
+                payload, _ = self.settle([self.bash("pwd")], publication)
+                self.assert_stopped(payload, contains)
+
+    def test_the_reported_head_and_change_request_must_be_the_published_ones(self):
+        self.assert_stopped(self.settle([self.bash("pwd")], published(), head_sha=OTHER)[0], "reports head")
+        self.assert_stopped(self.settle([self.bash("pwd")], published(),
+                                        change_request_id="443")[0], "names change request")
+        self.assert_stopped(self.settle([self.bash("pwd")], published(), head_sha=None)[0], "reports head")
+
+    def test_no_valid_completion_status_is_not_reconciled(self):
+        for completed in (None, "FAILED", "RESOLVED", "BLOCKED", "APPROVED"):
+            with self.subTest(completed=completed):
+                payload, _ = self.settle([self.bash("pwd")], published(), completed=completed)
+                self.assert_stopped(payload, "no completion status valid")
+
+    def test_resolve_is_reconciled_with_its_own_completion_status(self):
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed="RESOLVED")
+        self.assertEqual("RESOLVED", payload["status"])
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed="IMPLEMENTED")
+        self.assertEqual("BLOCKED", payload["status"])
+
+    def test_an_essential_pending_operation_is_not_reconciled(self):
+        push = self.bash("git push origin task-435")
+        payload, records = self.settle([push], published(remote_head=OTHER))
+        self.assert_stopped(payload, "essential_permission denial")
+        self.assertEqual(cp.ESSENTIAL_PERMISSION, records[0]["class"])
+        create = self.bash("gh pr create --title t --body-file b.md")
+        payload, records = self.settle([create], published(pr=None))
+        self.assertEqual(cp.ESSENTIAL_PERMISSION, records[0]["class"])
+        self.assert_stopped(payload, "essential_permission denial")
+
+    def test_a_push_and_a_pr_create_are_redundant_once_published(self):
+        payload, records = self.settle([self.bash("git push origin task-435"),
+                                        self.bash("gh pr create --title t --body-file b.md")], published())
+        self.assert_reconciled(payload)
+        self.assertEqual({cp.REDUNDANT_OPERATION}, {record["class"] for record in records})
+
+    def test_the_agent_cannot_downgrade_an_essential_denial(self):
+        push = self.bash("git push origin task-435")
+        payload, records = self.settle([push], published(remote_head=OTHER), permission_effects=[
+            {"command": "git push origin task-435", "essential": False, "check_ids": []}])
+        self.assertEqual(cp.ESSENTIAL_PERMISSION, records[0]["class"])
+        self.assert_stopped(payload, "essential_permission denial")
+
+    def test_the_agent_can_only_make_a_denial_more_serious(self):
+        payload, records = self.settle([self.bash("pwd")], published(), permission_effects=[
+            {"command": "pwd", "essential": True, "check_ids": []}])
+        self.assertEqual(cp.ESSENTIAL_PERMISSION, records[0]["class"])
+        self.assert_stopped(payload, "essential_permission denial")
+
+    def test_an_unclassified_or_ambiguous_denial_is_not_reconciled(self):
+        for command in ("git add -A", "mkdir -p out", "make build", "gh pr comment 442 --body-file x"):
+            with self.subTest(command=command):
+                payload, records = self.settle([self.bash("pwd"), self.bash(command)], published())
+                self.assertEqual(cp.UNKNOWN_DENIAL, records[1]["class"])
+                self.assert_stopped(payload, "unknown denial")
+        payload, records = self.settle([{"tool": "Edit", "input": {"file_path": str(self.cwd / "src.py")}}],
+                                       published())
+        self.assertEqual(cp.UNKNOWN_DENIAL, records[0]["class"])
+        self.assert_stopped(payload, "unknown denial")
+
+    def test_a_helper_that_may_shape_an_unpublished_result_is_unknown(self):
+        payload, records = self.settle([self.bash("python3 - <<'EOF'\nprint(1)\nEOF")],
+                                       published(remote_head=OTHER))
+        self.assertEqual(cp.UNKNOWN_DENIAL, records[0]["class"])
+        self.assert_stopped(payload, "unknown denial")
+
+    def test_an_unreachable_required_resource_is_an_environment_blocker(self):
+        payload, records = self.settle([self.bash("docker compose run web test")], published(),
+                                       environment_blocker={"kind": "sandbox_network_access",
+                                                            "command": "docker compose run web test"})
+        self.assertEqual(cp.ENVIRONMENT_BLOCKER, records[0]["class"])
+        self.assert_stopped(payload, "environment_blocker denial")
+        payload, records = self.settle([self.bash("pwd")], published(), environment_blocker={"kind": "x"})
+        self.assert_stopped(payload, "unresolved blocker")
+
+    def test_a_refused_mandatory_check_is_essential_and_never_passes(self):
+        check = {"id": "configured-test", "command": "python3 -m unittest", "result": "pass", "required": True}
+        payload, records = self.settle([self.bash("python3 -m unittest")], published(),
+                                       tests={"checks": [check]},
+                                       mandatory=lambda command: command == "python3 -m unittest")
+        self.assertEqual(cp.ESSENTIAL_PERMISSION, records[0]["class"])
+        self.assert_stopped(payload, "essential_permission denial")
+        self.assertEqual("unverified", payload["tests"]["checks"][0]["result"])
+        self.assertEqual("not_verified", payload["tests"]["conclusion"])
+
+    def test_a_pending_publication_or_failed_check_is_never_turned_into_success(self):
+        self.assert_stopped(self.settle([self.bash("pwd")], published(),
+                                        publication_pending=True)[0], "publication is pending")
+        failed = {"id": "x", "command": "make test", "result": "fail"}
+        self.assert_stopped(self.settle([self.bash("pwd")], published(),
+                                        tests={"checks": [failed]})[0], "a check failed")
+
+    def test_a_pending_mandatory_verification_stays_visible_after_reconciliation(self):
+        pending = {"id": "configured-test", "command": "basedpyright", "result": "unverified",
+                   "cause": "timeout"}
+        payload, _ = self.settle([self.bash("pwd")], published(), tests={
+            "conclusion": "not_verified", "checks": [pending]})
+        self.assert_reconciled(payload)
+        self.assertEqual("unverified", payload["tests"]["checks"][0]["result"])
+        self.assertEqual("not_verified", payload["tests"]["conclusion"])
+
+    def test_without_classification_the_409_behaviour_is_unchanged(self):
+        spoken = block("BLOCKED", head_sha=SHA, change_request_id="4", completed_status="IMPLEMENTED",
+                       permission_effects=[{"command": "pwd", "essential": False}])
+        blocker = {"kind": "command_permission", "resource": "x", "command": "pwd", "error": "t",
+                   "attempted": [], "requires_human": False}
+        changed, essential = cp.reconcile_result(spoken, blocker, None, "implement")
+        self.assertFalse(essential)
+        self.assertNotIn("reconciliation", payload_of(changed))
+
+    def test_the_reconciliation_is_a_runtime_key_an_agent_cannot_supply(self):
+        claimed = cp.claim_runtime_keys(block("IMPLEMENTED", reconciliation={"reconciled": True}))
+        payload = payload_of(claimed)
+        self.assertNotIn("reconciliation", payload)
+        self.assertEqual({"reconciled": True}, payload["agent_reconciliation"])
+
+    def test_the_hook_names_the_rule_the_operation_and_a_pr_edit_intent(self):
+        body = self.root / "pr-body.md"
+        body.write_text("Closes #435\n")
+        path = self.root / "policy.json"
+        path.write_text(self.policy.to_json())
+        commands = ["python3 - <<'EOF'\nprint(1)\nEOF", f"gh pr edit 442 --body-file {body}"]
+        events = []
+        for index, command in enumerate(commands):
+            output = io.StringIO()
+            sp.hook_main([str(path)], io.StringIO(json.dumps({
+                "tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(self.cwd)})), output)
+            reason = json.loads(output.getvalue())["hookSpecificOutput"]["permissionDecisionReason"]
+            events.append([{"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "id": str(index), "name": "Bash", "input": {"command": command}}]}},
+                {"type": "user", "message": {"content": [{
+                    "type": "tool_result", "tool_use_id": str(index), "is_error": True, "content": reason}]}}])
+        stream = "\n".join(json.dumps(event) for pair in events for event in pair)
+        refusals = ex.ClaudeAdapter().extra_artifacts(stream)["command_refusals"]
+        self.assertEqual(2, len(refusals))
+        for refusal in refusals:
+            self.assertTrue(refusal["rule"])
+            self.assertTrue(refusal["operation_id"])
+        self.assertIsNone(refusals[0]["intent"])
+        self.assertEqual({"body": {"sha256": hashlib.sha256(b"Closes #435").hexdigest()}},
+                         refusals[1]["intent"]["fields"])
+        records = cp.denial_records(refusals, self.policy, "claude", str(self.cwd))
+        self.assertEqual(["command_table", "command_table"], [record["rule"] for record in records])
+        self.assertEqual(2, len({record["operation"] for record in records}))
+
+    def test_the_guards_stay_as_they_were(self):
+        for command in ("git push --force origin task-435", "python3 - <<'EOF'\nx\nEOF",
+                        "gh pr edit 442 --body-file x | cat"):
+            with self.subTest(command=command):
+                self.assertFalse(sp.check(command, self.policy, cwd=str(self.cwd)).allowed)
+
+
+class ReconciledCycleTests(RunCycleTestCase):
+    """The driver continues from the verified head, or stops as before (#364)."""
+
+    def cycle(self, denials, publication, *, completed="IMPLEMENTED", **fields):
+        claude = PublishingClaude(denials, completed, fields)
+        broker = grants.ConsentBroker("owner/api", platform="linux",
+                                      store=grants.ConsentStore(self.home / "consents.json"))
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "deep_coder": {"primary": "claude:anthropic/claude-opus-5-5 high"},
+            "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}}}})
+        report = rc.run_cycle("owner/api", "435", router.TaskSignals(), self.store,
+            registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
+            profiles=profiles, issue_review="off", consent=broker,
+            publication_observer=lambda *_: publication)
+        return report, claude
+
+    def journal(self, report, component):
+        from cycle_journal import events
+        return [row for row in events(self.store.path, "owner/api") if row["component"] == component]
+
+    def test_the_435_incident_continues_from_the_verified_head(self):
+        denials = [{"tool": "Bash", "input": {"command": "pwd"}},
+                   {"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nprint(1)\nEOF"},
+                    "rule": "command_table", "operation_id": "refused_x"}]
+        report, claude = self.cycle(denials, published())
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual("IMPLEMENTED", report.stage_details[0].status)
+        self.assertEqual(2, len(claude.dispatched))  # implement, then review: no retry
+        self.assertTrue(any("reconciled" in line for _, line in report.notes))
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual(["reconciled"], [row["status"] for row in recorded])
+        self.assertEqual({"original_status": "BLOCKED", "completed_status": "IMPLEMENTED",
+                          "local_head": SHA, "remote_head": SHA, "pull_request_head": SHA,
+                          "reported_head": SHA, "denial_classes": "auxiliary_denial"},
+                         recorded[0]["correlation"])
+        classified = self.journal(report, "denial_classification")
+        self.assertEqual({"auxiliary_denial"}, {row["status"] for row in classified})
+        self.assertEqual({"pwd"}, {row["command"] for row in classified if row["command"] == "pwd"})
+        self.assertTrue(all(row["correlation"]["rule"] and row["correlation"]["operation"]
+                            for row in classified))
+
+    def test_diverging_shas_stop_as_before_and_say_so(self):
+        report, claude = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
+                                    published(remote_head=OTHER))
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual(1, len(claude.dispatched))
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual(["not_reconciled"], [row["status"] for row in recorded])
+        self.assertEqual((SHA, OTHER, SHA), (recorded[0]["correlation"]["local_head"],
+                                             recorded[0]["correlation"]["remote_head"],
+                                             recorded[0]["correlation"]["pull_request_head"]))
+        self.assertEqual("BLOCKED", recorded[0]["correlation"]["original_status"])
+
+    def test_an_essential_grantable_denial_still_asks_instead_of_reconciling(self):
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "git push origin task-435"}}],
+                               published(remote_head=OTHER))
+        self.assertEqual("permission_required", report.stop_reason)
+
+    def test_an_unobservable_publication_is_not_reconciled(self):
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "pwd"}}], None)
+        self.assertEqual("permission_required", report.stop_reason)
+
+    def test_no_completion_status_stops_as_before(self):
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "grep -rn x scripts"}}],
+                               published(), completed=None)
+        self.assertEqual("permission_required", report.stop_reason)
+
+
+class PublishingClaude(Talker):
+    """An implementer that publishes, reports BLOCKED and met refused commands."""
+
+    def __init__(self, denials, completed, fields):
+        super().__init__("claude")
+        self.denials, self.completed, self.fields = denials, completed, fields
+
+    def dispatch(self, target, task, **kwargs):
+        self.dispatched.append(task)
+        policy = kwargs.get("command_policy")
+        if policy is not None and policy.role != "implement":
+            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
+                start_state="started", process_exited=True, agent_output=block("APPROVED"))
+        spoken = block("BLOCKED", head_sha=SHA, change_request_id="442",
+                       **({"completed_status": self.completed} if self.completed else {}), **self.fields)
+        return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
+            start_state="started", process_exited=True, agent_output=spoken,
+            artifacts={"command_refusals": self.denials})
 
 
 if __name__ == "__main__":
