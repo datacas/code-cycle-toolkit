@@ -324,6 +324,52 @@ class SocketAndContinuationTests(ComposeConsentCase):
         blocked = spoken.replace("REVIEW_PASSED_AWAITING_CI", "BLOCKED")
         self.assertFalse(cp.reconcile_result(blocked, request, "deny", "review")[1])
 
+    def test_ac4_a_classified_mandatory_check_denial_stays_not_essential_in_resolve(self):
+        # #364 classifies a refused configured check as essential_permission;
+        # a declined configured check still never stops the stage (#398).
+        request, _ = self.request()
+        own = {"command": CHECK, "stage": "resolve", "reason": "denied", "rule": "command_permission",
+               "operation": "command_x", "class": cp.ESSENTIAL_PERMISSION, "why": "mandatory check"}
+        other = {**own, "command": "stat /opt", "operation": "command_y",
+                 "class": cp.AUXILIARY_DENIAL, "why": "inspects"}
+        spoken = ("ORCHESTRATION_RESULT\n" + json.dumps({
+            "status": "RESOLVED", "tests": {"version": 2, "checks": [
+                {"id": "verify-compose", "command": CHECK, "result": "pass"}]}})
+                  + "\nEND_ORCHESTRATION_RESULT")
+        result, essential = cp.reconcile_result(spoken, request, "deny", "resolve",
+                                                denials=[own, other], publication=None)
+        payload = json.loads(result.split("ORCHESTRATION_RESULT\n", 1)[1].split("\nEND_", 1)[0])
+        self.assertFalse(essential)
+        self.assertEqual("RESOLVED", payload["status"])
+        self.assertNotIn("stop_reason", payload)
+        self.assertEqual("unverified", payload["tests"]["checks"][0]["result"])
+        outcome = payload["permission_outcomes"][0]
+        self.assertEqual(("verify:" + CHECK, cp.ESSENTIAL_PERMISSION), (outcome["check"], outcome["class"]))
+        # A BLOCKED resolve is reconciled without counting the declined check
+        # as a serious denial; the other conditions still decide (no publication here).
+        blocked = spoken.replace('"RESOLVED"', '"BLOCKED", "completed_status": "RESOLVED"')
+        result, essential = cp.reconcile_result(blocked, request, "deny", "resolve",
+                                                denials=[own, other], publication=None)
+        payload = json.loads(result.split("ORCHESTRATION_RESULT\n", 1)[1].split("\nEND_", 1)[0])
+        self.assertFalse(essential)
+        self.assertNotIn("stop_reason", payload)
+        self.assertEqual(["stat /opt"], [item["command"] for item in payload["reconciliation"]["denials"]])
+        self.assertNotIn("essential_permission denial", payload["reconciliation"]["reason"])
+        # Whichever refusal is reconciled first decides: the auxiliary one, here.
+        auxiliary = {"kind": "command_permission", "resource": "command_y", "command": "stat /opt",
+                     "error": "inspects", "attempted": [], "requires_human": False}
+        result, essential = cp.reconcile_result(blocked, auxiliary, None, "resolve",
+                                                denials=[other, own], publication=None,
+                                                configured_checks=(CHECK,))
+        payload = json.loads(result.split("ORCHESTRATION_RESULT\n", 1)[1].split("\nEND_", 1)[0])
+        self.assertEqual(["stat /opt"], [item["command"] for item in payload["reconciliation"]["denials"]])
+        self.assertNotIn("essential_permission denial", payload["reconciliation"]["reason"])
+        result, essential = cp.reconcile_result(result, request, "deny", "resolve",
+                                                denials=[other, own], publication=None,
+                                                configured_checks=(CHECK,))
+        self.assertFalse(essential)
+        self.assertNotIn("HUMAN_INTERVENTION", result)
+
     def test_ac3_remembered_deny_and_its_denial_context(self):
         request, broker = self.request()
         grant = self.answer(request, broker, "deny")

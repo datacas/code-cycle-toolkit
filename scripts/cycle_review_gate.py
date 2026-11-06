@@ -64,12 +64,22 @@ class ReviewGate:
                       if isinstance(comment.author, str) else None)
             if author not in trusted:
                 continue
-            try:
-                found = self.api.stage_evidence(comment.body)
-            except self.api.ContractError:
-                if any(attempt in comment.body for attempt in attempts):
-                    return "its receipt cannot be read"
-                continue
+            # Receipt by receipt (#438): an accumulating comment keeps every
+            # attempt's receipt, and one that fails the contract must not hide
+            # the valid ones next to it. Only a malformed receipt of the gated
+            # attempt, or one that does not say whose it is yet mentions it,
+            # stops the gate; any other is reported and left out.
+            found, malformed = self.api.read_stage_evidence(comment.body)
+            for problem in malformed:
+                if (problem.attempt_id in attempts
+                        or (problem.attempt_id is None
+                            and any(attempt in problem.raw for attempt in attempts))):
+                    return f"its receipt cannot be read ({problem.reason})"
+                line = (f"warning: ignored a malformed stage receipt of attempt "
+                        f"{problem.attempt_id or '<unknown>'} on change request {number}: "
+                        f"{self.api.readable(problem.reason, 200)}")
+                if all(text != line for _, text in self.report.notes):
+                    self.report.note(line)
             receipts.extend(receipt for receipt in found
                             if receipt["repo"] == self.repo_id
                             and receipt["change_request_id"] == number)

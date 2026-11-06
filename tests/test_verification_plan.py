@@ -254,14 +254,99 @@ class ResultTests(unittest.TestCase):
                 "version": 99, "conclusion": conclusion, "passed": True}}, plan)
             self.assertEqual(rc._legacy_tests(payload)["verification"], "failed")
 
-    def test_v2_rejects_string_evidence_and_attempts_with_check_name(self):
+    def test_v2_rejects_string_evidence_entry_with_check_name(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
-        for field in ("evidence", "attempts"):
-            entry = report(**{field: ["text"]})
-            payload = {"version": 2, "conclusion": "verified", "checks": [entry]}
-            with self.subTest(field=field), self.assertRaisesRegex(
-                    vp.VerificationError, rf"check-1\]\.{field}\[0\].*received str.*expected an object"):
+        payload = {"version": 2, "conclusion": "verified", "checks": [report(evidence=["text"])]}
+        with self.assertRaisesRegex(
+                vp.VerificationError, r"check-1\]\.evidence\[0\].*received str.*expected an object"):
+            vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_attempts_representation_is_normalized_and_recorded(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        cases = (
+            (3, [], {"type": "int", "value": 3}),
+            (0, [], {"type": "int", "value": 0}),
+            ("retried twice", [{"note": "retried twice"}],
+             {"type": "str", "value": "retried twice"}),
+            (["first", {"command": "x"}], [{"note": "first"}, {"command": "x"}],
+             {"type": "array", "value": ["first", {"command": "x"}]}),
+        )
+        for original, attempts, record in cases:
+            payload = {"version": 2, "conclusion": "verified",
+                       "checks": [report(attempts=original)]}
+            with self.subTest(original=original):
+                normalized, updated = vp.normalize_tests(payload, HEAD, plan=plan)
+                self.assertEqual(normalized["checks"][0]["attempts"], attempts)
+                self.assertEqual(normalized["checks"][0]["attempts_normalized"], record)
+                assert updated is not None
+                self.assertEqual(updated.current("check-1", HEAD), "pass")
+                # The recorded plan survives a store and restore round trip.
+                self.assertEqual(vp.VerificationPlan.from_dict(updated.to_dict()), updated)
+
+    def test_attempts_already_objects_carry_no_normalization_record(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        for attempts in ([], [{"command": "x"}], None):
+            payload = {"version": 2, "conclusion": "verified",
+                       "checks": [report(attempts=attempts)]}
+            with self.subTest(attempts=attempts):
+                normalized, _ = vp.normalize_tests(payload, HEAD, plan=plan)
+                self.assertNotIn("attempts_normalized", normalized["checks"][0])
+
+    def test_attempts_normalization_reaches_history_entries(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        entry = report(history=[{**result("fail", head=OTHER).to_dict(), "attempts": 2}])
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD, plan=plan)
+        assert updated is not None
+        prior = next(item for item in updated.results if item.head_sha == OTHER)
+        self.assertEqual(prior.attempts, ())
+        self.assertEqual(prior.attempts_normalized, {"type": "int", "value": 2})
+
+    def test_attempts_that_cannot_be_normalized_name_field_type_and_shape(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        cases = (
+            ({"command": "x"}, r"checks\[0\]\.attempts: received dict; expected an array of objects"),
+            (1.5, r"checks\[0\]\.attempts: received float; expected an array of objects"),
+            (True, r"checks\[0\]\.attempts: received bool; expected an array of objects"),
+            ([4], r"checks\[check-1\]\.attempts\[0\]: received int; expected an object"),
+            ([["x"]], r"checks\[check-1\]\.attempts\[0\]: received list; expected an object"),
+        )
+        for attempts, message in cases:
+            payload = {"version": 2, "conclusion": "verified", "checks": [report(attempts=attempts)]}
+            with self.subTest(attempts=attempts), self.assertRaisesRegex(vp.VerificationError, message):
                 vp.normalize_tests(payload, HEAD, plan=plan)
+
+    def test_attempts_normalization_is_accepted_in_the_four_stage_reports(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        for status in ("IMPLEMENTED", "APPROVED", "RESOLVED", "REVIEWED"):
+            for original, attempts in ((3, []), ("note", [{"note": "note"}]),
+                                       (["note"], [{"note": "note"}])):
+                payload = {"status": status, "head_sha": HEAD, "tests": {
+                    "version": 2, "conclusion": "verified", "criteria": criteria().to_dict(),
+                    "checks": [report(attempts=original)]}}
+                with self.subTest(status=status, attempts=original):
+                    normalized, updated = rc._normalize_test_payload(payload, plan)
+                    self.assertNotIn("rejected", normalized["tests"])
+                    self.assertEqual(normalized["tests"]["checks"][0]["attempts"], attempts)
+                    self.assertEqual(normalized["tests"]["checks"][0]["attempts_normalized"]["value"],
+                                     original)
+                    assert updated is not None
+                    self.assertEqual(updated.current("check-1", HEAD), "pass")
+                    # A report without a runtime plan (a review) takes the same path.
+                    fields = rc._tests(dict(payload))
+                    self.assertTrue(fields["tests_passed"])
+
+    def test_evidence_representation_stays_rejected_in_the_four_stage_reports(self):
+        plan = vp.VerificationPlan(criteria()).extend((check(),))
+        for status in ("IMPLEMENTED", "APPROVED", "RESOLVED", "REVIEWED"):
+            for evidence in (["text"], 3):
+                payload = {"status": status, "head_sha": HEAD, "tests": {
+                    "version": 2, "conclusion": "verified",
+                    "checks": [report(evidence=evidence)]}}
+                with self.subTest(status=status, evidence=evidence):
+                    normalized, _ = rc._normalize_test_payload(payload, plan)
+                    self.assertIn("evidence", normalized["tests"]["rejected"])
+                    self.assertFalse(normalized["tests"]["passed"])
 
     def test_v2_normalizes_single_object_and_null_optional_values(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
@@ -321,7 +406,7 @@ class ResultTests(unittest.TestCase):
 
     def test_v2_rejections_describe_field_received_type_and_expected_format(self):
         plan = vp.VerificationPlan(criteria()).extend((check(),))
-        for field, value, expected in (("evidence", "bad", "array"), ("attempts", 3, "array"),
+        for field, value, expected in (("evidence", "bad", "array"), ("attempts", 1.5, "array"),
                                        ("cause", [], "text")):
             entry = report(**{field: value})
             payload = {"version": 2, "conclusion": "verified", "checks": [entry]}

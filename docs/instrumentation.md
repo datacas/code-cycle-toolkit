@@ -806,6 +806,34 @@ rows. The cycle journal holds one `publication_audit` result per publishing
 stage and one `failure` row per breach, with the ref and its before and after
 SHA. The full evidence is in the cycle report.
 
+#### Reconciling a `BLOCKED` publishing stage (#364)
+
+Every command a stage had refused, grantable or not, leaves a `stage_result`
+row with `component: denial_classification`: `status` is the runtime's class
+(`auxiliary_denial`, `redundant_operation`, `essential_permission`,
+`environment_blocker` or `unknown`), `command` the refused command, `reason` why
+the runtime chose that class, and the correlation holds the `rule` that refused,
+the `operation` identifier and the `stage`. The hook's own `refusal` row for the
+same denial gains the same `rule` and `operation` keys. The `permission_outcome`
+rows (and the `permission_outcomes` entries of the result) carry `class`, `rule`
+and `operation` too.
+
+When an `implement` or `resolve` stage reports `BLOCKED` after refusals, one
+`stage_result` row with `component: reconciliation` records the outcome after the
+[publication audit](role-workspace-policy.md#a-publishing-stage-that-reported-blocked-after-a-verified-publication-364)
+passed. `status` is `reconciled` or `not_reconciled` and `reason` says which
+condition held or failed. `detail` lists each denial with its class, rule and
+operation. The correlation holds `original_status` (always `BLOCKED`),
+`completed_status`, `denial_classes` and the observed SHAs: `local_head`,
+`remote_head`, `pull_request_head` and the `reported_head` the block claimed. A
+stage the audit stops (`publication_violation`) writes no reconciliation row. A
+reconciled stage is also named in the cycle report's notes.
+
+The runtime adds the record to the stage's result as `reconciliation`, next to
+`permission_outcomes`. Only the runtime writes it: a value an agent supplies
+under that name is set aside as `agent_reconciliation`, and a closed contract
+rejects it.
+
 The routing rules' choice is the `profile` on each `dispatch` row. A later
 selector's suggestion can be compared with it, and with the outcome, by
 `(cycle_id, stage_seq)`, without that selector being installed while the run is

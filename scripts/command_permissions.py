@@ -16,7 +16,7 @@ from stage_permissions import (operation, matching_answer, protected_reason, cre
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
 #: produced it. They are the consent record, not part of any role's contract.
-RUNTIME_RESULT_KEYS = ("permission_outcomes", "essential_permission", "stop_reason")
+RUNTIME_RESULT_KEYS = ("permission_outcomes", "essential_permission", "stop_reason", "reconciliation")
 #: Where an agent-supplied value of a runtime-owned key is kept apart. It is
 #: outside every closed contract, so a closed contract still rejects it.
 AGENT_KEY_PREFIX = "agent_"
@@ -198,11 +198,387 @@ def refused_operations(denials: object, policy: Any, broker: Any, executor: str,
     return list(requests.values())
 
 
-def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, role: str) -> tuple[str, bool]:
+#: What a refused operation turns out to be, decided by the runtime (#364).
+AUXILIARY_DENIAL = "auxiliary_denial"
+REDUNDANT_OPERATION = "redundant_operation"
+ESSENTIAL_PERMISSION = "essential_permission"
+ENVIRONMENT_BLOCKER = "environment_blocker"
+UNKNOWN_DENIAL = "unknown"
+DENIAL_CLASSES = (AUXILIARY_DENIAL, REDUNDANT_OPERATION, ESSENTIAL_PERMISSION,
+                  ENVIRONMENT_BLOCKER, UNKNOWN_DENIAL)
+#: Only these two let a stage that reported `BLOCKED` be reconciled. `unknown`
+#: is neither assumed essential nor assumed auxiliary: it prevents completion.
+RECONCILABLE_DENIALS = frozenset({AUXILIARY_DENIAL, REDUNDANT_OPERATION})
+#: The roles whose publication the runtime can verify against the code host.
+PUBLISHING_ROLES = frozenset({"implement", "resolve"})
+
+_READ_ONLY = frozenset({
+    "pwd", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "stat", "echo",
+    "printf", "true", "which", "sort", "uniq", "cut", "tr", "diff", "test", "[", "date", "id",
+    "whoami", "basename", "dirname", "realpath", "file", "tree", "env", "printenv"})
+_GIT_READ_ONLY = frozenset({
+    "grep", "log", "show", "status", "diff", "rev-parse", "ls-files", "ls-remote", "describe",
+    "blame", "rev-list", "cat-file", "show-ref", "merge-base", "symbolic-ref", "shortlog",
+    "for-each-ref", "name-rev", "diff-tree"})
+_GH_READ_ONLY = frozenset({"view", "list", "checks", "diff", "status"})
+_INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl"})
+_LINE_SEPARATORS = {"|", "||", "&&", ";", "&", ";;"}
+
+
+def _shell_kind(command: str) -> str:
+    """What a refused shell command would have done, from its text alone.
+
+    One of `read_only`, `interpreter`, `push`, `pr_create`, `pr_edit`, `commit`,
+    `comment`, `write` and `unknown`. The text is never executed; a command the
+    lexer cannot read, or any substitution, is `unknown`.
+    """
+    line = command.split("<<", 1)[0] if "<<" in command else command
+    line = line.replace("\n", " ; ")
+    if "`" in line or "$(" in line:
+        return "unknown"
+    try:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return "unknown"
+    segments: list[list[str]] = [[]]
+    kinds: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _LINE_SEPARATORS:
+            segments.append([])
+        elif token and set(token) <= set("<>") and ">" in token:
+            target = tokens[index + 1] if index + 1 < len(tokens) else ""
+            index += 1
+            if not (target.isdigit() or target == "/dev/null" or target.startswith("$TMPDIR/")
+                    or target.startswith("${TMPDIR}/")):
+                kinds.append("write")
+        elif token and set(token) <= set("<>"):
+            index += 1  # an input redirection names a file to read
+        elif token in {"(", ")"}:
+            return "unknown"
+        else:
+            segments[-1].append(token)
+        index += 1
+    for words in segments:
+        while words and "=" in words[0] and not words[0].startswith(("-", "=")):
+            words.pop(0)
+        if words[:1] == ["rtk"]:
+            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+        if words:
+            kinds.append(_word_kind(words))
+    kinds = [kind for kind in kinds if kind != "read_only"]
+    if len(kinds) > 1:
+        # A chain such as `git push && gh pr edit …` has no single intent: each
+        # part would need its own check, so none is inferred from the first (#364).
+        return "write" if "write" in kinds else "unknown"
+    return kinds[0] if kinds else "read_only"
+
+
+def _word_kind(words: list[str]) -> str:
+    program = Path(words[0]).name
+    if program == "find":
+        return "write" if any(word in {"-delete", "-exec", "-execdir", "-fprint", "-ok"}
+                              for word in words) else "read_only"
+    if program in _READ_ONLY:
+        return "read_only"
+    if program in _INTERPRETERS:
+        return "interpreter"
+    if program == "git":
+        rest, skip = [], False
+        for word in words[1:]:
+            if skip:
+                skip = False
+            elif word in {"-C", "-c"}:
+                skip = True
+            elif not word.startswith("-"):
+                rest.append(word)
+        sub = rest[0] if rest else ""
+        if sub in _GIT_READ_ONLY:
+            return "read_only"
+        return {"push": "push", "commit": "commit"}.get(sub, "write" if sub else "unknown")
+    if program == "gh":
+        area = words[1] if len(words) > 1 else ""
+        action = words[2] if len(words) > 2 else ""
+        if area in {"pr", "issue", "repo", "run", "release"} and action in _GH_READ_ONLY:
+            return "read_only"
+        if area == "auth" and action == "status":
+            return "read_only"
+        if area == "pr" and action in {"create", "edit"}:
+            return "pr_create" if action == "create" else "pr_edit"
+        if area in {"pr", "issue"} and action in {"comment", "review"}:
+            return "comment"
+        return "unknown"
+    return "unknown"
+
+
+def _pull_matches(pull: dict[str, Any], intent: object) -> bool | None:
+    """Whether the change request already has what a refused edit would set.
+
+    None when the intent is unknown or names a field the runtime did not read:
+    nothing is inferred from a missing field (#364).
+    """
+    if not isinstance(intent, dict) or intent.get("unknown") or not intent.get("fields"):
+        return None
+    import hashlib
+    observed_labels = pull.get("labels")
+    for name, wanted in intent["fields"].items():
+        if name == "title" and isinstance(pull.get("title"), str):
+            same = pull["title"] == wanted
+        elif name == "body" and isinstance(pull.get("body"), str) and isinstance(wanted, dict):
+            same = hashlib.sha256(pull["body"].strip().encode()).hexdigest() == wanted.get("sha256")
+        elif name == "base" and isinstance(pull.get("base"), str):
+            same = pull["base"] == wanted
+        elif name == "milestone" and "milestone" in pull:
+            same = pull["milestone"] == wanted
+        elif name == "labels_add" and isinstance(observed_labels, list):
+            same = set(wanted) <= set(observed_labels)
+        elif name == "labels_remove" and isinstance(observed_labels, list):
+            same = not set(wanted) & set(observed_labels)
+        else:
+            return None
+        if not same:
+            return False
+    return True
+
+
+def publication_shas(publication: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    pull = publication.get("pr") if isinstance(publication, dict) else None
+    reported = (payload or {}).get("head_sha")
+    return {"local": (publication or {}).get("local_head"), "remote": (publication or {}).get("remote_head"),
+            "pull_request": pull.get("head_sha") if isinstance(pull, dict) else None,
+            "reported": reported if isinstance(reported, str) else None}
+
+
+def publication_agrees(publication: dict[str, Any] | None,
+                       payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """Whether the remote head, the local HEAD and the PR head are one commit.
+
+    The branch must be the change request's head, the worktree clean and, when
+    the result names a head or a change request, those must be the observed
+    ones. Anything unobserved fails: absence is not agreement.
+    """
+    if not isinstance(publication, dict):
+        return False, "the published state could not be observed"
+    shas = publication_shas(publication, payload)
+    pull = publication.get("pr")
+    missing = [name for name in ("local", "remote", "pull_request") if not shas[name]]
+    if missing:
+        return False, f"no observed head for: {', '.join(missing)}"
+    if len({shas["local"], shas["remote"], shas["pull_request"]}) != 1:
+        return False, (f"the heads diverge: local {shas['local']}, remote {shas['remote']}, "
+                       f"pull request {shas['pull_request']}")
+    if not isinstance(pull, dict) or pull.get("state") != "OPEN":
+        return False, "the change request is not open"
+    if pull.get("head_ref") != publication.get("branch"):
+        return False, "the change request head is not the cycle branch"
+    if publication.get("clean") is not True:
+        return False, "the worktree has uncommitted changes"
+    if payload is not None:
+        if shas["reported"] != shas["local"]:
+            return False, f"the result reports head {shas['reported']}, not the published head"
+        for key in ("change_request_id", "pr_number"):
+            claimed = payload.get(key)
+            if claimed not in (None, "") and str(claimed).rstrip("/").rsplit("/", 1)[-1].lstrip("#") != pull.get("number"):
+                return False, f"the result names change request {claimed}, not {pull.get('number')}"
+    return True, "the remote head, the local HEAD and the pull request head are one commit"
+
+
+def denial_records(denials: object, policy: Any, executor: str,
+                   cwd: str | None = None) -> list[dict[str, Any]]:
+    """One record for every refusal the stage met, grantable or not (#364).
+
+    Each carries the command, the stage, the reason, the rule and an operation
+    identifier. Recording a denial never authorizes the operation, and nothing
+    is skipped: a refusal the runtime cannot classify is `unknown`, not absent.
+    """
+    from stage_permissions import FILE_EDIT_TOOLS, check, check_file_edit, denial_operation_id
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    for event in denials if isinstance(denials, list) else []:
+        if isinstance(event, str):
+            event = {"tool": "Bash", "input": {"command": event}}
+        if not isinstance(event, dict):
+            continue
+        tool, data = event.get("tool", "Bash"), event.get("input", {})
+        if not isinstance(tool, str) or not isinstance(data, dict):
+            continue
+        observed = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        target = None
+        if tool == "Bash":
+            if not isinstance(data.get("command"), str):
+                continue
+            command = data["command"]
+        else:
+            target = data.get(FILE_EDIT_TOOLS.get(tool, ""))
+            command = f"{tool} {target}" if isinstance(target, str) else tool
+        try:
+            decision = (check(command, observed, cwd=cwd) if tool == "Bash"
+                        else check_file_edit(tool, data, observed, cwd=cwd))
+            rule = event.get("rule") or (decision.rule if not decision.allowed else "")
+            reason = decision.reason if not decision.allowed else "executor permission layer refused the operation"
+        except Exception:
+            rule, reason = event.get("rule") or "", "the refusal could not be re-evaluated"
+        try:
+            requested = event.get("operation") or operation(tool, data, observed, cwd)
+        except (ValueError, TypeError, OSError):
+            requested = None
+        identity = event.get("operation_id") or denial_operation_id(requested, command)
+        records.setdefault((identity, command), {
+            "tool": tool, "command": command, "stage": policy.role, "reason": reason,
+            "rule": rule or "executor_permission_layer", "operation": identity,
+            "target": target if isinstance(target, str) else None,
+            "intent": event.get("intent") if isinstance(event.get("intent"), dict) else None,
+            "class": UNKNOWN_DENIAL, "why": "not classified"})
+    return list(records.values())
+
+
+def classify_denial(record: dict[str, Any], payload: dict[str, Any] | None, *,
+                    mandatory: Any = None, publication: dict[str, Any] | None = None,
+                    environment: tuple[str, ...] = (), cwd: str | None = None) -> tuple[str, str]:
+    """Decide what one refusal was, from runtime evidence and not the agent's word.
+
+    The agent's `permission_effects` can only make a denial more serious, never
+    less: an `essential: true` there is honoured, an `essential: false` is not.
+    `mandatory` says whether a command is a configured or required check.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    command = record["command"]
+    blocker = payload.get("environment_blocker")
+    if (any(same_command(command, item) for item in environment)
+            or (isinstance(blocker, dict) and same_command(command, blocker.get("command")))):
+        return ENVIRONMENT_BLOCKER, "a required resource was unreachable"
+    effects = payload.get("permission_effects")
+    if any(isinstance(item, dict) and same_command(item.get("command"), command)
+           and item.get("essential") is True
+           for item in (effects if isinstance(effects, list) else [])):
+        return ESSENTIAL_PERMISSION, "the stage reported the operation as essential"
+    tests = payload.get("tests")
+    checks = tests.get("checks") if isinstance(tests, dict) else None
+    if ((callable(mandatory) and mandatory(command))
+            or any(isinstance(check, dict) and same_command(check.get("command"), command)
+                   and check.get("required") is not False for check in checks or [])):
+        return ESSENTIAL_PERMISSION, "the refused command is a mandatory check"
+    if record["tool"] != "Bash":
+        target = record.get("target")
+        if cwd and isinstance(target, str) and Path(target).is_absolute():
+            try:
+                Path(target).resolve(strict=False).relative_to(Path(cwd).resolve())
+            except ValueError:
+                return AUXILIARY_DENIAL, "the file is outside the checkout, so it is not a deliverable"
+        return UNKNOWN_DENIAL, "the refused edit may be part of the result"
+    kind = _shell_kind(command)
+    agrees = publication_agrees(publication, None)[0]
+    pull = publication.get("pr") if isinstance(publication, dict) else None
+    if kind == "read_only":
+        return AUXILIARY_DENIAL, "the command only inspects"
+    if kind == "interpreter":
+        return ((AUXILIARY_DENIAL, "a helper whose result is already published and verified")
+                if agrees else (UNKNOWN_DENIAL, "a helper that may have shaped an unpublished result"))
+    if kind == "push":
+        if agrees:
+            return REDUNDANT_OPERATION, "the pushed head is already the remote and pull request head"
+        if isinstance(publication, dict) and publication.get("remote_head") != publication.get("local_head"):
+            return ESSENTIAL_PERMISSION, "the local commit is not on the remote"
+        return UNKNOWN_DENIAL, "the publication could not be verified"
+    if kind == "pr_create":
+        if agrees:
+            return REDUNDANT_OPERATION, "the change request already exists at the published head"
+        if isinstance(publication, dict) and pull is None:
+            return ESSENTIAL_PERMISSION, "no change request exists for the cycle branch"
+        return UNKNOWN_DENIAL, "the publication could not be verified"
+    if kind == "pr_edit":
+        if not isinstance(publication, dict):
+            return UNKNOWN_DENIAL, "the published state could not be observed"
+        if pull is None:
+            return ESSENTIAL_PERMISSION, "no change request exists for the cycle branch"
+        matches = _pull_matches(pull, record.get("intent"))
+        if matches is None:
+            return UNKNOWN_DENIAL, "the metadata the command meant to change is unknown"
+        if matches and agrees:
+            return REDUNDANT_OPERATION, "the change request already has the metadata the command set"
+        return ESSENTIAL_PERMISSION, ("the change request metadata differs from what the command set"
+                                      if not matches else "the publication could not be verified")
+    return UNKNOWN_DENIAL, f"the runtime cannot tell whether a {kind} operation was needed"
+
+
+def classify_denials(records: list[dict[str, Any]], payload: dict[str, Any] | None,
+                     **evidence: Any) -> list[dict[str, Any]]:
+    for record in records:
+        record["class"], record["why"] = classify_denial(record, payload, **evidence)
+    return records
+
+
+def _compact(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: (str(record[key])[:300] if key in {"command", "reason", "why"} else record[key])
+            for key in ("command", "stage", "reason", "rule", "operation", "class", "why")}
+
+
+def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[str],
+                       denials: list[dict[str, Any]], publication: dict[str, Any] | None) -> None:
+    """Complete a `BLOCKED` stage only when the runtime verified why it may.
+
+    All of it must hold: a completion status valid for the role, only auxiliary
+    or redundant denials, no pending publication or environment blocker, no
+    failed required check and, for a publishing role, one commit at the remote
+    head, the local HEAD and the PR head. Otherwise the stage stays `BLOCKED`
+    and the record says which condition failed.
+    """
+    if "reconciliation" in payload:
+        return
+    claimed = payload.get("completed_status")
+    record: dict[str, Any] = {
+        "reconciled": False, "original_status": "BLOCKED", "completed_status": claimed,
+        "denials": [_compact(item) for item in denials[:20]],
+        "shas": publication_shas(publication, payload), "reason": ""}
+    tests = payload.get("tests")
+    checks = tests.get("checks") if isinstance(tests, dict) else None
+    reason = None
+    serious = next((item for item in denials if item["class"] not in RECONCILABLE_DENIALS), None)
+    if claimed not in completed:
+        reason = f"the block declares no completion status valid for the {role} role"
+    elif serious is not None:
+        reason = f"{serious['class']} denial: {serious['command']}"
+    elif payload.get("publication_pending") is True:
+        reason = "the result says its publication is pending"
+    elif payload.get("environment_blocker") or payload.get("essential_permission"):
+        reason = "the result reports an unresolved blocker"
+    elif any(isinstance(check, dict) and check.get("result") == "fail" for check in checks or []):
+        reason = "a check failed"
+    elif role in PUBLISHING_ROLES:
+        agreed, why = publication_agrees(publication, payload)
+        if not agreed:
+            reason = why
+    if reason is None:
+        payload["status"] = claimed
+        record.update(reconciled=True, reason=(
+            "every denial is auxiliary or redundant and the published state is verified"))
+    else:
+        record["reason"] = reason
+    payload["reconciliation"] = record
+
+
+def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, role: str, *,
+                     denials: list[dict[str, Any]] | None = None,
+                     publication: dict[str, Any] | None = None,
+                     configured_checks: tuple[str, ...] = ()) -> tuple[str, bool]:
     """Use structured evidence to distinguish an essential denial from inspection.
 
     Completion claims still pass the runtime's normal publication/effect guards.
     A check linked to the refused operation can never retain a pass.
+
+    With `denials`, every refusal of the stage is already classified by the
+    runtime (`classify_denials`) and the agent's own `permission_effects` no
+    longer decide: a refusal is essential unless it is auxiliary or redundant,
+    and a `BLOCKED` stage is completed only when all of them are, the claimed
+    completion is valid for the role and, for a publishing role, `publication`
+    shows the remote head, the local HEAD and the PR head to be one commit
+    (#364). Without `denials` the behaviour of #409 is unchanged.
+
+    `configured_checks` names the refused commands of the stage that are
+    configured-check consent questions. They are recorded unverified and never
+    keep a stage blocked (#398), whichever refusal is reconciled first.
     """
     end = spoken.rfind("END_ORCHESTRATION_RESULT")
     begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
@@ -226,11 +602,29 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
         # A finished assessment can ask for refinement without needing access.
         completed |= {"NEEDS_REFINEMENT"}
     configured = blocker.get("check")
-    # A configured check the person declines is recorded unverified; it never
-    # stops the cycle by itself (#398, #414): the final state names it.
-    essential = (False if configured
-                 else effect.get("essential") is not False if effect is not None
-                 else payload.get("status") not in completed)
+    own = next((item for item in denials if same_command(item.get("command"), blocker["command"])),
+               None) if denials is not None else None
+    own_class = (own["class"] if own is not None else UNKNOWN_DENIAL) if denials is not None else None
+    # The classes that stop a stage whatever it reports. The agent's
+    # `essential: false` can never downgrade them.
+    hard = own_class in {ESSENTIAL_PERMISSION, ENVIRONMENT_BLOCKER}
+    # Only a publishing role has a published state the runtime can verify. Any
+    # other role keeps the #409 behaviour: its refusals are recorded, but a
+    # `BLOCKED` result is never completed from them (#364).
+    classified = denials is not None and role in PUBLISHING_ROLES
+    if configured:
+        # A configured check the person declines is recorded unverified; it
+        # never stops the cycle by itself (#398, #414): the final state names
+        # it. Its mandatory-check class therefore does not make it hard.
+        essential = False
+    elif classified:
+        # A stage that reports a completed status is not stopped by a refusal
+        # that is not hard; a stage that does not stays stopped until the
+        # runtime has verified why it may complete (below).
+        essential = hard or payload.get("status") not in completed
+    else:
+        essential = (effect.get("essential") is not False if effect is not None
+                     else payload.get("status") not in completed)
     tests = payload.get("tests")
     checks = tests.get("checks", []) if isinstance(tests, dict) else []
     check_ids = effect.get("check_ids", []) if effect is not None else []
@@ -255,6 +649,18 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     if answer == "deny" and essential:
         payload.update(status="BLOCKED", stop_reason="HUMAN_INTERVENTION",
                        essential_permission=blocker["resource"])
+    elif classified:
+        if payload.get("status") == "BLOCKED":
+            # A declined configured check is recorded unverified, so it is not
+            # one of the denials that keep the stage blocked (#398). Every call
+            # leaves all of them out: the first call decides the reconciliation.
+            _reconcile_blocked(payload, role, completed, [
+                item for item in denials or []
+                if not ((configured and item is own)
+                        or any(same_command(item.get("command"), check) for check in configured_checks))],
+                publication)
+            if not configured:
+                essential = hard or payload.get("status") not in completed
     elif not essential and payload.get("status") == "BLOCKED":
         # A distinct structured completion claim is required; prose is irrelevant.
         if (payload.get("completed_status") in completed
@@ -264,10 +670,13 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     outcomes = payload.get("permission_outcomes")
     if not isinstance(outcomes, list):
         outcomes = []
-    outcomes.append({
+    outcome = {
         "grant": blocker["resource"], "command": blocker["command"],
         "answer": answer or "pending", "essential": essential, "checks": affected,
-        **{key: blocker[key] for key in ("check", "config_sha256", "warnings") if key in blocker}})
+        **{key: blocker[key] for key in ("check", "config_sha256", "warnings") if key in blocker}}
+    if own is not None:
+        outcome.update({key: own[key] for key in ("stage", "rule", "operation", "class")})
+    outcomes.append(outcome)
     payload["permission_outcomes"] = outcomes
     return (spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:], essential)
 

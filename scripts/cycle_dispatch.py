@@ -546,6 +546,8 @@ class StageDispatch:
             stopped = self.audit_publication(role, audited, reported, change_request_id, outcome)
             if stopped is not None:
                 return reported, stopped
+        # Only a stage the audit let through can have been reconciled (#364).
+        self.record_reconciliation(role, reported, outcome)
         if role == "resolve" and outcome.decision is not None:
             self.state.previous_resolve_target = outcome.decision.target
             self.state.previous_resolve_used_fallback = outcome.decision.used_fallback

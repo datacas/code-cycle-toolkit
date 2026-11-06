@@ -106,6 +106,54 @@ def effect_snapshot(cwd: str | None, repo: str, *, publishes: bool,
     return snapshot
 
 
+def observe_publication(cwd: str | None, repo: str, change_request_id: str | None = None) -> dict | None:
+    """What the code host and the checkout say about the cycle branch now (#364).
+
+    The local HEAD, the remote head of the branch, the open change request
+    whose head is that branch and the metadata a refused `gh pr edit` could have
+    changed. None when any of it cannot be read: an unreadable state is never
+    evidence that the publication is intact.
+    """
+    root = cwd or os.getcwd()
+    try:
+        branch = _git_output(root, "branch", "--show-current").strip()
+        local = _git_output(root, "rev-parse", "--verify", "HEAD").strip()
+        listing = _git_output(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}")
+        remote = listing.split("\t", 1)[0].strip() if branch and listing.strip() else None
+        clean = not _git_output(root, "status", "--porcelain", "--untracked-files=all").strip()
+        fields = "number,headRefOid,headRefName,state,title,body,baseRefName,labels,milestone"
+        if change_request_id:
+            args = ["pr", "view", str(change_request_id), "--repo", repo, "--json", fields]
+        elif branch:
+            args = ["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+                    "--json", fields]
+        else:
+            return None
+        done = subprocess.run(["gh", *args], cwd=root, capture_output=True, text=True, timeout=30)
+        if done.returncode:
+            return None
+        pulls = json.loads(done.stdout)
+        pulls = pulls if isinstance(pulls, list) else [pulls]
+        pull = next((item for item in pulls if isinstance(item, dict)
+                     and item.get("headRefName") == branch), None)
+    except Exception:
+        return None
+    if not branch or not local:
+        return None
+    request = None
+    if pull is not None:
+        milestone = pull.get("milestone")
+        request = {"number": str(pull.get("number")), "head_sha": pull.get("headRefOid"),
+                   "head_ref": pull.get("headRefName"), "state": pull.get("state"),
+                   "title": pull.get("title"), "body": pull.get("body"),
+                   "base": pull.get("baseRefName"),
+                   "labels": sorted(str(item["name"]) for item in pull.get("labels") or []
+                                    if isinstance(item, dict) and item.get("name")),
+                   "milestone": milestone.get("title") if isinstance(milestone, dict) else None}
+    return {"branch": branch, "local_head": local, "remote_head": remote,
+            "clean": clean, "pr": request}
+
+
 def reconcile(before: dict | None, after: dict | None) -> tuple[str, str]:
     if before is None or after is None:
         return "stop", "evidence_unavailable"

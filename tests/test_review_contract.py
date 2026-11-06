@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import subprocess
 import tempfile
@@ -31,6 +32,49 @@ TRIAGE_RUN = (
     "#### [CCT-20260918-001] · cheap_coder · openai/luna-high→luna-high"
     f" · high · triaged:{PRE_EDIT_SHA} · schema:1"
 )
+
+
+def receipt_line(attempt: str = "attempt-a", **extra: object) -> str:
+    return "<!-- code-cycle-stage " + json.dumps({
+        "schema": 2, "repo": "owner/api", "change_request_id": "4", "stage": "review",
+        "attempt_id": attempt, "head_sha": PRE_EDIT_SHA, "status": "APPROVED",
+        "finding_outcomes": [], **extra}) + " -->"
+
+
+class PerReceiptReadingTests(unittest.TestCase):
+    """#438: a receipt that fails the contract does not hide the valid ones."""
+
+    def test_valid_receipts_survive_a_malformed_one_and_it_is_reported(self) -> None:
+        bad = receipt_line("attempt-bad", plan_id="p", plan_revision=1, plan_digest="f" * 64)
+        good = receipt_line("attempt-good")
+
+        receipts, problems = contract.read_stage_evidence(f"{good}\n{bad}\n{good}")
+
+        self.assertEqual(["attempt-good", "attempt-good"],
+                         [item["attempt_id"] for item in receipts])
+        (problem,) = problems
+        self.assertEqual("attempt-bad", problem.attempt_id)
+        self.assertIn("missing revision, digest", problem.reason)
+
+    def test_the_attempt_of_an_unparseable_receipt_is_still_recovered(self) -> None:
+        _, (problem,) = contract.read_stage_evidence(
+            '<!-- code-cycle-stage {"attempt_id": "attempt-x", oops} -->')
+
+        self.assertEqual("attempt-x", problem.attempt_id)
+
+    def test_a_malformed_receipt_does_not_inherit_the_previous_one(self) -> None:
+        text = receipt_line("attempt-good") + "\n<!-- code-cycle-stage {nothing} -->"
+
+        _, (problem,) = contract.read_stage_evidence(text)
+
+        self.assertIsNone(problem.attempt_id)
+
+    def test_the_strict_reader_still_raises_on_the_first_malformed_receipt(self) -> None:
+        text = receipt_line("attempt-good") + "\n" + receipt_line(
+            "attempt-bad", plan_id="p", revision=0, digest="f" * 64)
+
+        with self.assertRaisesRegex(contract.ContractError, "invalid revision"):
+            contract.stage_evidence(text)
 
 
 class LegacyFindingHeaderTests(unittest.TestCase):
@@ -403,6 +447,29 @@ class TriageValidatorCliTests(unittest.TestCase):
         self.assertIn(str(comment), result.stderr)
         self.assertIn("line 2", result.stderr)
         self.assertIn("missing triaged:<sha>", result.stderr)
+
+    def test_cli_rejects_a_receipt_with_invented_plan_keys_and_names_the_missing_ones(self) -> None:
+        invented = receipt_line(plan_id="plan-x", plan_revision=5, plan_digest="f" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{invented}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("attempt-a", result.stderr)
+        self.assertIn("missing revision, digest", result.stderr)
+        self.assertIn("plan_id, revision, digest", result.stderr)
+
+    def test_cli_accepts_a_receipt_with_the_contract_plan_keys(self) -> None:
+        valid = receipt_line(plan_id="plan-x", revision=5, digest="f" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            comment = Path(temporary) / "pr-comment.md"
+            comment.write_text(f"Summary prose.\n{valid}\n", encoding="utf-8")
+
+            result = self.invoke(comment)
+
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_cli_reports_an_unreadable_comment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
