@@ -241,6 +241,22 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                     correlation={"head_sha": event.get("head_sha"),
                                  "remote_head_sha": event.get("remote_head_sha"),
                                  "exit_code": attempt.get("exit_code")})
+        # The consent record the runtime wrote into the result is removed before
+        # the role's contract judges it; the cycle record keeps it here.
+        outcomes = reported.runtime.get("permission_outcomes")
+        for item in outcomes if isinstance(outcomes, list) else []:
+            if not isinstance(item, dict):
+                continue
+            checks = item.get("checks")
+            self.journal.record(
+                "stage_result", role=role, stage_seq=self.recorder.stage_seq,
+                attempt_id=attempt_id, component="permission_outcome",
+                status=item.get("answer") if isinstance(item.get("answer"), str) else None,
+                command=item.get("command") if isinstance(item.get("command"), str) else None,
+                correlation={"grant": item.get("grant") if isinstance(item.get("grant"), str) else None,
+                             "essential": str(item.get("essential")).lower(),
+                             "checks": ",".join(str(check) for check in checks)
+                             if isinstance(checks, list) and checks else None})
         questions = payload.get("questions")
         if isinstance(questions, list):
             for question in questions:
@@ -253,7 +269,11 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
 
     def stop(self, because: str, status: str = "HUMAN_INTERVENTION",
              reported: Reported | None = None, *,
-             stop_reason: str = "stage_not_completed") -> CycleReport:
+             stop_reason: str = "stage_not_completed",
+             refusals_are_warnings: bool = False) -> CycleReport:
+        """Close the cycle. `refusals_are_warnings` is for a stop whose cause is a
+        valid stage result: the commands the stage had refused are then listed as
+        warnings, never as part of why the cycle stopped."""
         if status == self.api.APPROVED_END:
             barrier = self.verification_barrier()
             if barrier is not None:
@@ -273,7 +293,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
             # The exact command a permission stopped, in the stop line, so a
             # person can authorize it once and resume (#142).
             denied = self.report.stage_details[-1].blocked_commands
-            if denied:
+            if denied and not refusals_are_warnings:
                 more = f" (and {len(denied) - 1} more)" if len(denied) > 1 else ""
                 because += (f"; blocked command in the {self.report.stages[-1].role} stage: "
                             f"`{denied[0]}`{more}")
@@ -287,7 +307,12 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         for refusal in refusals:
             citation = (f"refused by {refusal['component']}: {refusal['command'] or '(no command)'}"
                         f" — {refusal['reason']}")
-            if citation not in because:
+            if refusals_are_warnings:
+                # The stage's own line already lists a blocked command as a
+                # warning; the hook's refusal joins it there.
+                if self.report.stage_details and citation not in self.report.stage_details[-1].warnings:
+                    self.report.stage_details[-1].warnings.append(citation)
+            elif citation not in because:
                 because += f"; {citation}"
         self.report.stopped_because = because
         self.journal.record("stop", stage_seq=self.recorder.stage_seq,

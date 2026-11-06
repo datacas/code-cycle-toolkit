@@ -190,7 +190,7 @@ class StageDispatch:
             except self.api.CycleDriverError as error:
                 reported = self.api.Reported(present=True, status="BLOCKED", payload={
                     **(reported.payload or {}), "status": "BLOCKED", "reason": str(error),
-                    "publication_pending": True})
+                    "publication_pending": True}, runtime=reported.runtime)
         if (role == "resolve" and change_request_id and self.cwd and resolve_start_head
                 and stage_start_clean and stage_start_branch and self.state.history_store is not None
                 and isinstance(attempt_id, str) and outcome.result is not None
@@ -426,14 +426,19 @@ class StageDispatch:
             if readiness.gate == self.api.READINESS_STOP:
                 if not reported.readable:
                     return self.stop(reported.explain(self.api.ISSUE_REVIEW_ROLE), reported=reported)
+                # A refused command is the stop's cause only when the runtime
+                # judged it essential; beside a valid result it is a warning.
+                warn = readiness.valid and not reported.runtime.get("essential_permission")
                 if readiness.valid and readiness.status == "NEEDS_REFINEMENT":
                     return self.stop(readiness.explain(), reported=reported,
-                                stop_reason="needs_refinement")
-                return self.stop(readiness.explain(), reported=reported)
+                                stop_reason="needs_refinement", refusals_are_warnings=warn)
+                return self.stop(readiness.explain(), reported=reported,
+                                 refusals_are_warnings=warn)
             stronger = self.api.ESCALATION_PROFILES[self.api.ISSUE_REVIEW_ROLE]
             if escalated or outcome.decision.profile == stronger:
                 return self.stop(readiness.explain(), reported=reported,
-                            stop_reason="readiness_unconfirmed")
+                            stop_reason="readiness_unconfirmed",
+                            refusals_are_warnings=not reported.runtime.get("essential_permission"))
             escalated = True
 
     def rejected_report_reason(self: Any, role: str, rejected: str,

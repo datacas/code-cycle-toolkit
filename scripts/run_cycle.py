@@ -782,6 +782,10 @@ class Reported:
     present: bool = False
     payload: dict | None = None
     status: str | None = None
+    #: What the runtime wrote into the result after the agent produced it, such
+    #: as the consent record. It is removed from `payload`, so a role's contract
+    #: only judges what the agent said, and is kept for the cycle record.
+    runtime: dict = field(default_factory=dict)
 
     @property
     def readable(self) -> bool:
@@ -2053,7 +2057,9 @@ def read_structured_result(result: DispatchResult | None) -> Reported:
     # result. Present but unreadable: the caller must not `.get` on it.
     if not isinstance(payload, dict):
         return Reported(present=True)
-    return Reported(present=True, payload=payload, status=_status_of(payload))
+    from command_permissions import split_runtime_keys
+    payload, runtime = split_runtime_keys(payload)
+    return Reported(present=True, payload=payload, status=_status_of(payload), runtime=runtime)
 
 
 def _status_of(payload: dict) -> str | None:
@@ -2332,7 +2338,8 @@ def _with_sandbox_startup_failures(reported: Reported, failures: list[dict]) -> 
     tests["sandbox_startup_failures"] = failures
     payload["tests"] = tests
     payload["sandbox_startup_failures"] = failures
-    return Reported(present=reported.present, status=reported.status, payload=payload)
+    return Reported(present=reported.present, status=reported.status, payload=payload,
+                    runtime=reported.runtime)
 
 
 def run_cycle(
