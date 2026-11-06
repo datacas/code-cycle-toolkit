@@ -93,6 +93,11 @@ class CapabilityParityAuditTests(unittest.TestCase):
                     linked_children.add(child)
                     self.assertIn(identifier, self.children[child][5])
         self.assertEqual(linked_children, set(self.children))
+        for child, row in self.children.items():
+            for identifier in row[5].split(", "):
+                with self.subTest(child=child, row=identifier):
+                    self.assertEqual(self.inventory[identifier][5], "toolkit veto")
+                    self.assertIn(child, re.findall(r"#\d+", self.inventory[identifier][6]))
 
     def test_every_child_issue_is_created_with_one_milestone_and_one_priority(self) -> None:
         self.assertTrue(self.children)
@@ -108,12 +113,12 @@ class CapabilityParityAuditTests(unittest.TestCase):
         self.assertEqual(drafts_left, [])
 
     def test_the_roadmap_lists_every_child_issue(self) -> None:
-        roadmap = (ROOT / "docs" / "ROADMAP_V2.md").read_text(encoding="utf-8")
-        m1 = next(line for line in roadmap.splitlines()
-                  if line.startswith("| [M1 — Safe, inspectable execution]"))
+        roadmap = (ROOT / "docs" / "ROADMAP_V2.md").read_text(encoding="utf-8").splitlines()
         for identifier, row in self.children.items():
             with self.subTest(child=identifier):
-                self.assertIn(f"{identifier} ({row[4]}", m1)
+                milestone = next((line for line in roadmap if line.startswith(f"| [{row[3]}]")), None)
+                self.assertIsNotNone(milestone, f"no milestone row for {row[3]!r}")
+                self.assertIn(f"{identifier} ({row[4]}", milestone or "")
 
     def test_every_veto_names_a_claude_and_a_codex_baseline(self) -> None:
         vetoes = {key for key, row in self.inventory.items() if row[5] == "toolkit veto"}
