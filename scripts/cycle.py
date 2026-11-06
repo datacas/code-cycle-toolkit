@@ -36,6 +36,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, cast
 
 from cycle_journal import Journal, redact
@@ -62,9 +63,11 @@ from reroute import effect_snapshot, reconcile
 from quota_state import Handoffs
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
+    ProfileSelector,
     RoutingDecision,
     RoutingMode,
     RoutingStrategy,
+    Target,
     TaskSignals,
     escalation_selector,
     models_from_profiles,
@@ -98,6 +101,13 @@ TERMINAL_REVIEW_STATUSES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 #: A review that completed with nothing blocking. Under the parallel CI policy
 #: it becomes an approval only once the CI gate passes the same SHA.
 CLEAN_REVIEW_STATUSES = frozenset({"APPROVED", AWAITING_CI_STATUS})
+
+#: Failures a stage-local fallback may absorb, once, after exit proof.
+TRANSIENT_FAILURES = frozenset({"capacity", "transport", "timeout", "quota"})
+
+#: `CodexAdapter.probe_git_metadata_write`: whether a linked worktree's Git
+#: metadata is writable, and why not.
+GitMetadataProbe = Callable[[Target, str, tuple[str, ...]], tuple[bool, str]]
 
 ROLE_CONTRACTS = role_contracts()
 DEFAULT_ROLE_CONTRACT = RoleContract(WorkspacePolicy.READ_ONLY)
@@ -213,6 +223,86 @@ class StageOutcome:
     @property
     def succeeded(self) -> bool:
         return self.result is not None and self.result.outcome is DispatchOutcome.SUCCEEDED
+
+
+@dataclass
+class _StageRun:
+    """One `stage()` call: what it was asked, and what one attempt leaves the next."""
+
+    role: str
+    #: The prompt, with the stage's publication policy and recovery guidance.
+    #: A quota handoff appends its resume note once, for every later attempt.
+    task: str
+    escalated: bool
+    resolve_escalated: bool
+    #: The effort a resolve primary is pinned to; unused by other roles.
+    resolve_effort: str
+    target_override: Target | None
+    target_override_used_fallback: bool
+    workspace_policy: WorkspacePolicy
+    writes: bool
+    publishes: bool
+    #: The caller's keyword arguments for `executors.dispatch`, which hands
+    #: them to the adapter as its own untyped keywords.
+    dispatch_kwargs: dict[str, Any]
+    #: Signals that belong to the stage, not the attempt, such as a resolve
+    #: escalation's acceptance; every attempt's signals start from them.
+    stage_signals: dict[str, object]
+    #: Observed once, before the first routing: the diff does not change
+    #: between an attempt and its reroute.
+    change: ChangeSignals | None
+    parent_attempt_id: str | None = None
+    parent_executor: str | None = None
+    #: The decision the next attempt runs under, when this one chose it.
+    fallback_decision: RoutingDecision | None = None
+    #: Why the previous attempt was rerouted, carried into the next one's row.
+    parent_failure: dict[str, object] = field(default_factory=dict)
+    environment_context: str = ""
+    consent_requested: bool = False
+    denial_affected: set[str] = field(default_factory=set)
+    #: The first routing and its signals, for the shadow.
+    first: tuple[RoutingDecision, dict[str, object]] | None = None
+    decision: RoutingDecision | None = None
+    result: DispatchResult | None = None
+    attempts: list[tuple[RoutingDecision, DispatchResult]] = field(default_factory=list)
+    rows: list[int] = field(default_factory=list)
+
+    @property
+    def selector(self) -> ProfileSelector:
+        return escalation_selector if self.escalated else rule_selector
+
+    def outcome(self) -> StageOutcome:
+        assert self.decision is not None, "every stage ends with a routing decision"
+        return StageOutcome(self.role, self.decision, self.result, self.attempts, self.rows)
+
+
+@dataclass
+class _Attempt:
+    """One dispatch attempt within a stage, from its routing to its row."""
+
+    number: int
+    #: This attempt's row: pre-routing signals, then what the attempt showed.
+    signals: dict[str, object]
+    eligible: frozenset[str]
+    decision: RoutingDecision
+    #: A quota handoff record this attempt resumes, when it resumes one.
+    handoff: dict[str, Any] | None = None
+    relationship: str | None = None
+    started: float = 0.0
+    attempt_id: str | None = None
+    tool_activity: bool = False
+    #: The effect snapshot taken before the dispatch.
+    before: dict[str, Any] | None = None
+    #: Grants already denied when this attempt was dispatched.
+    denied_before: frozenset[str] = frozenset()
+    blocker: dict[str, Any] | None = None
+    known_prerequisite: bool = False
+    retry: bool = False
+
+    @property
+    def target(self) -> Target:
+        assert self.decision.target is not None, "only a routed attempt is dispatched"
+        return self.decision.target
 
 
 class CycleRecorder:
@@ -415,28 +505,101 @@ class CycleRecorder:
         `escalated` routes a role to its escalation profile instead of its rule
         and records that it did, as a pre-routing signal: the reason for the
         stronger profile was known before this routing.
+
+        The steps are separate methods, each with one job: `_prepare_stage`
+        checks the stage contract, `_route_attempt` routes, `_dispatch_attempt`
+        runs the executor, `_settle_attempt` reads what the attempt showed and
+        decides whether another attempt follows, and `_persist_attempt` writes
+        its row. This method is their only caller, so every attempt it starts
+        ends in a recorded row, whichever way it ends.
         """
-        selector = escalation_selector if escalated else rule_selector
-        outcome = StageOutcome(role=role, decision=None, result=None)  # type: ignore[arg-type]
+        run = self._prepare_stage(
+            role, task, escalated=escalated, effort_override=effort_override,
+            target_override=target_override,
+            target_override_used_fallback=target_override_used_fallback,
+            resolve_escalated=resolve_escalated,
+            escalation_finding_ids=escalation_finding_ids,
+            dispatch_kwargs=dispatch_kwargs,
+        )
+        # A primary, its fallback, and one rerun after a permission answer.
+        for number in range(3):
+            attempt = self._route_attempt(run, number)
+            if attempt.decision.blocked:
+                self._record_blocked(run, attempt)
+                break
+            result = self._dispatch_attempt(run, attempt)
+            result = self._settle_attempt(run, attempt, result)
+            self._persist_attempt(run, attempt, result)
+            if not attempt.retry:
+                break
+            run.parent_attempt_id = attempt.attempt_id
+            run.parent_executor = attempt.target.executor
+        return self._finish_stage(run)
+
+    # -- preparation ---------------------------------------------------------
+
+    def _prepare_stage(self, role: str, task: str, *, escalated: bool,
+                       effort_override: str | None, target_override: Target | None,
+                       target_override_used_fallback: bool, resolve_escalated: bool,
+                       escalation_finding_ids: tuple[str, ...],
+                       dispatch_kwargs: dict[str, Any]) -> _StageRun:
+        """Hold the stage to its role's contract and open its run."""
         contract = role_contract(role)
         workspace_policy = contract.workspace_policy
         writes = workspace_policy in {
             WorkspacePolicy.WORKSPACE_WRITE, WorkspacePolicy.DISPOSABLE,
         }
+        publishes = contract.publishes and not self.local_only
+        publication_permissions = (
+            contract.publication_permissions if publishes else ()
+        )
+        self._enforce_contract(role, dispatch_kwargs, writes=writes, publishes=publishes,
+                               publication_permissions=publication_permissions,
+                               workspace_policy=workspace_policy)
+        task = (f"{task}\n\n{publication_policy(role, publication_permissions)}"
+                f"\n\n{ENVIRONMENT_RECOVERY_GUIDANCE}")
+        resolve_effort = effort_override or self.resolve_effort
+        stage_signals: dict[str, object] = {}
+        if role == "resolve":
+            if resolve_effort not in {"low", "medium", "high", "max"}:
+                raise CycleError("resolve effort must be one of low, medium, high, max")
+            stage_signals = {
+                "escalated": bool(resolve_escalated),
+                "escalation_finding_ids": list(escalation_finding_ids),
+                "escalation_acceptance": "unknown" if resolve_escalated else "not_applicable",
+            }
+        self.stage_seq += 1
+        self._latest_seq[role] = self.stage_seq
+        change = (
+            self.change_observer()
+            if self.change_observer is not None and role in CHANGE_OBSERVED_ROLES
+            else None
+        )
+        self.latest_change = change
+        return _StageRun(
+            role=role, task=task, escalated=escalated,
+            resolve_escalated=resolve_escalated, resolve_effort=resolve_effort,
+            target_override=target_override,
+            target_override_used_fallback=target_override_used_fallback,
+            workspace_policy=workspace_policy, writes=writes, publishes=publishes,
+            dispatch_kwargs=dispatch_kwargs, stage_signals=stage_signals, change=change,
+        )
+
+    @staticmethod
+    def _enforce_contract(role: str, dispatch_kwargs: dict[str, Any], *, writes: bool,
+                          publishes: bool, publication_permissions: tuple[str, ...],
+                          workspace_policy: WorkspacePolicy) -> None:
+        """Refuse a caller's override of what the role's contract fixes."""
         requested_writes = dispatch_kwargs.pop("writes", writes)
         if requested_writes is not writes:
             raise CycleError(
                 f"{role!r} stages must use writes={writes}, not {requested_writes!r}")
         dispatch_kwargs["writes"] = writes
-        publishes = contract.publishes and not self.local_only
         requested_publishes = dispatch_kwargs.pop("publishes", publishes)
         if requested_publishes is not publishes:
             raise CycleError(
                 f"{role!r} stages must use publishes={publishes}, not {requested_publishes!r}")
         dispatch_kwargs["publishes"] = publishes
-        publication_permissions = (
-            contract.publication_permissions if publishes else ()
-        )
         requested_publication_permissions = dispatch_kwargs.pop(
             "publication_permissions", publication_permissions,
         )
@@ -446,8 +609,6 @@ class CycleRecorder:
                 f"{publication_permissions!r}, not {requested_publication_permissions!r}"
             )
         dispatch_kwargs["publication_permissions"] = publication_permissions
-        task = (f"{task}\n\n{publication_policy(role, publication_permissions)}"
-                f"\n\n{ENVIRONMENT_RECOVERY_GUIDANCE}")
         requested_policy = dispatch_kwargs.pop("workspace_policy", workspace_policy)
         try:
             requested_policy = WorkspacePolicy(requested_policy)
@@ -460,706 +621,779 @@ class CycleRecorder:
                 f"{role!r} stages must use workspace_policy={workspace_policy.value!r}, "
                 f"not {requested_policy!r}")
         dispatch_kwargs["workspace_policy"] = workspace_policy
-        if role == "resolve":
-            effort_override = effort_override or self.resolve_effort
-            if effort_override not in {"low", "medium", "high", "max"}:
-                raise CycleError("resolve effort must be one of low, medium, high, max")
-            stage_signals = {
-                "escalated": bool(resolve_escalated),
-                "escalation_finding_ids": list(escalation_finding_ids),
-                "escalation_acceptance": "unknown" if resolve_escalated else "not_applicable",
-            }
-        else:
-            stage_signals = {}
-        self.stage_seq += 1
-        self._latest_seq[role] = self.stage_seq
 
-        # Observed once per stage, before the first routing: the diff does not
-        # change between an attempt and its reroute.
-        change = (
-            self.change_observer()
-            if self.change_observer is not None and role in CHANGE_OBSERVED_ROLES
-            else None
+    # -- routing -------------------------------------------------------------
+
+    def _route_attempt(self, run: _StageRun, number: int) -> _Attempt:
+        """Route one attempt: the rule, then each override that may replace it."""
+        signals: dict[str, object] = {
+            **self._pre_routing(run.role, run.change), **run.stage_signals,
+            **run.parent_failure,
+        }
+        if run.escalated:
+            signals["escalated"] = True
+        eligible = self.registry.compatible_executors(
+            run.workspace_policy, **run.dispatch_kwargs,
         )
-        self.latest_change = change
-        parent_attempt_id = None
-        parent_executor = None
-        fallback_decision = None
-        parent_failure = {}
-        environment_context = ""
-        primary_decision = None
-        consent_requested = False
-        denial_affected: set[str] = set()
-        # A primary, its fallback, and one rerun after a permission answer.
-        for attempt in range(3):
-            signals = {**self._pre_routing(role, change), **stage_signals, **parent_failure}
-            if escalated:
-                signals["escalated"] = True
-            eligible = self.registry.compatible_executors(
-                workspace_policy, **dispatch_kwargs,
-            )
-            def select(candidates):
-                decision = route(
-                    role, self.signals, self.availability,
-                    mode=self.mode, profiles=self.profiles,
-                    eligible_executors=candidates,
-                    strategy=self.routing_strategy,
-                    selector=selector,
-                    first_pass_rate=(
-                        self.first_pass_rate.value
-                        if self.first_pass_rate is not None and self.first_pass_rate.known
-                        else None
-                    ),
-                    rate_observations=(
-                        self.first_pass_rate.observations
-                        if self.first_pass_rate is not None else None
-                    ),
-                    rate_minimum=(
-                        self.first_pass_rate.minimum
-                        if self.first_pass_rate is not None else None
-                    ),
-                    rate_known=(
-                        self.first_pass_rate.known
-                        if self.first_pass_rate is not None else None
-                    ),
-                    rate_explanation=(
-                        self.first_pass_rate.explain()
-                        if self.first_pass_rate is not None else None
-                    ),
-                    exhausted_until=self.exhausted_until,
+        decision = self._route(run, eligible, signals)
+        if run.role == "resolve" and not decision.blocked and decision.target is not None:
+            decision = self._resolve_target(run, decision, decision.target, eligible)
+        if run.fallback_decision is not None:
+            decision = run.fallback_decision
+        decision = self._check_codex_effort(run, decision, eligible, signals)
+        decision, eligible = self._check_codex_git_metadata(run, decision, eligible, signals)
+        if number == 0:
+            run.first = (decision, signals)
+        attempt = _Attempt(number=number, signals=signals, eligible=eligible,
+                           decision=decision)
+        self._match_handoff(run, attempt)
+        return attempt
+
+    def _route(self, run: _StageRun, candidates: frozenset[str],
+               signals: dict[str, object]) -> RoutingDecision:
+        rate = self.first_pass_rate
+        decision = route(
+            run.role, self.signals, self.availability,
+            mode=self.mode, profiles=self.profiles,
+            eligible_executors=candidates,
+            strategy=self.routing_strategy,
+            selector=run.selector,
+            first_pass_rate=rate.value if rate is not None and rate.known else None,
+            rate_observations=rate.observations if rate is not None else None,
+            rate_minimum=rate.minimum if rate is not None else None,
+            rate_known=rate.known if rate is not None else None,
+            rate_explanation=rate.explain() if rate is not None else None,
+            exhausted_until=self.exhausted_until,
+        )
+        if (self.mode is RoutingMode.PRODUCTION
+                and decision.used_fallback and decision.target is not None
+                and any(f"{row['executor']}/{row['model']} quota exhausted until "
+                        f"{row['expires_at'] or 'operator retry required'}" in decision.reasons
+                        for row in self.quota_exhaustions)):
+            signals["quota_resume_reason"] = "recorded_quota_exhaustion"
+        return decision
+
+    def _dispatchable(self, executor: str, eligible: frozenset[str]) -> bool:
+        return (executor in eligible
+                and self.availability.get(executor, Availability.UNKNOWN).dispatchable)
+
+    def _resolve_target(self, run: _StageRun, decision: RoutingDecision, target: Target,
+                        eligible: frozenset[str]) -> RoutingDecision:
+        """A resolve's effort: pinned, escalated, or the previous target's."""
+        override = run.target_override
+        if override is not None and (override.executor, override.model) in self.exhausted_until:
+            return replace(decision, reasons=decision.reasons +
+                           ("previous resolve target has recorded quota exhaustion; keep the available route",))
+        if override is not None:
+            if not self._dispatchable(override.executor, eligible):
+                return replace(
+                    decision, target=None, blocked=True,
+                    reasons=decision.reasons +
+                    ("the previous resolve target is no longer available",),
                 )
-                if (self.mode is RoutingMode.PRODUCTION
-                        and decision.used_fallback and decision.target is not None
-                        and any(f"{row['executor']}/{row['model']} quota exhausted until "
-                                f"{row['expires_at'] or 'operator retry required'}" in decision.reasons
-                                for row in self.quota_exhaustions)):
-                    signals["quota_resume_reason"] = "recorded_quota_exhaustion"
-                return decision
+            return replace(
+                decision,
+                target=replace(override, effort="max"),
+                used_fallback=run.target_override_used_fallback,
+                reasons=decision.reasons +
+                ("a finding survived a claimed fix; retry at max on the previous target",),
+            )
+        if decision.used_fallback:
+            return decision
+        if run.resolve_escalated:
+            # A resumed run has no previous resolve target; the seeded
+            # history still escalates, on the routed primary.
+            return replace(
+                decision, target=replace(target, effort="max"),
+                reasons=decision.reasons +
+                ("a finding survived a claimed fix; retry at max on the routed primary",),
+            )
+        return replace(
+            decision, target=replace(target, effort=run.resolve_effort),
+            reasons=decision.reasons +
+            (f"resolve primary effort pinned to {run.resolve_effort}",),
+        )
 
-            decision = select(eligible)
-            if role == "resolve" and not decision.blocked and decision.target is not None:
-                if (target_override is not None
-                        and (target_override.executor, target_override.model) in self.exhausted_until):
-                    decision = replace(decision, reasons=decision.reasons +
-                                       ("previous resolve target has recorded quota exhaustion; keep the available route",))
-                elif target_override is not None:
-                    if (target_override.executor not in eligible
-                            or not self.availability.get(
-                                target_override.executor, Availability.UNKNOWN).dispatchable):
-                        decision = replace(
-                            decision, target=None, blocked=True,
-                            reasons=decision.reasons +
-                            ("the previous resolve target is no longer available",),
-                        )
-                    else:
-                        decision = replace(
-                            decision,
-                            target=replace(target_override, effort="max"),
-                            used_fallback=target_override_used_fallback,
-                            reasons=decision.reasons +
-                            ("a finding survived a claimed fix; retry at max on the previous target",),
-                        )
-                elif resolve_escalated and not decision.used_fallback:
-                    # A resumed run has no previous resolve target; the seeded
-                    # history still escalates, on the routed primary.
-                    decision = replace(
-                        decision, target=replace(decision.target, effort="max"),
-                        reasons=decision.reasons +
-                        ("a finding survived a claimed fix; retry at max on the routed primary",),
-                    )
-                elif not decision.used_fallback:
-                    decision = replace(
-                        decision, target=replace(decision.target, effort=effort_override),
-                        reasons=decision.reasons +
-                        (f"resolve primary effort pinned to {effort_override}",),
-                    )
-            if fallback_decision is not None:
-                decision = fallback_decision
+    def _check_codex_effort(self, run: _StageRun, decision: RoutingDecision,
+                            eligible: frozenset[str],
+                            signals: dict[str, object]) -> RoutingDecision:
+        """Use the fallback when Codex's catalog says it cannot run at max.
 
-            # The Codex catalog is an optional pre-dispatch capability check.
-            # Missing catalogs and unlisted models remain unknown and dispatch.
-            if (role == "resolve" and not decision.blocked
-                    and decision.target is not None and decision.target.executor == "codex"
-                    and decision.target.effort == "max"):
-                try:
-                    from profile_config import codex_models
-                    catalog = codex_models()
-                except Exception:
-                    catalog = None
-                supported = catalog.get(decision.target.model) if catalog else None
-                if supported is not None and decision.target.effort not in supported:
-                    if resolve_escalated:
-                        stage_signals["escalation_acceptance"] = "unsupported"
-                        signals["escalation_acceptance"] = "unsupported"
-                    fallback = stage_fallback(decision, self.profiles)
-                    if (fallback is None or fallback.executor not in eligible
-                            or not self.availability.get(
-                                fallback.executor, Availability.UNKNOWN).dispatchable):
-                        decision = replace(
-                            decision, target=None, blocked=True,
-                            reasons=decision.reasons +
-                            (f"Codex does not support effort {decision.target.effort}; "
-                             "the configured fallback is unavailable",),
-                        )
-                    else:
-                        fallback_decision = replace(
-                            decision, target=fallback, used_fallback=True,
-                            reasons=decision.reasons +
-                            ("Codex model cache confirms the requested effort is unsupported; using the configured fallback",),
-                        )
-                        decision = fallback_decision
-            if (publishes and writes
-                    and not decision.blocked and decision.target.executor == "codex"
-                    and dispatch_kwargs.get("writable_dirs")):
-                adapter = self.registry.get("codex")
-                probe_write = getattr(adapter, "probe_git_metadata_write", None)
-                if callable(probe_write):
-                    allowed, detail = probe_write(
-                        decision.target, dispatch_kwargs["cwd"],
-                        tuple(dispatch_kwargs["writable_dirs"]),
-                    )
-                    if not allowed:
-                        eligible = [name for name in eligible if name != "codex"]
-                        eligible = [
-                            name for name in eligible
-                            if self.registry.get(name).publication_access(
-                                (self.probes or {}).get(name)
-                                or self.registry.get(name).probe(),
-                                writes=True,
-                            )[0]
-                        ]
-                        decision = select(eligible)
-                        note = ("Codex linked-worktree Git metadata probe failed: "
-                                f"{detail}; routed to "
-                                f"{decision.target.executor if decision.target else 'no available executor'} "
-                                "before dispatch.")
-                        decision = replace(
-                            decision, reasons=decision.reasons + (note,),
-                        )
-                        fallback_decision = None
-            if attempt == 0:
-                first = (decision, signals)
-                primary_decision = decision
-            handoff = None
-            if (attempt == 0 and role == self.started_from
-                    and self.started_from != "implement"
-                    and self.mode is RoutingMode.PRODUCTION
-                    and dispatch_kwargs.get("cwd") and not decision.blocked):
-                try:
-                    from executors import _git_output, _workspace_fingerprint
-                    cwd = dispatch_kwargs["cwd"]
-                    if _git_output(cwd, "status", "--porcelain", "--untracked-files=all"):
-                        handoff = Handoffs(self.telemetry.path).match(
-                            repo=self.repo_id, task=self.task_id, stage=role,
-                            pr=self.change_request_id, workspace=_workspace_fingerprint(cwd),
-                            destination=decision.target)
-                except (OSError, ValueError, sqlite3.Error) as error:
-                    decision = replace(decision, blocked=True, target=None,
+        The Codex catalog is an optional pre-dispatch capability check.
+        Missing catalogs and unlisted models remain unknown and dispatch.
+        """
+        target = decision.target
+        if (run.role != "resolve" or decision.blocked or target is None
+                or target.executor != "codex" or target.effort != "max"):
+            return decision
+        try:
+            from profile_config import codex_models
+            catalog = codex_models()
+        except Exception:
+            catalog = None
+        supported = catalog.get(target.model) if catalog else None
+        if supported is None or target.effort in supported:
+            return decision
+        if run.resolve_escalated:
+            run.stage_signals["escalation_acceptance"] = "unsupported"
+            signals["escalation_acceptance"] = "unsupported"
+        fallback = stage_fallback(decision, self.profiles)
+        if fallback is None or not self._dispatchable(fallback.executor, eligible):
+            return replace(
+                decision, target=None, blocked=True,
+                reasons=decision.reasons +
+                (f"Codex does not support effort {target.effort}; "
+                 "the configured fallback is unavailable",),
+            )
+        run.fallback_decision = replace(
+            decision, target=fallback, used_fallback=True,
+            reasons=decision.reasons +
+            ("Codex model cache confirms the requested effort is unsupported; using the configured fallback",),
+        )
+        return run.fallback_decision
+
+    def _check_codex_git_metadata(
+        self, run: _StageRun, decision: RoutingDecision, eligible: frozenset[str],
+        signals: dict[str, object],
+    ) -> tuple[RoutingDecision, frozenset[str]]:
+        """Route away from Codex before dispatch when it cannot write Git metadata."""
+        target = decision.target
+        if not (run.publishes and run.writes and not decision.blocked
+                and target is not None and target.executor == "codex"
+                and run.dispatch_kwargs.get("writable_dirs")):
+            return decision, eligible
+        # Only the Codex adapter defines this probe; another adapter registered
+        # under that name may not.
+        probe_write = cast("GitMetadataProbe | None", getattr(
+            self.registry.get("codex"), "probe_git_metadata_write", None))
+        if not callable(probe_write):
+            return decision, eligible
+        allowed, detail = probe_write(
+            target, run.dispatch_kwargs["cwd"], tuple(run.dispatch_kwargs["writable_dirs"]),
+        )
+        if allowed:
+            return decision, eligible
+        eligible = frozenset(name for name in eligible
+                             if name != "codex" and self._publishes_from(name))
+        decision = self._route(run, eligible, signals)
+        note = ("Codex linked-worktree Git metadata probe failed: "
+                f"{detail}; routed to "
+                f"{decision.target.executor if decision.target else 'no available executor'} "
+                "before dispatch.")
+        run.fallback_decision = None
+        return replace(decision, reasons=decision.reasons + (note,)), eligible
+
+    def _publishes_from(self, executor: str) -> bool:
+        adapter = self.registry.get(executor)
+        allowed, _ = adapter.publication_access(
+            (self.probes or {}).get(executor) or adapter.probe(), writes=True,
+        )
+        return allowed
+
+    def _match_handoff(self, run: _StageRun, attempt: _Attempt) -> None:
+        """Find the quota handoff a resumed stage continues, or block it."""
+        decision = attempt.decision
+        if not (attempt.number == 0 and run.role == self.started_from
+                and self.started_from != "implement"
+                and self.mode is RoutingMode.PRODUCTION
+                and run.dispatch_kwargs.get("cwd") and not decision.blocked):
+            return
+        try:
+            from executors import _git_output, _workspace_fingerprint
+            cwd = run.dispatch_kwargs["cwd"]
+            if _git_output(cwd, "status", "--porcelain", "--untracked-files=all"):
+                attempt.handoff = Handoffs(self.telemetry.path).match(
+                    repo=self.repo_id, task=self.task_id, stage=run.role,
+                    pr=self.change_request_id, workspace=_workspace_fingerprint(cwd),
+                    destination=decision.target)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            attempt.decision = replace(decision, blocked=True, target=None,
                                        reasons=decision.reasons + (str(error),))
-            if decision.blocked:
-                outcome.decision = decision
-                self._journal("failure", role=role, component="router",
-                              status="blocked", reason="routing found no dispatchable target",
-                              detail="; ".join(decision.reasons))
-                outcome.rows.append(self._record(role, decision, None, signals))
-                self.failed_attempts += 1
-                self.stages.append(outcome)
-                self._observe_shadow(role, *first)
-                return outcome
 
-            if self.stage_started is not None:
-                self.stage_started(role, decision)
+    def _record_blocked(self, run: _StageRun, attempt: _Attempt) -> None:
+        """A routing that reached no executor still leaves its row."""
+        decision = attempt.decision
+        run.decision = decision
+        self._journal("failure", role=run.role, component="router",
+                      status="blocked", reason="routing found no dispatchable target",
+                      detail="; ".join(decision.reasons))
+        run.rows.append(self._record(run.role, decision, None, attempt.signals))
+        self.failed_attempts += 1
 
-            # Per attempt: a reroute runs under the fallback's target, and its
-            # run line has to name that one.
-            started = time.monotonic()
-            relationship = None
-            if parent_attempt_id is not None:
-                relationship = (
-                    "fallback" if parent_executor != decision.target.executor else "retry"
-                )
-            skill = self.skills_by_role.get(role)
-            attempt_id = None
+    def _finish_stage(self, run: _StageRun) -> StageOutcome:
+        outcome = run.outcome()
+        self.stages.append(outcome)
+        assert run.first is not None, "a stage routes at least once"
+        self._observe_shadow(run.role, *run.first)
+        return outcome
 
-            def begin_dispatch_attempt() -> str:
-                nonlocal attempt_id
-                harness_snapshot = build_harness_snapshot(
-                    role=role, skill=skill, profile=decision.profile,
-                    routing_strategy=getattr(
-                        decision.strategy, "value", self.routing_strategy.value,
-                    ),
-                    readiness_policy=self.policy.value,
-                    executor=decision.target.executor,
-                    probe=(self.probes or {}).get(decision.target.executor),
-                    profiles=self.profiles,
-                    project_root=dispatch_kwargs.get("cwd"),
-                )
-                attempt_id = self.telemetry.create_dispatch_attempt(
-                    self.repo_id, self.task_id, self.cycle_id, self.stage_seq, role,
-                    executor=decision.target.executor,
-                    provider=decision.target.provider,
-                    model_requested=decision.target.model,
-                    effort=decision.target.effort,
-                    profile=decision.profile,
-                    harness_snapshot=harness_snapshot,
-                    parent_attempt_id=parent_attempt_id,
-                    relationship=relationship,
-                )
-                if self.registry.get(decision.target.executor).completes_work:
-                    self.telemetry.update_dispatch_attempt(
-                        attempt_id, {"lifecycle_state": "running"},
-                        update_id=f"update-{uuid.uuid4().hex}", source="runtime",
-                    )
-                target = decision.target
-                self._journal("stage_start", role=role, attempt_id=attempt_id,
-                              component=target.executor, status=decision.profile,
-                              detail=f"{target.provider}/{target.model} {target.effort}",
-                              correlation={"parent_attempt_id": parent_attempt_id,
-                                           "relationship": relationship})
-                if self.on_dispatch_started is not None:
-                    self.on_dispatch_started()
-                return attempt_id
+    # -- dispatch ------------------------------------------------------------
 
-            tool_activity = False
-
-            def snapshot():
-                try:
-                    return effect_snapshot(
-                        dispatch_kwargs.get("cwd"), self.repo_id, publishes=publishes,
-                        change_request_id=self.change_request_id,
-                        issue_repo=self.work_item_identity_fields.get("work_item_repository"),
-                        issue_id=self.task_id if publishes else None,
-                    )
-                except Exception:
-                    return None
-
-            before = (snapshot() if (writes or publishes)
-                      and self.mode is not RoutingMode.CALIBRATION else None)
-            if handoff is not None:
-                try:
-                    if before is None or before["workspace"]["fingerprint"] != handoff["fingerprint"]:
-                        raise ValueError("quota handoff diff changed before dispatch")
-                    Handoffs(self.telemetry.path).claim(handoff)
-                except (OSError, ValueError, sqlite3.Error) as error:
-                    raise CycleError(str(error)) from error
-                task += (
-                    "\n\nQuota worktree resume: inspect the existing staged, unstaged and untracked "
-                    "changes before editing. Preserve correct partial work; do not reset or overwrite it. "
-                    f"Original executor: {handoff['original_executor']}; continuing executor: "
-                    f"{decision.target.executor}; diff SHA-256: {handoff['fingerprint']}; "
-                    f"provenance: {handoff['provenance']}. This is not functional verification.")
-                self._journal("stage_result", role=role, component="quota", status="handoff",
-                              correlation={"original_executor": handoff["original_executor"],
-                                           "destination_executor": decision.target.executor,
-                                           "fingerprint": handoff["fingerprint"],
-                                           "provenance": handoff["provenance"]})
-
-            def observe_progress(**activity):
-                nonlocal tool_activity
-                tool_activity |= bool(activity.get("tool"))
-                if self.on_progress is not None:
-                    self.on_progress(**activity)
-
-            assert decision.target is not None
-            granted = (self.consent.granted(decision.target.executor)
-                       if self.consent is not None else ())
-            # This dispatch already ran with these denials; rerunning it with
-            # the same denial context cannot change its outcome.
-            denied_before = (frozenset(self.consent.denied_ids)
-                             if self.consent is not None else frozenset())
-            permission_context = ""
-            if self.consent is not None:
-                for grant_id in granted:
-                    scope = self.consent.registry[grant_id].scope_for(decision.target.executor, self.consent.platform)
-                    if scope is not None:
-                        permission_context += "\n\n" + granted_context(self.consent.registry[grant_id], scope)
-                permission_context += "\n\n" + "\n".join(
-                    denial_context(self.consent.registry[grant_id]) for grant_id in self.consent.denied_ids)
-                if dispatch_kwargs.get("command_policy") is not None:
-                    dispatch_kwargs["command_policy"] = replace(
-                        dispatch_kwargs["command_policy"],
-                        command_permissions=self.consent.command_entries(decision.target.executor, role))
-            sandbox_granted = tuple(grant_id for grant_id in granted if grant_id in GRANTS)
-            grant_kwargs = {"sandbox_grants": sandbox_granted} if sandbox_granted else {}
-            try:
-                result = dispatch(decision, f"{task}\n\n{environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
-                                  self.registry,
-                                  policy=self.policy, probes=self.probes,
-                                  on_progress=observe_progress,
-                                  on_workspace=self.on_workspace,
-                                  on_dispatch_attempt=begin_dispatch_attempt,
-                                  **dispatch_kwargs, **grant_kwargs)
-            except CycleInterrupted as interruption:
-                # No half-done state, even now: the stage that was running is
-                # the row a later question about this run needs most.
-                result = DispatchResult(
-                    DispatchOutcome.INTERRUPTED, decision.target.executor, decision.target,
-                    detail=f"interrupted by {interruption.signal_name}",
-                    duration_ms=max(0, round((time.monotonic() - started) * 1000)),
-                    lifecycle_state="interrupted",
-                    start_state="started" if tool_activity else "unknown",
-                )
-                if attempt_id is not None:
-                    self.telemetry.update_dispatch_attempt(
-                        attempt_id,
-                        {"lifecycle_state": "interrupted", "outcome": "interrupted",
-                         "duration_ms": result.duration_ms,
-                         "finished_at": datetime.now(timezone.utc).isoformat(),
-                         "error_code": "interrupted", "start_state": result.start_state},
-                        update_id=f"update-{uuid.uuid4().hex}", source="runtime",
-                    )
-                outcome.decision = decision
-                outcome.result = result
-                if attempt_id is not None:
-                    outcome.attempts.append((decision, result))
-                outcome.rows.append(self._record(
-                    role, decision, result, signals, attempt_id=attempt_id,
-                    parent_attempt_id=parent_attempt_id, relationship=relationship,
-                ))
-                self.failed_attempts += 1
-                self.stages.append(outcome)
-                self._journal_attempt(role, result, attempt_id, None, signals)
-                interruption.outcome = outcome
-                raise
-            if tool_activity:
-                result = replace(result, start_state="started")
-            if role == "resolve" and resolve_escalated:
-                if (result.outcome is DispatchOutcome.SUCCEEDED
-                        and result.requested.effort == "max"
-                        and signals.get("escalation_acceptance") == "unknown"):
-                    stage_signals["escalation_acceptance"] = "accepted"
-                    signals["escalation_acceptance"] = "accepted"
-                elif (result.failure_code != "unsupported_effort"
-                      and result.outcome is not DispatchOutcome.SUCCEEDED
-                      and result.requested.effort == "max" and not decision.used_fallback):
-                    # Only the escalated dispatch can leave the acceptance
-                    # unknown; a failed fallback keeps the signal already set.
-                    stage_signals["escalation_acceptance"] = "unknown"
-                    signals["escalation_acceptance"] = "unknown"
-
-            def reroute_gate():
-                # The #205 invariant: a stage that may have started is rerouted
-                # only once its workspace effects are reconciled.
-                if result.asynchronous or not result.process_exited:
-                    return "stop", "exit_unproven"
-                if result.needs_human_action:
-                    return "stop", "human_action"
-                if result.start_state == "not_started":
-                    return "reroute", "not_started"
-                if not writes and not publishes:
-                    return "reroute", "no_effects"
-                return reconcile(before, snapshot())
-
-            retry = False
-            if result.failure_code == "unsupported_effort" and role == "resolve":
-                if resolve_escalated:
-                    stage_signals["escalation_acceptance"] = "rejected"
-                    signals["escalation_acceptance"] = "rejected"
-                if attempt == 0:
-                    fallback = stage_fallback(decision, self.profiles)
-                    fallback_available = (
-                        fallback is not None and fallback != decision.target
-                        and fallback.executor in eligible
-                        and self.availability.get(
-                            fallback.executor, Availability.UNKNOWN).dispatchable
-                    )
-                    stopped_reason = "no available configured fallback"
-                    if fallback_available:
-                        if self.mode is RoutingMode.CALIBRATION:
-                            action, reason = "stop", "calibration"
-                        elif attempt_id is None:
-                            action, reason = "stop", "exit_unproven"
-                        else:
-                            action, reason = reroute_gate()
-                        signals.update(reroute_action=action, reroute_reason=reason,
-                                       process_exited=result.process_exited,
-                                       reroute_error_code="unsupported_effort",
-                                       reroute_start_state=result.start_state)
-                        retry = action == "reroute"
-                        stopped_reason = f"reroute stopped: {reason}"
-                    if retry:
-                        fallback_decision = replace(
-                            decision, target=fallback, used_fallback=True,
-                            reasons=decision.reasons +
-                            ("the CLI rejected the pinned resolve effort; using the configured fallback",),
-                        )
-                        parent_failure = {
-                            "reroute_error_code": "unsupported_effort",
-                            "reroute_start_state": result.start_state,
-                            "reroute_action": "reroute", "reroute_reason": reason,
-                        }
-                    else:
-                        result = replace(
-                            result,
-                            detail=f"{result.detail}; {stopped_reason} for unsupported effort",
-                        )
-            command_blocker = None
-            command_blockers = []
-            if isinstance(result.agent_output, str) and result.agent_output:
-                # Whatever the agent put under a runtime-owned key is set aside
-                # first, so what remains there afterwards is the runtime's own.
-                from command_permissions import claim_runtime_keys
-                result = replace(result, agent_output=claim_runtime_keys(result.agent_output))
-            if self.consent is not None and dispatch_kwargs.get("command_policy") is not None:
-                from command_permissions import refused_operations, reconcile_result
-                command_blockers = refused_operations(
-                    result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials"),
-                    dispatch_kwargs["command_policy"], self.consent, decision.target.executor,
-                    dispatch_kwargs.get("cwd"))
-                for refused in command_blockers:
-                    spoken, essential = reconcile_result(
-                        result.agent_output, refused, DENY if refused["resource"] in denied_before else None, role)
-                    result = replace(result, agent_output=spoken)
-                    if essential and command_blocker is None:
-                        command_blocker = refused
-            blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
-                                                result.artifacts.get("sandbox_denials"))
-                       or sandbox_blocker(result.agent_output)
-                       or denied_docker_blocker(result.agent_output,
-                                                result.artifacts.get("permission_denials"))
-                       if result.outcome is DispatchOutcome.SUCCEEDED
-                       and not result.asynchronous else None)
-            if self.consent is not None and blocker is not None:
-                denied_grant = self.consent.grant_for(blocker)
-                if denied_grant is not None and denied_grant.id in self.consent.denied_ids:
-                    denial_affected.add(denied_grant.id)
-            if denial_affected:
-                result = replace(result, agent_output=denied_result(
-                    result.agent_output, sorted(denial_affected)))
-            known_prerequisite = (
-                known_failure(blocker["command"], blocker["error"]) if blocker is not None
-                else result.failure_code == "environment_restricted"
-                and known_failure("codex sandbox" if result.executor == "codex" else "claude",
-                                  result.detail)
+    def _dispatch_attempt(self, run: _StageRun, attempt: _Attempt) -> DispatchResult:
+        """Run the executor; an interruption is recorded before it continues."""
+        decision, target = attempt.decision, attempt.target
+        if self.stage_started is not None:
+            self.stage_started(run.role, decision)
+        # Per attempt: a reroute runs under the fallback's target, and its
+        # run line has to name that one.
+        attempt.started = time.monotonic()
+        if run.parent_attempt_id is not None:
+            attempt.relationship = (
+                "fallback" if run.parent_executor != target.executor else "retry"
             )
-            preflight = result.artifacts.get("native_sandbox_preflight")
-            if (result.failure_code == "environment_restricted" and isinstance(preflight, dict)
-                    and isinstance(preflight.get("functional_check"), dict)
-                    and preflight["functional_check"].get("passed") is False):
-                known_prerequisite = True
-            if blocker is not None:
-                # A completed CLI call is not a completed functional stage.
-                # This claim enables reconciliation, never grants permissions.
-                result = replace(
-                    result, outcome=DispatchOutcome.FAILED,
-                    error_code="environment_restricted", lifecycle_state="failed",
-                    detail=f"agent reported {blocker['kind']}: {blocker['error']}",
-                )
-            if known_prerequisite:
-                # This selected executor cannot repair native nesting by
-                # redispatching. A residual BLOCKED without independently
-                # proved completion remains conservative; never infer completion
-                # from the mere presence of a draft PR.
-                signals.update(reroute_action="stop", reroute_reason="same_sandbox",
-                               reroute_error_code="environment_restricted",
-                               reroute_start_state=result.start_state,
-                               process_exited=result.process_exited)
-                result = replace(result, detail=result.detail +
-                                 "; known native prerequisite: checks not_verified; no executor reroute")
-            if result.failure_code == "environment_restricted" and not known_prerequisite:
-                signals.update(reroute_action="stop", reroute_reason="same_sandbox",
-                               reroute_error_code="environment_restricted",
-                               reroute_start_state=result.start_state,
-                               process_exited=result.process_exited)
-                result = replace(result, detail=result.detail +
-                                 "; sandbox restriction: keep the selected executor; checks not_verified")
-            if result.failure_code in {"capacity", "transport", "timeout", "quota"}:
-                action, reason = "stop", "retry_exhausted"
-                fallback = stage_fallback(decision, self.profiles)
-                exhaustion_expiry = None
-                reset_reported = False
-                if (result.failure_code == "quota"
-                        and self.mode is RoutingMode.PRODUCTION):
-                    try:
-                        _, reset_reported = self.telemetry.quota_expiry(result.detail)
-                        exhaustion_expiry = self.telemetry.record_quota_exhaustion(
-                            self.repo_id, decision.target.executor,
-                            decision.target.model, result.detail,
-                        )
-                        self.exhausted_until[(decision.target.executor, decision.target.model)] = (
-                            exhaustion_expiry or "operator retry required")
-                        self._journal("failure", role=role, component="quota", status="exhausted",
-                                      detail=result.detail,
-                                      correlation={"expires_at": exhaustion_expiry,
-                                                   "ambiguity": "reset_time_ambiguous" if exhaustion_expiry is None else None})
-                        after = snapshot() if self.change_request_id else None
-                        # Only a finished executor with a clean initial tree,
-                        # or a validated prior ownership record, can own edits.
-                        if (result.process_exited and not result.asynchronous
-                                and not result.needs_human_action and fallback is not None
-                                and before is not None and after is not None
-                                and (not before["dirty"] or handoff is not None)
-                                and after["dirty"]
-                                and before["workspace"]["head"] == after["workspace"]["head"]
-                                and reconcile({**before, "dirty": False},
-                                              {**after, "dirty": False, "workspace": before["workspace"]})[0] == "reroute"):
-                            record_id = Handoffs(self.telemetry.path).record(
-                                repo=self.repo_id, task=self.task_id, stage=role,
-                                pr=self.change_request_id, workspace=after["workspace"],
-                                original=decision.target, destination=fallback)
-                            self._journal("stage_result", role=role, component="quota", status="provenance_recorded",
-                                          correlation={"record_id": record_id,
-                                                       "original_executor": decision.target.executor,
-                                                       "destination_executor": fallback.executor,
-                                                       "fingerprint": after["workspace"]["fingerprint"]})
-                    except (OSError, sqlite3.Error, TelemetryError, ValueError):
-                        # Telemetry failure must not block the writing stage.
-                        pass
-                if self.mode is RoutingMode.CALIBRATION:
-                    reason = "calibration"
-                elif attempt == 0 and attempt_id is not None:
-                    action, reason = reroute_gate()
-                    if action == "reroute":
-                        if fallback is None or fallback == decision.target:
-                            action, reason = "stop", "no_fallback"
-                        elif (fallback.executor not in eligible or not self.availability.get(
-                                fallback.executor, Availability.UNKNOWN).dispatchable):
-                            action, reason = "stop", "fallback_unavailable"
-                signals.update(reroute_action=action, reroute_reason=reason,
+        attempt.before = (self._effect_snapshot(run) if (run.writes or run.publishes)
+                          and self.mode is not RoutingMode.CALIBRATION else None)
+        if attempt.handoff is not None:
+            self._claim_handoff(run, attempt, attempt.handoff)
+        permission_context, grant_kwargs = self._permission_context(run, attempt)
+        try:
+            return dispatch(decision, f"{run.task}\n\n{run.environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
+                            self.registry,
+                            policy=self.policy, probes=self.probes,
+                            on_progress=partial(self._observe_progress, attempt),
+                            on_workspace=self.on_workspace,
+                            on_dispatch_attempt=partial(self._begin_dispatch_attempt, run, attempt),
+                            **run.dispatch_kwargs, **grant_kwargs)
+        except CycleInterrupted as interruption:
+            self._record_interruption(run, attempt, interruption)
+            raise
+
+    def _effect_snapshot(self, run: _StageRun) -> dict[str, Any] | None:
+        try:
+            return effect_snapshot(
+                run.dispatch_kwargs.get("cwd"), self.repo_id, publishes=run.publishes,
+                change_request_id=self.change_request_id,
+                issue_repo=self.work_item_identity_fields.get("work_item_repository"),
+                issue_id=self.task_id if run.publishes else None,
+            )
+        except Exception:
+            return None
+
+    def _claim_handoff(self, run: _StageRun, attempt: _Attempt, handoff: dict[str, Any]) -> None:
+        """Claim the handoff for this attempt and tell the agent what it resumes."""
+        before = attempt.before
+        try:
+            if before is None or before["workspace"]["fingerprint"] != handoff["fingerprint"]:
+                raise ValueError("quota handoff diff changed before dispatch")
+            Handoffs(self.telemetry.path).claim(handoff)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            raise CycleError(str(error)) from error
+        run.task += (
+            "\n\nQuota worktree resume: inspect the existing staged, unstaged and untracked "
+            "changes before editing. Preserve correct partial work; do not reset or overwrite it. "
+            f"Original executor: {handoff['original_executor']}; continuing executor: "
+            f"{attempt.target.executor}; diff SHA-256: {handoff['fingerprint']}; "
+            f"provenance: {handoff['provenance']}. This is not functional verification.")
+        self._journal("stage_result", role=run.role, component="quota", status="handoff",
+                      correlation={"original_executor": handoff["original_executor"],
+                                   "destination_executor": attempt.target.executor,
+                                   "fingerprint": handoff["fingerprint"],
+                                   "provenance": handoff["provenance"]})
+
+    def _permission_context(self, run: _StageRun,
+                            attempt: _Attempt) -> tuple[str, dict[str, tuple[str, ...]]]:
+        """The grants and denials this attempt runs with, stated to the agent."""
+        executor = attempt.target.executor
+        consent = self.consent
+        granted = consent.granted(executor) if consent is not None else ()
+        # This dispatch already ran with these denials; rerunning it with
+        # the same denial context cannot change its outcome.
+        attempt.denied_before = (frozenset(consent.denied_ids)
+                                 if consent is not None else frozenset())
+        context = ""
+        if consent is not None:
+            for grant_id in granted:
+                scope = consent.registry[grant_id].scope_for(executor, consent.platform)
+                if scope is not None:
+                    context += "\n\n" + granted_context(consent.registry[grant_id], scope)
+            context += "\n\n" + "\n".join(
+                denial_context(consent.registry[grant_id]) for grant_id in consent.denied_ids)
+            if run.dispatch_kwargs.get("command_policy") is not None:
+                run.dispatch_kwargs["command_policy"] = replace(
+                    run.dispatch_kwargs["command_policy"],
+                    command_permissions=consent.command_entries(executor, run.role))
+        sandbox_granted = tuple(grant_id for grant_id in granted if grant_id in GRANTS)
+        return context, ({"sandbox_grants": sandbox_granted} if sandbox_granted else {})
+
+    def _begin_dispatch_attempt(self, run: _StageRun, attempt: _Attempt) -> str:
+        """Open the attempt's record at the adapter boundary, after preflight."""
+        decision, target = attempt.decision, attempt.target
+        harness_snapshot = build_harness_snapshot(
+            role=run.role, skill=self.skills_by_role.get(run.role), profile=decision.profile,
+            routing_strategy=getattr(
+                decision.strategy, "value", self.routing_strategy.value,
+            ),
+            readiness_policy=self.policy.value,
+            executor=target.executor,
+            probe=(self.probes or {}).get(target.executor),
+            profiles=self.profiles,
+            project_root=run.dispatch_kwargs.get("cwd"),
+        )
+        attempt_id = self.telemetry.create_dispatch_attempt(
+            self.repo_id, self.task_id, self.cycle_id, self.stage_seq, run.role,
+            executor=target.executor,
+            provider=target.provider,
+            model_requested=target.model,
+            effort=target.effort,
+            profile=decision.profile,
+            harness_snapshot=harness_snapshot,
+            parent_attempt_id=run.parent_attempt_id,
+            relationship=attempt.relationship,
+        )
+        attempt.attempt_id = attempt_id
+        if self.registry.get(target.executor).completes_work:
+            self.telemetry.update_dispatch_attempt(
+                attempt_id, {"lifecycle_state": "running"},
+                update_id=f"update-{uuid.uuid4().hex}", source="runtime",
+            )
+        self._journal("stage_start", role=run.role, attempt_id=attempt_id,
+                      component=target.executor, status=decision.profile,
+                      detail=f"{target.provider}/{target.model} {target.effort}",
+                      correlation={"parent_attempt_id": run.parent_attempt_id,
+                                   "relationship": attempt.relationship})
+        if self.on_dispatch_started is not None:
+            self.on_dispatch_started()
+        return attempt_id
+
+    def _observe_progress(self, attempt: _Attempt, **activity: object) -> None:
+        attempt.tool_activity |= bool(activity.get("tool"))
+        if self.on_progress is not None:
+            self.on_progress(**activity)
+
+    def _record_interruption(self, run: _StageRun, attempt: _Attempt,
+                             interruption: CycleInterrupted) -> None:
+        """No half-done state, even now: the stage that was running is the
+        row a later question about this run needs most."""
+        decision, target = attempt.decision, attempt.target
+        result = DispatchResult(
+            DispatchOutcome.INTERRUPTED, target.executor, target,
+            detail=f"interrupted by {interruption.signal_name}",
+            duration_ms=max(0, round((time.monotonic() - attempt.started) * 1000)),
+            lifecycle_state="interrupted",
+            start_state="started" if attempt.tool_activity else "unknown",
+        )
+        if attempt.attempt_id is not None:
+            self.telemetry.update_dispatch_attempt(
+                attempt.attempt_id,
+                {"lifecycle_state": "interrupted", "outcome": "interrupted",
+                 "duration_ms": result.duration_ms,
+                 "finished_at": datetime.now(timezone.utc).isoformat(),
+                 "error_code": "interrupted", "start_state": result.start_state},
+                update_id=f"update-{uuid.uuid4().hex}", source="runtime",
+            )
+        run.decision = decision
+        run.result = result
+        if attempt.attempt_id is not None:
+            run.attempts.append((decision, result))
+        run.rows.append(self._record(
+            run.role, decision, result, attempt.signals, attempt_id=attempt.attempt_id,
+            parent_attempt_id=run.parent_attempt_id, relationship=attempt.relationship,
+        ))
+        self.failed_attempts += 1
+        outcome = run.outcome()
+        self.stages.append(outcome)
+        self._journal_attempt(run.role, result, attempt.attempt_id, None, attempt.signals)
+        interruption.outcome = outcome
+
+    # -- settling: what the attempt showed, and whether another follows ------
+
+    def _settle_attempt(self, run: _StageRun, attempt: _Attempt,
+                        result: DispatchResult) -> DispatchResult:
+        """Read the attempt's evidence and decide whether the stage reroutes."""
+        if attempt.tool_activity:
+            result = replace(result, start_state="started")
+        self._note_escalation_acceptance(run, attempt, result)
+        result = self._unsupported_effort(run, attempt, result)
+        result = self._find_blocker(run, attempt, result)
+        result = self._environment_restriction(attempt, result)
+        if result.failure_code in TRANSIENT_FAILURES:
+            result = self._transient_failure(run, attempt, result)
+        elif (result.outcome is DispatchOutcome.SUCCEEDED
+                and self.mode is RoutingMode.PRODUCTION):
+            self._clear_quota(attempt)
+        return self._consent_answer(run, attempt, result)
+
+    @staticmethod
+    def _set_acceptance(run: _StageRun, attempt: _Attempt, acceptance: str) -> None:
+        run.stage_signals["escalation_acceptance"] = acceptance
+        attempt.signals["escalation_acceptance"] = acceptance
+
+    def _note_escalation_acceptance(self, run: _StageRun, attempt: _Attempt,
+                                    result: DispatchResult) -> None:
+        if run.role != "resolve" or not run.resolve_escalated:
+            return
+        if (result.outcome is DispatchOutcome.SUCCEEDED
+                and result.requested.effort == "max"
+                and attempt.signals.get("escalation_acceptance") == "unknown"):
+            self._set_acceptance(run, attempt, "accepted")
+        elif (result.failure_code != "unsupported_effort"
+              and result.outcome is not DispatchOutcome.SUCCEEDED
+              and result.requested.effort == "max" and not attempt.decision.used_fallback):
+            # Only the escalated dispatch can leave the acceptance
+            # unknown; a failed fallback keeps the signal already set.
+            self._set_acceptance(run, attempt, "unknown")
+
+    def _reroute_gate(self, run: _StageRun, attempt: _Attempt,
+                      result: DispatchResult) -> tuple[str, str]:
+        """The #205 invariant: a stage that may have started is rerouted only
+        once its workspace effects are reconciled."""
+        if result.asynchronous or not result.process_exited:
+            return "stop", "exit_unproven"
+        if result.needs_human_action:
+            return "stop", "human_action"
+        if result.start_state == "not_started":
+            return "reroute", "not_started"
+        if not run.writes and not run.publishes:
+            return "reroute", "no_effects"
+        return reconcile(attempt.before, self._effect_snapshot(run))
+
+    def _unsupported_effort(self, run: _StageRun, attempt: _Attempt,
+                            result: DispatchResult) -> DispatchResult:
+        """A CLI that rejected the pinned resolve effort uses the fallback once."""
+        if result.failure_code != "unsupported_effort" or run.role != "resolve":
+            return result
+        if run.resolve_escalated:
+            self._set_acceptance(run, attempt, "rejected")
+        if attempt.number != 0:
+            return result
+        decision = attempt.decision
+        fallback = stage_fallback(decision, self.profiles)
+        stopped_reason = "no available configured fallback"
+        reason = None
+        if (fallback is not None and fallback != decision.target
+                and self._dispatchable(fallback.executor, attempt.eligible)):
+            if self.mode is RoutingMode.CALIBRATION:
+                action, reason = "stop", "calibration"
+            elif attempt.attempt_id is None:
+                action, reason = "stop", "exit_unproven"
+            else:
+                action, reason = self._reroute_gate(run, attempt, result)
+            attempt.signals.update(reroute_action=action, reroute_reason=reason,
+                                   process_exited=result.process_exited,
+                                   reroute_error_code="unsupported_effort",
+                                   reroute_start_state=result.start_state)
+            attempt.retry = action == "reroute"
+            stopped_reason = f"reroute stopped: {reason}"
+        if not attempt.retry:
+            return replace(
+                result, detail=f"{result.detail}; {stopped_reason} for unsupported effort",
+            )
+        run.fallback_decision = replace(
+            decision, target=fallback, used_fallback=True,
+            reasons=decision.reasons +
+            ("the CLI rejected the pinned resolve effort; using the configured fallback",),
+        )
+        run.parent_failure = {
+            "reroute_error_code": "unsupported_effort",
+            "reroute_start_state": result.start_state,
+            "reroute_action": "reroute", "reroute_reason": reason,
+        }
+        return result
+
+    def _find_blocker(self, run: _StageRun, attempt: _Attempt,
+                      result: DispatchResult) -> DispatchResult:
+        """Find what stopped the agent: a refused command or a sandbox report."""
+        command_blocker = None
+        if isinstance(result.agent_output, str) and result.agent_output:
+            # Whatever the agent put under a runtime-owned key is set aside
+            # first, so what remains there afterwards is the runtime's own.
+            from command_permissions import claim_runtime_keys
+            result = replace(result, agent_output=claim_runtime_keys(result.agent_output))
+        command_policy = run.dispatch_kwargs.get("command_policy")
+        if self.consent is not None and command_policy is not None:
+            from command_permissions import refused_operations, reconcile_result
+            command_blockers = refused_operations(
+                result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials"),
+                command_policy, self.consent, attempt.target.executor,
+                run.dispatch_kwargs.get("cwd"))
+            for refused in command_blockers:
+                spoken, essential = reconcile_result(
+                    result.agent_output, refused,
+                    DENY if refused["resource"] in attempt.denied_before else None, run.role)
+                result = replace(result, agent_output=spoken)
+                if essential and command_blocker is None:
+                    command_blocker = refused
+        blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
+                                                               result.artifacts.get("sandbox_denials"))
+                                      or sandbox_blocker(result.agent_output)
+                                      or denied_docker_blocker(result.agent_output,
+                                                               result.artifacts.get("permission_denials"))
+                                      if result.outcome is DispatchOutcome.SUCCEEDED
+                                      and not result.asynchronous else None)
+        attempt.blocker = blocker
+        if self.consent is not None and blocker is not None:
+            denied_grant = self.consent.grant_for(blocker)
+            if denied_grant is not None and denied_grant.id in self.consent.denied_ids:
+                run.denial_affected.add(denied_grant.id)
+        if run.denial_affected:
+            result = replace(result, agent_output=denied_result(
+                result.agent_output, sorted(run.denial_affected)))
+        return result
+
+    def _environment_restriction(self, attempt: _Attempt,
+                                 result: DispatchResult) -> DispatchResult:
+        """A restriction keeps the selected executor; a known prerequisite says so."""
+        blocker = attempt.blocker
+        known_prerequisite = (
+            known_failure(blocker["command"], blocker["error"]) if blocker is not None
+            else result.failure_code == "environment_restricted"
+            and known_failure("codex sandbox" if result.executor == "codex" else "claude",
+                              result.detail)
+        )
+        preflight = result.artifacts.get("native_sandbox_preflight")
+        if (result.failure_code == "environment_restricted" and isinstance(preflight, dict)
+                and isinstance(preflight.get("functional_check"), dict)
+                and preflight["functional_check"].get("passed") is False):
+            known_prerequisite = True
+        attempt.known_prerequisite = bool(known_prerequisite)
+        if blocker is not None:
+            # A completed CLI call is not a completed functional stage.
+            # This claim enables reconciliation, never grants permissions.
+            result = replace(
+                result, outcome=DispatchOutcome.FAILED,
+                error_code="environment_restricted", lifecycle_state="failed",
+                detail=f"agent reported {blocker['kind']}: {blocker['error']}",
+            )
+        if known_prerequisite:
+            # This selected executor cannot repair native nesting by
+            # redispatching. A residual BLOCKED without independently
+            # proved completion remains conservative; never infer completion
+            # from the mere presence of a draft PR.
+            attempt.signals.update(reroute_action="stop", reroute_reason="same_sandbox",
+                                   reroute_error_code="environment_restricted",
+                                   reroute_start_state=result.start_state,
+                                   process_exited=result.process_exited)
+            result = replace(result, detail=result.detail +
+                             "; known native prerequisite: checks not_verified; no executor reroute")
+        if result.failure_code == "environment_restricted" and not known_prerequisite:
+            attempt.signals.update(reroute_action="stop", reroute_reason="same_sandbox",
+                                   reroute_error_code="environment_restricted",
+                                   reroute_start_state=result.start_state,
+                                   process_exited=result.process_exited)
+            result = replace(result, detail=result.detail +
+                             "; sandbox restriction: keep the selected executor; checks not_verified")
+        return result
+
+    def _transient_failure(self, run: _StageRun, attempt: _Attempt,
+                           result: DispatchResult) -> DispatchResult:
+        """Capacity, transport, timeout or quota: the stage fallback, once."""
+        decision, target = attempt.decision, attempt.target
+        action, reason = "stop", "retry_exhausted"
+        fallback = stage_fallback(decision, self.profiles)
+        exhaustion_expiry: str | None = None
+        reset_reported = False
+        if result.failure_code == "quota" and self.mode is RoutingMode.PRODUCTION:
+            exhaustion_expiry, reset_reported = self._record_quota_exhaustion(
+                run, attempt, result, fallback)
+        if self.mode is RoutingMode.CALIBRATION:
+            reason = "calibration"
+        elif attempt.number == 0 and attempt.attempt_id is not None:
+            action, reason = self._reroute_gate(run, attempt, result)
+            if action == "reroute":
+                if fallback is None or fallback == target:
+                    action, reason = "stop", "no_fallback"
+                elif not self._dispatchable(fallback.executor, attempt.eligible):
+                    action, reason = "stop", "fallback_unavailable"
+        attempt.signals.update(reroute_action=action, reroute_reason=reason,
                                process_exited=result.process_exited,
                                reroute_error_code=result.failure_code,
                                reroute_start_state=result.start_state)
-                retry = action == "reroute"
-                if retry:
-                    fallback_decision = replace(
-                        decision, target=fallback, used_fallback=True,
-                        reasons=decision.reasons + (f"stage fallback after {result.failure_code}",),
-                    )
-                    parent_failure = {
-                        "reroute_error_code": result.failure_code,
-                        "reroute_start_state": result.start_state,
-                        "reroute_action": action, "reroute_reason": reason,
-                    }
-                else:
-                    detail = f"{redact(result.detail) if result.failure_code == 'quota' else result.detail}; reroute stopped: {reason}"
-                    if (result.failure_code == "quota"
-                            and self.mode is RoutingMode.PRODUCTION):
-                        if exhaustion_expiry and reset_reported:
-                            detail += (f"; quota exhaustion recorded until {exhaustion_expiry}; "
-                                       "wait for the reset or " + self._quota_resume_command(role))
-                        elif exhaustion_expiry:
-                            detail += ("; quota reset is unknown; retry after 30 minutes; "
-                                       f"temporary quota window recorded until {exhaustion_expiry}; "
-                                       + self._quota_resume_command(role))
-                        else:
-                            detail += ("; quota reset is ambiguous; executor unavailable until explicit operator retry; "
-                                       + self._quota_resume_command(role))
-                    result = replace(result, detail=detail)
-            elif (result.outcome is DispatchOutcome.SUCCEEDED
-                    and self.mode is RoutingMode.PRODUCTION):
-                try:
-                    if handoff is not None:
-                        Handoffs(self.telemetry.path).complete(handoff)
-                    self.telemetry.clear_quota_exhaustion(
-                        self.repo_id, decision.target.executor, decision.target.model,
-                    )
-                except (OSError, sqlite3.Error, TelemetryError, ValueError):
-                    pass
-            # A restriction requests a grant on the chosen executor, never a fallback.
-            grant = (self.consent.grant_for(blocker)
-                     if blocker is not None and self.consent is not None
-                     and not known_prerequisite
-                     and self.mode is not RoutingMode.CALIBRATION else None)
-            answer = None
-            # Consent never selects a different target, even when an availability
-            # fallback was selected earlier in this stage.
-            consent_decision = decision
-            if grant is not None and grant.id in denied_before:
-                result = replace(result, detail=f"{result.detail}; {grant.id} was denied "
-                                                "before this dispatch: no rerun")
-                grant = None
-            if (grant is not None and not retry and not consent_requested
-                    and grant.id not in self.consent.granted(consent_decision.target.executor)):
-                consent_requested = True
-                answer = self.consent.request(grant, consent_decision.target.executor,
-                                              role=role, blocker=blocker)
-            if answer == PENDING:
-                # Nobody could answer: the sandbox stays as it is, no other
-                # executor is tried in its place, and the cycle stops to ask.
-                result = replace(result, detail=f"{result.detail}; permission required: {grant.id}")
-                signals.update(reroute_action="stop", reroute_reason="permission_required",
-                               process_exited=result.process_exited,
-                               reroute_error_code="environment_restricted",
-                               reroute_start_state=result.start_state)
-            elif answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY}:
-                if answer == DENY:
-                    denial_affected.add(grant.id)
-                # An answer permits access, not replaying effects. Reconcile
-                # every full rerun, including one on the same executor.
-                action, stop_reason = (("stop", "exit_unproven")
-                                       if attempt_id is None else reroute_gate())
-                safe = action == "reroute"
-                signals.update(reroute_action="reroute" if safe else "stop",
-                               reroute_reason="permission_answered" if safe else stop_reason,
-                               process_exited=result.process_exited,
-                               reroute_error_code="environment_restricted",
-                               reroute_start_state=result.start_state)
-                if safe:
-                    environment_context = recovery_context(blocker)
-                    fallback_decision = replace(
-                        consent_decision, reasons=consent_decision.reasons +
-                        (f"rerun after the {grant.id} permission answer: {answer}",),
-                    )
-                    parent_failure = {
-                        "reroute_error_code": "environment_restricted",
-                        "reroute_start_state": result.start_state,
-                        "reroute_action": "reroute", "reroute_reason": "permission_answered",
-                    }
-                    retry = True
-                else:
-                    result = replace(result, detail=f"{result.detail}; reroute stopped: {stop_reason}")
-            elif grant is not None and not retry:
-                result = replace(result, detail=f"{result.detail}; reroute stopped: "
-                                                f"{signals.get('reroute_reason', 'no_fallback')}")
-            state = result.lifecycle_state or (
-                "launched" if result.asynchronous else
-                "completed" if result.outcome is DispatchOutcome.SUCCEEDED else
-                "interrupted" if result.outcome is DispatchOutcome.INTERRUPTED else "failed"
+        attempt.retry = action == "reroute"
+        if attempt.retry:
+            run.fallback_decision = replace(
+                decision, target=fallback, used_fallback=True,
+                reasons=decision.reasons + (f"stage fallback after {result.failure_code}",),
             )
-            partial_result = {
-                "lifecycle_state": state,
-                "outcome": result.outcome.value,
-                "model_resolved": result.model_resolved,
-                "duration_ms": result.duration_ms,
-                "usage_observations": list(result.usage_observations),
-                "cost_measures": list(result.cost_measures),
-                "start_state": result.start_state,
+            run.parent_failure = {
+                "reroute_error_code": result.failure_code,
+                "reroute_start_state": result.start_state,
+                "reroute_action": action, "reroute_reason": reason,
             }
-            if state in {"completed", "failed", "timed_out", "interrupted"}:
-                partial_result["finished_at"] = datetime.now(timezone.utc).isoformat()
-            external_dispatch_id = (result.artifacts or {}).get("dispatchId")
-            if external_dispatch_id is None:
-                external_dispatch_id = (result.artifacts or {}).get("dispatch_id")
-            if external_dispatch_id is not None:
-                partial_result["external_dispatch_id"] = external_dispatch_id
-            if result.failure_code is not None:
-                partial_result["error_code"] = result.failure_code
-            if attempt_id is not None:
-                self.telemetry.update_dispatch_attempt(
-                    attempt_id, partial_result,
-                    update_id=f"update-{uuid.uuid4().hex}", source="runtime",
-                )
-                result = replace(result, artifacts={**result.artifacts, "dispatch_attempt_id": attempt_id})
-            outcome.decision = decision
-            outcome.result = result
-            if attempt_id is not None:
-                outcome.attempts.append((decision, result))
-            outcome.rows.append(self._record(
-                role, decision, result, signals, attempt_id=attempt_id,
-                parent_attempt_id=parent_attempt_id, relationship=relationship,
-            ))
-            if result.outcome is not DispatchOutcome.SUCCEEDED:
-                self.failed_attempts += 1
-            self._journal_attempt(role, result, attempt_id, blocker, signals)
+            return result
+        detail = f"{redact(result.detail) if result.failure_code == 'quota' else result.detail}; reroute stopped: {reason}"
+        if (result.failure_code == "quota"
+                and self.mode is RoutingMode.PRODUCTION):
+            if exhaustion_expiry and reset_reported:
+                detail += (f"; quota exhaustion recorded until {exhaustion_expiry}; "
+                           "wait for the reset or " + self._quota_resume_command(run.role))
+            elif exhaustion_expiry:
+                detail += ("; quota reset is unknown; retry after 30 minutes; "
+                           f"temporary quota window recorded until {exhaustion_expiry}; "
+                           + self._quota_resume_command(run.role))
+            else:
+                detail += ("; quota reset is ambiguous; executor unavailable until explicit operator retry; "
+                           + self._quota_resume_command(run.role))
+        return replace(result, detail=detail)
 
-            if not retry:
-                break
-            parent_attempt_id = attempt_id
-            parent_executor = decision.target.executor
+    def _record_quota_exhaustion(self, run: _StageRun, attempt: _Attempt,
+                                 result: DispatchResult,
+                                 fallback: Target | None) -> tuple[str | None, bool]:
+        """Persist the exhaustion, and who owns a dirty tree it left.
 
-        self.stages.append(outcome)
-        self._observe_shadow(role, *first)
-        return outcome
+        Returns the recorded expiry and whether the executor reported a reset
+        time, as far as recording got: a telemetry failure must not block the
+        writing stage, so it ends the recording, never the stage.
+        """
+        target = attempt.target
+        exhaustion_expiry: str | None = None
+        reset_reported = False
+        try:
+            _, reset_reported = self.telemetry.quota_expiry(result.detail)
+            exhaustion_expiry = self.telemetry.record_quota_exhaustion(
+                self.repo_id, target.executor, target.model, result.detail,
+            )
+            self.exhausted_until[(target.executor, target.model)] = (
+                exhaustion_expiry or "operator retry required")
+            self._journal("failure", role=run.role, component="quota", status="exhausted",
+                          detail=result.detail,
+                          correlation={"expires_at": exhaustion_expiry,
+                                       "ambiguity": "reset_time_ambiguous" if exhaustion_expiry is None else None})
+            before = attempt.before
+            after = self._effect_snapshot(run) if self.change_request_id else None
+            # Only a finished executor with a clean initial tree,
+            # or a validated prior ownership record, can own edits.
+            if (result.process_exited and not result.asynchronous
+                    and not result.needs_human_action and fallback is not None
+                    and before is not None and after is not None
+                    and (not before["dirty"] or attempt.handoff is not None)
+                    and after["dirty"]
+                    and before["workspace"]["head"] == after["workspace"]["head"]
+                    and reconcile({**before, "dirty": False},
+                                  {**after, "dirty": False, "workspace": before["workspace"]})[0] == "reroute"):
+                record_id = Handoffs(self.telemetry.path).record(
+                    repo=self.repo_id, task=self.task_id, stage=run.role,
+                    pr=self.change_request_id, workspace=after["workspace"],
+                    original=target, destination=fallback)
+                self._journal("stage_result", role=run.role, component="quota", status="provenance_recorded",
+                              correlation={"record_id": record_id,
+                                           "original_executor": target.executor,
+                                           "destination_executor": fallback.executor,
+                                           "fingerprint": after["workspace"]["fingerprint"]})
+        except (OSError, sqlite3.Error, TelemetryError, ValueError):
+            pass
+        return exhaustion_expiry, reset_reported
+
+    def _clear_quota(self, attempt: _Attempt) -> None:
+        try:
+            if attempt.handoff is not None:
+                Handoffs(self.telemetry.path).complete(attempt.handoff)
+            self.telemetry.clear_quota_exhaustion(
+                self.repo_id, attempt.target.executor, attempt.target.model,
+            )
+        except (OSError, sqlite3.Error, TelemetryError, ValueError):
+            pass
+
+    def _consent_answer(self, run: _StageRun, attempt: _Attempt,
+                        result: DispatchResult) -> DispatchResult:
+        """A restriction requests a grant on the chosen executor, never a fallback.
+
+        Consent never selects a different target, even when an availability
+        fallback was selected earlier in this stage.
+        """
+        consent, blocker = self.consent, attempt.blocker
+        grant = (consent.grant_for(blocker)
+                 if blocker is not None and consent is not None
+                 and not attempt.known_prerequisite
+                 and self.mode is not RoutingMode.CALIBRATION else None)
+        if grant is None or consent is None or blocker is None:
+            return result
+        if grant.id in attempt.denied_before:
+            return replace(result, detail=f"{result.detail}; {grant.id} was denied "
+                                          "before this dispatch: no rerun")
+        decision = attempt.decision
+        executor = attempt.target.executor
+        answer = None
+        if (not attempt.retry and not run.consent_requested
+                and grant.id not in consent.granted(executor)):
+            run.consent_requested = True
+            answer = consent.request(grant, executor, role=run.role, blocker=blocker)
+        if answer == PENDING:
+            # Nobody could answer: the sandbox stays as it is, no other
+            # executor is tried in its place, and the cycle stops to ask.
+            attempt.signals.update(reroute_action="stop", reroute_reason="permission_required",
+                                   process_exited=result.process_exited,
+                                   reroute_error_code="environment_restricted",
+                                   reroute_start_state=result.start_state)
+            return replace(result, detail=f"{result.detail}; permission required: {grant.id}")
+        if answer in {ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY}:
+            if answer == DENY:
+                run.denial_affected.add(grant.id)
+            # An answer permits access, not replaying effects. Reconcile
+            # every full rerun, including one on the same executor.
+            action, stop_reason = (("stop", "exit_unproven")
+                                   if attempt.attempt_id is None
+                                   else self._reroute_gate(run, attempt, result))
+            safe = action == "reroute"
+            attempt.signals.update(reroute_action="reroute" if safe else "stop",
+                                   reroute_reason="permission_answered" if safe else stop_reason,
+                                   process_exited=result.process_exited,
+                                   reroute_error_code="environment_restricted",
+                                   reroute_start_state=result.start_state)
+            if not safe:
+                return replace(result, detail=f"{result.detail}; reroute stopped: {stop_reason}")
+            run.environment_context = recovery_context(blocker)
+            run.fallback_decision = replace(
+                decision, reasons=decision.reasons +
+                (f"rerun after the {grant.id} permission answer: {answer}",),
+            )
+            run.parent_failure = {
+                "reroute_error_code": "environment_restricted",
+                "reroute_start_state": result.start_state,
+                "reroute_action": "reroute", "reroute_reason": "permission_answered",
+            }
+            attempt.retry = True
+            return result
+        if not attempt.retry:
+            return replace(result, detail=f"{result.detail}; reroute stopped: "
+                                          f"{attempt.signals.get('reroute_reason', 'no_fallback')}")
+        return result
+
+    # -- recording -----------------------------------------------------------
+
+    def _persist_attempt(self, run: _StageRun, attempt: _Attempt,
+                         result: DispatchResult) -> None:
+        """Close the attempt's record and write its row and journal entries."""
+        decision, attempt_id = attempt.decision, attempt.attempt_id
+        state = result.lifecycle_state or (
+            "launched" if result.asynchronous else
+            "completed" if result.outcome is DispatchOutcome.SUCCEEDED else
+            "interrupted" if result.outcome is DispatchOutcome.INTERRUPTED else "failed"
+        )
+        partial_result: dict[str, object] = {
+            "lifecycle_state": state,
+            "outcome": result.outcome.value,
+            "model_resolved": result.model_resolved,
+            "duration_ms": result.duration_ms,
+            "usage_observations": list(result.usage_observations),
+            "cost_measures": list(result.cost_measures),
+            "start_state": result.start_state,
+        }
+        if state in {"completed", "failed", "timed_out", "interrupted"}:
+            partial_result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        external_dispatch_id = (result.artifacts or {}).get("dispatchId")
+        if external_dispatch_id is None:
+            external_dispatch_id = (result.artifacts or {}).get("dispatch_id")
+        if external_dispatch_id is not None:
+            partial_result["external_dispatch_id"] = external_dispatch_id
+        if result.failure_code is not None:
+            partial_result["error_code"] = result.failure_code
+        if attempt_id is not None:
+            self.telemetry.update_dispatch_attempt(
+                attempt_id, partial_result,
+                update_id=f"update-{uuid.uuid4().hex}", source="runtime",
+            )
+            result = replace(result, artifacts={**result.artifacts, "dispatch_attempt_id": attempt_id})
+        run.decision = decision
+        run.result = result
+        if attempt_id is not None:
+            run.attempts.append((decision, result))
+        run.rows.append(self._record(
+            run.role, decision, result, attempt.signals, attempt_id=attempt_id,
+            parent_attempt_id=run.parent_attempt_id, relationship=attempt.relationship,
+        ))
+        if result.outcome is not DispatchOutcome.SUCCEEDED:
+            self.failed_attempts += 1
+        self._journal_attempt(run.role, result, attempt_id, attempt.blocker, attempt.signals)
 
     def _quota_resume_command(self, role: str) -> str:
         if self.started_from == "implement" and role == "implement":
