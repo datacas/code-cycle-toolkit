@@ -7,6 +7,16 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- **Agent capability parity audit (#450).** `docs/host-permissions.md` states
+  the agent capability parity rule as mandatory for new implementations and
+  reviews. `docs/capability-parity-audit.md` classifies every toolkit-owned
+  restriction as a real limit, a role contract or a toolkit veto. Each veto
+  links the issue that converts it to consent and a record, among them the
+  child issues #455 to #459 for the vetoes no earlier issue tracked, and names the
+  direct Claude and Codex baseline for its parity test. `cc-pr-review` reports
+  a change that breaks a review rule the repository states. No restriction
+  changes behaviour in this release.
+
 - **Incomplete required verification ends once (#414).** A required check that
   is denied, cannot run, or exceeds its stage time limit stays `not_verified`
   with its command, cause (`time_limit` for an overrun), limit and evidence.

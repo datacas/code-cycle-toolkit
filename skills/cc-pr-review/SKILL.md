@@ -213,6 +213,10 @@ or security configuration, recommend `cc-security-review` as a second pass.
   hypothetical future use?
 - Does the change respect the repository's own stated boundaries when it
   declares any?
+- Does the change break a review rule that the repository's instructions
+  state, for example a rule that a new restriction of the tool's own is a
+  finding? A change that breaks a stated review rule is a finding, even when
+  the code is otherwise correct.
 
 ### Frontend
 
