@@ -7,6 +7,18 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 
+- **Bounded re-read of review and rereview publications (#446).** A `review`
+  or `rereview` publication that is not seen at the first read is re-read after
+  1 s, 2 s and 4 s, correlated by the receipt's `attempt_id`, before it is
+  called absent. Found: confirmed. Three successful re-reads without it:
+  `failed`, retried once by the next dispatch, which reuses a late comment
+  instead of posting another. A re-read that fails for a provider error without
+  finding it is a `verification_error`: the cycle stops `BLOCKED` with
+  `publication_unverified`, never publishes again, and a resume verifies the
+  original first. Telemetry schema 29 adds the `failed` and `verification_error`
+  outbox states and `cycle_publication_rereads`; an older database is migrated
+  in place. See `docs/telemetry.md`.
+
 - **Agent capability parity audit (#450).** `docs/host-permissions.md` states
   the agent capability parity rule as mandatory for new implementations and
   reviews. `docs/capability-parity-audit.md` classifies every toolkit-owned

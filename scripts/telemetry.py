@@ -118,7 +118,11 @@ except ImportError:  # pragma: no cover - imported as `scripts.telemetry`
 #: eligibility. Provider prose remains exclusively in the redacted journal.
 #: 27: explicit, non-successful terminal verification-incomplete cycles.
 #: 28: external ref advances, suspected attribution, and review-target changes (#421).
-SCHEMA_VERSION = 28
+#: 29: the bounded publication re-read (#446). `cycle_publications.state` gains
+#: `failed` and `verification_error`, and the additive
+#: `cycle_publication_rereads` table holds the re-read count, the last provider
+#: error and the single-retry lineage. An older store is migrated in place.
+SCHEMA_VERSION = 29
 APP_DIRNAME = "code-cycle-toolkit"
 DATABASE_NAME = "telemetry.sqlite"
 
@@ -1077,7 +1081,7 @@ CREATE TABLE IF NOT EXISTS cycle_publications (
     repo_id           TEXT NOT NULL,
     change_request_id TEXT NOT NULL,
     stage             TEXT NOT NULL CHECK(stage IN ('implement', 'review', 'resolve', 'rereview')),
-    state             TEXT NOT NULL CHECK(state IN ('pending', 'published', 'superseded')),
+    state             TEXT NOT NULL CHECK(state IN ('pending', 'published', 'superseded', 'failed', 'verification_error')),
     comment_id        TEXT,
     head_sha          TEXT,
     created_at        TEXT NOT NULL,
@@ -1086,6 +1090,19 @@ CREATE TABLE IF NOT EXISTS cycle_publications (
 );
 CREATE INDEX IF NOT EXISTS cycle_publications_pending
     ON cycle_publications (repo_id, change_request_id, stage, state);
+CREATE TABLE IF NOT EXISTS cycle_publication_rereads (
+    attempt_id        TEXT PRIMARY KEY,
+    repo_id           TEXT NOT NULL,
+    change_request_id TEXT NOT NULL,
+    stage             TEXT NOT NULL CHECK(stage IN ('implement', 'review', 'resolve', 'rereview')),
+    rereads           INTEGER NOT NULL CHECK(rereads >= 0),
+    last_error        TEXT,
+    retry_of          TEXT,
+    retried_by        TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    schema_version    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cycle_history_locks (
     repo_id           TEXT NOT NULL,
     change_request_id TEXT NOT NULL,
@@ -1326,6 +1343,42 @@ class Telemetry:
             connection.executescript(QUOTA_SCHEMA)
             self._migrate_dispatch_attempts(connection)
             connection.commit()
+            self._migrate_publication_states(connection)
+            connection.commit()
+
+    @staticmethod
+    def _migrate_publication_states(connection) -> None:
+        """Schema 29: widen the outbox states without losing a row.
+
+        SQLite cannot alter a `CHECK`, so a table created by an earlier schema
+        is copied into the widened one. A table that already allows the new
+        states is left alone.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='cycle_publications'"
+        ).fetchone()
+        if row is None or "verification_error" in (row["sql"] or ""):
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE IF EXISTS cycle_publications_migrating")
+        connection.execute(
+            "CREATE TABLE cycle_publications_migrating ("
+            "attempt_id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, "
+            "change_request_id TEXT NOT NULL, "
+            "stage TEXT NOT NULL CHECK(stage IN ('implement', 'review', 'resolve', 'rereview')), "
+            "state TEXT NOT NULL CHECK(state IN ('pending', 'published', 'superseded', "
+            "'failed', 'verification_error')), "
+            "comment_id TEXT, head_sha TEXT, created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL, schema_version INTEGER NOT NULL)")
+        connection.execute(
+            "INSERT INTO cycle_publications_migrating SELECT attempt_id, repo_id, "
+            "change_request_id, stage, state, comment_id, head_sha, created_at, "
+            "updated_at, schema_version FROM cycle_publications")
+        connection.execute("DROP TABLE cycle_publications")
+        connection.execute("ALTER TABLE cycle_publications_migrating RENAME TO cycle_publications")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS cycle_publications_pending "
+            "ON cycle_publications (repo_id, change_request_id, stage, state)")
 
     @staticmethod
     def _migrate_dispatch_attempts(connection) -> None:

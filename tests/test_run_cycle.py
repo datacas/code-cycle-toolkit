@@ -182,6 +182,8 @@ class RunCycleTestCase(unittest.TestCase):
         # The original flow, which these tests describe; the issue-review stage
         # has its own tests, which ask for it.
         kw.setdefault("issue_review", "off")
+        # The bounded publication re-read waits 1+2+4 s on a real clock.
+        kw.setdefault("publication_sleep", lambda _seconds: None)
         # Provider reads are explicit fixtures; driver tests never contact GitHub.
         kw.setdefault("criteria_reader", lambda provider, *_args, **_kw:
                       rc.verification_contract.parse_criteria(

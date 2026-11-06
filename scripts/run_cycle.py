@@ -97,6 +97,8 @@ from execution_profiles import (
 from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup
 from cycle_history import (
     COMMENT_STAGES,
+    REREAD_BACKOFF,
+    REREAD_STAGES,
     CycleHistoryStore,
     HistoryError,
     HistoryRemote,
@@ -2395,6 +2397,7 @@ def run_cycle(
     published_change_request: Callable[[], str | None] | None = None,
     publication_auditor: PublicationAuditor | None = None,
     publication_observer: Callable[..., dict | None] | None = None,
+    publication_sleep: Callable[[float], None] | None = None,
     criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
     execution_plan: ExecutionPlan | None = None,
     security_rule=None,
@@ -2458,6 +2461,9 @@ def run_cycle(
     `publication_observer` (#364) reads the cycle branch's local HEAD, remote
     head and change request when a publishing stage reports `BLOCKED` after
     refused commands; it is injected so a test needs no code host.
+
+    `publication_sleep` (#446) replaces `time.sleep` between the bounded
+    re-reads that confirm a `review` or `rereview` publication.
     """
     from cycle_session import CycleSession
     # The facade supplies this module's types; the session's static aliases

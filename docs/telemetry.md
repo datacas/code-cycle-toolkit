@@ -393,7 +393,8 @@ earlier findings".
 | `cycle_history_findings` | the `REV-` headers each trusted comment carries: ID, severity, status, disposition, blocking flag |
 | `cycle_history_receipts` | the schema-2 receipts each trusted comment carries: attempt ID, stage, status token, head SHA |
 | `cycle_history_finding_state` | per finding: last status, claims and claimed-fix survivals |
-| `cycle_publications` | the outbox: one row per comment-publishing attempt, `pending`, `published` (with its comment ID and head) or `superseded` |
+| `cycle_publications` | the outbox: one row per comment-publishing attempt, `pending`, `published` (with its comment ID and head), `superseded`, and from schema 29 `failed` or `verification_error` |
+| `cycle_publication_rereads` | schema 29: per attempt, the number of bounded re-reads, the last provider error (redacted, at most 200 characters) and the single-retry lineage (`retry_of`, `retried_by`) |
 | `cycle_history_locks` | the per-machine writer lock: owner token, process ID, acquisition time |
 | `cycle_unpublished_heads` | runtime-observed clean resolver start/end SHAs by attempt, repository, PR, branch and hashed worktree path; created lazily when an exited stage leaves a commit |
 
@@ -420,6 +421,38 @@ An unobserved publication is a warning on the stage, and the next dispatch of
 the same stage on that change request is told to look for a comment carrying
 the earlier attempt ID and reuse it rather than post again. A later confirmed
 publication of the same stage supersedes it.
+
+**Bounded re-read of a review or rereview publication (#446).** The identifier
+that correlates an attempt with its comment is the receipt's `attempt_id`; the
+receipt format is unchanged. When a `review` or `rereview` stage completes and
+the first read does not show a comment carrying its receipt, the runtime reads
+the change request again after waiting 1 s, 2 s and 4 s (`REREAD_BACKOFF`),
+stopping at the first read that finds it. It never publishes: the stage
+publishes, and the runtime only reads and records.
+
+| Outcome | Condition | Outbox state | `publication_reread` journal status | What the cycle does |
+|---|---|---|---|---|
+| confirmed | any read finds the receipt | `published` | `confirmed` | continues, no warning |
+| not observed | all three re-reads succeeded and none found it | `failed` | `not_observed` | continues with a warning; the next dispatch of the stage retries once |
+| verification error | at least one re-read failed because of a provider error and none found it | `verification_error` | `verification_error` | stops `BLOCKED` with `stop_reason=publication_unverified`; nothing is published again |
+
+`failed` is not proof that the host never received the comment, only that three
+successful reads did not show it. A mixed result (some re-reads failed, none
+found it) is a verification error, never an absence. The retry is claimed with
+one conditional update, so two dispatches cannot both retry the same attempt;
+the retrying attempt records `retry_of`, and the earlier one `retried_by`, in
+`cycle_publication_rereads`. The retry dispatch re-reads the change request
+first: a comment that already carries the earlier attempt ID is reused and
+nothing is posted. A retry that is itself not observed is recorded `failed`
+with a warning and is not retried again. A later confirmed publication of the
+stage supersedes a `failed` attempt.
+
+A resumed cycle verifies a `verification_error` attempt before dispatching the
+stage: found, it is `published`; absent after the bounded re-reads, `failed` and
+retried once; still unreadable, the cycle stops again. Each settled attempt
+writes one `publication_reread` journal event with its status, the number of
+re-reads and the last provider error. `resolve` and `implement` keep their
+single read; reconciling a `BLOCKED` publishing stage is #364's mechanism.
 
 **Concurrency.** A cycle holds the writer lock of its change request from the
 resume (or the implementation that opened it) until it ends. A lock whose
