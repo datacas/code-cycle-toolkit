@@ -7,6 +7,38 @@ global set for interactive sessions. Until #142 a dispatched stage kept its
 executor's ordinary `gh` and `git` access and its prompt was the only boundary;
 this page describes what replaced that, and what it still does not cover.
 
+## Agent capability parity
+
+This rule is mandatory for every new implementation and every review (#450).
+`AGENTS.md` states it too.
+
+The toolkit orchestrates; it is not a second permission authority. Any operation
+the underlying agent can run directly, in the same environment and with the same
+credentials and permissions, must also run through the toolkit.
+
+- The toolkit may explain a risk and ask for consent. Once the user authorizes
+  the operation, the toolkit adds no further veto.
+- A toolkit-only policy never turns an operation the agent can run into
+  `BLOCKED`, `HUMAN_INTERVENTION` or `not_verified`. It never skips or
+  downgrades a check that can run because the table does not recognize its
+  command.
+- Permissions, decisions, commands and outcomes are recorded. Recording never
+  changes what the agent can do.
+- A real limit of the agent, the operating system, the provider or the
+  infrastructure is reported, and the toolkit looks for an alternative. User
+  consent does not remove a real limit or an authorization boundary the user
+  defined.
+- The same rule applies to Claude, Codex and any future agent, according to
+  what each one can really do.
+
+Every restriction on this page is either a **real limit**, a **role contract**
+(what a stage is for, such as a review that does not edit the code it judges)
+or a **toolkit veto** still to be converted to disclosure, consent and a
+record. The [capability parity audit](capability-parity-audit.md) classifies
+each one. It links the issue that converts each veto and names the
+direct-agent baseline its parity test uses. A change that adds a toolkit-only
+veto is a review finding.
+
 ## Per stage, not global
 
 The runtime applies permissions to each stage it dispatches natively
@@ -331,7 +363,13 @@ item starts a separate lineage and does not receive cycle-only decisions.
 
 Force-push, direct pushes to base/protected branches, deletion of Git refs and
 direct reads naming a protected credential store cannot be granted: publication
-integrity and credential confidentiality require these boundaries. The hook
+integrity and credential confidentiality require these boundaries. Under
+[agent capability parity](#agent-capability-parity) the audit classifies these
+never-grant boundaries, Git configuration edits and the refusal of `forever`
+for review roles as toolkit vetoes. They are to become consent with a risk
+warning and a record (rows PA-25 to PA-31 of the
+[audit](capability-parity-audit.md#sensitive-operations)); until that change
+ships, the behaviour below still applies. The hook
 recognizes a store named as a complete argument or edit target. It does not
 inspect recursive ancestor reads (`grep -r token ~`), attached option paths
 (`grep -f~/.ssh/id_ed25519 ...`, `--file=...`) or opaque program internals.

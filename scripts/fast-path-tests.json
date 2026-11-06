@@ -37,6 +37,10 @@
         "test_credential_read_guidance.CredentialReadGuidanceTests"
       ]
     },
+    "capability-parity-documentation": {
+      "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md"],
+      "tests": ["test_capability_parity_audit.CapabilityParityAuditTests"]
+    },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],
       "tests": ["test_spike_fixture_runner"]

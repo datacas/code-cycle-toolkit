@@ -42,6 +42,7 @@ Code Cycle Toolkit is an orchestrator, not an additional permission authority. T
 - Permissions, decisions, commands and outcomes are recorded without changing what the agent can do. Report a real limit of the agent, the operating system, the provider or the infrastructure, and look for an alternative; the user's consent does not remove a real limit or an authorization boundary the user defined.
 - The same rule applies to Claude, Codex and any future agent, according to what each can really do.
 - A review treats a new toolkit-only veto as a finding.
+- The owning page is `docs/host-permissions.md#agent-capability-parity`. `docs/capability-parity-audit.md` classifies every toolkit-owned restriction as a real limit, a role contract or a toolkit veto. A change that adds a restriction adds its row there.
 
 Acceptance rule: if an operation works when requested directly from the same agent in the same environment, Code Cycle Toolkit must not be the reason it fails.
 
