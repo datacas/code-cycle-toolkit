@@ -312,7 +312,10 @@ operation stops the cycle with `HUMAN_INTERVENTION` and the named decision.
 An accessory inspection does not stop completed work; a stage reporting
 `BLOCKED` can supply `completed_status` and completion references, which still
 pass the normal publication/effect guards. Agent prose is not completion
-evidence.
+evidence. For `implement` and `resolve` the runtime classifies every refusal
+itself and completes the stage only when the remote head, the local HEAD and
+the PR head agree: see
+[a publishing stage that reported `BLOCKED`](role-workspace-policy.md#a-publishing-stage-that-reported-blocked-after-a-verified-publication-364).
 
 List or revoke decisions with `consent_control.py list|revoke --repo owner/repo
 --executor claude`; revoke also needs `--grant-id command_<sha256>`, with

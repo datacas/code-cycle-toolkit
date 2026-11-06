@@ -595,6 +595,42 @@ class CycleAuditTests(RunCycleTestCase):
         self.assertIn({"kind": kind, "ref": ref},
                       [{"kind": item["kind"], "ref": item["ref"]} for item in evidence["breaches"]])
 
+    def blocked_after_publishing(self, **effects):
+        """An implementer that reports BLOCKED after a refused heredoc, with an agreeing publication."""
+        import grants
+
+        class BlockedActor(Actor):
+            def dispatch(self, target, task, **kw):
+                result = super().dispatch(target, task, **kw)
+                return ex.replace(result, artifacts={**result.artifacts, "command_refusals": [
+                    {"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}]})
+
+        sha = "a" * 40
+        implementer = BlockedActor("codex", **effects)
+        implementer.answers["implement"] = block(
+            "BLOCKED", head_sha=sha, change_request_id="4", completed_status="IMPLEMENTED")
+        broker = grants.ConsentBroker(REPO, platform="linux",
+                                      store=grants.ConsentStore(Path(self.store.path).parent / "consents.json"))
+        agreeing = {"branch": BRANCH, "local_head": sha, "remote_head": sha, "clean": True,
+                    "pr": {"number": "4", "head_sha": sha, "head_ref": BRANCH, "state": "OPEN"}}
+        return self.cycle(implementer, consent=broker, publication_observer=lambda *_: agreeing)
+
+    def reconciliations(self) -> list:
+        from cycle_journal import events
+        return [row for row in events(self.store.path, REPO) if row["component"] == "reconciliation"]
+
+    def test_a_blocked_stage_that_also_breaks_an_invariant_is_a_violation_not_a_reconciliation(self) -> None:
+        """#364: the audit comes first; a verified-looking BLOCKED never hides a breach."""
+        report, reviewer = self.blocked_after_publishing(implement=self.remote.push_default)
+        self.assert_violation(report, reviewer, pa.MOVED, "refs/heads/main")
+        self.assertEqual([], self.reconciliations())
+
+    def test_a_blocked_stage_with_the_invariants_intact_is_reconciled_after_the_audit(self) -> None:
+        report, _ = self.blocked_after_publishing()
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual(pa.PASSED, report.publication_audit["status"])
+        self.assertEqual(["reconciled"], [row["status"] for row in self.reconciliations()])
+
     def test_a_stage_that_merges_the_change_request_stops_the_cycle(self) -> None:
         report, reviewer = self.cycle(Actor("codex", implement=lambda: self.gh.merge(4)))
         self.assert_violation(report, reviewer, pa.MERGED, "change_request:4")

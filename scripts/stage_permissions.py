@@ -288,6 +288,8 @@ class Decision:
     reason: str
     #: The denial would be lifted by the `docker_host` grant.
     needs_docker: bool = False
+    #: The rule that refused, for the denial record (#364). Empty when allowed.
+    rule: str = ""
 
 
 @dataclass
@@ -493,7 +495,8 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
     """Decide whether this stage may run `command`. Never raises."""
     try:
         if matching_answer("Bash", {"command": command}, policy, cwd) == "deny":
-            return Decision(False, "the user denied this exact operation; skip it, checks not_verified")
+            return Decision(False, "the user denied this exact operation; skip it, checks not_verified",
+                            rule="user_denial")
         parsed = parse_command(command, policy.tmpdir)
         words = list(parsed.words)
         if words[0] == "rtk":
@@ -507,18 +510,19 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                 raise PolicyError("output may be redirected only into $TMPDIR")
         protected = credential_reason(words[1:], policy, cwd)
         if protected:
-            return Decision(False, protected)
+            return Decision(False, protected, rule="credential_guard")
         _check_words(words, parsed, policy, cwd=cwd, run=run)
     except _DockerDenied as denied:
-        return Decision(False, str(denied), needs_docker=True)
+        return Decision(False, str(denied), needs_docker=True, rule="docker_host")
     except PolicyError as error:
         if (not policy.static_only
                 and matching_answer("Bash", {"command": command}, policy, cwd) == "allow"
                 and protected_reason("Bash", {"command": command}, policy, cwd) is None):
             return Decision(True, "allowed by exact operation consent")
-        return Decision(False, str(error))
+        return Decision(False, str(error), rule="command_table")
     except Exception as error:  # fail closed on anything unexpected
-        return Decision(False, f"the command could not be validated ({type(error).__name__})")
+        return Decision(False, f"the command could not be validated ({type(error).__name__})",
+                        rule="validation_error")
     return Decision(True, "allowed by the stage command table")
 
 
@@ -548,7 +552,7 @@ def check_bash_tool_input(tool_input: dict, policy: StagePolicy, *,
     """Apply Claude -p foreground and verification-timeout safeguards."""
     command = tool_input.get("command")
     if tool_input.get("run_in_background") is True:
-        return Decision(False, "Bash commands must run in the foreground")
+        return Decision(False, "Bash commands must run in the foreground", rule="foreground_policy")
     timeout = tool_input.get("timeout")
     if (_is_verification_command(command, policy)
             and isinstance(timeout, int) and not isinstance(timeout, bool)
@@ -557,6 +561,7 @@ def check_bash_tool_input(tool_input: dict, policy: StagePolicy, *,
             False,
             "configured verification needs a timeout of at least "
             f"{CLAUDE_VERIFICATION_TIMEOUT_MS} ms",
+            rule="verification_timeout",
         )
     if not policy.active:
         return Decision(True, "foreground policy only")
@@ -590,9 +595,10 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
             raise PolicyError("the edit names no file")
         protected = credential_reason([path], policy, cwd)
         if protected:
-            return Decision(False, protected)
+            return Decision(False, protected, rule="credential_guard")
         if matching_answer(tool_name, tool_input or {}, policy, cwd) == "deny":
-            return Decision(False, "the user denied this exact edit; skip it, checks not_verified")
+            return Decision(False, "the user denied this exact edit; skip it, checks not_verified",
+                            rule="user_denial")
         if policy.role not in WRITING_ROLES and not is_tmpdir_helper(path, policy.tmpdir):
             raise PolicyError(f"a {policy.role} stage edits only its comment, report, reply "
                               "and check-log files in $TMPDIR")
@@ -615,9 +621,10 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
                 and matching_answer(tool_name, tool_input or {}, policy, cwd) == "allow"
                 and protected_reason(tool_name, tool_input or {}, policy, cwd) is None):
             return Decision(True, "allowed by exact operation consent")
-        return Decision(False, str(error))
+        return Decision(False, str(error), rule="edit_rule")
     except Exception as error:  # fail closed on anything unexpected
-        return Decision(False, f"the edit could not be validated ({type(error).__name__})")
+        return Decision(False, f"the edit could not be validated ({type(error).__name__})",
+                        rule="validation_error")
     return Decision(True, "allowed by the stage edit rule")
 
 
@@ -2089,22 +2096,116 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
             command = f"{tool} {target}" if isinstance(target, str) else tool
         else:
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
-                               command, decision.reason)
         try:
             requested_operation = operation(tool, tool_input, policy, event.get("cwd"))
         except (ValueError, TypeError, OSError):
             requested_operation = None
+        # Every denial is recorded with the rule that applied and an operation
+        # identifier, including an operation that can never be granted (#364).
+        rule = decision.rule or ("edit_rule" if editing else "command_table")
+        operation_id = denial_operation_id(requested_operation, command)
+        intent = None if editing else pr_edit_intent(command, policy)
+        note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
+                               command, decision.reason, rule=rule, operation_id=operation_id)
         print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
                                    f"{decision.reason}{_journal_note(note)}. {advice} "
                                    f"COMMAND_PERMISSION_TMPDIR={json.dumps(policy.tmpdir)} "
-                                   f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)}"),
+                                   f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
+                                   f"COMMAND_PERMISSION_RULE={json.dumps(rule)} "
+                                   f"COMMAND_PERMISSION_ID={json.dumps(operation_id)} "
+                                   f"COMMAND_PERMISSION_INTENT={json.dumps(intent)}"),
               file=stdout)
     return 0
 
 
+def denial_operation_id(requested_operation: dict[str, Any] | None, command) -> str:
+    """A stable identifier of a refused operation, grantable or not (#364).
+
+    A grantable operation keeps the identifier its grant would have; one the
+    table can never parse (a heredoc, a pipeline) is identified by its text.
+    """
+    import hashlib
+    if requested_operation is not None:
+        return "command_" + hashlib.sha256(json.dumps(
+            requested_operation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return "refused_" + hashlib.sha256(json.dumps(
+        {"command": command if isinstance(command, str) else None},
+        sort_keys=True).encode()).hexdigest()
+
+
+#: `gh pr edit` flags and the metadata field each one changes.
+_PR_EDIT_VALUE_FLAGS = {"--title": "title", "-t": "title", "--body": "body", "-b": "body",
+                        "--body-file": "body", "-F": "body", "--base": "base", "-B": "base",
+                        "--add-label": "labels_add", "--remove-label": "labels_remove",
+                        "--milestone": "milestone", "-m": "milestone"}
+_BODY_FILE_LIMIT = 1_000_000
+
+
+def pr_edit_intent(command, policy: StagePolicy) -> dict[str, Any] | None:
+    """What a refused `gh pr edit` meant to change, read while its files exist.
+
+    The body file lives in the dispatch's `$TMPDIR`, which is gone when the
+    runtime classifies the refusal, so its digest is taken here. Any flag this
+    table does not know leaves the intent unknown: nothing is inferred (#364).
+    """
+    if not isinstance(command, str):
+        return None
+    try:
+        words = list(parse_command(command, policy.tmpdir).words)
+    except Exception:
+        return None
+    if words[:1] == ["rtk"]:
+        words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+    if words[:3] != ["gh", "pr", "edit"]:
+        return None
+    import hashlib
+    fields: dict[str, Any] = {}
+    unknown: list[str] = []
+    index = 3
+    while index < len(words):
+        word = words[index]
+        flag, equals, inline = word.partition("=") if word.startswith("--") else (word, "", "")
+        if flag in {"--repo", "-R"}:
+            # Names the repository, not metadata to change.
+            index += 1 if equals else 2
+            continue
+        target = _PR_EDIT_VALUE_FLAGS.get(flag)
+        if target is None:
+            if word.startswith("-"):
+                unknown.append(flag)
+            index += 1
+            continue
+        if equals:
+            value = inline
+        elif index + 1 < len(words):
+            value, index = words[index + 1], index + 1
+        else:
+            unknown.append(flag)
+            break
+        index += 1
+        if flag in {"--body-file", "-F"}:
+            try:
+                if not inside_tmpdir(value, policy.tmpdir):
+                    raise OSError("outside $TMPDIR")
+                with open(value, "rb") as handle:
+                    raw = handle.read(_BODY_FILE_LIMIT + 1)
+                if len(raw) > _BODY_FILE_LIMIT:
+                    raise OSError("too large")
+                fields["body"] = {"sha256": hashlib.sha256(raw.decode("utf-8").strip().encode()).hexdigest()}
+            except (OSError, UnicodeDecodeError):
+                unknown.append(flag)
+        elif target == "body":
+            fields["body"] = {"sha256": hashlib.sha256(value.strip().encode()).hexdigest()}
+        elif target in {"labels_add", "labels_remove"}:
+            fields.setdefault(target, []).extend(item for item in value.split(",") if item)
+        else:
+            fields[target] = value
+    return {"fields": fields, "unknown": unknown}
+
+
 def _journal_denial(policy: StagePolicy, event: dict[str, object] | None, component: str,
-                    command, reason: str) -> str | None:
+                    command, reason: str, *, rule: str | None = None,
+                    operation_id: str | None = None) -> str | None:
     """Record a denial in the cycle journal; a failure is returned, never raised.
 
     The decision is already made and stays made: this only writes it down.
@@ -2119,7 +2220,8 @@ def _journal_denial(policy: StagePolicy, event: dict[str, object] | None, compon
             policy, component=component,
             command=command if isinstance(command, str) else None, reason=reason,
             correlation={"tool_use_id": event.get("tool_use_id"),
-                         "session_id": event.get("session_id")})
+                         "session_id": event.get("session_id"),
+                         "rule": rule, "operation": operation_id})
     except Exception as error:
         return f"the cycle journal could not record this denial ({type(error).__name__})"
 

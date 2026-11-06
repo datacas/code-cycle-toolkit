@@ -59,7 +59,7 @@ from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,
     observed_sandbox_blocker, denied_result,
 )
-from reroute import effect_snapshot, reconcile
+from reroute import effect_snapshot, observe_publication, reconcile
 from quota_state import Handoffs
 from jev_shadow import JevShadow, telemetry_fields as shadow_fields
 from router import (
@@ -343,8 +343,12 @@ class CycleRecorder:
         ci_policy: str = "strict",
         consent: ConsentBroker | None = None,
         journal: Journal | None = None,
+        publication_observer: Callable[[str | None, str, str | None], dict[str, Any] | None] | None = None,
     ) -> None:
         self.telemetry = telemetry
+        # What the code host and the checkout say about the published branch;
+        # injectable so a test needs no network (#364).
+        self.publication_observer = publication_observer or observe_publication
         # The cycle journal (#306): stage timings, failures and refusals as they
         # happen. Best effort; nothing here reads it back to decide anything.
         self.journal = journal
@@ -1101,17 +1105,57 @@ class CycleRecorder:
             result = replace(result, agent_output=claim_runtime_keys(result.agent_output))
         command_policy = run.dispatch_kwargs.get("command_policy")
         if self.consent is not None and command_policy is not None:
-            from command_permissions import refused_operations, reconcile_result
-            command_blockers = refused_operations(
-                result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials"),
-                command_policy, self.consent, attempt.target.executor,
-                run.dispatch_kwargs.get("cwd"))
-            for refused in command_blockers:
+            from command_permissions import (
+                refused_operations, reconcile_result, denial_records, classify_denials,
+                PUBLISHING_ROLES, _result_block)
+            events = result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials")
+            cwd = run.dispatch_kwargs.get("cwd")
+            executor = attempt.target.executor
+            grantable = {item["command"]: item for item in refused_operations(
+                events, command_policy, self.consent, executor, cwd)}
+            # Every refusal is recorded and classified by the runtime, grantable
+            # or not, so the stage is judged on all of them together (#364).
+            records = denial_records(events, command_policy, executor, cwd)
+            block = _result_block(result.agent_output)
+            payload = block[2] if block is not None else {}
+            publication = None
+            if (records and run.role in PUBLISHING_ROLES and payload.get("status") == "BLOCKED"
+                    and not self.local_only):
+                requested = payload.get("change_request_id") or payload.get("pr_number")
+                number = str(requested).rstrip("/").rsplit("/", 1)[-1].lstrip("#") if requested else None
+                try:
+                    publication = self.publication_observer(
+                        cwd, self.repo_id, number if number and number.isdigit() else self.change_request_id)
+                except Exception:
+                    publication = None
+            sandbox_commands = tuple(
+                str(item.get("command")) for item in
+                (*(result.artifacts.get("sandbox_startup_failures") or ()),
+                 *(result.artifacts.get("sandbox_denials") or ()))
+                if isinstance(item, dict) and item.get("command"))
+            from stage_permissions import _is_verification_command
+            classify_denials(
+                records, payload, publication=publication, cwd=cwd, environment=sandbox_commands,
+                mandatory=lambda command: _is_verification_command(command, command_policy))
+            if records:
+                result = replace(result, artifacts={**result.artifacts, "denial_records": records})
+            for record in records:
+                refused = grantable.get(record["command"]) or next(
+                    (item for item in grantable.values()
+                     if record["target"] and item["command"].endswith(record["target"])), None)
                 spoken, essential = reconcile_result(
-                    result.agent_output, refused,
-                    DENY if refused["resource"] in attempt.denied_before else None, run.role)
+                    result.agent_output,
+                    {**refused, "command": record["command"]} if refused is not None else {
+                        "kind": "command_permission", "resource": record["operation"],
+                        "command": record["command"], "error": record["reason"],
+                        "attempted": ["stage command table refused the operation"],
+                        "requires_human": False},
+                    DENY if refused is not None and refused["resource"] in attempt.denied_before else None,
+                    run.role, denials=records, publication=publication)
                 result = replace(result, agent_output=spoken)
-                if essential and command_blocker is None:
+                # A refusal that can never be granted is no request to ask for:
+                # it is recorded and classified, and the stage stands as reported.
+                if essential and command_blocker is None and refused is not None:
                     command_blocker = refused
         blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
                                                                result.artifacts.get("sandbox_denials"))
@@ -1470,6 +1514,15 @@ class CycleRecorder:
                               command=denial.get("command") or denial.get("tool"),
                               reason=f"Claude's permission layer denied {denial.get('tool')}",
                               correlation={"tool_use_id": denial.get("tool_use_id")})
+        for record in artifacts.get("denial_records") or []:
+            # What the runtime made of every refusal, grantable or not (#364).
+            if isinstance(record, dict):
+                self._journal("stage_result", role=role, attempt_id=attempt_id,
+                              component="denial_classification", status=record.get("class"),
+                              command=record.get("command"), reason=record.get("why"),
+                              correlation={"rule": record.get("rule"),
+                                           "operation": record.get("operation"),
+                                           "stage": record.get("stage")})
         for failure in artifacts.get("sandbox_startup_failures") or []:
             if isinstance(failure, dict):
                 self._journal("refusal", role=role, attempt_id=attempt_id,
