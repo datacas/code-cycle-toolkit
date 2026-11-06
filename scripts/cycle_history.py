@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from .execution_plan import ExecutionPlan
 
 from verification_plan import persisted_token
+from cycle_journal import redact
 from review_contract import (
     CLAIM_STATUSES,
     RESOLUTION_RUN,
@@ -74,6 +75,23 @@ LOCK_STALE_AFTER = timedelta(hours=24)
 #: can confirm it. `implement` publishes the change request itself.
 COMMENT_STAGES = frozenset({"review", "resolve", "rereview"})
 STAGES = frozenset({"implement"}) | COMMENT_STAGES
+
+#: Stages whose unobserved publication is re-read with backoff before it is
+#: called absent (#446). `resolve` keeps the single read of #364's mechanism.
+REREAD_STAGES = frozenset({"review", "rereview"})
+
+#: Seconds waited before each bounded re-read of the change request.
+REREAD_BACKOFF = (1.0, 2.0, 4.0)
+
+#: Outbox states a re-read may settle an attempt in, besides `published`.
+FAILED = "failed"
+VERIFICATION_ERROR = "verification_error"
+
+#: What a retry claim holds until the retrying attempt is recorded.
+_DISPATCHING = "dispatching"
+
+#: The provider error kept beside a publication, bounded and redacted.
+_ERROR_LIMIT = 200
 
 _COMMENT_ID = re.compile(r"[0-9]{1,20}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})")
@@ -657,14 +675,18 @@ class CycleHistoryStore:
     # -- publication outbox ------------------------------------------------
 
     def expect_publication(self, attempt_id: str, repo_id: str,
-                           change_request_id: str, stage: str) -> None:
+                           change_request_id: str, stage: str,
+                           retry_of: Iterable[str] = ()) -> None:
         """Record that `attempt_id` should publish on the change request.
 
-        Idempotent: recording the same attempt again changes nothing.
+        Idempotent: recording the same attempt again changes nothing. `retry_of`
+        names the failed attempts whose single retry this attempt is; it is
+        recorded as their retry and as this attempt's lineage (#446).
         """
         if stage not in STAGES:
             raise HistoryError(f"unknown stage {stage!r}")
         attempt_id = _match(_ATTEMPT_ID, attempt_id, "attempt id")
+        retried = [_match(_ATTEMPT_ID, item, "attempt id") for item in retry_of]
         now = _now()
         with closing(self._connect()) as connection:
             connection.execute(
@@ -672,8 +694,102 @@ class CycleHistoryStore:
                 "(?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?)",
                 (attempt_id, repo_id, change_request_id, stage, now, now,
                  HISTORY_SCHEMA_VERSION))
+            for earlier in retried:
+                connection.execute(
+                    "UPDATE cycle_publication_rereads SET retried_by=?, updated_at=? "
+                    "WHERE attempt_id=? AND retried_by=?",
+                    (attempt_id, now, earlier, _DISPATCHING))
+            if retried:
+                self._check_row(connection, attempt_id, repo_id, change_request_id,
+                                stage, now, retry_of=retried[0])
             self._confirm_publications(connection, (repo_id, change_request_id))
             connection.commit()
+
+    @staticmethod
+    def _check_row(connection, attempt_id: str, repo_id: str, change_request_id: str,
+                   stage: str, now: str, *, retry_of: str | None = None) -> None:
+        connection.execute(
+            "INSERT OR IGNORE INTO cycle_publication_rereads (attempt_id, repo_id, "
+            "change_request_id, stage, rereads, retry_of, created_at, updated_at, "
+            "schema_version) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (attempt_id, repo_id, change_request_id, stage, retry_of, now, now,
+             HISTORY_SCHEMA_VERSION))
+        if retry_of is not None:
+            connection.execute(
+                "UPDATE cycle_publication_rereads SET retry_of=? WHERE attempt_id=? "
+                "AND retry_of IS NULL", (retry_of, attempt_id))
+
+    def settle_publication(self, attempt_id: str, repo_id: str, change_request_id: str,
+                           stage: str, state: str, rereads: int,
+                           last_error: str | None = None) -> None:
+        """Record how bounded re-reads left an attempt (#446).
+
+        `state` is `failed` (every read succeeded and none showed the comment),
+        `verification_error` (a read failed, so absence is unproven) or
+        `published` (a read found the receipt, already marked by the sync). A
+        published or superseded attempt is never moved back.
+        """
+        if state not in {FAILED, VERIFICATION_ERROR, "published"}:
+            raise HistoryError(f"unknown settled publication state {state!r}")
+        attempt_id = _match(_ATTEMPT_ID, attempt_id, "attempt id")
+        error = redact(last_error, _ERROR_LIMIT) if last_error else None
+        now = _now()
+        with closing(self._connect()) as connection:
+            self._check_row(connection, attempt_id, repo_id, change_request_id, stage, now)
+            connection.execute(
+                "UPDATE cycle_publication_rereads SET rereads=?, last_error=?, updated_at=? "
+                "WHERE attempt_id=?", (max(int(rereads), 0), error, now, attempt_id))
+            if state != "published":
+                connection.execute(
+                    "UPDATE cycle_publications SET state=?, updated_at=? "
+                    "WHERE attempt_id=? AND state IN ('pending', 'failed', 'verification_error')",
+                    (state, now, attempt_id))
+            connection.commit()
+
+    def publication_check(self, attempt_id: str) -> dict | None:
+        """The re-read record of an attempt: count, last error, retry lineage."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM cycle_publication_rereads WHERE attempt_id=?",
+                (attempt_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def unverified_publications(self, repo_id: str, change_request_id: str,
+                                stage: str) -> list[dict]:
+        """Attempts a read failure left unproven, oldest first."""
+        with closing(self._connect()) as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM cycle_publications WHERE repo_id=? AND change_request_id=? "
+                "AND stage=? AND state='verification_error' ORDER BY created_at, attempt_id",
+                (repo_id, change_request_id, stage))]
+
+    def claim_retries(self, repo_id: str, change_request_id: str, stage: str) -> list[str]:
+        """Claim the failed attempts whose single retry has not been spent.
+
+        The claim is one conditional update per attempt, so two concurrent
+        dispatches cannot both retry the same attempt; the claimed attempts
+        stay claimed until `expect_publication` names their retry. An attempt
+        that is itself a retry has no further retry.
+        """
+        now = _now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidates = [row["attempt_id"] for row in connection.execute(
+                "SELECT p.attempt_id FROM cycle_publications p JOIN cycle_publication_rereads c "
+                "ON c.attempt_id=p.attempt_id WHERE p.repo_id=? AND p.change_request_id=? "
+                "AND p.stage=? AND p.state='failed' AND c.retried_by IS NULL "
+                "AND c.retry_of IS NULL ORDER BY p.created_at, p.attempt_id",
+                (repo_id, change_request_id, stage))]
+            claimed = []
+            for attempt_id in candidates:
+                cursor = connection.execute(
+                    "UPDATE cycle_publication_rereads SET retried_by=?, updated_at=? "
+                    "WHERE attempt_id=? AND retried_by IS NULL",
+                    (_DISPATCHING, now, attempt_id))
+                if cursor.rowcount == 1:
+                    claimed.append(attempt_id)
+            connection.commit()
+        return claimed
 
     @staticmethod
     def _confirm_publications(connection, scope) -> None:
@@ -699,7 +815,8 @@ class CycleHistoryStore:
             # earlier attempt that never appeared; the record is complete again.
             connection.execute(
                 "UPDATE cycle_publications SET state='superseded', updated_at=? "
-                "WHERE repo_id=? AND change_request_id=? AND stage=? AND state='pending' "
+                "WHERE repo_id=? AND change_request_id=? AND stage=? "
+                "AND state IN ('pending', 'failed') "
                 "AND created_at <= (SELECT created_at FROM cycle_publications "
                 "WHERE attempt_id=?) AND attempt_id != ?",
                 (now, *scope, row["stage"], row["attempt_id"], row["attempt_id"]))
