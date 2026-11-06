@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from execution_plan import completion_statuses
-from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question)
-from stage_permissions import operation, matching_answer, protected_reason, credential_reason, parse_command
+from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question,
+                    ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
+from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
+                               consent_role, split_environment, same_operation, configured_check_id)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -80,12 +82,34 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
             return (bool(policy.tmpdir) and Path(raw).is_absolute()
                     and Path(raw).is_relative_to(policy.tmpdir)
                     and not Path(relative).is_absolute() and ".." not in Path(relative).parts)
-        data_read = words[0] in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
+
+        def checkout(raw: str, relative: str) -> bool:
+            # The clone is gone too; the hook verified membership while it existed.
+            path = Path(raw)
+            return (path.is_absolute() and not Path(relative).is_absolute()
+                    and ".." not in Path(relative).parts
+                    and (relative == "." or path.as_posix().endswith("/" + relative)))
+
+        def placeholder(raw: str, pattern: dict[str, str]) -> bool:
+            prefix = (f"{pattern['env']}=" if "env" in pattern
+                      else f"{pattern['option']}=" if "option" in pattern else "")
+            if not raw.startswith(prefix):
+                return False
+            value = raw[len(prefix):]
+            if "tmpdir" in pattern:
+                return temporary(value, pattern["tmpdir"])
+            return "checkout" in pattern and checkout(value, pattern["checkout"])
+        _, command_words = split_environment(words)
+        program = Path(command_words[0]).name if command_words else ""
+        data_read = program in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
         for index, (raw, pattern) in enumerate(zip(words, expected)):
             if raw == pattern:
                 continue
-            if not (index and data_read and isinstance(pattern, dict)
-                    and temporary(raw, pattern["tmpdir"])):
+            if not isinstance(pattern, dict):
+                return False
+            if set(pattern) == {"tmpdir"} and not (data_read or program == "docker"):
+                return False
+            if not (index or "env" in pattern) or not placeholder(raw, pattern):
                 return False
         redirects = op["pattern"]["redirects"]
         if len(redirects) != len(parsed.redirects):
@@ -104,10 +128,16 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
 
 
 def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str, Any]:
+    op = grant.operation or {}
+    compose = op.get("compose") if isinstance(op.get("compose"), dict) else None
     return {"kind": "command_permission", "resource": grant.id,
             "command": command, "error": reason,
             "attempted": ["stage command table refused the operation"],
-            "requires_human": False}
+            "requires_human": False,
+            # Evidence ties the decision to the exact check and configuration (#398).
+            **({"check": op["check"]} if op.get("check") else {}),
+            **({"config_sha256": compose["config_sha256"],
+                "warnings": list(compose.get("warnings") or [])} if compose else {})}
 
 
 def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
@@ -125,14 +155,18 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         if not isinstance(tool, str) or (tool == "Bash" and not isinstance(data.get("command"), str)):
             continue
+        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        if tool == "Bash" and check(data["command"], observed_policy, cwd=cwd).needs_docker:
+            # The docker_host socket permission is asked first, on its own (#398);
+            # an exact-command consent never stands in for it.
+            continue
         try:
-            observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
             # The native scratch directory is gone by the time dispatch returns.
             # Retain the pattern the hook verified while its symlinks existed.
             observed = from_entry({"operation": event.get("operation"),
                                    "executor": executor, "platform": broker.platform})
             if (observed is not None and observed.operation is not None
-                    and observed.operation["role"] == policy.role
+                    and consent_role(observed.operation["role"]) == consent_role(policy.role)
                     and observed.operation["tool"] == tool
                     and observed_pattern_matches(observed.operation, tool, data, observed_policy)):
                 op = observed.operation
@@ -527,7 +561,8 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
 
 def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, role: str, *,
                      denials: list[dict[str, Any]] | None = None,
-                     publication: dict[str, Any] | None = None) -> tuple[str, bool]:
+                     publication: dict[str, Any] | None = None,
+                     configured_checks: tuple[str, ...] = ()) -> tuple[str, bool]:
     """Use structured evidence to distinguish an essential denial from inspection.
 
     Completion claims still pass the runtime's normal publication/effect guards.
@@ -540,6 +575,10 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     completion is valid for the role and, for a publishing role, `publication`
     shows the remote head, the local HEAD and the PR head to be one commit
     (#364). Without `denials` the behaviour of #409 is unchanged.
+
+    `configured_checks` names the refused commands of the stage that are
+    configured-check consent questions. They are recorded unverified and never
+    keep a stage blocked (#398), whichever refusal is reconciled first.
     """
     end = spoken.rfind("END_ORCHESTRATION_RESULT")
     begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
@@ -562,6 +601,7 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     elif role == "issue_review":
         # A finished assessment can ask for refinement without needing access.
         completed |= {"NEEDS_REFINEMENT"}
+    configured = blocker.get("check")
     own = next((item for item in denials if same_command(item.get("command"), blocker["command"])),
                None) if denials is not None else None
     own_class = (own["class"] if own is not None else UNKNOWN_DENIAL) if denials is not None else None
@@ -572,7 +612,12 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     # other role keeps the #409 behaviour: its refusals are recorded, but a
     # `BLOCKED` result is never completed from them (#364).
     classified = denials is not None and role in PUBLISHING_ROLES
-    if classified:
+    if configured:
+        # A configured check the person declines is recorded unverified; it
+        # never stops the cycle by itself (#398, #414): the final state names
+        # it. Its mandatory-check class therefore does not make it hard.
+        essential = False
+    elif classified:
         # A stage that reports a completed status is not stopped by a refusal
         # that is not hard; a stage that does not stays stopped until the
         # runtime has verified why it may complete (below).
@@ -585,6 +630,8 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     check_ids = effect.get("check_ids", []) if effect is not None else []
     if not isinstance(check_ids, list):
         check_ids = []
+    if configured:
+        check_ids = [*check_ids, configured]
     affected = []
     for check in checks if isinstance(checks, list) else []:
         if isinstance(check, dict) and (same_command(check.get("command"), blocker["command"]) or
@@ -604,8 +651,16 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
                        essential_permission=blocker["resource"])
     elif classified:
         if payload.get("status") == "BLOCKED":
-            _reconcile_blocked(payload, role, completed, denials or [], publication)
-            essential = hard or payload.get("status") not in completed
+            # A declined configured check is recorded unverified, so it is not
+            # one of the denials that keep the stage blocked (#398). Every call
+            # leaves all of them out: the first call decides the reconciliation.
+            _reconcile_blocked(payload, role, completed, [
+                item for item in denials or []
+                if not ((configured and item is own)
+                        or any(same_command(item.get("command"), check) for check in configured_checks))],
+                publication)
+            if not configured:
+                essential = hard or payload.get("status") not in completed
     elif not essential and payload.get("status") == "BLOCKED":
         # A distinct structured completion claim is required; prose is irrelevant.
         if (payload.get("completed_status") in completed
@@ -617,12 +672,176 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
         outcomes = []
     outcome = {
         "grant": blocker["resource"], "command": blocker["command"],
-        "answer": answer or "pending", "essential": essential, "checks": affected}
+        "answer": answer or "pending", "essential": essential, "checks": affected,
+        **{key: blocker[key] for key in ("check", "config_sha256", "warnings") if key in blocker}}
     if own is not None:
         outcome.update({key: own[key] for key in ("stage", "rule", "operation", "class")})
     outcomes.append(outcome)
     payload["permission_outcomes"] = outcomes
     return (spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:], essential)
+
+
+def declared_compose_checks(policy: Any) -> list[str]:
+    """The configured verification commands that run `docker compose`."""
+    commands = []
+    for command in getattr(policy, "verification_commands", ()) or ():
+        try:
+            words = list(parse_command(command, None).words)
+        except ValueError:
+            continue
+        _, command_words = split_environment(words)
+        if command_words[:1] and Path(command_words[0]).name == "docker" and command_words[1:2] == ["compose"]:
+            commands.append(command)
+    return commands
+
+
+_ALLOWS = frozenset({ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL})
+
+
+def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
+                          cwd: str | None) -> tuple[str, list[dict[str, Any]]]:
+    """Ask the #409 consent before a Codex dispatch for each declared Compose check.
+
+    Codex has no command hook (#398): nothing refuses a command during its run,
+    so the runtime asks before dispatch, with the same identity the Claude hook
+    computes, and tells the agent each answer. It cannot limit the dispatch to
+    the consented command or abort when the configuration changes mid-run;
+    `compose_drift` compares the digest afterwards. The runtime calls it only
+    once `docker_host` is granted, the condition for resolving a configuration.
+    """
+    policy = replace(policy, docker=True)
+    context: list[str] = []
+    records: list[dict[str, Any]] = []
+    for command in declared_compose_checks(policy):
+        try:
+            op = operation("Bash", {"command": command}, policy, cwd)
+        except (ValueError, OSError, TypeError) as error:
+            context.append(f"Declared Compose check `{command}` could not be identified ({error}). "
+                           "Do not run it; record it unverified with that cause.")
+            try:
+                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
+            except ValueError:
+                check_id = None
+            records.append({"command": command, "answer": "unidentified", "error": str(error),
+                            **({"check": check_id} if check_id else {})})
+            continue
+        grant = make_grant(op, executor, broker.platform)
+        broker.operations[grant.id] = grant
+        request = request_record(grant, command, "Codex has no command hook; consent is asked before dispatch")
+        answer = broker.request(grant, executor, role=role, blocker=request)
+        records.append({**{key: request[key] for key in ("check", "config_sha256", "warnings")
+                           if key in request},
+                        "grant": grant.id, "command": command, "answer": answer})
+        if answer in _ALLOWS:
+            scope = grant.scope_for(executor, broker.platform)
+            context.append((granted_context(grant, scope) if scope is not None else "")
+                           + f" Run the declared check exactly as `{command}`. On Codex nothing "
+                           "limits this dispatch to that command or aborts a changed configuration; "
+                           "the runtime compares the configuration digest after the run.")
+        elif answer == DENY:
+            context.append(denial_context(grant))
+        else:
+            context.append(f"Declared Compose check `{command}` awaits the user's consent ({grant.id}). "
+                           "Do not run it; record it unverified with cause "
+                           f"`permission {grant.id}: pending` and complete the other steps.")
+    return "\n\n".join(context), records
+
+
+def compose_drift(records: list[dict[str, Any]], policy: Any, cwd: str | None) -> list[dict[str, Any]]:
+    """The evidence of each pre-dispatch Codex consent, rechecked after the run.
+
+    Every consent becomes a permission outcome with its check, digest and
+    warnings. For an allowed one the configuration is resolved again; a change
+    is disclosed with both digests and a warning, and does not by itself
+    downgrade the check (#398). The records exist only for a dispatch with
+    `docker_host` granted.
+    """
+    policy = replace(policy, docker=True)
+    outcomes = []
+    for record in records:
+        outcome = {"grant": record.get("grant"), "command": record["command"],
+                   "answer": record["answer"], "essential": False, "checks": [],
+                   "executor_hook": "none: consent asked before dispatch",
+                   **{key: record[key] for key in ("check", "config_sha256", "warnings", "error")
+                      if key in record}}
+        if record.get("answer") in _ALLOWS and "config_sha256" in record:
+            try:
+                after = operation("Bash", {"command": record["command"]}, policy, cwd)["compose"]["config_sha256"]
+            except (ValueError, OSError, TypeError, KeyError):
+                after = None
+            if after != record["config_sha256"]:
+                outcome.update(config_sha256_before=record["config_sha256"], config_sha256_after=after,
+                               warning="the effective Compose configuration changed during the "
+                                       "Codex run, or could no longer be resolved")
+        outcomes.append(outcome)
+    return outcomes
+
+
+def stored_check_denials(policy: Any, executor: str, platform: str, cwd: str | None,
+                         reported: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Configured checks this dispatch's stored decisions deny, as outcomes (#398).
+
+    A denied check is often never attempted again: the agent is told it was
+    denied and skips it, so no refusal is observed. The runtime still knows:
+    the exact identity of each configured command, recomputed now, matches a
+    stored `deny`. That, not what the agent reported, keeps it `unverified`.
+    """
+    if policy is None or not policy.command_permissions:
+        return []
+    seen = {item.get("check") for item in reported or () if isinstance(item, dict)}
+    outcomes = []
+    for command in dict.fromkeys(policy.verification_commands):
+        try:
+            op = operation("Bash", {"command": command}, policy, cwd)
+        except (ValueError, OSError, TypeError) as error:
+            # Its identity, and so any stored denial of it, cannot be read now;
+            # the hook refuses such a run too. It stays unverified, never passed.
+            try:
+                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
+            except ValueError:
+                check_id = None
+            if check_id and check_id not in seen:
+                outcomes.append({"grant": None, "command": command, "answer": "unidentified",
+                                 "essential": False, "checks": [], "check": check_id,
+                                 "error": str(error), "source": "identity unavailable"})
+                seen.add(check_id)
+            continue
+        if not op.get("check") or op["check"] in seen:
+            continue
+        if not any(same_operation(entry.get("operation"), op) and entry.get("decision") == "deny"
+                   for entry in policy.command_permissions):
+            continue
+        grant = make_grant(op, executor, platform)
+        compose = op.get("compose") if isinstance(op.get("compose"), dict) else None
+        outcomes.append({"grant": grant.id, "command": command, "answer": DENY,
+                         "essential": False, "checks": [], "check": op["check"],
+                         "source": "stored decision",
+                         **({"config_sha256": compose["config_sha256"],
+                             "warnings": list(compose.get("warnings") or [])} if compose else {})})
+        seen.add(op["check"])
+    return outcomes
+
+
+def add_stored_denials(spoken: str, policy: Any, executor: str, platform: str,
+                       cwd: str | None) -> str:
+    """`spoken` with an outcome for each configured check a stored decision denies."""
+    block = _result_block(spoken)
+    if block is None:
+        return spoken
+    reported = block[2].get("permission_outcomes")
+    return add_outcomes(spoken, stored_check_denials(
+        policy, executor, platform, cwd, reported if isinstance(reported, list) else None))
+
+
+def add_outcomes(spoken: str, outcomes: list[dict[str, Any]]) -> str:
+    """Append runtime-observed permission outcomes to a stage's result block."""
+    block = _result_block(spoken)
+    if block is None or not outcomes:
+        return spoken
+    begin, end, payload = block
+    existing = payload.get("permission_outcomes")
+    payload["permission_outcomes"] = [*(existing if isinstance(existing, list) else []), *outcomes]
+    return spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:]
 
 
 def same_command(left, right) -> bool:

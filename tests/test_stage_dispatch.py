@@ -885,15 +885,21 @@ class DockerBlockerTests(unittest.TestCase):
                 self.assertEqual("docker_host", blocker["resource"])
                 self.assertEqual(command, blocker["command"])
 
+    def test_every_docker_command_asks_for_the_socket_first(self) -> None:
+        # #398: docker_host is its own permission, asked before any exact-command
+        # consent, also for commands the table never holds.
+        for command in ("docker compose run --rm app pytest", "docker compose exec api sh",
+                        "rtk docker compose cp a b", "docker compose --verbose up", "docker run x",
+                        "DOCKER_CONFIG=/x docker compose run --rm app pytest"):
+            with self.subTest(command=command):
+                blocker = recovery.denied_docker_blocker(self.BLOCKED, [command])
+                self.assertEqual("docker_host", blocker["resource"])
+
     def test_nothing_else_is_a_docker_blocker(self) -> None:
         implemented = 'ORCHESTRATION_RESULT\n{"status": "IMPLEMENTED"}\nEND_ORCHESTRATION_RESULT'
         for spoken, denied in ((implemented, ["docker compose up"]),
-                               (self.BLOCKED, ["docker run x", "python3 x"]),
-                               (self.BLOCKED, ["docker compose run --rm app pytest",
-                                               "docker compose exec api sh",
-                                               "rtk docker compose cp a b",
-                                               "docker compose --verbose up",
-                                               "docker compose up > /etc/x"]),
+                               (self.BLOCKED, ["python3 x", "docker-compose up"]),
+                               (self.BLOCKED, ["docker compose up > /etc/x"]),
                                (self.BLOCKED, None), (self.BLOCKED, "docker compose up"),
                                ("no block", ["docker compose up"])):
             self.assertIsNone(recovery.denied_docker_blocker(spoken, denied))
