@@ -39,7 +39,7 @@
     },
     "capability-parity-documentation": {
       "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md"],
-      "tests": ["test_capability_parity_audit.CapabilityParityAuditTests"]
+      "tests": ["test_capability_parity_audit"]
     },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],
