@@ -32,6 +32,19 @@
 4. Stable, generic programming knowledge → model knowledge is acceptable.
 5. If a preferred tool is unavailable → use the next best source and continue; never block the task.
 
+## Core principle: agent capability parity
+
+Code Cycle Toolkit is an orchestrator, not an additional permission authority. This rule is mandatory for every new implementation and every review (issue #450).
+
+- Any operation that the underlying agent can run directly in the same environment, with the same credentials and permissions, must also be executable through the toolkit.
+- The toolkit may explain a risk and ask for explicit consent. Once the user authorizes the operation, it adds no further veto.
+- A toolkit-only policy never turns an executable operation into `BLOCKED`, `HUMAN_INTERVENTION` or `not_verified`, and never skips or downgrades an executable check because the toolkit does not recognize its command.
+- Permissions, decisions, commands and outcomes are recorded without changing what the agent can do. Report a real limit of the agent, the operating system, the provider or the infrastructure, and look for an alternative; the user's consent does not remove a real limit or an authorization boundary the user defined.
+- The same rule applies to Claude, Codex and any future agent, according to what each can really do.
+- A review treats a new toolkit-only veto as a finding.
+
+Acceptance rule: if an operation works when requested directly from the same agent in the same environment, Code Cycle Toolkit must not be the reason it fails.
+
 ## Documentation
 
 - A change that alters visible behaviour, a command, a stored schema or a configuration key updates the page in `docs/` that owns that concept in the same pull request. `README.md` only changes when a skill or an entry point is added or removed; otherwise it links.
