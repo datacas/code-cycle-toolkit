@@ -7,6 +7,7 @@ called absent, and a read failure is never read as an absence.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 import sys
@@ -170,11 +171,11 @@ class SchemaCompatibilityTests(unittest.TestCase):
             self.assertEqual(("published", "9"), (old["state"], old["comment_id"]))
             store.settle_publication("old-1", REPO, REQUEST, "review", "failed", 3)
             self.assertEqual("failed", publication(store, "old-1")["state"])
-            connection = sqlite3.connect(path)
-            self.addCleanup(connection.close)
-            indexes = [row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='cycle_publications'")]
+            # Close before the directory is removed: Windows cannot delete an open file.
+            with contextlib.closing(sqlite3.connect(path)) as connection:
+                indexes = [row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name='cycle_publications'")]
             self.assertIn("cycle_publications_pending", indexes)
 
     def test_an_outbox_reader_of_the_earlier_states_still_works(self) -> None:
@@ -187,9 +188,8 @@ class SchemaCompatibilityTests(unittest.TestCase):
             # The earlier reader: rows of ten columns, `pending` only.
             self.assertEqual(["attempt-a"], [item["attempt_id"] for item in
                                              store.pending_publications(REPO, REQUEST, "review")])
-            connection = sqlite3.connect(path)
-            self.addCleanup(connection.close)
-            row = connection.execute("SELECT * FROM cycle_publications").fetchone()
+            with contextlib.closing(sqlite3.connect(path)) as connection:
+                row = connection.execute("SELECT * FROM cycle_publications").fetchone()
             self.assertEqual(10, len(row))
             self.assertEqual(29, tm.SCHEMA_VERSION)
 
