@@ -505,6 +505,12 @@ part of the identity). Git remote includes are switched off for it. An OCI
 remote `include` would still be fetched by `docker compose config`; a
 configuration that needs one is resolved with the user's network access.
 Interpolated environment values are replaced by `<env:NAME>` in the warnings.
+Nothing is resolved without `docker_host`, even when consents are stored: the
+socket question comes first. One hook invocation resolves a command once, and
+all its attempts share a 20-second budget, well under the hook's 60-second
+timeout; when the budget runs out the hook kills the resolver's process group
+and refuses the command. The hook is registered with `"onFailure": "block"`, so
+a hook that fails or times out refuses the call instead of letting it through.
 
 The question and the evidence list, as warnings, the host access of the
 effective configuration: bind mounts outside the checkout, `privileged`, host
@@ -529,11 +535,20 @@ A required configured check that is denied, skipped, still unanswered at the
 end, or accepted as unverified is recorded `unverified` with the decision, its
 identity and the SHA. It is never essential: the stage completes with the
 status the rest of its work earns, independent stages and CI continue, and CI
-never replaces the local check. The cycle ends `VERIFICATION_INCOMPLETE` with
-`stop_reason=verification_unverified` and names the pending check; authorize it
-with `--grant command_<sha256>=…` or revoke a denial with `consent_control.py`
-and resume. A denial that would break repository integrity, publication,
-credentials or security invariants may still stop the cycle.
+never replaces the local check. The runtime decides this from its own
+permission outcomes on every stage, review included, and not from what the
+agent reported: a refusal it reconciled, a Codex pre-dispatch answer, or a
+stored `deny` that matches the check's current identity, which covers an agent
+that obeys the denial and never tries the check again. The cycle ends
+`VERIFICATION_INCOMPLETE` with `stop_reason=verification_unverified` and names
+the pending check; any other final state names it too. To authorize it, revoke
+the denial with `consent_control.py revoke --repo owner/repo --executor
+claude|codex --grant-id command_<sha256>`, resume, and allow it when asked, or
+pass `--grant command_<sha256>=persistent`. A stage that reports `BLOCKED` over
+the declined check without a structured completion claim stays `BLOCKED`: the
+runtime never invents a verdict, and the stop names the check. A denial that
+would break repository integrity, publication, credentials or security
+invariants may still stop the cycle.
 
 ## Where verification runs
 

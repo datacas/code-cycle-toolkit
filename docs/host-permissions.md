@@ -88,7 +88,18 @@ The hook validates arguments, not only the program, and it is fail-closed:
   ([Declared Docker checks](verification.md#declared-docker-checks-and-declined-checks));
 - a command with `NAME=value` prefixes is never a table entry; consent can
   cover it, and the Git, GitHub and credential guards still apply to the
-  program after the prefixes (`GIT_*` prefixes on `git` are refused).
+  program after the prefixes. `GIT_*`, `GH_*`, `GITHUB_*`, `HOME`, `XDG_*`,
+  `PATH`, `LD_*`, `DYLD_*`, `EDITOR`, `VISUAL`, `PAGER`, `LESS*`, `BROWSER`,
+  `SSH_ASKPASS*` and `SSH_*COMMAND` prefixes on `git` or `gh`, in any letter
+  case, are refused: they redirect the program, or choose a program it starts,
+  where the guards cannot see it. A command whose program the runtime cannot
+  identify, after an append-style `NAME+=value` prefix, after a prefix before
+  `rtk`, or after a nested `rtk`, stays refused and is never a consent question.
+
+The hook is registered with `"onFailure": "block"` (Claude Code 2.1.295 or
+later). Without it a `PreToolUse` hook that fails or reaches its 60-second
+timeout lets the call through the normal permission flow; with it, a failed or
+cancelled hook refuses the call.
 
 `rtk …` and `rtk proxy …` forms are accepted only when RTK is installed, and
 are validated as the command they wrap.

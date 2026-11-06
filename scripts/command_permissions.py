@@ -11,7 +11,7 @@ from execution_plan import completion_statuses
 from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question,
                     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
 from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
-                               consent_role, split_environment)
+                               consent_role, split_environment, same_operation, configured_check_id)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -297,8 +297,10 @@ def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
     so the runtime asks before dispatch, with the same identity the Claude hook
     computes, and tells the agent each answer. It cannot limit the dispatch to
     the consented command or abort when the configuration changes mid-run;
-    `compose_drift` compares the digest afterwards.
+    `compose_drift` compares the digest afterwards. The runtime calls it only
+    once `docker_host` is granted, the condition for resolving a configuration.
     """
+    policy = replace(policy, docker=True)
     context: list[str] = []
     records: list[dict[str, Any]] = []
     for command in declared_compose_checks(policy):
@@ -307,7 +309,12 @@ def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
         except (ValueError, OSError, TypeError) as error:
             context.append(f"Declared Compose check `{command}` could not be identified ({error}). "
                            "Do not run it; record it unverified with that cause.")
-            records.append({"command": command, "answer": "unidentified", "error": str(error)})
+            try:
+                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
+            except ValueError:
+                check_id = None
+            records.append({"command": command, "answer": "unidentified", "error": str(error),
+                            **({"check": check_id} if check_id else {})})
             continue
         grant = make_grant(op, executor, broker.platform)
         broker.operations[grant.id] = grant
@@ -337,8 +344,10 @@ def compose_drift(records: list[dict[str, Any]], policy: Any, cwd: str | None) -
     Every consent becomes a permission outcome with its check, digest and
     warnings. For an allowed one the configuration is resolved again; a change
     is disclosed with both digests and a warning, and does not by itself
-    downgrade the check (#398).
+    downgrade the check (#398). The records exist only for a dispatch with
+    `docker_host` granted.
     """
+    policy = replace(policy, docker=True)
     outcomes = []
     for record in records:
         outcome = {"grant": record.get("grant"), "command": record["command"],
@@ -357,6 +366,62 @@ def compose_drift(records: list[dict[str, Any]], policy: Any, cwd: str | None) -
                                        "Codex run, or could no longer be resolved")
         outcomes.append(outcome)
     return outcomes
+
+
+def stored_check_denials(policy: Any, executor: str, platform: str, cwd: str | None,
+                         reported: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Configured checks this dispatch's stored decisions deny, as outcomes (#398).
+
+    A denied check is often never attempted again: the agent is told it was
+    denied and skips it, so no refusal is observed. The runtime still knows:
+    the exact identity of each configured command, recomputed now, matches a
+    stored `deny`. That, not what the agent reported, keeps it `unverified`.
+    """
+    if policy is None or not policy.command_permissions:
+        return []
+    seen = {item.get("check") for item in reported or () if isinstance(item, dict)}
+    outcomes = []
+    for command in dict.fromkeys(policy.verification_commands):
+        try:
+            op = operation("Bash", {"command": command}, policy, cwd)
+        except (ValueError, OSError, TypeError) as error:
+            # Its identity, and so any stored denial of it, cannot be read now;
+            # the hook refuses such a run too. It stays unverified, never passed.
+            try:
+                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
+            except ValueError:
+                check_id = None
+            if check_id and check_id not in seen:
+                outcomes.append({"grant": None, "command": command, "answer": "unidentified",
+                                 "essential": False, "checks": [], "check": check_id,
+                                 "error": str(error), "source": "identity unavailable"})
+                seen.add(check_id)
+            continue
+        if not op.get("check") or op["check"] in seen:
+            continue
+        if not any(same_operation(entry.get("operation"), op) and entry.get("decision") == "deny"
+                   for entry in policy.command_permissions):
+            continue
+        grant = make_grant(op, executor, platform)
+        compose = op.get("compose") if isinstance(op.get("compose"), dict) else None
+        outcomes.append({"grant": grant.id, "command": command, "answer": DENY,
+                         "essential": False, "checks": [], "check": op["check"],
+                         "source": "stored decision",
+                         **({"config_sha256": compose["config_sha256"],
+                             "warnings": list(compose.get("warnings") or [])} if compose else {})})
+        seen.add(op["check"])
+    return outcomes
+
+
+def add_stored_denials(spoken: str, policy: Any, executor: str, platform: str,
+                       cwd: str | None) -> str:
+    """`spoken` with an outcome for each configured check a stored decision denies."""
+    block = _result_block(spoken)
+    if block is None:
+        return spoken
+    reported = block[2].get("permission_outcomes")
+    return add_outcomes(spoken, stored_check_denials(
+        policy, executor, platform, cwd, reported if isinstance(reported, list) else None))
 
 
 def add_outcomes(spoken: str, outcomes: list[dict[str, Any]]) -> str:

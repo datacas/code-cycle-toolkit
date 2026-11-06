@@ -37,8 +37,10 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1706,10 +1708,16 @@ def hook_settings(hook_command: str, *, bash_only: bool = False) -> dict:
 
     `bash_only` is the minimal hook of a non-GitHub cycle: it validates Bash
     calls for the foreground rule and leaves file edits to the executor.
+
+    A `PreToolUse` hook that times out or fails lets the call continue by
+    default, so the hook is no gate unless `onFailure` is `block` (Claude Code
+    2.1.295 or later). The hook resolves Compose configurations on the host,
+    which an untrusted change can make slow (#398): its failure must refuse.
     """
     return {"hooks": {"PreToolUse": [{
         "matcher": "Bash" if bash_only else "|".join(["Bash", *FILE_EDIT_TOOLS]),
-        "hooks": [{"type": "command", "command": hook_command, "timeout": 60}],
+        "hooks": [{"type": "command", "command": hook_command, "timeout": HOOK_TIMEOUT_SECONDS,
+                   "onFailure": "block"}],
     }]}}
 
 
@@ -2081,6 +2089,15 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     deny rules are meant to stay in force as the first barrier. The hook only
     ever narrows.
     """
+    global _RESOLUTIONS
+    _RESOLUTIONS = {}
+    try:
+        return _hook_main(arguments, stdin, stdout)
+    finally:
+        _RESOLUTIONS = None
+
+
+def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     policy = None
@@ -2158,9 +2175,17 @@ def _journal_note(note: str | None) -> str:
 
 
 _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+#: `NAME+=value` is an assignment to the shell, never a program; the runtime
+#: does not normalize it, so a command that starts with one is not identified.
+_APPEND_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+=")
 #: Prefixes that redirect git or gh to another host, repository, token or
 #: configuration, which their guards cannot see (#398).
-_GUARD_DEFEATING_ENV = re.compile(r"(GIT_.*|GH_.*|GITHUB_.*|HOME|XDG_CONFIG_HOME)\Z")
+#: `PATH` and the loader variables choose which program runs as `git` or `gh`;
+#: editor, pager, browser and askpass variables name programs they start.
+#: Case-insensitive: Windows environment names are.
+_GUARD_DEFEATING_ENV = re.compile(
+    r"(GIT_.*|GH_.*|GITHUB_.*|HOME|XDG_.*|PATH|LD_.*|DYLD_.*|EDITOR|VISUAL|PAGER|LESS.*"
+    r"|BROWSER|SSH_ASKPASS.*|SSH_.*COMMAND)\Z", re.IGNORECASE)
 #: Prefixes the Compose resolver never receives: they would choose which
 #: program, library, plugin or Docker configuration the host-side hook runs.
 _RESOLVER_UNSAFE_ENV = re.compile(
@@ -2182,6 +2207,23 @@ def split_environment(words: list[Any]) -> tuple[list[Any], list[Any]]:
 
 def _program(word: str) -> str:
     return os.path.basename(word).removesuffix(".exe")
+
+
+def hidden_program(environment: list[Any], command_words: list[Any]) -> str | None:
+    """Why the program after the prefixes cannot be identified, if it cannot.
+
+    Both forms would hide the real program from its guards and from the
+    consent identity, so they are a real limit, never a consent question.
+    """
+    first = command_words[0] if command_words else None
+    if isinstance(first, str) and _APPEND_ASSIGNMENT.match(first):
+        return "an append-style NAME+=value prefix hides the program it applies to"
+    # Callers strip one leading `rtk` or `rtk proxy`; one still in the program
+    # position follows an environment prefix or another rtk.
+    if isinstance(first, str) and _program(first) == "rtk":
+        return ("an environment prefix before rtk hides the program it applies to" if environment
+                else "a nested rtk hides the program it applies to")
+    return None
 
 
 def consent_role(role: str | None) -> str | None:
@@ -2255,6 +2297,16 @@ def configured_check_id(words: list[str], policy: Any) -> str | None:
     return None
 
 
+#: Seconds Claude Code waits for the hook before cancelling it.
+HOOK_TIMEOUT_SECONDS = 60
+#: Seconds one hook invocation may spend resolving a Compose configuration, all
+#: attempts together; well under the hook timeout so the hook decides (#398).
+COMPOSE_RESOLUTION_BUDGET_SECONDS = 20
+#: Resolutions of the current hook invocation, or None outside the hook. The
+#: hook identifies one command several times; it resolves it once. The runtime
+#: never caches: it must see a configuration changed during a run.
+_RESOLUTIONS: dict[Any, Any] | None = None
+
 #: Effective Compose settings the consent question and the evidence disclose.
 _HOST_NAMESPACES = ("network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup")
 
@@ -2326,7 +2378,9 @@ def _location_free(text: str, config: dict[str, Any], cwd: str | None, root: Pat
     locations = []
     for path, marker in ((root, "<checkout>"), (tmpdir, "<tmpdir>")):
         if path:
-            locations += [(str(path), marker), (str(Path(path).resolve()), marker)]
+            for location in (str(path), str(Path(path).resolve())):
+                # In JSON a Windows path's backslashes are escaped.
+                locations += [(location, marker), (json.dumps(location)[1:-1], marker)]
     for location, marker in sorted(set(locations), key=lambda item: -len(item[0])):
         text = text.replace(location, marker)
     return text
@@ -2355,11 +2409,73 @@ def _resolve_compose(words: list[str], environment: dict[str, str], cwd: str | N
             if not _RESOLVER_UNSAFE_ENV.match(name)}
     base = ["docker", "compose", *words[2:globals_end], "config"]
     env = {**os.environ, **safe, "COMPOSE_EXPERIMENTAL_GIT_REMOTE": "false"}
-    for arguments in ([*base, "--format", "json"], base):
+    key = (tuple(base), cwd, tuple(sorted(safe.items())), str(root), tmpdir)
+    if _RESOLUTIONS is not None and key in _RESOLUTIONS:
+        cached = _RESOLUTIONS[key]
+        if isinstance(cached, PolicyError):
+            raise cached
+        return dict(cached)
+    try:
+        resolved = _resolve_within_budget(base, env, cwd, root, tmpdir)
+    except PolicyError as error:
+        if _RESOLUTIONS is not None:
+            _RESOLUTIONS[key] = error
+        raise
+    if _RESOLUTIONS is not None:
+        _RESOLUTIONS[key] = resolved
+    return dict(resolved)
+
+
+def _run_bounded(arguments: list[str], cwd: str | None, env: dict[str, str],
+                 timeout: float) -> subprocess.CompletedProcess:
+    """`subprocess.run`, killing the whole process group when time runs out.
+
+    `docker compose` runs as a CLI plugin, a child of `docker`: killing only
+    `docker` would leave the plugin holding the hook's pipes.
+    """
+    if os.name == "nt":
+        return subprocess.run(arguments, cwd=cwd or None, env=env, capture_output=True,
+                              text=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL)
+    process = subprocess.Popen(arguments, cwd=cwd or None, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+                               start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
         try:
-            completed = subprocess.run(arguments, cwd=cwd or None, env=env, capture_output=True,
-                                       text=True, timeout=60, check=False)
-        except (OSError, subprocess.SubprocessError) as error:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        raise
+    return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+
+
+def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None,
+                           root: Path | None, tmpdir: str | None) -> dict[str, Any]:
+    """Both resolution attempts share one budget well under the hook's timeout.
+
+    A hook cancelled by its timeout decides nothing, so the budget expiring is
+    an explicit refusal instead (#398): an untrusted Compose file that makes
+    `config` slow cannot let its run through unidentified.
+    """
+    deadline = time.monotonic() + COMPOSE_RESOLUTION_BUDGET_SECONDS
+    completed = None
+    for arguments in ([*base, "--format", "json"], base):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            completed = COMPOSE_RUN(arguments, cwd, env, remaining)
+        except subprocess.TimeoutExpired as error:
+            raise PolicyError("the effective Compose configuration could not be resolved within "
+                              f"{COMPOSE_RESOLUTION_BUDGET_SECONDS} seconds; the runtime cannot "
+                              "identify this run and refuses it") from error
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            # ValueError includes undecodable output: still a refusal, cached once.
             raise PolicyError("the effective Compose configuration could not be resolved "
                               f"({type(error).__name__}); the runtime cannot identify this run") from error
         if completed.returncode != 0:
@@ -2378,6 +2494,10 @@ def _resolve_compose(words: list[str], environment: dict[str, str], cwd: str | N
         return {"config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
                 "warnings": ["the effective configuration is not JSON; its mounts and "
                              "privileges were not inspected"]}
+    if completed is None:
+        raise PolicyError("the effective Compose configuration could not be resolved within "
+                          f"{COMPOSE_RESOLUTION_BUDGET_SECONDS} seconds; the runtime cannot "
+                          "identify this run and refuses it")
     raise PolicyError("the effective Compose configuration could not be resolved "
                       f"(docker compose config exited {completed.returncode}); "
                       "the runtime cannot identify this run")
@@ -2385,6 +2505,8 @@ def _resolve_compose(words: list[str], environment: dict[str, str], cwd: str | N
 
 #: Replaced in tests; the hook calls it to identify a Compose run.
 COMPOSE_RESOLVER = _resolve_compose
+#: Replaced in tests; runs one `docker compose config` attempt with a timeout.
+COMPOSE_RUN = _run_bounded
 
 
 def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None) -> dict[str, Any]:
@@ -2411,6 +2533,9 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         environment, command_words = split_environment(words)
         if not command_words:
             raise ValueError("an environment prefix needs a command")
+        hidden = hidden_program(environment, command_words)
+        if hidden:
+            raise ValueError(hidden)
         docker = _program(command_words[0]) == "docker"
         root = checkout_root(cwd)
         normalized: list[Any] = []
@@ -2446,7 +2571,10 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
                 pattern["cwd"] = Path(cwd).resolve().relative_to(root).as_posix() or "."
             else:
                 pattern["cwd"] = str(Path(cwd).resolve()) if cwd else None
-            if command_words[1:2] == ["compose"]:
+            # Without the socket grant nothing resolves the configuration on
+            # the host: the socket question comes first (#398), and an
+            # identity without a digest matches no stored Compose consent.
+            if command_words[1:2] == ["compose"] and getattr(policy, "docker", False):
                 values = dict(assignment.partition("=")[::2] for assignment in environment)
                 extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
         check_id = configured_check_id(words, policy)
@@ -2505,10 +2633,13 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             environment, words = split_environment(words)
             if not words:
                 return "an environment prefix needs a command"
+            hidden = hidden_program(environment, words)
+            if hidden:
+                return hidden
             if _program(words[0]) in {"git", "gh"} and any(
                     _GUARD_DEFEATING_ENV.match(assignment.partition("=")[0]) for assignment in environment):
-                return ("GIT_*, GH_*, GITHUB_*, HOME and XDG_CONFIG_HOME prefixes on git or gh "
-                        "defeat their argument guards")
+                return ("GIT_*, GH_*, GITHUB_*, HOME, XDG_*, PATH, LD_*, DYLD_*, editor, pager, "
+                        "browser and SSH program prefixes on git or gh defeat their argument guards")
             program = os.path.basename(words[0]).removesuffix(".exe")
             # Re-run all Git/GitHub argument, publication and workspace guards.
             # A grant is not a different stage role or a different PR context.

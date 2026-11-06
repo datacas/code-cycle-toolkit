@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -53,11 +54,22 @@ def fake_compose(arguments, cwd=None, env=None, **_kwargs):
         path = Path(cwd or ".") / name
         if not path.exists():
             return subprocess.CompletedProcess(arguments, 14, "", f"open {path}: no such file")
-        text = path.read_text(encoding="utf-8").replace("SRC", str(Path(cwd).resolve()))
+        # JSON-escaped, so a Windows path's backslashes stay valid JSON.
+        text = path.read_text(encoding="utf-8").replace("SRC", json.dumps(str(Path(cwd or ".").resolve()))[1:-1])
         config.update(json.loads(text))
     config["x-resolved"] = {"profiles": profiles,
                             "env": {key: (env or {}).get(key) for key in ("APP_ENV", "COMPOSE_PROFILES")}}
     return subprocess.CompletedProcess(arguments, 0, json.dumps(config), "")
+
+
+def fake_run(arguments, cwd, env, timeout):
+    """`stage_permissions.COMPOSE_RUN`, answered by `fake_compose`."""
+    return fake_compose(arguments, cwd=cwd, env=env)
+
+
+def posix(path) -> str:
+    """A path as a command word: shell words treat backslashes as escapes."""
+    return Path(path).as_posix()
 
 
 class ComposeConsentCase(unittest.TestCase):
@@ -68,7 +80,7 @@ class ComposeConsentCase(unittest.TestCase):
         self.store = grants.ConsentStore(self.root / "consents.json")
         self.clone = self.make_clone("clone-a")
         self.tmpdir = self.make_tmpdir()
-        patcher = patch.object(sp.subprocess, "run", side_effect=fake_compose)
+        patcher = patch.object(sp, "COMPOSE_RUN", side_effect=fake_run)
         self.compose = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -210,8 +222,9 @@ class IdentityTests(ComposeConsentCase):
                          "docker compose --file={clone}/docker-compose-local.yml run --rm backend-test",
                          "DOCKER_CONFIG={tmp}/docker docker compose -f docker-compose-local.yml run backend-test"):
             with self.subTest(template=template):
-                first = op(self.clone, self.tmpdir, template.format(clone=self.clone, tmp=self.tmpdir))
-                second = op(clone_b, tmp_b, template.format(clone=clone_b, tmp=tmp_b))
+                first = op(self.clone, self.tmpdir, template.format(clone=posix(self.clone),
+                                                                    tmp=posix(self.tmpdir)))
+                second = op(clone_b, tmp_b, template.format(clone=posix(clone_b), tmp=posix(tmp_b)))
                 self.assertEqual(grants.identifier(first), grants.identifier(second))
         base = op(self.clone, self.tmpdir, CHECK)
         for prefix in ("DOCKER_HOST=tcp://evil:2375", "COMPOSE_FILE=other.yml", "LD_PRELOAD=/x.so"):
@@ -219,8 +232,8 @@ class IdentityTests(ComposeConsentCase):
                 self.assertNotEqual(base, op(self.clone, self.tmpdir, f"{prefix} {CHECK}"))
         # A pnpm check with a per-dispatch DOCKER_CONFIG (#439) matches across dispatches.
         pnpm = "DOCKER_CONFIG={tmp}/docker pnpm run test:unit"
-        self.assertEqual(op(self.clone, self.tmpdir, pnpm.format(tmp=self.tmpdir)),
-                         op(clone_b, tmp_b, pnpm.format(tmp=tmp_b)))
+        self.assertEqual(op(self.clone, self.tmpdir, pnpm.format(tmp=posix(self.tmpdir))),
+                         op(clone_b, tmp_b, pnpm.format(tmp=posix(tmp_b))))
 
     def test_ac9_ac11_a_changed_effective_configuration_asks_again(self):
         request, broker = self.request()
@@ -359,11 +372,11 @@ class IndirectAndGuardTests(ComposeConsentCase):
 
     def test_the_host_side_resolver_never_runs_what_the_command_chooses(self):
         # SEC-1: the hook resolves outside the sandbox and before consent.
-        command = (f"PATH={self.clone}/bin LD_PRELOAD={self.clone}/x.so DOCKER_CONFIG={self.clone}/d "
-                   f"APP_ENV=staging {self.clone}/bin/docker compose -f docker-compose-local.yml run backend-test")
+        clone = posix(self.clone)
+        command = (f"PATH={clone}/bin LD_PRELOAD={clone}/x.so DOCKER_CONFIG={clone}/d "
+                   f"APP_ENV=staging {clone}/bin/docker compose -f docker-compose-local.yml run backend-test")
         sp.operation("Bash", {"command": command}, self.policy(), str(self.clone))
-        arguments = self.compose.call_args.args[0]
-        env = self.compose.call_args.kwargs["env"]
+        arguments, _cwd, env, _timeout = self.compose.call_args.args
         self.assertEqual("docker", arguments[0])
         self.assertEqual(os.environ.get("PATH"), env.get("PATH"))
         self.assertEqual((os.environ.get("LD_PRELOAD"), os.environ.get("DOCKER_CONFIG")),
@@ -386,6 +399,133 @@ class IndirectAndGuardTests(ComposeConsentCase):
                         "HOME=/tmp/fake git status", "GITHUB_TOKEN=x gh pr view 1"):
             with self.subTest(command=command):
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+
+
+class HookBudgetTests(ComposeConsentCase):
+    """REV-001: a slow resolution refuses; the hook never times out undecided."""
+
+    def test_the_hook_blocks_the_call_when_it_fails_or_times_out(self):
+        [entry] = sp.hook_settings("hook")["hooks"]["PreToolUse"]
+        hook = entry["hooks"][0]
+        self.assertEqual("block", hook["onFailure"])
+        self.assertLess(sp.COMPOSE_RESOLUTION_BUDGET_SECONDS, hook["timeout"])
+
+    def test_an_exceeded_budget_is_an_explicit_deny(self):
+        request, broker = self.request()
+        self.answer(request, broker)
+        self.compose.side_effect = subprocess.TimeoutExpired(["docker"], 1)
+        decision = sp.check(CHECK, replace(self.policy(), command_permissions=broker.command_entries(
+            "claude", "review")), cwd=str(self.clone))
+        self.assertFalse(decision.allowed)
+        path = self.root / "policy.json"
+        path.write_text(replace(self.policy(), command_permissions=broker.command_entries(
+            "claude", "review")).to_json(), encoding="utf-8")
+        output = io.StringIO()
+        sp.hook_main([str(path)], io.StringIO(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": CHECK}, "cwd": str(self.clone)})), output)
+        reason = json.loads(output.getvalue())["hookSpecificOutput"]
+        self.assertEqual("deny", reason["permissionDecision"])
+
+    def test_attempts_share_one_budget_and_one_hook_resolves_once(self):
+        timeouts = []
+
+        def first_fails(arguments, cwd, env, timeout):
+            timeouts.append(timeout)
+            if "--format" in arguments:
+                return subprocess.CompletedProcess(arguments, 1, "", "unknown flag")
+            return fake_run([*arguments, "--format", "json"], cwd, env, timeout)
+
+        self.compose.side_effect = first_fails
+        request, broker = self.request()
+        self.assertIsNotNone(request)
+        self.assertEqual(2, len(timeouts))
+        self.assertLessEqual(timeouts[1], timeouts[0])
+        self.assertLessEqual(timeouts[0], sp.COMPOSE_RESOLUTION_BUDGET_SECONDS)
+        # One hook invocation identifies the command several times, resolves it once.
+        self.answer(request, broker, "deny")
+        timeouts.clear()
+        path = self.root / "policy.json"
+        path.write_text(replace(self.policy(), command_permissions=broker.command_entries(
+            "claude", "review")).to_json(), encoding="utf-8")
+        sp.hook_main([str(path)], io.StringIO(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": CHECK}, "cwd": str(self.clone)})), io.StringIO())
+        self.assertEqual(2, len(timeouts))
+        self.assertIsNone(sp._RESOLUTIONS)
+
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX")
+    def test_a_stalled_resolver_is_killed_with_its_children(self):
+        sleeper = [sys.executable, "-c",
+                   "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+                   "'import time; time.sleep(30)']); time.sleep(30)"]
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            sp._run_bounded(sleeper, None, dict(os.environ), 0.5)
+        self.assertLess(time.monotonic() - started, 10)
+
+
+class SocketFirstTests(ComposeConsentCase):
+    def test_rev003_no_host_resolution_without_the_socket_even_with_stored_consents(self):
+        request, broker = self.request()
+        self.answer(request, broker)
+        self.compose.reset_mock()
+        ungranted = replace(self.policy(docker=False),
+                            command_permissions=broker.command_entries("claude", "review"))
+        self.assertTrue(sp.check(CHECK, ungranted, cwd=str(self.clone)).needs_docker)
+        evil = "docker compose -f evil.yml run x"
+        self.assertTrue(sp.check(evil, ungranted, cwd=str(self.clone)).needs_docker)
+        self.assertEqual(0, self.compose.call_count)
+
+    def test_rev005_path_and_loader_prefixes_never_hide_git_guards(self):
+        policy = self.policy("implement", base_branch="main")
+        for command in ("PATH=/tmp/bin git status", "LD_PRELOAD=/tmp/x.so git status",
+                        "DYLD_INSERT_LIBRARIES=/tmp/x.dylib gh pr view 1"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+        self.assertIsNone(sp.protected_reason("Bash", {"command": "FOO=1 git status"}, policy,
+                                              str(self.clone)))
+
+    def test_program_hiding_prefixes_are_a_real_limit_not_a_consent(self):
+        policy = self.policy("implement", base_branch="main")
+        for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK,
+                        "GIT_DIR=/x rtk git push --force origin main", "rtk rtk git push --force origin main",
+                        "EDITOR=/tmp/x git commit", "git_dir=/x git status", "BROWSER=/tmp/x gh pr view 1 --web"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertFalse(sp.check(command, self.policy(), cwd=str(self.clone)).allowed)
+        for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK,
+                        "GIT_DIR=/x rtk git status"):
+            with self.subTest(question=command):
+                self.assertIsNone(self.request(command)[0])
+
+
+class StoredDenialTests(ComposeConsentCase):
+    def test_a_denied_check_the_agent_skipped_is_still_declined(self):
+        request, broker = self.request()
+        self.answer(request, broker, "deny")
+        policy = replace(self.policy(), command_permissions=broker.command_entries("claude", "review"))
+        spoken = 'ORCHESTRATION_RESULT\n{"status": "APPROVED"}\nEND_ORCHESTRATION_RESULT'
+        added = cp.add_stored_denials(spoken, policy, "claude", "linux", str(self.clone))
+        [outcome] = cp._result_block(added)[2]["permission_outcomes"]
+        self.assertEqual(("deny", "verify:" + CHECK, request["config_sha256"]),
+                         (outcome["answer"], outcome["check"], outcome["config_sha256"]))
+        # Not twice when the refusal was already reconciled, and nothing for an allow.
+        self.assertEqual(added, cp.add_stored_denials(added, policy, "claude", "linux", str(self.clone)))
+        allowed, allow_broker = self.request(broker=self.broker(repo="owner/allowed"))
+        self.answer(allowed, allow_broker)
+        allow_policy = replace(self.policy(), command_permissions=allow_broker.command_entries(
+            "claude", "review"))
+        self.assertEqual(spoken, cp.add_stored_denials(spoken, allow_policy, "claude", "linux",
+                                                       str(self.clone)))
+
+    def test_a_check_whose_identity_cannot_be_read_stays_unverified(self):
+        request, broker = self.request()
+        self.answer(request, broker, "deny")
+        policy = replace(self.policy(), command_permissions=broker.command_entries("claude", "review"))
+        (self.clone / "docker-compose-local.yml").unlink()
+        spoken = 'ORCHESTRATION_RESULT\n{"status": "APPROVED"}\nEND_ORCHESTRATION_RESULT'
+        added = cp.add_stored_denials(spoken, policy, "claude", "linux", str(self.clone))
+        [outcome] = cp._result_block(added)[2]["permission_outcomes"]
+        self.assertEqual(("unidentified", "verify:" + CHECK), (outcome["answer"], outcome["check"]))
 
 
 class CodexTests(ComposeConsentCase):
@@ -421,6 +561,14 @@ class CodexTests(ComposeConsentCase):
         self.assertIn("awaits the user's consent", context)
         self.assertEqual(1, len(pending.pending))
 
+    def test_ac14_an_unidentified_codex_check_still_names_its_check(self):
+        (self.clone / "docker-compose-local.yml").unlink()
+        _, records = cp.codex_compose_consent(self.policy(), self.broker(), "codex", "review",
+                                              str(self.clone))
+        self.assertEqual(("unidentified", "verify:" + CHECK), (records[0]["answer"], records[0]["check"]))
+        [outcome] = cp.compose_drift(records, self.policy(), str(self.clone))
+        self.assertEqual("verify:" + CHECK, outcome["check"])
+
     def test_outcomes_are_added_to_the_result(self):
         spoken = 'ORCHESTRATION_RESULT\n{"status": "REVIEW_PASSED_AWAITING_CI"}\nEND_ORCHESTRATION_RESULT'
         added = cp.add_outcomes(spoken, [{"grant": "g", "command": CHECK}])
@@ -434,24 +582,58 @@ import run_cycle as rc  # noqa: E402
 
 
 class ComposeReviewer(Talker):
-    """A Claude reviewer whose configured Compose check the hook refuses until consented."""
+    """A Claude reviewer whose configured Compose check the hook refuses until consented.
 
-    def __init__(self):
-        super().__init__("claude")
+    `retries` False is an agent that obeys a denial and never tries the check again.
+    """
+
+    def __init__(self, name="claude", status="APPROVED", retries=True):
+        super().__init__(name)
         self.reviews = 0
+        self.ran = 0
+        self.status = status
+        self.retries = retries
+        self.kwargs = []
+        self.reasons = []
 
     def dispatch(self, target, task, **kwargs):
         self.dispatched.append(task)
+        self.kwargs.append(kwargs)
         policy = kwargs.get("command_policy")
         if policy is None or policy.role == "implement":
-            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
+            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, self.name, target,
                 start_state="started", process_exited=True, agent_output=block("IMPLEMENTED"))
         self.reviews += 1
-        granted = replace(policy, docker="docker_host" in (kwargs.get("sandbox_grants") or ()))
-        allowed = sp.check(CHECK, granted, cwd=kwargs.get("cwd")).allowed
-        return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
-            start_state="started", process_exited=True, agent_output=block("APPROVED"),
+        # The dispatcher already set `docker` from the docker_host grant.
+        granted = policy
+        if self.name == "codex" or (not self.retries and self.reviews > 1):
+            # No hook on Codex; an obedient agent skips a denied check.
+            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                start_state="started", process_exited=True, agent_output=block(self.status))
+        decision = sp.check(CHECK, granted, cwd=kwargs.get("cwd"))
+        self.reasons.append(decision.reason)
+        allowed = decision.allowed
+        self.ran += allowed
+        return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, self.name, target,
+            start_state="started", process_exited=True, agent_output=block(self.status),
             artifacts={} if allowed else {"permission_denials": [CHECK]})
+
+
+class FakeChecks:
+    """A code host whose only required check passed on every head."""
+
+    def __init__(self):
+        self.read = []
+
+    def pull(self, repo, change_request_id):
+        return rc.ci_gate.PullState("OPEN", "a" * 40, "main", "topic", True, "clean")
+
+    def required(self, repo, base_ref):
+        return (rc.ci_gate.RequiredCheck("unit"),)
+
+    def checks(self, repo, sha):
+        self.read.append(sha)
+        return (rc.ci_gate.Check("unit", "github-actions", "success"),)
 
 
 class ReviewCycleTests(RunCycleTestCase):
@@ -468,18 +650,27 @@ class ReviewCycleTests(RunCycleTestCase):
         snapshot.start()
         self.addCleanup(snapshot.stop)
 
-    def run_review(self, prompt=None):
-        claude = ComposeReviewer()
+    def run_review(self, prompt=None, reviewer=None, **options):
+        claude = reviewer or ComposeReviewer()
         broker = grants.ConsentBroker("owner/api", platform="linux", prompt=prompt,
                                       store=grants.ConsentStore(self.home / "consents.json"),
                                       preauthorized=frozenset({"docker_host"}))
+        executor = claude.name
         profiles = router.load_profiles({"code_cycle": {"profiles": {
-            "deep_coder": {"primary": "claude:anthropic/claude-opus-5-5 high"},
-            "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}}}})
+            "deep_coder": {"primary": f"{executor}:anthropic/claude-opus-5-5 high"},
+            "reviewer": {"primary": f"{executor}:anthropic/claude-sonnet-5 high"}}}})
         report = rc.run_cycle("owner/api", "398", router.TaskSignals(), self.store,
-            registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
-            profiles=profiles, issue_review="off", consent=broker, allowed_verify_commands=(CHECK,))
+            registry=ex.Registry([claude]), availability={executor: ex.Availability.READY},
+            profiles=profiles, issue_review="off", consent=broker, allowed_verify_commands=(CHECK,),
+            **options)
         return report, claude, broker
+
+    def assert_declined(self, report):
+        self.assertEqual("VERIFICATION_INCOMPLETE", report.status, report.stopped_because)
+        self.assertEqual("verification_unverified", report.stop_reason)
+        self.assertIn("verify:" + CHECK, report.stopped_because)
+        self.assertIn("consent_control.py revoke", report.stopped_because)
+        self.assertTrue(any(item["check"] == "verify:" + CHECK for item in report.pending_verification))
 
     def test_ac1_unanswered_review_check_is_a_permission_question(self):
         report, claude, _ = self.run_review()
@@ -491,21 +682,122 @@ class ReviewCycleTests(RunCycleTestCase):
 
     def test_ac4_a_denied_review_check_never_stops_with_human_intervention(self):
         report, claude, _ = self.run_review(prompt=lambda _question: "deny")
-        self.assertNotEqual("HUMAN_INTERVENTION", report.stop_reason)
-        self.assertNotEqual("permission_required", report.stop_reason)
-        self.assertIn(report.status, {rc.APPROVED_END, "VERIFICATION_INCOMPLETE"}, report.stopped_because)
+        self.assert_declined(report)
         self.assertEqual(2, claude.reviews)  # refused, denied, rerun without it
-        # The persisted denial is not asked again in a later cycle.
+        # The persisted denial is not asked again in a later cycle, and still counts.
         later, _, _ = self.run_review(prompt=lambda _question: self.fail("asked again after a denial"))
-        self.assertNotEqual("HUMAN_INTERVENTION", later.stop_reason)
+        self.assert_declined(later)
+
+    def test_ac4_a_denied_check_the_agent_skips_still_ends_verification_incomplete(self):
+        report, claude, _ = self.run_review(prompt=lambda _question: "deny",
+                                            reviewer=ComposeReviewer(retries=False))
+        self.assert_declined(report)
+        later, _, _ = self.run_review(prompt=lambda _question: self.fail("asked again"),
+                                      reviewer=ComposeReviewer(retries=False))
+        # The skipping agent never retried, yet the stored denial is observed.
+        self.assert_declined(later)
+
+    def test_ac4_a_review_blocked_over_the_declined_check_names_it(self):
+        report, _, _ = self.run_review(prompt=lambda _question: "deny",
+                                       reviewer=ComposeReviewer(status="BLOCKED"))
+        self.assertNotEqual(rc.APPROVED_END, report.status)
+        self.assertNotEqual("HUMAN_INTERVENTION", report.stop_reason)
+        self.assertIn("verify:" + CHECK, report.stopped_because)
+        self.assertIn("consent_control.py revoke", report.stopped_because)
+
+    def test_ac4_ac7_authorize_after_a_denial_and_resume(self):
+        report, _, broker = self.run_review(prompt=lambda _question: "deny")
+        self.assert_declined(report)
+        [entry] = [item for item in broker.store.list("owner/api") if item["status"] == "DENIED"]
+        self.assertIn(entry["grant"], report.stopped_because)
+        # What `consent_control.py revoke --grant-id <id>` does.
+        target = grants.from_entry(entry)
+        self.assertTrue(broker.store.revoke("owner/api", target, target.scope_for("claude", "linux")))
+        asked = []
+        resumed, claude, _ = self.run_review(prompt=lambda question: asked.append(question) or "persistent")
+        self.assertEqual(rc.APPROVED_END, resumed.status, resumed.stopped_because)
+        self.assertEqual(1, claude.ran, (claude.reviews, len(asked), claude.reasons,
+                                         [e["status"] for e in broker.store.list("owner/api")]))
+
+    def test_ac10_ci_runs_after_a_denial_and_never_replaces_the_local_check(self):
+        import review_contract as contract
+        store = self.store
+
+        class Remote:
+            """The trusted receipt each review the runtime recorded would publish."""
+
+            def probe(self, *_):
+                return None
+
+            def comments(self, repo_id, *_args, **_kwargs):
+                rows = store.rows(repo_id)
+                evidence = []
+                for dispatch in rows:
+                    payload = dispatch["payload"]
+                    if payload.get("record_kind") != "dispatch" or dispatch["role"] != "review":
+                        continue
+                    verdict = next((row for row in rows if row["role"] == "review"
+                                    and row["payload"].get("record_kind") == "verdict"
+                                    and row["payload"].get("stage_seq") == payload.get("stage_seq")), None)
+                    if verdict is None:
+                        continue
+                    value = {"schema": 2, "repo": repo_id, "change_request_id": "4", "stage": "review",
+                             "attempt_id": payload.get("dispatch_attempt_id"), "head_sha": "a" * 40,
+                             "status": verdict["status"], "finding_outcomes": []}
+                    evidence.append(contract.ProviderComment(
+                        author="reviewer", id=str(dispatch["id"]),
+                        body="<!-- code-cycle-stage " + json.dumps(value) + " -->"))
+                return evidence
+
+        checks = FakeChecks()
+        reviewer = ComposeReviewer()
+        reviewer.status = "APPROVED"
+        original = reviewer.dispatch
+
+        def dispatch(target, task, **kwargs):
+            result = original(target, task, **kwargs)
+            return replace(result, agent_output=block(
+                "APPROVED", head_sha="a" * 40, reviewed_head_sha="a" * 40,
+                blocking_findings=[], findings=[]))
+
+        reviewer.dispatch = dispatch
+        report, _, _ = self.run_review(
+            prompt=lambda _question: "deny", reviewer=reviewer, start_from="review",
+            change_request_id="4", history_remote=Remote(), trusted_authors=("reviewer",),
+            comment_reader=lambda *_: [], ci_checks=checks, ci_policy="parallel", code_host="github",
+            ci_timeout=1, ci_poll_interval=1)
+        self.assertIn("a" * 40, checks.read, report.explain())
+        self.assert_declined(report)
+
+    def test_ac14_codex_wiring_asks_before_dispatch_and_records_the_denial(self):
+        asked = []
+        report, codex, _ = self.run_review(prompt=lambda question: asked.append(question) or "deny",
+                                           reviewer=ComposeReviewer("codex"))
+        # The implement and review roles each own their decision; none is asked twice.
+        self.assertEqual(2, len(asked))
+        self.assertEqual(len(asked), len({question["prompt"] for question in asked}))
+        review_tasks = [task for task, kwargs in zip(codex.dispatched, codex.kwargs)
+                        if kwargs.get("command_policy") is not None
+                        and kwargs["command_policy"].role != "implement"]
+        self.assertTrue(any("not essential" in task for task in review_tasks))
+        self.assert_declined(report)
+
+    def test_ac14_codex_wiring_allows_and_reuses(self):
+        report, codex, _ = self.run_review(prompt=lambda _question: "persistent",
+                                           reviewer=ComposeReviewer("codex"))
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertTrue(any(f"exactly as `{CHECK}`" in task for task in codex.dispatched))
+        later, _, _ = self.run_review(prompt=lambda _question: self.fail("asked twice"),
+                                      reviewer=ComposeReviewer("codex"))
+        self.assertEqual(rc.APPROVED_END, later.status, later.stopped_because)
 
     def test_ac3_an_allowed_review_check_is_reused_by_the_next_cycle(self):
         report, claude, _ = self.run_review(prompt=lambda _question: "persistent")
         self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
-        self.assertEqual(2, claude.reviews)  # refused, answered, rerun allowed
+        self.assertEqual((2, 1), (claude.reviews, claude.ran))  # refused, answered, rerun allowed
         later, claude, _ = self.run_review(prompt=lambda _question: self.fail("asked twice"))
         self.assertEqual(rc.APPROVED_END, later.status, later.stopped_because)
-        self.assertEqual(1, claude.reviews)
+        self.assertEqual((1, 1), (claude.reviews, claude.ran))
 
 
 if __name__ == "__main__":

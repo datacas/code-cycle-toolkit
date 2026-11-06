@@ -1140,6 +1140,12 @@ class CycleRecorder:
                        and refused["resource"] not in self.consent.granted_ids)
                 if (essential or ask) and command_blocker is None:
                     command_blocker = refused
+            if isinstance(result.agent_output, str) and result.agent_output:
+                # A denied check the agent skipped is still declined (#398).
+                from command_permissions import add_stored_denials
+                result = replace(result, agent_output=add_stored_denials(
+                    result.agent_output, command_policy, attempt.target.executor,
+                    self.consent.platform, run.dispatch_kwargs.get("cwd")))
         blocker = command_blocker or (observed_sandbox_blocker(result.agent_output,
                                                                result.artifacts.get("sandbox_denials"))
                                       or sandbox_blocker(result.agent_output)
