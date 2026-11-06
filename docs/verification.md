@@ -238,10 +238,21 @@ top-level `tests.evidence` list. This is separate from the unchanged code-host
 
 `cause` is omitted or text. A null cause is normalized to empty text, and null
 `attempts` or `evidence` is normalized to an empty array. A single object in
-`evidence` is normalized to a one-item array. Other entries in evidence and
-attempts must be JSON objects; malformed values are rejected with the field,
-received value or type, and expected format identified. A pass without evidence
-and an unverified result without a non-empty cause remain invalid.
+`evidence` is normalized to a one-item array. Other entries in `evidence` must
+be JSON objects; malformed values are rejected with the field, received value
+or type, and expected format identified. A pass without evidence and an
+unverified result without a non-empty cause remain invalid.
+
+`attempts` is accepted in the representations an agent reports by mistake, in
+the implement, review, resolve and rereview reports alike, and always ends as an
+array of objects. An integer count becomes an empty array, a string becomes one
+object whose `note` is the string, and a string entry of the array becomes an
+object whose `note` is the string. The original type and value stay on the same
+check as `attempts_normalized` (`{"type": "int|str|array", "value": ...}`); the
+key is absent when nothing was normalized. Any other shape (an object, a
+number that is not an integer, a boolean, an entry that is neither an object nor
+a string) is rejected with the field, the received type and the expected shape.
+`evidence` is not normalized this way.
 
 Freeze each check before execution. A result names the same check ID, command,
 executor/profile and context. The runtime supplies frozen check identities to
