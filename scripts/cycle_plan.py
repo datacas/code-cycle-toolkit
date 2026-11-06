@@ -269,7 +269,7 @@ class PlanRuntime:
             comments = self.remote.comments(self.repo_id, self.state.change_request_id)
             receipts = [receipt for comment in comments
                         if isinstance(comment.author, str) and comment.author.casefold() in trusted
-                        for receipt in self.api.stage_evidence(comment.body)
+                        for receipt in self.api.read_stage_evidence(comment.body)[0]
                         if receipt["repo"] == self.repo_id
                         and receipt["change_request_id"] == self.state.change_request_id]
         except (self.api.CycleDriverError, self.api.ContractError):
@@ -289,7 +289,8 @@ class PlanRuntime:
             "execution_profile": self.execution_plan.execution_profile,
             "security_required": security.selected,
             "verify_selected": self.execution_plan.stage("verify").selected})
-            + "\nInclude plan_id, revision and digest in the schema-2 stage receipt. "
+            + "\nInclude plan_id, revision and digest in the schema-2 stage receipt, "
+            "with exactly those key names (plan_revision and plan_digest are rejected). "
             "Required controls cannot be removed by an agent. "
             "When security_required, run cc-security-review and report security_audit_ran=true.\n")
         if self.execution_plan.execution_profile == "hotfix":

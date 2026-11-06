@@ -321,6 +321,27 @@ SHA, functional status, and explicit outcomes for this attempt:
 <!-- code-cycle-stage {"schema":2,"repo":"owner/repository","change_request_id":"123","stage":"resolve","attempt_id":"attempt-runtime-token","head_sha":"0123456789abcdef0123456789abcdef01234567","status":"RESOLVED","finding_outcomes":[{"id":"REV-001","status":"resolved"}]} -->
 ```
 
+When the runtime hands the stage an execution plan, the receipt also carries
+`plan_id`, `revision` and `digest`, with exactly those key names. A receipt that
+carries some of them, or invents others such as `plan_revision` and
+`plan_digest`, fails the contract and the rejection names the keys it lacks.
+`validate-triage-comment.py` checks every receipt of `$TMPDIR/pr-comment.md`
+before the stage publishes it.
+
+**Receipts are read one by one.** A summary comment accumulates the receipts of
+every attempt for the life of the change request, so one malformed receipt must
+not hide the valid ones next to it. The review gate (`receipt_problem`) reads each
+receipt on its own: a receipt that fails the contract is dropped and the cycle
+report carries a `warning: ignored a malformed stage receipt of attempt <id>` line
+naming its attempt and the reason. A malformed receipt of the attempt being gated,
+or one whose attempt cannot be read but which mentions it, still stops the cycle
+as `BLOCKED` with `its receipt cannot be read (<reason>)`, naming the offending
+key, because approval never rests on an unreadable receipt of its own attempt.
+Plan reuse and history recovery read the same way. `trusted_receipts`, which
+decides whether a clean review is reused and which review boundary a resolution
+starts from, still treats any unreadable trusted receipt as possibly the latest
+and reviews again.
+
 This is evidence, not a replacement for `ORCHESTRATION_RESULT`. Finding headers
 alone never establish a resolution claim. A receipt with `BLOCKED` or `FAILED`
 vetoes recovery. The GitHub runtime reads the open PR and its complete paginated
