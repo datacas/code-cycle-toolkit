@@ -92,52 +92,106 @@ class FindingCollisionError(ContractError):
     """One stable finding ID was reused for a different finding."""
 
 
+#: The keys an execution plan receipt carries, named exactly (#438). A stage
+#: that invents `plan_revision` / `plan_digest` is rejected, and the rejection
+#: names the keys it lacks.
+PLAN_RECEIPT_KEYS = ("plan_id", "revision", "digest")
+_ATTEMPT_ID_RE = re.compile(r'"attempt_id"\s*:\s*"([^"]*)"')
+
+
+@dataclass(frozen=True)
+class MalformedReceipt:
+    """A receipt that failed the contract, kept apart from the valid ones.
+
+    `attempt_id` is whatever the receipt claims for itself, `None` when it
+    cannot be read; the gate uses it to tell a bystander from its own attempt.
+    """
+
+    reason: str
+    attempt_id: str | None
+    raw: str
+
+
+def _check_receipt(value: object) -> dict:
+    if not isinstance(value, dict) or value.get("schema") != 2:
+        raise ContractError("stage evidence requires schema 2")
+    for key in ("repo", "change_request_id", "stage", "attempt_id", "head_sha", "status"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise ContractError(f"stage evidence requires {key}")
+    if not _FULL_SHA_RE.fullmatch(value["head_sha"]):
+        raise ContractError("stage evidence requires a full head SHA")
+    if set(PLAN_RECEIPT_KEYS) & value.keys():
+        missing = [key for key in PLAN_RECEIPT_KEYS if key not in value]
+        if missing:
+            raise ContractError(
+                "invalid execution plan receipt: missing " + ", ".join(missing)
+                + " (the keys are exactly " + ", ".join(PLAN_RECEIPT_KEYS) + ")")
+        for key, valid in (
+                ("plan_id", isinstance(value["plan_id"], str)
+                 and re.fullmatch(r"[A-Za-z0-9._:#/-]{1,200}", value["plan_id"]) is not None),
+                ("revision", type(value["revision"]) is int and value["revision"] >= 1),
+                ("digest", isinstance(value["digest"], str)
+                 and re.fullmatch(r"[a-f0-9]{64}", value["digest"]) is not None)):
+            if not valid:
+                raise ContractError(f"invalid execution plan receipt: invalid {key}")
+    outcomes = value.get("finding_outcomes", [])
+    if not isinstance(outcomes, list):
+        raise ContractError("stage evidence outcomes must be a list")
+    ids = set()
+    for item in outcomes:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or not re.fullmatch(r"REV-[0-9]{3,}", item["id"])
+                or item.get("status") not in FINDING_STATUSES
+                or item["id"] in ids):
+            raise ContractError("invalid or duplicate stage evidence outcome")
+        ids.add(item["id"])
+    provenance = value.get("provenance", RUNTIME_PROVENANCE)
+    if provenance not in RECEIPT_PROVENANCES:
+        raise ContractError(f"unknown stage evidence provenance {provenance!r}")
+    if provenance == MANUAL_PROVENANCE:
+        _check_manual(value)
+    return value
+
+
+def read_stage_evidence(text: str) -> tuple[list[dict], list[MalformedReceipt]]:
+    """Read every receipt of a comment on its own (#438).
+
+    A receipt that fails the contract is dropped from the first list and
+    reported in the second, so it never hides the valid receipts next to it.
+    A comment accumulates one receipt per attempt for the life of a change
+    request, so one bad receipt must not make the others unreadable.
+    """
+    receipts: list[dict] = []
+    problems: list[MalformedReceipt] = []
+    for raw in _STAGE_EVIDENCE_RE.findall(text):
+        value: object = None
+        try:
+            try:
+                value = json.loads(raw)
+            except ValueError as error:
+                raise ContractError("malformed stage evidence") from error
+            receipts.append(_check_receipt(value))
+        except ContractError as error:
+            attempt = value.get("attempt_id") if isinstance(value, dict) else None
+            if not isinstance(attempt, str) or not attempt:
+                found = _ATTEMPT_ID_RE.search(raw)
+                attempt = (found.group(1) or None) if found else None
+            problems.append(MalformedReceipt(str(error), attempt, raw))
+    return receipts, problems
+
+
 def stage_evidence(text: str) -> list[dict]:
     """Read schema-2 attempt receipts, never infer claims from finding headers.
 
     These receipts are provisional evidence, not structured stage verdicts.
     The caller must authenticate their author and match every scope reference.
+    It raises on the first malformed receipt; a caller that must keep reading
+    the valid receipts next to it uses `read_stage_evidence`.
     """
-    receipts = []
-    for raw in _STAGE_EVIDENCE_RE.findall(text):
-        try:
-            value = json.loads(raw)
-        except ValueError as error:
-            raise ContractError("malformed stage evidence") from error
-        if not isinstance(value, dict) or value.get("schema") != 2:
-            raise ContractError("stage evidence requires schema 2")
-        for key in ("repo", "change_request_id", "stage", "attempt_id", "head_sha", "status"):
-            if not isinstance(value.get(key), str) or not value[key]:
-                raise ContractError(f"stage evidence requires {key}")
-        if not _FULL_SHA_RE.fullmatch(value["head_sha"]):
-            raise ContractError("stage evidence requires a full head SHA")
-        plan_keys = {"plan_id", "revision", "digest"}
-        if plan_keys & value.keys():
-            if (not plan_keys <= value.keys()
-                    or not isinstance(value["plan_id"], str)
-                    or re.fullmatch(r"[A-Za-z0-9._:#/-]{1,200}", value["plan_id"]) is None
-                    or type(value["revision"]) is not int or value["revision"] < 1
-                    or not isinstance(value["digest"], str)
-                    or re.fullmatch(r"[a-f0-9]{64}", value["digest"]) is None):
-                raise ContractError("invalid execution plan receipt")
-        outcomes = value.get("finding_outcomes", [])
-        if not isinstance(outcomes, list):
-            raise ContractError("stage evidence outcomes must be a list")
-        ids = set()
-        for item in outcomes:
-            if (not isinstance(item, dict)
-                    or not isinstance(item.get("id"), str)
-                    or not re.fullmatch(r"REV-[0-9]{3,}", item["id"])
-                    or item.get("status") not in FINDING_STATUSES
-                    or item["id"] in ids):
-                raise ContractError("invalid or duplicate stage evidence outcome")
-            ids.add(item["id"])
-        provenance = value.get("provenance", RUNTIME_PROVENANCE)
-        if provenance not in RECEIPT_PROVENANCES:
-            raise ContractError(f"unknown stage evidence provenance {provenance!r}")
-        if provenance == MANUAL_PROVENANCE:
-            _check_manual(value)
-        receipts.append(value)
+    receipts, problems = read_stage_evidence(text)
+    if problems:
+        raise ContractError(problems[0].reason)
     return receipts
 
 
@@ -519,8 +573,18 @@ def parse_comment(text: str) -> ReviewRecord:
 
 
 def validate_triage_comment(text: str) -> None:
-    """Validate every machine-readable contract line in a staged comment."""
+    """Validate every machine-readable contract line in a staged comment.
+
+    That includes each `<!-- code-cycle-stage … -->` receipt (#438): a receipt
+    the contract rejects never reaches the change request, where it would stay
+    for the life of the comment.
+    """
     parse_comment(text)
+    _, problems = read_stage_evidence(text)
+    if problems:
+        raise ContractError(
+            "; ".join(f"stage receipt of attempt {problem.attempt_id or '<unreadable>'}: "
+                      f"{problem.reason}" for problem in problems))
 
 
 def merge_disposition(previous: str | None, incoming: str) -> str:
@@ -863,13 +927,10 @@ def history_entry(
         raise ContractError(f"{label} carries no author metadata")
     if comment.author.strip().casefold() not in trusted:
         return None
-    try:
-        receipts = tuple(
-            (receipt["attempt_id"], receipt["stage"], receipt["status"],
-             receipt["head_sha"], receipt["repo"], receipt["change_request_id"])
-            for receipt in stage_evidence(comment.body))
-    except ContractError:
-        receipts = ()
+    receipts = tuple(
+        (receipt["attempt_id"], receipt["stage"], receipt["status"],
+         receipt["head_sha"], receipt["repo"], receipt["change_request_id"])
+        for receipt in read_stage_evidence(comment.body)[0])
     if not _contains_recovery_contract_header(comment.body):
         return (HistoryEntry(comment.id, receipts=receipts, author=comment.author,
                              number=number) if receipts else None)

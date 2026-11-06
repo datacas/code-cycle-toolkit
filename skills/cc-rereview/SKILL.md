@@ -696,6 +696,16 @@ Use a body file with the configured code-host tooling. For GitHub:
 gh pr comment <n> --body-file <file.md>
 ```
 
+When the cycle already has a summary comment of yours, edit that one instead
+with `gh pr comment <n> --edit-last --body-file <file.md>`. Do not edit the comment
+through the REST API or read it that way: the stage command table refuses both
+by design. Every `<!-- code-cycle-stage … -->` receipt in the
+body, including those carried over from earlier attempts, must follow the
+contract exactly (`schema`, `repo`, `change_request_id`, `stage`, `attempt_id`,
+`head_sha`, `status`, `finding_outcomes`; with a plan `plan_id`, `revision` and
+`digest`, never `plan_revision` or `plan_digest`);
+`validate-triage-comment.py` rejects one that does not.
+
 Confirm the resulting comment URL to the user.
 
 ## Final result

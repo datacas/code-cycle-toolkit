@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import ci_gate as gate  # noqa: E402
 import cycle_history as ch  # noqa: E402
 import cycle_journal as cj  # noqa: E402
+import cycle_review_gate  # noqa: E402
 import review_contract as contract  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
@@ -572,6 +573,74 @@ class ConcurrentFailureTests(ParallelTestCase):
         modes = [(row["payload"]["ci_mode"], row["payload"]["ci_head_sha"])
                  for row in self.rows("ci")]
         self.assertEqual([("once", HEAD), ("once", FIX), ("wait", OTHER)], modes)
+
+
+class AccumulatingCommentTests(unittest.TestCase):
+    """#438: one malformed receipt never hides the valid ones in the same comment."""
+
+    ATTEMPT = "attempt-gated"
+    OLD = "attempt-old"
+
+    def invented(self, attempt: str) -> str:
+        """A receipt with the key names a stage invented (`plan_revision`)."""
+        return ("<!-- code-cycle-stage " + json.dumps({
+            "schema": 2, "repo": "owner/api", "change_request_id": "4", "stage": "review",
+            "attempt_id": attempt, "head_sha": HEAD, "status": "APPROVED",
+            "finding_outcomes": [], "plan_id": "plan-x", "plan_revision": 5,
+            "plan_digest": "f" * 64}) + " -->")
+
+    def problem(self, body: str):
+        session = mock.Mock(spec=["pull_number", "api", "remote", "trusted_authors",
+                                  "repo_id", "report"])
+        session.pull_number.return_value = "4"
+        session.api = rc
+        session.trusted_authors = ("reviewer",)
+        session.repo_id = "owner/api"
+        session.remote.comments.return_value = [
+            contract.ProviderComment(body=body, author="reviewer", id="1")]
+        session.report = rc.CycleReport(repo_id="owner/api", task_id="t")
+        result = cycle_review_gate.ReviewGate.receipt_problem(
+            session, "review", HEAD, {self.ATTEMPT})
+        return result, session.report
+
+    def test_a_malformed_receipt_of_another_attempt_is_a_warning(self) -> None:
+        body = "\n".join([self.invented(self.OLD),
+                          receipt("review", self.ATTEMPT, "APPROVED", HEAD)])
+
+        result, report = self.problem(body)
+
+        self.assertIsNone(result)
+        (note,) = [text for _, text in report.notes]
+        self.assertIn("warning", note)
+        self.assertIn(self.OLD, note)
+        self.assertIn("missing revision, digest", note)
+
+    def test_a_malformed_receipt_of_the_gated_attempt_stops_naming_the_key(self) -> None:
+        body = "\n".join([receipt("review", self.ATTEMPT, "APPROVED", HEAD),
+                          self.invented(self.ATTEMPT)])
+
+        result, report = self.problem(body)
+
+        self.assertIn("its receipt cannot be read", str(result))
+        self.assertIn("missing revision, digest", str(result))
+        self.assertEqual([], report.notes)
+
+    def test_an_unattributable_malformed_receipt_naming_the_attempt_stops(self) -> None:
+        body = receipt("review", self.ATTEMPT, "APPROVED", HEAD) + (
+            f"\n<!-- code-cycle-stage {{not json {self.ATTEMPT} -->")
+
+        result, _ = self.problem(body)
+
+        self.assertIn("its receipt cannot be read", str(result))
+
+    def test_an_unattributable_malformed_receipt_of_nobody_is_a_warning(self) -> None:
+        body = "<!-- code-cycle-stage {not json} -->\n" + receipt(
+            "review", self.ATTEMPT, "APPROVED", HEAD)
+
+        result, report = self.problem(body)
+
+        self.assertIsNone(result)
+        self.assertIn("<unknown>", report.notes[0][1])
 
 
 class ReceiptTests(ParallelTestCase):
