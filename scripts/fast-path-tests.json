@@ -38,7 +38,7 @@
       ]
     },
     "capability-parity-documentation": {
-      "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md"],
+      "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md", "docs/ROADMAP_V2.md"],
       "tests": ["test_capability_parity_audit"]
     },
     "spike-fixtures": {

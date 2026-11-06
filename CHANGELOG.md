@@ -11,7 +11,8 @@ All notable changes to this project are documented here. This project follows
   the agent capability parity rule as mandatory for new implementations and
   reviews. `docs/capability-parity-audit.md` classifies every toolkit-owned
   restriction as a real limit, a role contract or a toolkit veto. Each veto
-  links the issue that converts it to consent and a record, and names the
+  links the issue that converts it to consent and a record, among them the
+  child issues #455 to #459 for the vetoes no earlier issue tracked, and names the
   direct Claude and Codex baseline for its parity test. `cc-pr-review` reports
   a change that breaks a review rule the repository states. No restriction
   changes behaviour in this release.

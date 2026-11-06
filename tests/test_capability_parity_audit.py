@@ -48,7 +48,7 @@ class CapabilityParityAuditTests(unittest.TestCase):
         cls.kept = {row[0]: row for row in rows(section(cls.audit, "Kept restrictions"))}
         cls.vetoes = {row[0]: row for row in
                       rows(section(cls.audit, "Vetoes: conversion and parity baseline"))}
-        cls.children = {row[0]: row for row in rows(section(cls.audit, "Child issues to create"))}
+        cls.children = {row[0]: row for row in rows(section(cls.audit, "Child issues"))}
 
     def test_the_rule_is_mandatory_in_agents_and_its_owning_page(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -80,23 +80,40 @@ class CapabilityParityAuditTests(unittest.TestCase):
                 self.assertGreater(len(row[1]), 40)
 
     def test_every_veto_links_an_issue_or_a_child_issue(self) -> None:
+        linked_children: set[str] = set()
         for identifier, row in self.inventory.items():
             if row[5] != "toolkit veto":
                 continue
             with self.subTest(row=identifier):
-                links = re.findall(r"#\d+|CI-\d+", row[6])
+                # A draft is not an issue: every veto links a created one.
+                self.assertNotRegex(row[6], r"CI-\d")
+                links = re.findall(r"#\d+", row[6])
                 self.assertTrue(links)
-                for child in (link for link in links if link.startswith("CI-")):
-                    self.assertIn(child, self.children)
-                    self.assertIn(identifier, self.children[child][4])
+                for child in (link for link in links if link in self.children):
+                    linked_children.add(child)
+                    self.assertIn(identifier, self.children[child][5])
+        self.assertEqual(linked_children, set(self.children))
 
-    def test_every_child_issue_has_one_milestone_and_one_priority(self) -> None:
+    def test_every_child_issue_is_created_with_one_milestone_and_one_priority(self) -> None:
+        self.assertTrue(self.children)
         for identifier, row in self.children.items():
             with self.subTest(child=identifier):
-                self.assertTrue(row[1])
-                self.assertRegex(row[2], r"\AM\d+ — ")
-                self.assertRegex(row[3], r"\AP[0-3]\Z")
-                self.assertTrue(row[5])
+                self.assertRegex(identifier, r"\A#\d+\Z")
+                self.assertRegex(row[1], r"\ACI-\d+\Z")
+                self.assertTrue(row[2])
+                self.assertRegex(row[3], r"\AM\d+ — ")
+                self.assertRegex(row[4], r"\AP[0-3]\Z")
+                self.assertTrue(row[6])
+        drafts_left = re.findall(r"CI-\d+", self.audit.replace(section(self.audit, "Child issues"), ""))
+        self.assertEqual(drafts_left, [])
+
+    def test_the_roadmap_lists_every_child_issue(self) -> None:
+        roadmap = (ROOT / "docs" / "ROADMAP_V2.md").read_text(encoding="utf-8")
+        m1 = next(line for line in roadmap.splitlines()
+                  if line.startswith("| [M1 — Safe, inspectable execution]"))
+        for identifier, row in self.children.items():
+            with self.subTest(child=identifier):
+                self.assertIn(f"{identifier} ({row[4]}", m1)
 
     def test_every_veto_names_a_claude_and_a_codex_baseline(self) -> None:
         vetoes = {key for key, row in self.inventory.items() if row[5] == "toolkit veto"}
