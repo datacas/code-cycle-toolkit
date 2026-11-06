@@ -299,7 +299,12 @@ intent `unknown`.
 
 1. the block declares a `completed_status` valid for its role (`IMPLEMENTED`
    for `implement`, `RESOLVED` for `resolve`);
-2. every denial of the stage is `auxiliary_denial` or `redundant_operation`;
+2. every denial of the stage is `auxiliary_denial` or `redundant_operation`.
+   A configured check the person declined is the one exception: it keeps its
+   `essential_permission` class in the record, but it is recorded `unverified`
+   and never stops the stage or keeps it blocked; the cycle ends
+   `VERIFICATION_INCOMPLETE` naming it
+   ([#398](verification.md#declared-docker-checks-and-declined-checks));
 3. the remote head of the cycle branch, the local HEAD and the PR head are one
    commit, the pull request is open with the cycle branch as its head, the
    worktree is clean, and the head and change request the block reports are

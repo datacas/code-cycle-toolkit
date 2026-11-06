@@ -21,3 +21,6 @@ class SessionState:
     criteria_context: str = ""
     history_store: CycleHistoryStore | None = None
     history_lock: tuple[CycleHistoryStore, str, str] | None = None
+    #: Configured checks the runtime saw declined, by check identity (#398).
+    #: Read from its own permission outcomes, never from what an agent reported.
+    declined_checks: dict[str, dict[str, Any]] = field(default_factory=dict)

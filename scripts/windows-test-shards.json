@@ -46,6 +46,7 @@
     "unmeasured_modules": [
       "test_basedpyright_configuration",
       "test_command_permissions",
+      "test_compose_consent",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_cycle_stage_characterization",
@@ -97,6 +98,7 @@
     ],
     "windows-3": [
       "test_command_permissions",
+      "test_compose_consent",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_permission_view",

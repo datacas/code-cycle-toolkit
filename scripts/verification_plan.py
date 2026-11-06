@@ -244,6 +244,39 @@ def _as_items(value: Any, field: str, *, singleton: bool = False) -> tuple[Any, 
     raise _invalid_field(field, value, "an array of objects" + (" or one object" if singleton else ""))
 
 
+def normalize_attempts(value: Any, field: str, *, entry_field: str | None = None
+                       ) -> tuple[tuple[Mapping[str, Any], ...], dict[str, Any] | None]:
+    """Normalise `attempts` and return `(attempts, attempts_normalized)`.
+
+    A report that differs only in representation is accepted: an integer count
+    becomes an empty array, a string becomes one object carrying it as its
+    `note`, and a string entry of an array becomes such an object. The original
+    type and value are returned as the record the caller keeps in
+    `attempts_normalized`; it is `None` when nothing was changed. A shape that
+    cannot be normalised keeps the field-level message. `evidence` is not
+    normalised this way.
+    """
+    if value is None:
+        return (), None
+    if type(value) is int:
+        return (), {"type": "int", "value": value}
+    if isinstance(value, str):
+        return ({"note": value},), {"type": "str", "value": value}
+    if not isinstance(value, (list, tuple)):
+        raise _invalid_field(field, value, "an array of objects")
+    entries: list[Mapping[str, Any]] = []
+    changed = False
+    for position, item in enumerate(value):
+        if isinstance(item, Mapping):
+            entries.append(item)
+        elif isinstance(item, str):
+            entries.append({"note": item})
+            changed = True
+        else:
+            raise _invalid_field(f"{entry_field or field}[{position}]", item, "an object")
+    return tuple(entries), ({"type": "array", "value": list(value)} if changed else None)
+
+
 @dataclass(frozen=True)
 class CheckResult:
     id: str
@@ -252,22 +285,36 @@ class CheckResult:
     evidence: tuple[Mapping[str, Any], ...] = ()
     cause: str = ""
     attempts: tuple[Mapping[str, Any], ...] = ()
+    attempts_normalized: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "evidence": [dict(v) for v in self.evidence],
+        data = {**asdict(self), "evidence": [dict(v) for v in self.evidence],
                 "attempts": [dict(v) for v in self.attempts]}
+        if self.attempts_normalized is None:
+            del data["attempts_normalized"]
+        else:
+            data["attempts_normalized"] = dict(self.attempts_normalized)
+        return data
 
     @classmethod
-    def from_dict(cls, item: Mapping[str, Any]) -> CheckResult:
+    def from_dict(cls, item: Mapping[str, Any], *, label: str = "",
+                  entry_label: str | None = None) -> CheckResult:
         evidence = _as_items(item.get("evidence"), "evidence", singleton=True)
-        attempts = _as_items(item.get("attempts"), "attempts")
+        prefix = f"{label}." if label else ""
+        attempts, normalized = normalize_attempts(
+            item.get("attempts"), f"{prefix}attempts",
+            entry_field=f"{entry_label}.attempts" if entry_label else None)
+        if normalized is None:
+            normalized = item.get("attempts_normalized")
+            if normalized is not None and not isinstance(normalized, Mapping):
+                raise _invalid_field(f"{prefix}attempts_normalized", normalized, "an object")
         cause = item.get("cause")
         if cause is None:
             cause = ""
         return cls(_required(item, "id", "a non-empty string"),
                    _required(item, "head_sha", "a full SHA or null for unverified results"),
                    _required(item, "result", "pass, fail, or unverified"),
-                   evidence, cause, attempts)
+                   evidence, cause, attempts, normalized)
 
     def validate(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -496,21 +543,28 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             if not isinstance(previous, Mapping):
                 raise _invalid_field(f"checks[{index}].history[{history_index}]", previous,
                                      "a prior check result object")
-            prior = CheckResult.from_dict({**previous, "id": check.id})
+            prior = CheckResult.from_dict({**previous, "id": check.id},
+                                          label=f"checks[{index}].history[{history_index}]")
             if prior not in plan.results:
                 plan = plan.record(prior)
-        for field in ("evidence", "attempts"):
-            values = _as_items(entry.get(field), f"checks[{index}].{field}", singleton=field == "evidence")
-            for position, item in enumerate(values):
-                if not isinstance(item, Mapping):
-                    raise _invalid_field(f"checks[{check.id}].{field}[{position}]", item, "an object")
+        for position, item in enumerate(
+                _as_items(entry.get("evidence"), f"checks[{index}].evidence", singleton=True)):
+            if not isinstance(item, Mapping):
+                raise _invalid_field(f"checks[{check.id}].evidence[{position}]", item, "an object")
+        attempts, attempts_normalized = normalize_attempts(
+            entry.get("attempts"), f"checks[{index}].attempts",
+            entry_field=f"checks[{check.id}].attempts")
+        if attempts_normalized is None:
+            attempts_normalized = entry.get("attempts_normalized")
+            if attempts_normalized is not None and not isinstance(attempts_normalized, Mapping):
+                raise _invalid_field(f"checks[{index}].attempts_normalized", attempts_normalized,
+                                     "an object")
         evidence = _as_items(entry.get("evidence"), f"checks[{check.id}].evidence", singleton=True)
-        attempts = _as_items(entry.get("attempts"), f"checks[{check.id}].attempts")
         cause = entry.get("cause")
         if cause is None:
             cause = ""
         result = CheckResult(check.id, entry.get("head_sha"), entry.get("result", ""),
-                             evidence, cause, attempts)
+                             evidence, cause, attempts, attempts_normalized)
         if not isinstance(result.result, str) or result.result not in {"pass", "fail", "unverified"}:
             raise _invalid_field(f"checks[{check.id}].result", entry.get("result", _MISSING),
                                  "pass, fail, or unverified")

@@ -216,9 +216,9 @@ def denied_docker_blocker(spoken: str, denied_commands) -> dict | None:
     grant (#142), which also opens Unix sockets in the generated sandbox
     settings. When the hook denied such a command and the stage then
     reported BLOCKED, the denial is the restriction, observed by the runtime
-    itself rather than claimed by the agent, so it enters the grant flow. Only
-    a denial the grant would lift counts: `docker compose run`, `exec` and the
-    rest stay denied with it, so asking a person for it would change nothing.
+    itself rather than claimed by the agent, so it enters the grant flow. Every
+    Docker command asks for the socket first (#398); one outside the table,
+    such as `docker compose run`, then asks its own exact-command consent.
     """
     if not isinstance(denied_commands, (list, tuple)) or _final_status(spoken) != "BLOCKED":
         return None
@@ -239,7 +239,7 @@ def _docker_blocker(command: str) -> dict:
     return {
         "kind": "sandbox_local_access",
         "command": command,
-        "error": "denied by the stage command policy: docker compose needs "
+        "error": "denied by the stage command policy: docker needs "
                  "the docker_host grant",
         "attempted": ["the stage command hook denied it before it ran"],
         "requires_human": False,

@@ -263,6 +263,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                              if isinstance(item.get("operation"), str) else None,
                              "checks": ",".join(str(check) for check in checks)
                              if isinstance(checks, list) and checks else None})
+            self.note_declined_check(item, payload.get("head_sha"))
         questions = payload.get("questions")
         if isinstance(questions, list):
             for question in questions:
@@ -272,6 +273,50 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
                                    decision_key=f"{attempt_id}:{question.get('id')}",
                                    status="unanswered", reason=question.get("prompt"),
                                    detail=self.api.json.dumps(question.get("options")))
+
+    #: Answers that let a configured check run.
+    _CHECK_ALLOWS = frozenset({"cycle", "persistent", "forever"})
+
+    def note_declined_check(self, outcome: dict[str, Any], head_sha: Any) -> None:
+        """Keep a configured check the person declined as pending verification (#398).
+
+        The runtime's own permission outcome decides, whatever the agent put in
+        its tests: a denied, unanswered or unidentified configured check stays
+        `unverified` to the end of the cycle, and a later allow clears it.
+        """
+        check = outcome.get("check")
+        answer = outcome.get("answer")
+        if not isinstance(check, str) or not check:
+            return
+        if answer in self._CHECK_ALLOWS:
+            self.state.declined_checks.pop(check, None)
+            return
+        if answer in {None, "pending"} and not outcome.get("executor_hook"):
+            # A refusal still unanswered is asked before the stage reruns, and
+            # an unanswered question stops the cycle as permission_required.
+            # Only Codex's pre-dispatch question runs on without its answer.
+            return
+        grant = outcome.get("grant") if isinstance(outcome.get("grant"), str) else None
+        self.state.declined_checks[check] = {
+            "check": check, "command": outcome.get("command"),
+            "head_sha": head_sha if isinstance(head_sha, str) else None,
+            "cause": f"permission {grant or 'unknown'}: {answer or 'pending'}",
+            "decision": "declined", "grant": grant,
+            **({"config_sha256": outcome["config_sha256"]}
+               if isinstance(outcome.get("config_sha256"), str) else {})}
+
+    def declined_summary(self) -> str:
+        """The declined configured checks and how to authorize them and resume."""
+        parts = []
+        for item in self.state.declined_checks.values():
+            grant = item.get("grant")
+            how = (f"to authorize it, revoke a stored denial with `consent_control.py revoke "
+                   f"--repo {self.repo_id} --executor claude|codex --grant-id {grant}`, resume, "
+                   f"and allow it when asked (or pass --grant {grant}=persistent)"
+                   if grant else "authorize it and resume")
+            parts.append(f"configured check {item['check']} remains unverified "
+                         f"({item['cause']}); {how}")
+        return "; ".join(parts)
 
     def record_reconciliation(self, role: str, reported: Reported, outcome) -> None:
         """Record what became of a stage that reported `BLOCKED` after refusals (#364).
@@ -317,15 +362,25 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
             barrier = self.verification_barrier()
             if barrier is not None:
                 return barrier
-            if self.report.pending_verification:
+            declined = [item for item in self.state.declined_checks.values()
+                        if not any(pending.get("check") == item["check"]
+                                   for pending in self.report.pending_verification)]
+            if self.report.pending_verification or declined:
+                accepted = bool(self.report.pending_verification)
+                self.report.pending_verification = [*self.report.pending_verification, *declined]
                 status = "VERIFICATION_INCOMPLETE"
                 stop_reason = "verification_unverified"
-                because = "Required verification accepted as not_verified; other applicable stages and CI completed."
+                because = ("Required verification accepted as not_verified; other applicable stages and CI completed."
+                           if accepted else
+                           "A declined configured check remains not_verified; other applicable stages and CI completed.")
             if status == self.api.APPROVED_END and self.execution_plan.objective != "merge_ready":
                 status = self.api.UNRESOLVED_END
                 stop_reason = ("approved" if self.execution_plan.objective == "verified_change"
                                else "local_only")
                 because = f"objective {self.execution_plan.objective} completed before merge readiness"
+        if self.state.declined_checks:
+            # Any final result names the pending check and how to resume (#398).
+            because += "; " + self.declined_summary()
         self.save_plan("stopped", stop_reason=stop_reason)
         self.control.move("stop")
         if self.report.stages and self.report.stage_details:
