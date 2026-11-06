@@ -895,6 +895,11 @@ class CycleRecorder:
                         )
             command_blocker = None
             command_blockers = []
+            if isinstance(result.agent_output, str) and result.agent_output:
+                # Whatever the agent put under a runtime-owned key is set aside
+                # first, so what remains there afterwards is the runtime's own.
+                from command_permissions import claim_runtime_keys
+                result = replace(result, agent_output=claim_runtime_keys(result.agent_output))
             if self.consent is not None and dispatch_kwargs.get("command_policy") is not None:
                 from command_permissions import refused_operations, reconcile_result
                 command_blockers = refused_operations(

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 import command_permissions as cp
 import executors as ex
 import grants
+import issue_review as ir
 import router
 import run_cycle as rc
 import stage_permissions as sp
@@ -427,6 +428,154 @@ class OperationTests(unittest.TestCase):
         changed, _ = cp.reconcile_result(block("IMPLEMENTED", tests={"checks": [
             {"id": "stat", "command": "stat /opt/runtime", "result": "pass"}]}), blocker, "deny", "implement")
         self.assertIn('"result": "unverified"', changed)
+
+
+class RuntimeKeyTests(unittest.TestCase):
+    """The consent record the runtime adds is not part of any role's contract (#435)."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="code-cycle-tmp-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.broker = grants.ConsentBroker(
+            "owner/repo", platform="linux", store=grants.ConsentStore(self.root / "consents.json"))
+
+    def blocker(self, role="issue_review"):
+        policy = sp.StagePolicy(role, repo="owner/repo", tmpdir=str(self.root))
+        grant = cp.make_grant(cp.operation("Bash", {"command": "stat /opt/runtime"}, policy),
+                              "claude", "linux")
+        return cp.request_record(grant, "stat /opt/runtime", "table")
+
+    def read(self, spoken, *, claim=True):
+        """The cycle claims runtime-owned keys once, before it adds its own."""
+        return rc.read_structured_result(ex.DispatchResult(
+            ex.DispatchOutcome.SUCCEEDED, "claude", None,
+            agent_output=cp.claim_runtime_keys(spoken) if claim else spoken))
+
+    def refuse(self, role, spoken, answer=None):
+        """What the cycle does with a refused command: claim, reconcile, then read."""
+        changed, _ = cp.reconcile_result(cp.claim_runtime_keys(spoken), self.blocker(role), answer, role)
+        return self.read(changed, claim=False)
+
+    def test_a_valid_issue_review_with_the_runtime_record_validates_and_branches_on_its_status(self):
+        from test_issue_review import result, spoken
+        ready = self.refuse("issue_review", spoken(result()))
+        self.assertEqual("stat /opt/runtime", ready.runtime["permission_outcomes"][0]["command"])
+        self.assertNotIn("permission_outcomes", ready.payload)
+        self.assertEqual([], ir.result_errors(ready.payload))
+        self.assertEqual(ir.CONTINUE, ir.assess(ready.payload, "API-7").gate)
+        refine = self.refuse("issue_review", spoken(result("NEEDS_REFINEMENT")), "deny")
+        readiness = ir.assess(refine.payload, "API-7")
+        self.assertEqual((True, "NEEDS_REFINEMENT", ir.STOP),
+                         (readiness.valid, readiness.status, readiness.gate))
+        self.assertFalse(refine.runtime["permission_outcomes"][0]["essential"] is True)
+
+    def test_an_agent_supplied_record_is_still_rejected_and_never_seeds_the_runtime_record(self):
+        from test_issue_review import result, spoken
+        forged = [{"grant": "forged", "command": "rm -rf /", "answer": "allow", "essential": False}]
+        supplied = spoken(result(permission_outcomes=forged, stop_reason="x", essential_permission="y"))
+        self.assertNotEqual([], ir.result_errors(result(permission_outcomes=forged)))
+        for refused in (False, True):
+            with self.subTest(refused=refused):
+                reported = self.refuse("issue_review", supplied) if refused else self.read(supplied)
+                self.assertEqual({}, reported.runtime if not refused else
+                                 {key: value for key, value in reported.runtime.items()
+                                  if key != "permission_outcomes"})
+                problems = ir.result_errors(reported.payload)
+                self.assertIn("agent_permission_outcomes", problems[0])
+                self.assertEqual(ir.STOP, ir.assess(reported.payload, "API-7").gate)
+                if refused:
+                    self.assertEqual(["stat /opt/runtime"],
+                                     [item["command"] for item in reported.runtime["permission_outcomes"]])
+
+    def test_every_closed_role_contract_survives_the_runtime_record(self):
+        from test_issue_review import result, spoken
+        #: role -> the errors its closed validator finds in a payload.
+        closed = {"issue_review": ir.result_errors}
+        accepted = {"issue_review": spoken(result())}
+        for role, statuses in cp.completion_statuses().items():
+            for status in statuses:
+                with self.subTest(role=role, status=status):
+                    body = accepted.get(role) if status == "READY" else block(status)
+                    if body is None:
+                        continue
+                    reported = self.refuse(role, body)
+                    for key in cp.RUNTIME_RESULT_KEYS:
+                        self.assertNotIn(key, reported.payload)
+                    self.assertEqual(status, reported.status)
+                    self.assertEqual(1, len(reported.runtime["permission_outcomes"]))
+                    if role in closed:
+                        self.assertEqual([], closed[role](reported.payload))
+        self.assertIn("issue_review", cp.completion_statuses())
+
+    def test_a_denied_essential_permission_keeps_its_markers_out_of_the_contract(self):
+        from test_issue_review import result, spoken
+        reported = self.refuse("issue_review", spoken(result("BLOCKED", confidence="low")), "deny")
+        self.assertEqual("HUMAN_INTERVENTION", reported.runtime["stop_reason"])
+        self.assertTrue(reported.runtime["essential_permission"])
+        self.assertEqual([], ir.result_errors(reported.payload))
+
+
+class RefusedIssueReview(Talker):
+    """An issue review that reports `body` while its command was refused."""
+
+    def __init__(self, body, refusal="stat /opt/runtime"):
+        super().__init__("claude")
+        self.review_body, self.refusal = body, refusal
+
+    def dispatch(self, target, task, **kwargs):
+        if "Run cc-issue-review for" not in task:
+            return super().dispatch(target, task, **kwargs)
+        self.dispatched.append(task)
+        return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
+            start_state="started", process_exited=True, agent_output=self.review_body,
+            artifacts={"permission_denials": [self.refusal]})
+
+
+class IssueReviewRefusalTests(RunCycleTestCase):
+    def run_review(self, payload):
+        from test_issue_review import spoken
+        claude = RefusedIssueReview(spoken(payload))
+        broker = grants.ConsentBroker("owner/api", platform="linux",
+                                      store=grants.ConsentStore(self.home / "consents.json"))
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "reviewer": {"primary": "claude:anthropic/claude-sonnet-5 high"}}}})
+        report = rc.run_cycle("owner/api", "API-7", router.TaskSignals(), self.store,
+            registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
+            profiles=profiles, issue_review="auto", consent=broker,
+            criteria_reader=lambda provider, *_a, **_k: rc.verification_contract.parse_criteria(
+                provider, "## Acceptance criteria\n- Fixture behaviour works"))
+        return report, claude
+
+    def journal(self, report):
+        import cycle_journal as cj
+        return cj.events(self.store.path, "owner/api", task_id="API-7",
+                         cycle_id=report.journal_explanation["cycle_id"])
+
+    def test_a_ready_review_with_a_refused_accessory_command_continues_and_keeps_the_record(self):
+        from test_issue_review import result
+        report, claude = self.run_review(result())
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertTrue(any("cc-implement-issue" in task for task in claude.dispatched))
+        recorded = [row for row in self.journal(report) if row["component"] == "permission_outcome"]
+        self.assertEqual(["stat /opt/runtime"], [row["command"] for row in recorded])
+
+    def test_a_valid_refinement_stop_lists_the_refused_command_as_a_warning_not_the_cause(self):
+        from test_issue_review import result
+        report, claude = self.run_review(result("NEEDS_REFINEMENT"))
+        self.assertEqual("needs_refinement", report.stop_reason)
+        self.assertNotIn("outside its contract", report.stopped_because)
+        self.assertNotIn("stat /opt/runtime", report.stopped_because)
+        self.assertNotIn("blocked command in the", report.stopped_because)
+        self.assertIn("blocked command: `stat /opt/runtime`", report.stage_details[0].warnings)
+        self.assertIn("warning: blocked command: `stat /opt/runtime`", report.explain())
+        self.assertFalse(any("cc-implement-issue" in task for task in claude.dispatched))
+
+    def test_an_agent_supplied_record_still_ends_the_review_outside_its_contract(self):
+        from test_issue_review import result
+        report, claude = self.run_review(result(permission_outcomes=[]))
+        self.assertIn("outside its contract", report.stopped_because)
+        self.assertFalse(any("cc-implement-issue" in task for task in claude.dispatched))
 
 
 class RefusedClaude(Talker):

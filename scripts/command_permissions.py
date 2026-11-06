@@ -12,6 +12,58 @@ from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, fro
 from stage_permissions import operation, matching_answer, protected_reason, credential_reason, parse_command
 
 
+#: Top-level keys only the runtime writes into a stage's result, after the agent
+#: produced it. They are the consent record, not part of any role's contract.
+RUNTIME_RESULT_KEYS = ("permission_outcomes", "essential_permission", "stop_reason")
+#: Where an agent-supplied value of a runtime-owned key is kept apart. It is
+#: outside every closed contract, so a closed contract still rejects it.
+AGENT_KEY_PREFIX = "agent_"
+
+
+def _result_block(spoken: object) -> tuple[int, int, dict[str, Any]] | None:
+    if not isinstance(spoken, str):
+        return None
+    end = spoken.rfind("END_ORCHESTRATION_RESULT")
+    begin = spoken.rfind("ORCHESTRATION_RESULT", 0, end) if end >= 0 else -1
+    if begin < 0:
+        return None
+    try:
+        payload = json.loads(spoken[begin + len("ORCHESTRATION_RESULT"):end].strip())
+    except ValueError:
+        return None
+    return (begin, end, payload) if isinstance(payload, dict) else None
+
+
+def claim_runtime_keys(spoken: str) -> str:
+    """Move an agent-supplied runtime-owned key aside, before the runtime writes its own.
+
+    Only the runtime may write `RUNTIME_RESULT_KEYS`. Whatever the agent put under
+    those names is kept as `agent_<key>`: it can never pass for the runtime's
+    record, never seeds it, and a closed contract still rejects it by name.
+    """
+    block = _result_block(spoken)
+    if block is None or not any(key in block[2] for key in RUNTIME_RESULT_KEYS):
+        return spoken
+    begin, end, payload = block
+    for key in RUNTIME_RESULT_KEYS:
+        if key in payload:
+            payload[AGENT_KEY_PREFIX + key] = payload.pop(key)
+    return spoken[:begin] + "ORCHESTRATION_RESULT\n" + json.dumps(payload) + "\n" + spoken[end:]
+
+
+def split_runtime_keys(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The agent's result for contract validation, and the runtime's record of it.
+
+    Call this after `claim_runtime_keys`: what is left under a runtime-owned name
+    was written by the runtime. The record belongs in the cycle record; the
+    contract of a role only ever sees what the agent said.
+    """
+    runtime = {key: payload[key] for key in RUNTIME_RESULT_KEYS if key in payload}
+    if not runtime:
+        return payload, {}
+    return {key: value for key, value in payload.items() if key not in runtime}, runtime
+
+
 def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any], policy: Any) -> bool:
     """Metadata is a request hint. It cannot change the observed action or arguments."""
     if tool != "Bash" or not isinstance(data.get("command"), str):
