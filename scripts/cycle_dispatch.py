@@ -2,6 +2,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from publication_audit import Breach
+from issue_snapshot import write_snapshot, snapshot_prompt
+from stage_permissions import GH_CREDENTIAL_STORE
 if TYPE_CHECKING:
     from .run_cycle import CycleReport, Reported, StageOutcome, StagePolicy
 
@@ -41,11 +43,16 @@ class StageDispatch:
             resolve_target_used_fallback: bool = False,
             escalation_finding_ids: tuple[str, ...] = (),
             publishes: bool = True,
+            issue_snapshot=None,
             ) -> tuple[StageOutcome, Reported, str | None, dict[str, Any]]:
         """Dispatch one stage; also say whether the evidence it was given changed.
 
         `publishes` is false for a dispatch that only re-reads a publication
         already recovered, so the outbox expects nothing from it.
+
+        `issue_snapshot` (#397) is the runtime's read of the work item, given
+        to `issue_review` only, as a read-only file outside every writable
+        root: the stage reads it instead of the credential store it cannot.
         """
         self.control.move(role)
         resolve_start_head = (
@@ -64,7 +71,20 @@ class StageDispatch:
         # No base to measure against means no file, so no directory either.
         directory = (self.api.diff_directory(self.cwd)
                      if role in self.api.DIFF_ROLES and self.change_bases else None)
+        snapshot_file = None
+        if issue_snapshot is not None and role == self.api.ISSUE_REVIEW_ROLE:
+            directory = self.api.diff_directory(self.cwd)
         try:
+            if issue_snapshot is not None and role == self.api.ISSUE_REVIEW_ROLE:
+                if directory is not None:
+                    try:
+                        snapshot_file = write_snapshot(issue_snapshot, directory)
+                    except OSError:
+                        snapshot_file = None
+                evidence = (snapshot_file.prompt() if snapshot_file is not None
+                            else snapshot_prompt(issue_snapshot, None))
+                if snapshot_file is not None:
+                    stage_kwargs = {**stage_kwargs, "read_dirs": (str(directory),)}
             review_base = None
             if role == "resolve" and self.ci_policy == "parallel" and not self.local_only and change_request_id:
                 try:
@@ -88,6 +108,9 @@ class StageDispatch:
             command_policy = self.stage_policy(role, change_request_id)
             if artifact is not None and command_policy is not None:
                 command_policy = self.api.replace(command_policy, evidence_paths=(str(artifact.path),))
+            if snapshot_file is not None and command_policy is not None:
+                command_policy = self.api.replace(command_policy,
+                                                  evidence_paths=(str(snapshot_file.path),))
             stage_kwargs = {**stage_kwargs, "command_policy": command_policy}
             if self.publication_auditor is not None:
                 stage_kwargs = {**stage_kwargs, "publication_auditor": self.publication_auditor}
@@ -136,6 +159,8 @@ class StageDispatch:
                 **stage_kwargs)
             if artifact is not None:
                 tampered = artifact.changed()
+            if snapshot_file is not None:
+                tampered = snapshot_file.changed()
         finally:
             # The diff lives for its stage only. A later stage writes its own,
             # from the head that stage will judge.
@@ -408,14 +433,28 @@ class StageDispatch:
                 self.select_plan_stage(self.api.ISSUE_REVIEW_ROLE)
             except ValueError as error:
                 return self.stop(str(error), "BLOCKED")
+            # Read for every dispatch, never reused from an earlier run (#397).
+            snapshot = self.read_issue_snapshot()
+            if snapshot is not None:
+                self.report.note(
+                    f"  issue snapshot  {snapshot.completeness} "
+                    f"({snapshot.repository}#{snapshot.issue_id} at {snapshot.retrieved_at})")
+                if not snapshot.issue_complete:
+                    # An incomplete work item is not input to judge readiness on.
+                    return self.stop(
+                        f"the runtime's issue snapshot is {snapshot.issue_status}: "
+                        f"{snapshot.issue_reason}", "BLOCKED",
+                        stop_reason="readiness_unconfirmed")
             outcome, reported, tampered, _ = self.run(
                 self.api.ISSUE_REVIEW_ROLE,
                 (self.api.ESCALATED_ISSUE_REVIEW if escalated else "") + self.plan_context(),
-                escalated=escalated)
+                escalated=escalated, issue_snapshot=snapshot)
             stopped = self.unfinished(outcome, reported, tampered)
             if stopped is not None:
                 return stopped
-            readiness = self.api.assess_readiness(reported.payload, self.task_id)
+            readiness = self.api.assess_readiness(
+                reported.payload, self.task_id,
+                unreadable_links=snapshot.unreadable_links if snapshot is not None else ())
             self.report.readiness = readiness
             if reported.status:
                 self.record_plan_stage(self.api.ISSUE_REVIEW_ROLE, reported, outcome)
@@ -440,6 +479,20 @@ class StageDispatch:
                             stop_reason="readiness_unconfirmed",
                             refusals_are_warnings=not reported.runtime.get("essential_permission"))
             escalated = True
+
+    def read_issue_snapshot(self: Any):
+        """The runtime's own read of the work item, for GitHub; None elsewhere.
+
+        The stage keeps its credential denials: related-work searches are listed
+        as unavailable unless the project already lets it read the gh store.
+        """
+        if self.policy_provider != "github":
+            return None
+        choices = self.user_tool_choices or {}
+        related = GH_CREDENTIAL_STORE in tuple(choices.get("credential_reads") or ())
+        reader = self.issue_snapshot_reader or self.api.issue_snapshot.read_issue_snapshot
+        return reader(self.policy_provider, self.work_item_repository or self.repo_id,
+                      self.task_id, cwd=self.cwd, related_reads=related)
 
     def rejected_report_reason(self: Any, role: str, rejected: str,
                                payload: dict[str, Any], request: str | None) -> str:

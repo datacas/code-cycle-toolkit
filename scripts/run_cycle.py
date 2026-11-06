@@ -66,6 +66,7 @@ else:
     import verification_plan as verification_contract
 
 import ci_gate
+import issue_snapshot
 import remote_refs
 from security_gate import GateRule
 try:
@@ -2396,6 +2397,7 @@ def run_cycle(
     publication_auditor: PublicationAuditor | None = None,
     publication_observer: Callable[..., dict | None] | None = None,
     criteria_reader: Callable[..., verification_contract.Criteria] | None = None,
+    issue_snapshot_reader: Callable[..., issue_snapshot.IssueSnapshot | None] | None = None,
     execution_plan: ExecutionPlan | None = None,
     security_rule=None,
     orca_context=None,
@@ -2458,6 +2460,11 @@ def run_cycle(
     `publication_observer` (#364) reads the cycle branch's local HEAD, remote
     head and change request when a publishing stage reports `BLOCKED` after
     refused commands; it is injected so a test needs no code host.
+
+    `issue_snapshot_reader` (#397) reads the work item `issue_review` judges,
+    with the runtime's own credentials, before every issue-review dispatch; by
+    default a GitHub work item is read through `gh`. It is injected so a test
+    needs no provider.
     """
     from cycle_session import CycleSession
     # The facade supplies this module's types; the session's static aliases

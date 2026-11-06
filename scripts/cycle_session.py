@@ -91,6 +91,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.publication_auditor = options["publication_auditor"]
         self.publication_observer = options["publication_observer"]
         self.criteria_reader = options["criteria_reader"]
+        self.issue_snapshot_reader = options.get("issue_snapshot_reader")
         self.api.validate_start(self.start_from, self.state.change_request_id, local_only=self.local_only,
                        continue_work=self.continue_work)
         self.api.check_ci_policy(self.ci_policy, self.code_host)

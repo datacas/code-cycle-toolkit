@@ -303,6 +303,8 @@ class Readiness:
     uncertainties: tuple[dict, ...] = field(default_factory=tuple)
     #: The decisions the review asks for, in asking order.
     questions: tuple[dict, ...] = field(default_factory=tuple)
+    #: Snapshot references the runtime could not read and the result never named.
+    unaccounted_links: tuple[str, ...] = ()
 
     @property
     def decisions(self) -> int:
@@ -338,6 +340,10 @@ class Readiness:
             if count:
                 reasons.append(f"{count} unresolved material "
                                f"uncertaint{'y' if count == 1 else 'ies'}")
+            if self.unaccounted_links:
+                # Runtime-made `#N` references, never agent text.
+                reasons.append("unreadable referenced items it did not account for ("
+                               + ", ".join(self.unaccounted_links) + ")")
             return ("the issue review reported READY with "
                     + " and ".join(reasons) + ", which does not confirm readiness")
         return f"the issue review reported {self.status}"
@@ -365,11 +371,23 @@ def names_work_item(reported: str, requested: str) -> bool:
     return False
 
 
-def assess(payload: dict | None, work_item: str | None = None) -> Readiness:
+def accounted(reference: str, uncertainties) -> bool:
+    """Whether an uncertainty names `reference` (`#12`, never matching `#123`)."""
+    pattern = re.compile(rf"(?<![\w/]){re.escape(reference)}(?!\d)")
+    return any(pattern.search(item["summary"]) for item in uncertainties)
+
+
+def assess(payload: dict | None, work_item: str | None = None, *,
+           unreadable_links: tuple[str, ...] = ()) -> Readiness:
     """Judge one result. Anything but a confirmed READY does not continue.
 
     With `work_item`, the result must also name that work item: a READY about
     another item says nothing about this one.
+
+    `unreadable_links` are the references the runtime's issue snapshot names but
+    could not read (#397). A READY must account for each with an uncertainty
+    that names it; otherwise it is not confirmed, and escalates like a low
+    confidence one: an unreadable item never silently becomes a READY.
     """
     if payload is None:
         return Readiness(STOP, None, False,
@@ -388,9 +406,11 @@ def assess(payload: dict | None, work_item: str | None = None) -> Readiness:
     open_material = sum(1 for item in uncertainties
                         if item["material"] and not item["resolved"])
     confidence = payload["confidence"]
+    unaccounted = tuple(reference for reference in unreadable_links
+                        if not accounted(reference, uncertainties))
     if status != CONTINUING_STATUS:
         gate = STOP
-    elif confidence == "low" or open_material:
+    elif confidence == "low" or open_material or unaccounted:
         gate = ESCALATE
     else:
         gate = CONTINUE
@@ -403,4 +423,5 @@ def assess(payload: dict | None, work_item: str | None = None) -> Readiness:
         findings=findings,
         uncertainties=uncertainties,
         questions=tuple(stop_questions.ask_order(payload.get("questions", []))),
+        unaccounted_links=unaccounted if status == CONTINUING_STATUS else (),
     )
