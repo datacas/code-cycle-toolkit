@@ -543,6 +543,11 @@ class StageDispatch:
                 "A reopened finding follows the normal resolution loop."
             )
         if recover:
+            # An earlier publication a read failure left unproven is verified
+            # before anything is dispatched, and never published again (#446).
+            stopped = self.verify_unverified_publications(role, change_request_id)
+            if stopped is not None:
+                return self.api.Reported(), stopped
             instruction += self.retry_directive(role, change_request_id)
         if (role in {"resolve", "rereview"} and self.code_host == "github"
                 and change_request_id is not None and self.cwd is not None):

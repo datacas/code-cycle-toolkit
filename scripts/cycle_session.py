@@ -90,6 +90,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.published_change_request = options["published_change_request"]
         self.publication_auditor = options["publication_auditor"]
         self.publication_observer = options["publication_observer"]
+        self.publication_sleep = options.get("publication_sleep")
         self.criteria_reader = options["criteria_reader"]
         self.issue_snapshot_reader = options.get("issue_snapshot_reader")
         self.api.validate_start(self.start_from, self.state.change_request_id, local_only=self.local_only,

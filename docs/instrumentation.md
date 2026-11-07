@@ -779,6 +779,13 @@ Schema 27 adds the terminal, non-successful cycle status
 rows are read unchanged. See
 [execution plan history](telemetry.md#execution-plan-history-schema-25).
 
+Schema 29 widens `cycle_publications.state` with `failed` and
+`verification_error` and adds `cycle_publication_rereads` for the bounded
+re-read of a review or rereview publication; an older database is migrated in
+place and keeps every row. A persistent read failure stops with the existing
+`publication_unverified`. See
+[the bounded re-read](telemetry.md#cycle-history-schema-18).
+
 Schema 28 adds `suspected_external_change` and `review_target_changed` to
 `stop_reason` and `attempt_error_code`. The former stops on insufficient
 evidence for a protected-ref advance without calling it an agent breach; the
