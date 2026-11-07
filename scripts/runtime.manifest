@@ -50,6 +50,7 @@ validate-triage-comment.py
 stage_signals.py
 jev_shadow.py
 issue_review.py
+issue_snapshot.py
 stop_questions.py
 behavioral.py
 

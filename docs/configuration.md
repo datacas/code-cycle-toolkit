@@ -245,13 +245,17 @@ is needed for verification-only recovery; see [Verification](verification.md).
 Issue review's GitHub network grant does not grant stored credentials. Codex
 denies `~/.config/gh` in this non-publishing role. Claude ordinary issue review
 keeps its normal tooling; if registry domains or a Docker grant enable its Bash
-sandbox, that sandbox also denies the gh store. For authenticated issue reads
-on private repositories from either sandbox, set
+sandbox, that sandbox also denies the gh store. No configuration is needed to
+review a private GitHub issue: before every issue-review dispatch the runtime
+reads the work item with its own credentials and gives the stage a read-only
+[issue snapshot](provider-contract.md#runtime-issue-snapshot) instead. What the
+snapshot does not serve is the stage's own related-work searches (`gh issue
+list`, `gh pr list`, `gh search`): they are reported as unavailable and do not
+block `READY` on their own. A project that wants those searches can still set
 `code_cycle.user_choices.credential_reads: ["~/.config/gh"]` in the trusted
-project configuration. Without that exception, stored-credential authentication
-is unavailable to sandboxed gh commands; a resulting access failure does not
-mean the work item needs refinement. The exception does not authorize publication.
-See [credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
+project configuration; that exception exposes the whole gh store to every
+sandboxed non-publishing stage, not only issue review, and does not authorize
+publication. See [credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
 
 ### CI policy
 

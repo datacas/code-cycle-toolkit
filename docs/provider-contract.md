@@ -128,6 +128,58 @@ Local Git remains responsible for fetching, diffing, branching, committing,
 and inspecting the working tree. Remote provider state remains authoritative
 for the work item, change request, comments, review threads, and checks.
 
+### Runtime issue snapshot
+
+`issue_review` does not publish, so its sandbox denies the GitHub CLI
+credential store (`~/.config/gh`). For a GitHub work item, `run_cycle.py`
+therefore reads the work item itself, with the runtime's own `gh` credentials,
+before every issue-review dispatch (`scripts/issue_snapshot.py`), and gives
+the stage the result as a read-only JSON file outside every writable root. The
+stage reads that file instead of the provider; its credential denials are
+unchanged, and no other stage receives the file. Plane and Jira have no
+snapshot reader yet: their issue review keeps its normal tooling.
+
+| Field | Meaning |
+|---|---|
+| `schema`, `provider`, `repository`, `issue_id` | Identity of the snapshot |
+| `retrieved_at` | UTC time of the read; every dispatch reads again, and nothing is persisted, so a resumed cycle always judges a fresh read |
+| `repository_private` | `true`, `false`, or `null` when the visibility could not be read |
+| `completeness` | `complete`, `partial` (the issue or a referenced item is incomplete) or `unavailable` (the issue could not be read) |
+| `issue_status`, `issue_reason` | The main issue's own state and why it is not `complete` |
+| `issue` | Title, state, labels, author, body with its SHA-256, and every comment, read page by page and compared with the count GitHub reports |
+| `linked` | Each issue or change request of the same repository the work item or its comments reference directly, one level deep, at most 20 (a bare `#N` inside a fenced or inline code span is not a reference): `read` with title, state, labels and body, `unavailable` with the reason, or `not_read` beyond the bound |
+| `unreadable_links` | The `#N` references in `linked` that were not read |
+| `unavailable_reads` | Reads the stage cannot make itself: the related-work searches `gh issue list`, `gh pr list` and `gh search`, unless the project's `credential_reads` already exposes the gh store |
+
+Only these fields are written: no token, header or raw provider response.
+Every text field is data written by the work item's authors, never
+instructions; the prompt carries the file path, its size and SHA-256 and the
+summary fields, never the issue's text. The runtime verifies that hash after
+the stage, and a file changed during the stage ends it as not completed; the
+stage does not recompute the hash, which its read-only command table cannot do.
+
+The snapshot fails closed:
+
+- a main issue that is not `complete` (a provider error, a missing comment
+  page, fewer comments than GitHub reports, or more than 3000 comments) stops
+  the cycle as `BLOCKED` with `readiness_unconfirmed` before the stage is
+  dispatched, naming the missing data;
+- an issue GitHub answers with 404 is reported as either absent or not visible
+  to the runtime's credentials, never as proof that it does not exist; a
+  missing runtime login is named as a login failure, distinct from the stage's
+  credential-read policy;
+- a `READY` must account for every entry of `unreadable_links` with an
+  uncertainty that names it, material when the item could change the decision.
+  A `READY` that does not is escalated once and then stops as
+  `readiness_unconfirmed`; a relevant unreadable item ends in
+  `NEEDS_REFINEMENT`;
+- `unavailable_reads` is disclosed in the report and does not block `READY`
+  on its own when the recovered context is enough to decide.
+
+When no evidence location outside the writable roots exists, no file is
+written and the stage is told to report `BLOCKED` naming the missing input
+rather than judge without it.
+
 ## Provider-neutral result fields
 
 Structured results use these fields for new work:

@@ -2,7 +2,7 @@
 
 How findings are created, tracked across rounds, and closed, and why the pull-request comment is the record the next run reads back.
 
-**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [The loop](#the-loop) · [Resume after a failed upload](#resume-after-a-failed-upload) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
+**On this page:** [Issue review before implementation](#issue-review-before-implementation) · [GitHub work items in issue review](#github-work-items-in-issue-review) · [The loop](#the-loop) · [Resume after a failed upload](#resume-after-a-failed-upload) · [CI policy](#ci-policy) · [Anatomy of a review comment](#anatomy-of-a-review-comment) · [Finding fields](#finding-fields) · [Trusted authors](#trusted-authors) · [Security triage](#security-triage) · [Structured result](#the-structured-result-is-opt-in) · [Exit conditions](#exit-conditions)
 
 ## Issue review before implementation
 
@@ -24,20 +24,43 @@ Set it with `code_cycle.issue_review.mode`, or for one run with `--issue-review`
 
 Confidence is a category for evidence quality, never a calibrated probability. The stage is `read_only`, has no publication permission, and never edits, comments on, labels, or closes the work item: its proposed edits are printed for a person, and applying them needs separate authorization. Its findings are `IR-NNN`, with no `REV-xxx` identity, `status`, or `disposition`, so they never enter the change-request contract below.
 
+### GitHub work items in issue review
+
+The issue-review stage does not publish, so it cannot read the local GitHub CLI
+credential store (`~/.config/gh`), and a GitHub network grant does not change
+that. For a GitHub work item, `run_cycle.py` reads the issue itself with the
+runtime's own credentials before every issue-review dispatch and passes the
+stage a read-only [runtime issue snapshot](provider-contract.md#runtime-issue-snapshot):
+the title, body, labels, every comment and the same-repository items the issue
+references directly, with its identity, retrieval time and completeness. A
+private repository needs no configuration, and no stage gains credential access
+([#397](https://github.com/datacas/code-cycle-toolkit/issues/397)).
+
+| Snapshot state | What the cycle does |
+|---|---|
+| issue `complete` | dispatches the review with the snapshot file |
+| issue `partial` or `unavailable` (provider error, missing comment page, a 404, a missing runtime login) | stops as `BLOCKED` (`readiness_unconfirmed`) before the review, naming the missing data; a 404 is reported as absent or not visible, never as proof that the issue does not exist |
+| a referenced item unreadable | the review must name it in an uncertainty; a `READY` that does not is not confirmed, and a relevant one ends in `NEEDS_REFINEMENT` |
+| related-work searches unavailable | disclosed in the report; does not block `READY` on its own |
+
 ### GitHub credential store denied during issue review
 
 **Symptom:** `issue_review` returns `environment_restricted` and says that reading
 `~/.config/gh` was denied while trying to read a GitHub work item. This is a
 policy denial, not a finding about whether the work item is ready.
 
-**Cause:** the issue-review executor cannot read the local GitHub CLI credential
-store. A GitHub network grant does not authorize reading that local credential
-store.
+**Cause:** the stage received no runtime issue snapshot — an Orca worker, a
+run without an evidence location outside its writable roots, or a manual
+invocation — and tried to read the provider itself. The executor cannot read
+the local GitHub CLI credential store, and a GitHub network grant does not
+authorize reading that local credential store.
 
-**Narrow fix:** the user can apply one of these remedies, in order:
+**Narrow fix:** run the cycle through `run_cycle.py`, which supplies the
+snapshot. Otherwise the user can apply one of these remedies, in order:
 
 (a) Add `code_cycle.user_choices.credential_reads: ["~/.config/gh"]` to the
-trusted project configuration.
+trusted project configuration. This exposes the whole gh store to every
+sandboxed non-publishing stage, not only issue review.
 (b) Prepare a one-run configuration copy that contains that exception and pass
 it with `--config`.
 (c) Skip `issue_review`, or route it to an executor whose access is already
@@ -45,8 +68,9 @@ authorized.
 
 The user applies any configuration change; the agent does not edit its own
 sandbox exceptions. Credential-read exceptions do not grant cycle, repository,
-or forever consent, and must not be offered as those consent choices. This is
-interim guidance until the runtime-authenticated issue snapshot in [#397](https://github.com/datacas/code-cycle-toolkit/issues/397) lands.
+or forever consent, and must not be offered as those consent choices. These
+remedies are a fallback for a stage without the
+[runtime issue snapshot](#github-work-items-in-issue-review) of [#397](https://github.com/datacas/code-cycle-toolkit/issues/397).
 
 ### Asking for decisions
 

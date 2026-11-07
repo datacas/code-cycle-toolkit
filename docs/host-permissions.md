@@ -322,8 +322,12 @@ emitted; missing paths are omitted. An explicit per-project
 `code_cycle.user_choices.credential_reads` list selects exceptions and is
 reported in dispatch and preparation evidence. See
 [credential-read exceptions](dependency-preparation.md#credential-read-exceptions).
-For an issue-review stop caused by a denied GitHub credential-store read, use
-the [interim troubleshooting guidance](review-cycle.md#github-credential-store-denied-during-issue-review).
+Issue review keeps the `~/.config/gh` denial: the runtime reads a GitHub work
+item with its own credentials and passes the stage a read-only
+[issue snapshot](provider-contract.md#runtime-issue-snapshot), so no stage gains
+credential access to read it. For an issue-review stop that still names a
+denied GitHub credential-store read, use the
+[troubleshooting guidance](review-cycle.md#github-credential-store-denied-during-issue-review).
 
 ## When a command is denied
 
