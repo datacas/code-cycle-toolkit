@@ -526,6 +526,11 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
             for key in ("command", "stage", "reason", "rule", "operation", "class", "why")}
 
 
+def has_open_questions(payload: dict[str, Any]) -> bool:
+    """Whether the stage stopped to ask the user something: it is then not done."""
+    return bool(payload.get("questions"))
+
+
 def inferred_completion(payload: dict[str, Any], role: str, completed: frozenset[str]) -> str | None:
     """The completion status a `BLOCKED` result proves without claiming it (#464).
 
@@ -533,11 +538,13 @@ def inferred_completion(payload: dict[str, Any], role: str, completed: frozenset
     contract requires, and never from prose or from a change request merely
     existing: `implement` needs a full head, a change request, planned work
     units and tests that ran; `resolve` needs a full head and finding outcomes.
+    A result that carries `questions` is waiting for an answer, so it is never
+    inferred done.
     The caller still requires one commit at the remote, local and PR head.
     """
     head = payload.get("head_sha")
     if (role not in PUBLISHING_ROLES or not isinstance(head, str)
-            or not re.fullmatch(r"[0-9a-f]{40}", head)):
+            or not re.fullmatch(r"[0-9a-f]{40}", head) or has_open_questions(payload)):
         return None
     tests = payload.get("tests")
     if role == "implement":

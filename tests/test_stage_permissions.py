@@ -163,6 +163,10 @@ INSPECTION_TABLE = (
     ("sed -n p", False, True),
     ("sed 5p README.md", False, False),
     ("sed -n 5p /etc/passwd", False, True),
+    ("sed -n -e 1p -", False, True),
+    ("sed -n /tmp/p -e 1p README.md", False, True),
+    ("sed -n /tmp/p --expression=1p README.md", False, True),
+    ("sed -n -e 1p README.md CLAUDE.md", True, True),
     ("sed -n 5p README.md > $TMPDIR/out", False, True),
     ("date", True, None),
     ("date +%H:%M:%S", True, None),
@@ -236,6 +240,10 @@ class InspectionToolTests(PolicyTestCase):
     def test_the_read_operands_of_sed_are_its_files_and_never_its_script(self) -> None:
         self.assertEqual(["a", "b"], sp.read_operands(["sed", "-n", "1,2p", "a", "b"]))
         self.assertEqual(["a"], sp.read_operands(["sed", "-n", "-e", "1p", "a"]))
+        # Options are permuted: with any -e, every non-option word is a file (REV-001).
+        self.assertEqual(["/tmp/p", "README.md"],
+                         sp.read_operands(["sed", "-n", "/tmp/p", "-e", "1p", "README.md"]))
+        self.assertEqual(["/tmp/p"], sp.read_operands(["sed", "-n", "/tmp/p", "--expression=1p"]))
         self.assertEqual([], sp.read_operands(["date", "+%s"]))
         self.assertEqual([], sp.read_operands(["ps", "-e"]))
 

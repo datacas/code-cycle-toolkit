@@ -52,6 +52,10 @@ class WorkDoneTests(unittest.TestCase):
                 ("an environment blocker", "implement", payload(
                     environment_blocker={"kind": "sandbox_local_access"})),
                 ("an essential refusal", "implement", payload(essential_permission="x")),
+                ("a question waiting for the user", "implement", payload(
+                    questions=[{"id": "Q-001", "prompt": "Which?", "options": ["a", "b"]}])),
+                ("a question beside a claimed completion", "implement", payload(
+                    completed_status="IMPLEMENTED", questions=[{"id": "Q-001"}])),
                 ("a failed check", "implement", payload(
                     tests={"ran": True, "checks": [{"id": "c", "result": "fail"}]})),
                 ("a review role", "review", payload(status="APPROVED")),

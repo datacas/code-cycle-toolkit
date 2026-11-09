@@ -436,7 +436,9 @@ refusals of that stage are listed as warnings. A publishing stage that reports
 full head, the change request, planned work units and tests that ran for
 `implement`, or finding outcomes for `resolve`. With that evidence and a
 verified publication the runtime derives `IMPLEMENTED` or `RESOLVED` itself and
-records `inferred: true`; without it the stage stays `BLOCKED`.
+records `inferred: true`; without it the stage stays `BLOCKED`. A result that
+carries `questions` is waiting for an answer from the user, so it is never
+inferred done and never writes a resume point.
 
 **Resume without `--from` and `--pr`.** When a publishing stage's result proves
 its work done, the runtime writes a *resume point* to the cycle journal

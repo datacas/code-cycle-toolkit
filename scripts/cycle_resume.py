@@ -69,14 +69,17 @@ def work_done(payload: dict[str, Any], role: str) -> bool:
     """Whether the stage's structured result claims or proves its work done.
 
     It needs a full head and a change request, no pending publication, no
-    environment blocker, no essential refused operation and no failed check, and
+    environment blocker, no essential refused operation, no open question for
+    the user and no failed check, and
     then either a completion status valid for the role (`status` or the agent's
     `completed_status`) or the structured evidence `inferred_completion` reads.
     """
-    from command_permissions import inferred_completion
+    from command_permissions import has_open_questions, inferred_completion
     from execution_plan import completion_statuses
     if role not in NEXT_STAGE or not isinstance(payload, dict):
         return False
+    if has_open_questions(payload):
+        return False  # the stage stopped to ask the user; its work is not done
     head = payload.get("head_sha")
     if not isinstance(head, str) or not FULL_SHA.fullmatch(head):
         return False

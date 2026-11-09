@@ -843,6 +843,23 @@ class BlockedReconciliationTests(unittest.TestCase):
                                          completed=None, **fields)
                 self.assert_stopped(payload, contains)
 
+    def test_a_blocked_result_waiting_for_an_answer_is_not_inferred_done(self):
+        # REV-002: planned units, tests that ran and a pushed head do not make a
+        # stage done when it stopped to ask the user a question.
+        done = {"work_units": [{"id": "WU-1", "commit_sha": None, "rollback": "independent"}],
+                "tests": {"ran": True, "checks": []},
+                "questions": [{"id": "Q-001", "prompt": "Which option?", "options": ["a", "b"],
+                               "recommended": "a", "blocks": []}]}
+        payload, _ = self.settle([self.bash("sed -n 1,5p README.md")], published(),
+                                 completed=None, **done)
+        self.assert_stopped(payload, "no completion status valid")
+        self.assertIsNone(cp.inferred_completion({**done, "head_sha": SHA}, "implement",
+                                                 frozenset({"IMPLEMENTED"})))
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed=None,
+                                 finding_outcomes=[{"id": "REV-001", "status": "resolved"}],
+                                 questions=done["questions"])
+        self.assert_stopped(payload, "no completion status valid")
+
     def test_an_inferred_completion_never_hides_a_serious_denial(self):
         done = {"work_units": [{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
                 "tests": {"ran": True, "checks": []}}

@@ -742,7 +742,7 @@ def _sed_parts(args: list[str]) -> tuple[list[str], list[str]]:
     `sed` without a file would read the stage's standard input, so it needs one.
     """
     scripts: list[str] = []
-    files: list[str] = []
+    positional: list[str] = []
     options = True
     index = 0
     while index < len(args):
@@ -770,13 +770,19 @@ def _sed_parts(args: list[str]) -> tuple[list[str], list[str]]:
             else:
                 raise PolicyError(f"sed option {word} writes, runs a program or reads a script "
                                   "file; it is not allowed")
-        elif not scripts:
-            scripts.append(word)
         else:
-            files.append(word)
+            positional.append(word)
+    # GNU sed permutes its options: once any `-e`/`--expression` appears, every
+    # non-option word is an input file wherever it stands; without one, the
+    # first non-option word is the script. Deciding after the whole line keeps
+    # `sed -n /tmp/p -e 1p README.md` from hiding `/tmp/p` as a script.
+    if scripts:
+        files = positional
+    else:
+        scripts, files = positional[:1], positional[1:]
     if not scripts:
         raise PolicyError("sed needs a script")
-    if not files:
+    if not files or "-" in files:
         raise PolicyError("sed needs a file operand; it never reads the stage's standard input")
     return scripts, files
 
