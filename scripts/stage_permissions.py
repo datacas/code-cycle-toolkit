@@ -624,8 +624,13 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
                 i += 1
         elif quote is None and char in "|&;\n()":
             finish_segment()
+        elif char == "~" and not word and quote is None:
+            # Only a bare `~` names $HOME. `~user`, `~+`, `~-` and `~N` keep
+            # their prefix so the guards resolve what bash reads (REV-009).
+            bare = i + 1 == len(source) or source[i + 1] in "/ \t|&;\n()<>"
+            word.append(os.path.expanduser("~") if bare else "~")
         else:
-            word.append(os.path.expanduser(char) if char == "~" and not word and quote is None else char)
+            word.append(char)
         i += 1
     finish_segment()
     return result
@@ -3349,6 +3354,21 @@ def _operand_values(word: str) -> list[str]:
     return [value for value in values if value]
 
 
+#: The refusal for an operand that may name a store below an unknown directory.
+_UNRESOLVED_CREDENTIAL = ("cannot guard an operand that may name a credential store after an "
+                          "unresolved directory change; use an explicit absolute path")
+
+
+def _tilde_directory(value: str) -> tuple[str, str] | None:
+    """The `~+`, `~-` or `~N`/`~+N`/`~-N` prefix of a value, and the rest.
+
+    `~+` is $PWD, `~-` is $OLDPWD and the others name directory-stack
+    entries. A bare `~` and `~user` are left to `os.path.expanduser`.
+    """
+    match = re.match(r"~([+-]?[0-9]*)(?=/|$)", value)
+    return (match[1], value[match.end():]) if match and match[1] else None
+
+
 def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
     """Whether a relative operand from an unknown directory may name a store.
 
@@ -3361,6 +3381,10 @@ def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
               for store in _guarded_stores(policy)
               for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
     for value in _operand_values(word):
+        tilde = _tilde_directory(value)
+        if tilde:
+            # `~+/x`, `~-/x`: the rest is relative to an unknown directory.
+            value = tilde[1].lstrip("/")
         if os.path.isabs(os.path.expanduser(value)):
             continue
         parts = Path(value).parts
@@ -3467,10 +3491,15 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
     # Any HOME that is not an expansion may set it (HOME=, read HOME,
     # printf -v HOME), and so may a builtin that assigns a quoted or
     # computed name (declare "HO""ME=…").
+    assigning_builtin = re.search(r"\b(?:declare|typeset|export|local|readonly|read|printf|mapfile|readarray)\b",
+                                  source) is not None
     home_assigned = (re.search(r"(?<![$A-Za-z0-9_{])HOME(?![A-Za-z0-9_])", source) is not None
-                     or re.search(r"\b(?:declare|typeset|export|local|readonly|read|printf|mapfile|readarray)\b",
-                                  source) is not None)
+                     or assigning_builtin)
     oldpwd_assigned = "OLDPWD" in source
+    # A reassigned PWD moves `~+` (REV-009).
+    pwd_assigned = (re.search(r"(?<![$A-Za-z0-9_{])PWD(?![A-Za-z0-9_])", source) is not None
+                    or assigning_builtin)
+    tilde_unresolved = False
     home = str(Path.home())
     segment_cwd: str | None = str(Path(cwd or ".").resolve())
     possible_cwds: set[str | None] = {segment_cwd, os.path.abspath(cwd or ".")}
@@ -3481,12 +3510,19 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
         # A cd may fail, be conditional or run in a subshell. The
         # flattened analysis cannot discard any earlier cwd.
         possible_cwds.add(segment_cwd)
+        operands = segment_words[1:] + [target for _, _, target in segment.redirects if target]
+        # `~-`, `~N` and, after a PWD assignment, `~+` name a directory the
+        # hook cannot resolve, whatever the working directory (REV-009).
+        unknown_tilde = [value for word in operands for value in _operand_values(word)
+                         if (tilde := _tilde_directory(value)) and (tilde[0] != "+" or pwd_assigned)]
+        if unknown_tilde:
+            tilde_unresolved = True
+            if any(_could_name_credential(value, policy, dotglob) for value in unknown_tilde):
+                return _UNRESOLVED_CREDENTIAL, True
         for possible_cwd in possible_cwds:
             if possible_cwd is None:
-                operands = segment_words[1:] + [target for _, _, target in segment.redirects if target]
                 if any(_could_name_credential(word, policy, dotglob) for word in operands):
-                    return ("cannot guard an operand that may name a credential store after an "
-                            "unresolved directory change; use an explicit absolute path"), True
+                    return _UNRESOLVED_CREDENTIAL, True
             guard = protected_reason(tool, tool_input, policy, possible_cwd, _parsed=segment, _dotglob=dotglob)
             if guard:
                 return guard, None in possible_cwds
@@ -3527,6 +3563,11 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
                 segment_cwd = None
             continue
         target = args[0] if args else home
+        tilde = _tilde_directory(target)
+        if tilde:
+            # `cd ~+/x` stays relative to the current directory; `cd ~-` and
+            # stack entries go where the hook cannot follow.
+            target = "." + tilde[1] if tilde[0] == "+" and not pwd_assigned else "$TILDE"
         if (cdpath and target != "-" and not target.startswith(("+", "-"))
                 and not os.path.isabs(os.path.expanduser(target))):
             target = "$CDPATH"
@@ -3556,7 +3597,7 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
                        if not any(char in target for char in "$`*?[")
                        and (current is not None or os.path.isabs(expanded))
                        and not (program == "pushd" and target.startswith(("+", "-"))) else None)
-    return None, None in possible_cwds or segment_cwd is None
+    return None, None in possible_cwds or segment_cwd is None or tilde_unresolved
 
 
 def unresolved_directory(command: str, policy: Any, cwd: str | None = None) -> bool:
@@ -3621,13 +3662,19 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
-            chdir = _env_chdir(words) if program == "env" else None
+            # `env -C` runs its program in another directory (REV-008), also
+            # behind `command`, `nice`, `timeout` and other runners (REV-010):
+            # any `env` word that changes directory counts.
+            chdir = next((found for index, word in enumerate(words)
+                          if os.path.basename(word).removesuffix(".exe") == "env"
+                          for found in (_env_chdir(words[index:]),) if found is not None), None)
             if chdir is not None:
-                # `env -C` runs its program in another directory (REV-008).
+                tilde = _tilde_directory(chdir)
+                if tilde:
+                    chdir = "." + tilde[1] if tilde[0] == "+" else "$TILDE"
                 if any(char in chdir for char in "$`*?[{}"):
                     if any(_could_name_credential(path, policy, _dotglob) for path in paths):
-                        return ("cannot guard an operand that may name a credential store after an "
-                                "unresolved directory change; use an explicit absolute path")
+                        return _UNRESOLVED_CREDENTIAL
                 else:
                     protected = credential_reason(
                         paths, policy, str(Path(cwd or ".") / os.path.expanduser(chdir)), dotglob=_dotglob)
@@ -3733,6 +3780,15 @@ def credential_reason(words, policy, cwd: str | None, *, dotglob: bool = False) 
 
     for word in words:
         for value in dict.fromkeys([word, *_operand_values(word)]):
+            tilde = _tilde_directory(value)
+            if tilde:
+                # `~+` is the working directory; `~-` and stack entries are
+                # unknown, so only a name check applies (REV-009).
+                if tilde[0] != "+":
+                    if _could_name_credential(value, policy, dotglob):
+                        return _UNRESOLVED_CREDENTIAL
+                    continue
+                value = "." + tilde[1]
             operand = Path(os.path.expanduser(value))
             own = operand.parts
             path = base / operand

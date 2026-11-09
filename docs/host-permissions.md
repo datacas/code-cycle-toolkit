@@ -209,7 +209,10 @@ credential guards account for `cd` options and directory-stack changes from
 `command`, and `env -C`/`--chdir` in any spelling `env` accepts (combined
 short options such as `-vC` or `-uNAME -C`, abbreviations such as `--c=`, and
 a `-C` or `--c…` anywhere inside an `env -S` value, which counts as
-unresolved).
+unresolved), also when `env` runs behind another program word such as
+`command`, `nice`, `nohup` or `timeout 5`. Tilde prefixes resolve as bash
+reads them: `~` and `~/…` name the home directory, `~user/…` that user's home
+directory, and `~+/…` the segment's working directory.
 They compare glob and brace operands, the
 value of a `name=value` word and an attached short-option value such as
 `-C~/.ssh` to the protected stores without reading them. Globs match one path
@@ -229,7 +232,10 @@ any relative target while `CDPATH` is set in the environment or mentioned in
 the source, a bare `cd`, `~` or home target when the source names `HOME`
 other than as an expansion (`HOME=`, `read HOME`, `printf -v HOME`) or uses a
 builtin that may assign a quoted or computed name (`declare`, `export`, `read`,
-`printf`, …), `cd -` when it names `OLDPWD`, and anything after `eval`, `source`, `.`,
+`printf`, …), `cd -` when it names `OLDPWD`, a `~-`, `~N`, `~+N` or `~-N`
+prefix (the previous directory or a directory-stack entry) on any operand or
+target, `~+` when the source may assign `PWD` in the same way as `HOME`,
+and anything after `eval`, `source`, `.`,
 `trap` or `alias` (also through `builtin` or `command`). The unknown directory
 may be any directory, so after one a relative operand (or `name=value` value,
 or redirect target) receives no grant when it may spell the rest of a store's

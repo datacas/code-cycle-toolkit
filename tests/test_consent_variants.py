@@ -18,6 +18,11 @@ import grants
 import stage_permissions as sp
 import command_permissions as cp
 
+#: These cases model bash on POSIX paths: they run bash, create symlinks, or
+#: embed `~`, `/`-rooted and host paths in shell source, where a Windows path's
+#: backslashes are escapes. The Linux job runs them; Windows keeps the rest.
+posix_shell = unittest.skipIf(os.name == "nt", "bash semantics on POSIX paths; covered by the Linux job")
+
 
 class ConsentVariantsTests(unittest.TestCase):
     def approved(self, policy, command, regex=None, executor="claude", store=None, cwd=None):
@@ -30,6 +35,7 @@ class ConsentVariantsTests(unittest.TestCase):
             store.save("owner/repo", grant, grant.scopes[0], "allow")
         return replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},)), grant
 
+    @posix_shell
     def test_ac1_ac3_ac4_configured_variants_survive_dispatch(self):
         for role in ("resolve", "rereview"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as root:
@@ -52,6 +58,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         self.assertEqual("allow", sp.matching_answer("Bash", {"command": command}, current, root))
                         self.assertTrue(sp.check(command, current, cwd=root).allowed)
 
+    @posix_shell
     def test_ac2_distinct_commands_still_ask(self):
         policy = sp.StagePolicy("resolve", tmpdir="/tmp/current", test_command="pnpm run test:unit")
         op = sp.operation("Bash", {"command": "pnpm run test:unit"}, policy)
@@ -75,6 +82,7 @@ class ConsentVariantsTests(unittest.TestCase):
         current = replace(policy, command_permissions=broker.command_entries("claude", "resolve"))
         self.assertTrue(sp.check(command, current).allowed)
 
+    @posix_shell
     def test_rev003_unrelated_questions_do_not_name_configured_test(self):
         policy = sp.StagePolicy("resolve", test_command="pnpm run test:unit",
                                 verify_prefixes=("python3 scripts/validate-package.py",))
@@ -90,6 +98,7 @@ class ConsentVariantsTests(unittest.TestCase):
             if expected is None:
                 self.assertNotIn("Configured command:", asked["prompt"])
 
+    @posix_shell
     def test_ac3_all_operands_relative_paths_and_symlink_membership(self):
         with tempfile.TemporaryDirectory() as root:
             old, new, other = [Path(root) / name for name in ("old", "new", "other")]
@@ -112,6 +121,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 return sp.operation("Bash", {"command": "cat " + str(path) + " | head"}, policy, root)
             self.assertEqual(shell(first, old / "result"), shell(second, new / "result"))
 
+    @posix_shell
     def test_ac5_ac9_pattern_survives_scope_and_dispatch_and_revocation(self):
         for role in ("resolve", "rereview"):
             for scope in ("cycle", "persistent", "forever"):
@@ -160,6 +170,7 @@ class ConsentVariantsTests(unittest.TestCase):
         self.assertEqual(["python3 -c print(1)"], record["pattern"]["positive"])
         self.assertIn("Bash(*)", sp.allowed_tool_patterns(policy))
 
+    @posix_shell
     def test_ac8_compound_consent_guards_every_segment_and_does_not_extend(self):
         with tempfile.TemporaryDirectory() as root:
             policy = sp.StagePolicy("resolve", tmpdir=root)
@@ -188,9 +199,11 @@ class ConsentVariantsTests(unittest.TestCase):
                     self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, root))
                     self.assertFalse(sp.check(command, current, cwd=root).allowed)
 
+    @posix_shell
     def test_ac8_shared_hook_with_claude_grant_metadata(self):
         self.shell_baselines_and_guarded_execution("claude")
 
+    @posix_shell
     def test_ac8_shared_hook_with_codex_grant_metadata(self):
         self.shell_baselines_and_guarded_execution("codex")
 
@@ -216,6 +229,7 @@ class ConsentVariantsTests(unittest.TestCase):
                             env={**os.environ, "TMPDIR": root}, capture_output=True)
                         self.assertEqual((baseline.returncode, baseline.stdout), (actual.returncode, actual.stdout))
 
+    @posix_shell
     def test_rev001_simple_pattern_never_authorizes_compound_shell(self):
         for role in ("resolve", "rereview"):
             policy, _ = self.approved(sp.StagePolicy(role), "cat /outside/api/schema.json", r"cat /outside/api/.+")
@@ -230,6 +244,7 @@ class ConsentVariantsTests(unittest.TestCase):
             policy, _ = self.approved(sp.StagePolicy(role), "cat /outside/api/x", r"cat [^;&|]+")
             self.assertFalse(sp.check("cat $(printf ~)/.codex/auth.json", policy).allowed)
 
+    @posix_shell
     def test_rev001_compound_pattern_requires_explicit_approval_and_survives_storage(self):
         with tempfile.TemporaryDirectory() as root:
             command = "printf hello | cat"
@@ -265,6 +280,7 @@ class ConsentVariantsTests(unittest.TestCase):
         self.assertLessEqual(len(asked["prompt"]), 600)
         self.assertEqual(regex, grants.PermissionRequest(grant, grant.scopes[0], "resolve", asked).record()["pattern"]["pattern"]["regex"])
 
+    @posix_shell
     def test_rev002_credentials_guard_cwd_options_stack_and_globs(self):
         policy = sp.StagePolicy("resolve")
         commands = ("cd -P ~/.codex && cat auth.json", "cd -L -- ~/.codex; cat auth.json",
@@ -290,6 +306,7 @@ class ConsentVariantsTests(unittest.TestCase):
         current, _ = self.approved(policy, command)
         self.assertFalse(sp.check(command, current, cwd=str(Path.home())).allowed)
 
+    @posix_shell
     def test_rev002_logical_cd_dotdot_retains_protected_directory(self):
         with tempfile.TemporaryDirectory() as root:
             protected = Path(root, "logical/.codex")
@@ -302,6 +319,7 @@ class ConsentVariantsTests(unittest.TestCase):
             with patch.object(sp, "CREDENTIAL_STORES", (str(protected / "auth.json"),)):
                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
 
+    @posix_shell
     def test_rev002_glob_keeps_symlinked_credential_store_spelling(self):
         with tempfile.TemporaryDirectory() as root:
             protected = Path(root, "auth.json")
@@ -311,6 +329,7 @@ class ConsentVariantsTests(unittest.TestCase):
             with patch.object(sp, "CREDENTIAL_STORES", (str(protected),)):
                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
 
+    @posix_shell
     def test_rev006_unresolved_directory_asks_for_non_credential_operands(self):
         for role in ("resolve", "rereview"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as root:
@@ -342,6 +361,7 @@ class ConsentVariantsTests(unittest.TestCase):
                                                        grants.ConsentBroker("owner/repo", platform="linux"),
                                                        "claude", root))
 
+    @posix_shell
     def test_rev006_unresolved_directory_keeps_credential_names_guarded(self):
         policy = sp.StagePolicy("resolve")
         for command in ('cd "$X" && cat auth.json', 'cd "$X"; cat id_rsa', 'cd "$X" && cat *',
@@ -360,6 +380,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
 
+    @posix_shell
     def test_rev007_globs_match_one_component_at_a_time(self):
         policy = sp.StagePolicy("resolve")
         users = str(Path.home().parent)
@@ -384,6 +405,7 @@ class ConsentVariantsTests(unittest.TestCase):
         with patch.dict(os.environ, {"BASHOPTS": "checkwinsize", "GLOBIGNORE": ""}):
             self.assertIsNone(sp.protected_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
 
+    @posix_shell
     def test_rev007_deep_globstar_fails_closed_quickly(self):
         policy = sp.StagePolicy("resolve")
         command = "cat /" + "**/" * 990 + "x"
@@ -392,6 +414,7 @@ class ConsentVariantsTests(unittest.TestCase):
         cp.refused_operation([command], policy, grants.ConsentBroker("owner/repo", platform="linux"), "claude")
         self.assertLess(time.monotonic() - started, 10)
 
+    @posix_shell
     def test_rev007_glob_characters_in_working_directory_are_literal(self):
         with tempfile.TemporaryDirectory() as root:
             cwd = Path(root, "a[b]*", "child")
@@ -401,6 +424,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 with self.subTest(command=command):
                     self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(cwd)))
 
+    @posix_shell
     def test_rev008_builtin_command_and_cdpath_directory_changes_are_guarded(self):
         policy = sp.StagePolicy("resolve")
         for command in ("builtin cd ~/.codex; cat auth.json", "command cd ~/.ssh && cat id_rsa",
@@ -428,6 +452,7 @@ class ConsentVariantsTests(unittest.TestCase):
             command = "cd sub && make build"
             self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
 
+    @posix_shell
     def test_rev008_env_options_and_reassigned_home_or_oldpwd_are_guarded(self):
         policy = sp.StagePolicy("resolve")
         for command in ('env --c="$X" cat id_rsa', "env --c=$HOME/.codex cat auth.json",
@@ -448,6 +473,48 @@ class ConsentVariantsTests(unittest.TestCase):
             with self.subTest(command=safe):
                 self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
 
+    @posix_shell
+    def test_rev009_tilde_prefixes_name_what_bash_reads(self):
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        for role in ("resolve", "rereview"):
+            policy = sp.StagePolicy(role)
+            with self.subTest(role=role), patch.dict(os.environ, {"HOME": entry.pw_dir}):
+                for command in (f"cat ~{entry.pw_name}/.ssh/id_rsa", "cd ~ && cat ~+/.ssh/id_rsa",
+                                "cd ~/x; cd /tmp; cat ~-/../.ssh/id_rsa", 'cd "$X" && cat ~+/id_rsa',
+                                "cat ~-/.ssh/id_rsa", "cat ~2/.codex/auth.json", "cat ~+1/id_rsa",
+                                "cd ~-; cat id_rsa", "cd ~ && cd ~+/.ssh; cat id_rsa","env -C ~- cat id_rsa",
+                                "PWD=~; cat ~+/.ssh/id_rsa", "cat < ~-/.ssh/id_rsa",
+                                f"cd ~{entry.pw_name}/.codex && cat auth.json"):
+                    with self.subTest(command=command):
+                        current, _ = self.approved(policy, command)
+                        self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                        self.assertFalse(sp.check(command, current).allowed)
+                for command in ("cat ~+/README.md", "cat ~-/notes.txt", "cd ~-; ls", f"ls ~{entry.pw_name}/projects"):
+                    with self.subTest(command=command):
+                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                        current, _ = self.approved(policy, command)
+                        self.assertTrue(sp.check(command, current).allowed)
+                for command in ("cat ~-/notes.txt", "cd ~-; ls"):
+                    self.assertTrue(sp.unresolved_directory(command, policy))
+                self.assertFalse(sp.unresolved_directory("cat ~+/README.md", policy))
+
+    @posix_shell
+    def test_rev010_env_chdir_behind_command_and_runners_is_guarded(self):
+        policy = sp.StagePolicy("resolve")
+        for command in ('command env -C "$X" cat id_rsa', 'nice env -C "$X" cat id_rsa',
+                        'timeout 5 env -C "$X" cat id_rsa', "nohup env -C ~/.ssh cat id_rsa",
+                        "command env --chdir ~/.codex cat auth.json", "nice -n 5 /usr/bin/env -C ~/.ssh cat id_rsa"):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        for safe in ("nice env -C /outside/api cat schema.json", "command env -C /outside/api cat schema.json"):
+            with self.subTest(command=safe):
+                current, _ = self.approved(policy, safe)
+                self.assertTrue(sp.check(safe, current).allowed)
+
+    @posix_shell
     def test_unresolved_directory_asks_for_project_paths_below_it(self):
         # Code loaders and variable targets make the directory unknown; a
         # nested project path still names no credential store, so it asks.
@@ -517,6 +584,7 @@ class ConsentVariantsTests(unittest.TestCase):
         self.assertIn("global grant never covers", output.getvalue())
         self.assertEqual(1, len(broker.pending))
 
+    @posix_shell
     def test_ac10_patterns_never_lift_protected_guards(self):
         policy = sp.StagePolicy("rereview", tmpdir="/tmp/current")
         current, grant = self.approved(policy, "ls /outside/api", r"(?:git|cat|echo|ls) .+")
@@ -535,6 +603,7 @@ class ConsentVariantsTests(unittest.TestCase):
             self.assertIn("[layer=toolkit_hook]", output.getvalue())
             self.assertIn("unlabelled refusal", sp.prompt_note(policy))
 
+    @posix_shell
     def test_ac7_ac9_pattern_proposal_edited_approval_and_real_hook(self):
         with tempfile.TemporaryDirectory() as root:
             store = grants.ConsentStore(Path(root) / "consents.json")
@@ -571,6 +640,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 "layer": executor + "_permission"}], sp.StagePolicy("resolve"), executor)
             self.assertEqual(executor + "_permission", records[0]["layer"])
 
+    @posix_shell
     def test_ac9_execution_audit_keeps_verified_temporary_identity_after_cleanup(self):
         with tempfile.TemporaryDirectory() as root:
             scratch = Path(root) / "dispatch"
@@ -591,13 +661,14 @@ class ConsentVariantsTests(unittest.TestCase):
 
     def test_ac12_documentation_contract(self):
         root = Path(__file__).resolve().parents[1]
-        text = (root / "docs/host-permissions.md").read_text()
+        # The docs are UTF-8 (`Í`, `←`); Windows' default code page cannot decode them.
+        text = (root / "docs/host-permissions.md").read_text(encoding="utf-8")
         for token in ("command_pattern_proposals", "positive", "negative", "toolkit_hook", "#439"):
             self.assertIn(token, text)
-        audit = (root / "docs/capability-parity-audit.md").read_text()
+        audit = (root / "docs/capability-parity-audit.md").read_text(encoding="utf-8")
         self.assertIn("PA-19", audit)
         self.assertIn("#439", audit)
-        self.assertIn("#455", (root / "docs/ROADMAP_V2.md").read_text())
+        self.assertIn("#455", (root / "docs/ROADMAP_V2.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
