@@ -21,6 +21,7 @@ question, and a later run applies the answer through `--grant`.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -149,8 +150,14 @@ def validate_pattern(pattern: str, positive: list[str], negative: list[str]) -> 
     try:
         compiled = re.compile(pattern)
         # Python's own regex AST avoids guessing repetition from escaped text.
-        import sre_parse as _parser
-        import sre_constants as _constants
+        # Python 3.11+ keeps the parser in the re package; the sre_* shims are
+        # deprecated and absent from newer interpreters.
+        try:
+            _parser = importlib.import_module("re._parser")
+            _constants = importlib.import_module("re._constants")
+        except ImportError:
+            _parser = importlib.import_module("sre_parse")
+            _constants = importlib.import_module("sre_constants")
         tree = _parser.parse(pattern, 0)
         repeats = {_constants.MAX_REPEAT, _constants.MIN_REPEAT}
         if (possessive := getattr(_constants, "POSSESSIVE_REPEAT", None)) is not None:
