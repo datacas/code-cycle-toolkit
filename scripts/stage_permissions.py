@@ -73,7 +73,25 @@ def credential_read_denials(*, publishes: bool = False,
         for target in (root / store[2:],) if target.exists()))
 
 #: Read-only shell tools every stage may use, and nothing else from the shell.
-READ_SHELL = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "find", "jq"})
+READ_SHELL = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "find", "jq",
+                        "sed", "date", "ps"})
+#: `sed` is the one read tool whose first barrier is narrower than the program:
+#: the hook accepts a `sed` that starts with one of these options, and the
+#: `--allowedTools` patterns name exactly these prefixes (#464).
+SED_FIRST_OPTIONS = ("-n", "-E", "-e", "-ne", "-nE", "-En")
+_SED_FLAGS = frozenset({"-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended",
+                        "-s", "--separate", "-z", "--null-data"})
+_SED_COMMANDS = "pdqQ=lPnN"
+_SED_S_FLAGS = frozenset("gpiImM0123456789")
+#: `ps` output fields that name no command line, environment or file. `args`,
+#: `command` and `cmd` are not here: another process's arguments can carry a
+#: credential, so those forms stay in the consent flow (#464).
+PS_SAFE_FIELDS = frozenset({
+    "pid", "ppid", "pgid", "sid", "tid", "tty", "stat", "state", "s", "etime", "etimes",
+    "time", "cputime", "cputimes", "pcpu", "%cpu", "pmem", "%mem", "rss", "vsz", "sz",
+    "nlwp", "thcount", "comm", "ucmd", "lstart", "start", "start_time", "nice", "ni",
+    "pri", "user", "uid"})
+_PS_SELECT_FLAGS = frozenset({"-e", "-A", "-a", "--no-headers", "--no-header"})
 #: `find` primaries that run a command, delete, or write a file.
 FIND_FORBIDDEN = frozenset({
     "-exec", "-execdir", "-ok", "-okdir", "-delete",
@@ -698,6 +716,12 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             for word in words[1:]:
                 if word in FIND_FORBIDDEN:
                     raise PolicyError(f"find {word} runs, deletes or writes; it is not allowed")
+        elif program == "sed":
+            check_sed(words[1:])
+        elif program == "date":
+            check_date(words[1:])
+        elif program == "ps":
+            check_ps(words[1:])
         if cwd:
             root = Path(cwd).resolve()
             evidence = {Path(path).resolve() for path in policy.evidence_paths}
@@ -710,12 +734,238 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
 
 
+def _sed_parts(args: list[str]) -> tuple[list[str], list[str]]:
+    """The scripts and file operands of a read-only `sed`; refuse anything else.
+
+    Only `-n`, `-E`, `-r`, `-s`, `-z` and `-e`/`--expression` are read. `-i`,
+    `--in-place`, `-f`, `--file` and every unknown option are refused, and a
+    `sed` without a file would read the stage's standard input, so it needs one.
+    """
+    scripts: list[str] = []
+    files: list[str] = []
+    options = True
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if options and word == "--":
+            options = False
+        elif options and word.startswith("-") and word != "-":
+            expression = re.fullmatch(r"-([nErsz]*)e(.*)", word, re.DOTALL)
+            if word in _SED_FLAGS or re.fullmatch(r"-[nErsz]+", word):
+                continue
+            if expression:
+                if expression.group(2):
+                    scripts.append(expression.group(2))
+                elif index < len(args):
+                    scripts.append(args[index])
+                    index += 1
+                else:
+                    raise PolicyError("sed -e needs a script")
+            elif word.startswith("--expression="):
+                scripts.append(word.partition("=")[2])
+            elif word == "--expression" and index < len(args):
+                scripts.append(args[index])
+                index += 1
+            else:
+                raise PolicyError(f"sed option {word} writes, runs a program or reads a script "
+                                  "file; it is not allowed")
+        elif not scripts:
+            scripts.append(word)
+        else:
+            files.append(word)
+    if not scripts:
+        raise PolicyError("sed needs a script")
+    if not files:
+        raise PolicyError("sed needs a file operand; it never reads the stage's standard input")
+    return scripts, files
+
+
+def _skip_sed_regex(script: str, index: int, delimiter: str, brackets: bool) -> int:
+    """The index after the regex or replacement that starts at `index`."""
+    size = len(script)
+    while index < size:
+        char = script[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "\n" and delimiter != "\n":
+            raise PolicyError("sed script: a newline inside a pattern is not allowed")
+        if brackets and char == "[":
+            index += 1
+            if index < size and script[index] == "^":
+                index += 1
+            if index < size and script[index] == "]":
+                index += 1
+            while index < size and script[index] != "]":
+                if script[index] == "[" and script[index + 1:index + 2] in {":", ".", "="}:
+                    closing = script.find(script[index + 1] + "]", index + 2)
+                    if closing < 0:
+                        raise PolicyError("sed script: unterminated bracket expression")
+                    index = closing + 2
+                else:
+                    index += 1
+            if index >= size:
+                raise PolicyError("sed script: unterminated bracket expression")
+            index += 1
+            continue
+        if char == delimiter:
+            return index + 1
+        index += 1
+    raise PolicyError("sed script: unterminated pattern")
+
+
+def _sed_commands(script: str, brackets: bool) -> list[str]:
+    """The command letters of a read-only sed script, or a refusal."""
+    commands: list[str] = []
+    size, index = len(script), 0
+
+    def address(position: int, second: bool) -> int:
+        if position < size and script[position] == "$":
+            return position + 1
+        if position < size and script[position] == "/":
+            position = _skip_sed_regex(script, position + 1, "/", brackets)
+            while position < size and script[position] in "IM":
+                position += 1
+            return position
+        if second and position < size and script[position] in "+~":
+            position += 1
+        digits = re.compile(r"\d+").match(script, position)
+        if not digits:
+            raise PolicyError("sed script: an address is a line number, $ or /regex/")
+        position = digits.end()
+        step = re.compile(r"~\d+").match(script, position)
+        return step.end() if step and not second else position
+
+    while True:
+        while index < size and script[index] in " \t\n;":
+            index += 1
+        if index >= size:
+            break
+        if script[index] in "$/0123456789":
+            index = address(index, False)
+            if index < size and script[index] == ",":
+                index = address(index + 1, True)
+        while index < size and script[index] in " \t!":
+            index += 1
+        if index >= size:
+            raise PolicyError("sed script: an address needs a command")
+        command = script[index]
+        index += 1
+        if command == "s":
+            if index >= size or script[index] in "\\\n \t;" or script[index].isalnum():
+                raise PolicyError("sed script: s needs a plain delimiter")
+            delimiter = script[index]
+            index = _skip_sed_regex(script, index + 1, delimiter, brackets)
+            index = _skip_sed_regex(script, index, delimiter, False)
+            while index < size and script[index] not in " \t\n;":
+                if script[index] not in _SED_S_FLAGS:
+                    raise PolicyError(f"sed script: the s flag {script[index]!r} may write a file "
+                                      "or run a command")
+                index += 1
+        elif command in _SED_COMMANDS:
+            if command in "qQl":
+                digits = re.compile(r"\d*").match(script, index)
+                index = digits.end() if digits else index
+        else:
+            raise PolicyError(f"sed command {command!r} writes, reads a file, runs a command "
+                              "or is outside the read-only set")
+        while index < size and script[index] in " \t":
+            index += 1
+        if index < size and script[index] not in "\n;":
+            raise PolicyError("sed script: unexpected text after a command")
+        commands.append(command)
+    return commands
+
+
+def check_sed(args: list[str]) -> None:
+    """Allow `sed` only in its read-only forms (#464); raise PolicyError otherwise.
+
+    The script is read twice, with and without bracket expressions as sed's
+    own parsers differ on a delimiter inside `[...]`; a script the two readings
+    disagree on is refused.
+    """
+    if not args or args[0] not in SED_FIRST_OPTIONS:
+        raise PolicyError("sed is allowed only when it starts with -n, -E or -e "
+                          "(prefixes: " + ", ".join(f"sed {option}" for option in SED_FIRST_OPTIONS)
+                          + ")")
+    scripts, _ = _sed_parts(args)
+    for script in scripts:
+        if _sed_commands(script, True) != _sed_commands(script, False):
+            raise PolicyError("sed script: ambiguous bracket expression is not allowed")
+
+
+_DATE_FLAGS = frozenset({"-u", "--utc", "--universal", "-R", "--rfc-email", "--rfc-822",
+                         "--rfc-2822"})
+
+
+def check_date(args: list[str]) -> None:
+    """Allow `date` to print a time, never to set one or read a file (#464)."""
+    format_seen = False
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word.startswith("+"):
+            if format_seen:
+                raise PolicyError("date takes one +FORMAT")
+            format_seen = True
+        elif (word in _DATE_FLAGS
+              or re.fullmatch(r"-I(date|hours|minutes|seconds|ns)?", word)
+              or re.fullmatch(r"--iso-8601(=(date|hours|minutes|seconds|ns))?", word)
+              or re.fullmatch(r"--rfc-3339=(date|seconds|ns)", word)
+              or re.fullmatch(r"--date=.+", word, re.DOTALL)):
+            continue
+        elif word in {"-d", "--date"} and index < len(args):
+            index += 1
+        else:
+            raise PolicyError(f"date {word} sets the clock, reads a file or is not a "
+                              "read-only form; it is not allowed")
+
+
+def _check_ps_fields(value: str) -> None:
+    for item in re.split(r"[,\s]+", value.strip()):
+        if item and item.partition("=")[0].lower() not in PS_SAFE_FIELDS:
+            raise PolicyError(f"ps field {item.partition('=')[0]!r} can show a command line or "
+                              "environment; it is not allowed")
+
+
+def check_ps(args: list[str]) -> None:
+    """Allow `ps` to list processes with fields that expose no arguments (#464)."""
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word in _PS_SELECT_FLAGS:
+            continue
+        if re.fullmatch(r"-[eAa]*o", word) and index < len(args):
+            _check_ps_fields(args[index])
+            index += 1
+        elif word.startswith("--format="):
+            _check_ps_fields(word.partition("=")[2])
+        elif word in {"--format"} and index < len(args):
+            _check_ps_fields(args[index])
+            index += 1
+        elif word in {"-p", "--pid"} and index < len(args) and re.fullmatch(
+                r"\d+(,\d+)*", args[index]):
+            index += 1
+        elif re.fullmatch(r"--pid=\d+(,\d+)*", word):
+            continue
+        else:
+            raise PolicyError(f"ps {word} can show a command line or environment, or is not "
+                              "a read-only form; it is not allowed")
+
+
 def read_operands(words: list[str]) -> list[str]:
     """File operands of the read tools, excluding filters and option data.
 
     This is path classification, not a replacement for external read isolation.
     """
     program, args = words[0], words[1:]
+    if program in {"date", "ps"}:
+        return []
+    if program == "sed":
+        return _sed_parts(args)[1]
     paths: list[str] = []
     pattern_seen = program not in {"grep", "jq"}
     find_roots = True
@@ -1643,7 +1893,9 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             for nested in (f'{shlex.quote(str(root))}/claude-*/pr-comment.md',
                            shlex.quote(str(root / "claude-*" / "pr-comment.md"))):
                 wildcards.append(f'python3 {validator} {nested}')
-    prefixes += sorted(READ_SHELL)
+    prefixes += sorted(READ_SHELL - {"sed"})
+    # `sed` has no bare prefix: only the read-only openings the hook accepts (#464).
+    prefixes += [f"sed {option}" for option in SED_FIRST_OPTIONS]
     if policy.permissions_command:
         prefixes.append(shlex.join(policy.permissions_command))
     prefixes += [shlex.join(command) for command in policy.publication_commands]

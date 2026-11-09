@@ -214,7 +214,7 @@ PUBLISHING_ROLES = frozenset({"implement", "resolve"})
 
 _READ_ONLY = frozenset({
     "pwd", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "stat", "echo",
-    "printf", "true", "which", "sort", "uniq", "cut", "tr", "diff", "test", "[", "date", "id",
+    "printf", "true", "which", "sort", "uniq", "cut", "tr", "diff", "test", "[", "id",
     "whoami", "basename", "dirname", "realpath", "file", "tree", "env", "printenv"})
 _GIT_READ_ONLY = frozenset({
     "grep", "log", "show", "status", "diff", "rev-parse", "ls-files", "ls-remote", "describe",
@@ -282,6 +282,16 @@ def _word_kind(words: list[str]) -> str:
     if program == "find":
         return "write" if any(word in {"-delete", "-exec", "-execdir", "-fprint", "-ok"}
                               for word in words) else "read_only"
+    if program in {"sed", "date", "ps"}:
+        # Read-only only in the forms the stage table accepts (#464); `sed -i`,
+        # `date -s` and a `ps` that shows command lines are not inspection.
+        import stage_permissions as sp
+        check = {"sed": sp.check_sed, "date": sp.check_date, "ps": sp.check_ps}[program]
+        try:
+            check(words[1:])
+        except sp.PolicyError:
+            return "write" if program in {"sed", "date"} else "unknown"
+        return "read_only"
     if program in _READ_ONLY:
         return "read_only"
     if program in _INTERPRETERS:
