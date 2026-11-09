@@ -289,9 +289,17 @@ class StageDispatch:
             # The sandbox stayed as it was; a person answers before any rerun.
             self.report.permission_requests = list(self.consent.pending)
             asked = self.consent.pending[0]
-            return self.stop(f"the {asked.role} stage needs permission: {asked.grant.id} "
-                        f"({asked.grant.resource})", reported=reported,
-                        stop_reason="permission_required")
+            because = (f"the {asked.role} stage needs permission: {asked.grant.id} "
+                       f"({asked.grant.resource})")
+            command = (asked.blocker or {}).get("command")
+            if self.consent.prompt is None and asked.grant.operation and command:
+                # Nobody can answer a run without a human channel (`--detach`, no
+                # terminal): the stop names the authorization it lacks and the
+                # decision stays pending in the decisions record (#464).
+                because += (f"; no one was attached to answer, nothing was granted: "
+                            f"`{self.api.readable(str(command), 200)}` is pending as a decision "
+                            f"(answer it with --grant {asked.grant.id}=cycle|persistent|forever|deny)")
+            return self.stop(because, reported=reported, stop_reason="permission_required")
         if not outcome.succeeded:
             if outcome.result is not None and outcome.result.failure_code in {
                     "suspected_external_change", "review_target_changed", "publication_violation",

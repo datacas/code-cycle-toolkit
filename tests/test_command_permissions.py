@@ -1056,9 +1056,9 @@ class BlockedReconciliationTests(unittest.TestCase):
 class ReconciledCycleTests(RunCycleTestCase):
     """The driver continues from the verified head, or stops as before (#364)."""
 
-    def cycle(self, denials, publication, *, completed="IMPLEMENTED", **fields):
+    def cycle(self, denials, publication, *, completed="IMPLEMENTED", prompt=None, **fields):
         claude = PublishingClaude(denials, completed, fields)
-        broker = grants.ConsentBroker("owner/api", platform="linux",
+        broker = grants.ConsentBroker("owner/api", platform="linux", prompt=prompt,
                                       store=grants.ConsentStore(self.home / "consents.json"))
         profiles = router.load_profiles({"code_cycle": {"profiles": {
             "deep_coder": {"primary": "claude:anthropic/claude-opus-5-5 high"},
@@ -1107,6 +1107,62 @@ class ReconciledCycleTests(RunCycleTestCase):
         recorded = self.journal(report, "reconciliation")
         self.assertEqual(["reconciled"], [row["status"] for row in recorded])
         self.assertEqual("IMPLEMENTED", recorded[0]["correlation"]["completed_status"])
+
+    def pending_denials(self, report):
+        from cycle_journal import decisions
+        return [item for item in decisions(self.store.path, "owner/api", "435")
+                if item["component"] == "unattended_denial"]
+
+    def test_464_a_run_without_a_human_channel_records_the_refusal_as_a_pending_decision(self):
+        # `--detach` and a run without a terminal build a broker with no prompt.
+        command = "git push origin task-435"
+        report, claude = self.cycle([{"tool": "Bash", "input": {"command": command},
+                                      "rule": "command_table", "operation_id": "refused_push"}],
+                                    published(remote_head=OTHER))
+        self.assertEqual("permission_required", report.stop_reason)
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertIn("no one was attached to answer, nothing was granted", report.stopped_because)
+        self.assertIn(f"`{command}` is pending as a decision", report.stopped_because)
+        pending = self.pending_denials(report)
+        self.assertEqual(1, len(pending))
+        self.assertFalse(pending[0]["answered"])
+        self.assertIn(command, pending[0]["question"])
+        self.assertIn("rule command_table", pending[0]["question"])
+        from cycle_journal import events
+        row = [item for item in events(self.store.path, "owner/api", kinds=("decision_asked",))
+               if item["component"] == "unattended_denial"][0]
+        self.assertEqual("implement", row["role"])
+        self.assertEqual({"stage": "implement", "role": "implement", "rule": "command_table",
+                          "operation": row["correlation"]["operation"],
+                          "class": "essential_permission", "pending": "true", "channel": "none"},
+                         row["correlation"])
+        self.assertEqual(1, len(claude.dispatched))  # nothing was granted, nothing reran
+        explained = report.journal_explanation["decisions"]
+        self.assertTrue(any(item["component"] == "unattended_denial" for item in explained))
+
+    def test_464_an_attended_run_asks_and_leaves_no_unattended_denial(self):
+        asked = []
+
+        def prompt(question):
+            asked.append(question)
+            return "deny"
+
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "git push origin task-435"}}],
+                               published(remote_head=OTHER), prompt=prompt)
+        self.assertTrue(asked)
+        self.assertEqual([], self.pending_denials(report))
+        self.assertNotIn("no one was attached", report.stopped_because)
+
+    def test_464_a_saved_grant_applies_before_the_unattended_policy(self):
+        # The stored answer is read first: no request is left pending for it.
+        broker_store = grants.ConsentStore(self.home / "consents.json")
+        grant = cp.make_grant(cp.operation("Bash", {"command": "git push origin task-435"},
+            sp.StagePolicy("implement", repo="owner/api")), "claude", "linux")
+        broker = grants.ConsentBroker("owner/api", platform="linux", store=broker_store)
+        broker.apply_answer(grant, grant.scope_for("claude", "linux"), "persistent")
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "git push origin task-435"}}],
+                               published(remote_head=OTHER))
+        self.assertNotIn("no one was attached", report.stopped_because or "")
 
     def test_464_the_stop_names_the_real_cause_apart_from_the_refusals(self):
         report, _ = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
