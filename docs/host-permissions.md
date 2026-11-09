@@ -212,7 +212,9 @@ a `-C` or `--c…` anywhere inside an `env -S` value, which counts as
 unresolved), also when `env` runs behind another program word such as
 `command`, `nice`, `nohup` or `timeout 5`. Tilde prefixes resolve as bash
 reads them: `~` and `~/…` name the home directory, `~user/…` that user's home
-directory, and `~+/…` the segment's working directory.
+directory, and `~+/…` the segment's working directory. The parser removes
+backslash-newline continuations and decodes ANSI-C `$'…'` and locale `$"…"`
+quoting before the guards compare a word.
 They compare glob and brace operands, the
 value of a `name=value` word and an attached short-option value such as
 `-C~/.ssh` to the protected stores without reading them. Globs match one path
