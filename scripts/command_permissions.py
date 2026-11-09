@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import replace
 from pathlib import Path
@@ -214,7 +215,7 @@ PUBLISHING_ROLES = frozenset({"implement", "resolve"})
 
 _READ_ONLY = frozenset({
     "pwd", "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "stat", "echo",
-    "printf", "true", "which", "sort", "uniq", "cut", "tr", "diff", "test", "[", "date", "id",
+    "printf", "true", "which", "sort", "uniq", "cut", "tr", "diff", "test", "[", "id",
     "whoami", "basename", "dirname", "realpath", "file", "tree", "env", "printenv"})
 _GIT_READ_ONLY = frozenset({
     "grep", "log", "show", "status", "diff", "rev-parse", "ls-files", "ls-remote", "describe",
@@ -282,6 +283,16 @@ def _word_kind(words: list[str]) -> str:
     if program == "find":
         return "write" if any(word in {"-delete", "-exec", "-execdir", "-fprint", "-ok"}
                               for word in words) else "read_only"
+    if program in {"sed", "date", "ps"}:
+        # Read-only only in the forms the stage table accepts (#464); `sed -i`,
+        # `date -s` and a `ps` that shows command lines are not inspection.
+        import stage_permissions as sp
+        check = {"sed": sp.check_sed, "date": sp.check_date, "ps": sp.check_ps}[program]
+        try:
+            check(words[1:])
+        except sp.PolicyError:
+            return "write" if program in {"sed", "date"} else "unknown"
+        return "read_only"
     if program in _READ_ONLY:
         return "read_only"
     if program in _INTERPRETERS:
@@ -515,6 +526,45 @@ def _compact(record: dict[str, Any]) -> dict[str, Any]:
             for key in ("command", "stage", "reason", "rule", "operation", "class", "why")}
 
 
+def has_open_questions(payload: dict[str, Any]) -> bool:
+    """Whether the stage stopped to ask the user something: it is then not done."""
+    return bool(payload.get("questions"))
+
+
+def inferred_completion(payload: dict[str, Any], role: str, completed: frozenset[str]) -> str | None:
+    """The completion status a `BLOCKED` result proves without claiming it (#464).
+
+    Only for a publishing role, only from the structured fields the role's
+    contract requires, and never from prose or from a change request merely
+    existing: `implement` needs a full head, a change request, planned work
+    units and tests that ran; `resolve` needs a full head and finding outcomes.
+    A result that carries `questions` is waiting for an answer, so it is never
+    inferred done.
+    The caller still requires one commit at the remote, local and PR head.
+    """
+    head = payload.get("head_sha")
+    if (role not in PUBLISHING_ROLES or not isinstance(head, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", head) or has_open_questions(payload)):
+        return None
+    tests = payload.get("tests")
+    if role == "implement":
+        units = payload.get("work_units")
+        if (payload.get("change_request_id") or payload.get("pr_number")) \
+                and isinstance(units, list) and units \
+                and isinstance(tests, dict) and tests.get("ran") is True \
+                and "IMPLEMENTED" in completed:
+            return "IMPLEMENTED"
+        return None
+    outcomes = payload.get("finding_outcomes")
+    if isinstance(outcomes, list) and outcomes and all(
+            isinstance(item, dict) and item.get("status") in {"resolved", "not_applicable", "open"}
+            for item in outcomes):
+        status = ("RESOLVED" if all(item["status"] != "open" for item in outcomes)
+                  else "PARTIALLY_RESOLVED")
+        return status if status in completed else None
+    return None
+
+
 def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[str],
                        denials: list[dict[str, Any]], publication: dict[str, Any] | None) -> None:
     """Complete a `BLOCKED` stage only when the runtime verified why it may.
@@ -528,8 +578,16 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
     if "reconciliation" in payload:
         return
     claimed = payload.get("completed_status")
+    inferred = False
+    if claimed is None:
+        # The agent reported `BLOCKED` after its refusals without saying it was
+        # done (#464). The structured result may still prove it: the runtime
+        # then derives the status, and every other condition below still holds.
+        claimed = inferred_completion(payload, role, completed)
+        inferred = claimed is not None
     record: dict[str, Any] = {
         "reconciled": False, "original_status": "BLOCKED", "completed_status": claimed,
+        "inferred": inferred,
         "denials": [_compact(item) for item in denials[:20]],
         "shas": publication_shas(publication, payload), "reason": ""}
     tests = payload.get("tests")
@@ -553,7 +611,8 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
     if reason is None:
         payload["status"] = claimed
         record.update(reconciled=True, reason=(
-            "every denial is auxiliary or redundant and the published state is verified"))
+            "every denial is auxiliary or redundant and the published state is verified"
+            + ("; the completion was inferred from the structured result" if inferred else "")))
     else:
         record["reason"] = reason
     payload["reconciliation"] = record

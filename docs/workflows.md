@@ -276,6 +276,7 @@ From a toolkit checkout: `python3 scripts/run_cycle.py …`
 | `--from` | `implement` | Stage to start at: `implement`, `review`, `resolve`, or `rereview`; anything but `implement` resumes `--pr` |
 | `--pr` | — | Existing change request a resumed cycle works on; required by `--from review\|resolve\|rereview` |
 | `--continue` | off | Continue an interrupted implementation from the partial work in `--cwd` instead of starting it again; skips the issue review |
+| `--no-auto-resume` | off | Start the work item over instead of resuming a finished `implement` or `resolve` stage at `review` or `rereview`. See [Resume without `--from` and `--pr`](host-permissions.md#detached-and-unattended-runs) |
 | `--max-iterations` | `3` | Resolve + rereview rounds |
 | `--ci-policy` | `ci.policy`, else `strict` | `strict` waits for checks inside each writing stage; `parallel` reviews while they run and approves only after a CI pass of the reviewed SHA. GitHub only. See [CI policy](review-cycle.md#ci-policy) |
 | `--ci-timeout` | `ci.timeout`, else `900` seconds | How long the `parallel` CI gate waits for one SHA |
@@ -386,6 +387,8 @@ python3 ~/.code-cycle/runtime/run_cycle.py --task 123 --cwd /path/to/checkout --
 ```
 
 The driver refuses `--continue` without `--cwd`, with a resuming `--from`, or when the checkout is clean on its default branch (`repository.default_branch`, else `main` or `master`), because then there is nothing to continue. Otherwise the implementer is told a previous run was interrupted and to inspect the branch, its commits, uncommitted changes, and any open change request for the work item, keep what is correct, and continue without discarding it or opening a second change request. The issue review is not repeated, and the cycle row records `continued`.
+
+**A finished stage needs no manual `--from` and `--pr` (#464).** When an `implement` or `resolve` stage's own result proved its work done, the runtime leaves a resume point in the cycle journal, whether the stage completed or ended `BLOCKED` with no operation it needed refused. Running the same work item again, without `--from`, `--pr` or `--continue`, resumes at `review` (after `implement`) or `rereview` (after `resolve`), prints why, and records the block reason, the recovery stage and the checks made. It is used only when the earlier run recorded its stop, no later stage began, and the change request is open at the recorded head; any mismatch stops the run and names it. See [Detached and unattended runs](host-permissions.md#detached-and-unattended-runs).
 
 An implementation can publish its pull request and then stop, for example when verification loses registry access. On a GitHub cycle the driver reads the checkout branch's single open pull request before the continuation starts. The implementer is told to push to it and report it. The review then runs on that pull request, including when the result omits its identifier. A result naming a different change request stops `BLOCKED` before review, and a person decides which one continues. When no single open pull request can be read, nothing is guessed, and the implementer gets only the generic instruction.
 

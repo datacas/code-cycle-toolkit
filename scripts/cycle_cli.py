@@ -3,6 +3,45 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+def auto_resume_of(api: Any, args: argparse.Namespace, config: dict, repo: str,
+                   *, read_pull=None):
+    """Turn a rerun of a finished publishing stage into a resume of the next stage (#464).
+
+    Only a plain rerun of the work item on GitHub qualifies: no explicit `--from`
+    or `--pr`, no `--continue`, no local-only work and no `--no-auto-resume`. A
+    recorded resume point that cannot be honoured stops the run, naming the
+    mismatch, instead of re-implementing a work item whose change request exists.
+    Returns the resume that was applied to `args`, or None.
+    """
+    import cycle_resume
+    if (args.start_from != "implement" or args.change_request or args.continue_work
+            or args.local_only or not args.auto_resume or args.orca_action != "launch"):
+        return None
+    host = (config.get("code_cycle") or {}).get("code_host")
+    if host not in (None, "github"):
+        return None
+    database = api.Path(args.database) if args.database else api.default_database_path()
+    if not database.is_file():
+        return None
+    try:
+        resume = cycle_resume.auto_resume(
+            database, repo, args.task,
+            read_pull=read_pull or cycle_resume.read_pull_with_gh(repo))
+    except cycle_resume.ResumeRefused as error:
+        raise api.CycleDriverError(
+            f"{args.task} has a finished stage to resume but it cannot be resumed "
+            f"automatically: {error}; pass --from and --pr explicitly, or --no-auto-resume "
+            "to start the work item over") from error
+    if resume is None:
+        return None
+    args.start_from, args.change_request = resume.start_from, resume.change_request_id
+    # The same validation an explicit `--from` and `--pr` get.
+    api.validate_start(args.start_from, args.change_request, local_only=args.local_only,
+                       continue_work=args.continue_work)
+    print(resume.notice())
+    return resume
+
+
 def main(api: Any, argv: list[str] | None = None) -> int:
     api.apply_gh_environment_defaults()
     api._configure_stdout()
@@ -46,6 +85,10 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                               "work; off keeps the original flow (default: "
                               f"code_cycle.issue_review.mode in {api.CONFIG_NAME}, "
                               "else auto). A resumed cycle never runs it"))
+    parser.add_argument("--no-auto-resume", dest="auto_resume", action="store_false",
+                        help=("start the work item over instead of resuming a finished "
+                              "implement or resolve stage whose change request exists at "
+                              "the recorded head (default: resume from review or rereview)"))
     parser.add_argument("--continue", dest="continue_work", action="store_true",
                         help=("continue an interrupted implementation from the partial "
                               "work in --cwd instead of starting it again; skips the "
@@ -148,6 +191,7 @@ def main(api: Any, argv: list[str] | None = None) -> int:
             api.validate_start(args.start_from, args.change_request, local_only=True,
                            continue_work=args.continue_work)
         grant_answers = api.parse_grant_options(args.grant)
+        resumed = auto_resume_of(api, args, config, repo)
         if args.local_only:
             api.validate_local_only_cwd(args.cwd)
             if args.workspace != "current":
@@ -196,6 +240,13 @@ def main(api: Any, argv: list[str] | None = None) -> int:
         # Everything that can be refused was refused above, where a person is
         # still reading; the detached run repeats those checks on its own.
         return api.detach(list(api.sys.argv[1:] if argv is None else argv), args.database)
+
+    if resumed is not None:
+        # Recorded only now that every preflight check passed: a rerun that
+        # failed before dispatching must not look like a run still in progress.
+        import cycle_resume
+        database_path = api.Path(args.database) if args.database else api.default_database_path()
+        cycle_resume.record_auto_resume(database_path, repo, args.task, resumed)
 
     change_bases = api.change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.
@@ -289,6 +340,8 @@ def main(api: Any, argv: list[str] | None = None) -> int:
               file=api.sys.stderr)
         return 1
 
+    if resumed is not None:
+        report.notes[:0] = [(0, resumed.notice())]
     if consent.notes:
         report.notes[:0] = [(0, f"  permission {api.readable(line, 300)}")
                             for line in consent.notes]

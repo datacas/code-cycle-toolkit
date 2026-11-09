@@ -298,7 +298,12 @@ intent `unknown`.
 **A `BLOCKED` stage is completed only when all of this holds:**
 
 1. the block declares a `completed_status` valid for its role (`IMPLEMENTED`
-   for `implement`, `RESOLVED` for `resolve`);
+   for `implement`, `RESOLVED` for `resolve`). Since #464 a block that declares
+   none is judged on its structured result instead: `implement` needs a full
+   `head_sha`, a change request, non-empty `work_units` and `tests.ran: true`;
+   `resolve` needs a full `head_sha` and `finding_outcomes`. The runtime then
+   derives the status and records `inferred: true`; prose never counts and a
+   pull request existing is not completion;
 2. every denial of the stage is `auxiliary_denial` or `redundant_operation`.
    A configured check the person declined is the one exception: it keeps its
    `essential_permission` class in the record, but it is recorded `unverified`

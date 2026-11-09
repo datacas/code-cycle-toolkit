@@ -132,6 +132,128 @@ class ReadOnlyShellTests(PolicyTestCase):
                 self.denied(command, policy)
 
 
+#: One table for both barriers (#464): the hook's decision on a command, and
+#: whether any `--allowedTools` pattern of the stage opens it as a prefix.
+#: `first_barrier` is None where the first barrier is only the program prefix and
+#: the hook alone reads the arguments (as for `find`, `jq` and `grep`).
+INSPECTION_TABLE = (
+    # (command, hook allows, first barrier opens it)
+    ("sed -n 10,20p README.md", True, True),
+    ("sed -n '1,5p' README.md CLAUDE.md", True, True),
+    ("sed -n -e 5p README.md", True, True),
+    ("sed -ne 5p README.md", True, True),
+    ("sed -E 's/a+/b/g' README.md", True, True),
+    ("sed -n '/foo/,/bar/p' README.md", True, True),
+    ("sed -n '$p' README.md", True, True),
+    ("sed -n '5q' README.md", True, True),
+    ("sed -n '3!d' README.md", True, True),
+    ("sed -n 's/[/]/x/p' README.md", False, True),
+    ("sed -i s/a/b/ README.md", False, False),
+    ("sed -n -i 5p README.md", False, True),
+    ("sed -ni 5p README.md", False, False),
+    ("sed --in-place s/a/b/ README.md", False, False),
+    ("sed -n -f script.sed README.md", False, True),
+    ("sed -n --file=script.sed README.md", False, True),
+    ("sed -n 'w out.txt' README.md", False, True),
+    ("sed -n '5w out.txt' README.md", False, True),
+    ("sed -n 's/a/b/w out.txt' README.md", False, True),
+    ("sed -n 's/a/b/e' README.md", False, True),
+    ("sed -n 'e id' README.md", False, True),
+    ("sed -n '1r /etc/passwd' README.md", False, True),
+    ("sed -n p", False, True),
+    ("sed 5p README.md", False, False),
+    ("sed -n 5p /etc/passwd", False, True),
+    ("sed -n -e 1p -", False, True),
+    ("sed -n /tmp/p -e 1p README.md", False, True),
+    ("sed -n /tmp/p --expression=1p README.md", False, True),
+    ("sed -n -e 1p README.md CLAUDE.md", True, True),
+    ("sed -n 5p README.md > $TMPDIR/out", False, True),
+    ("date", True, None),
+    ("date +%H:%M:%S", True, None),
+    ("date -u +%s", True, None),
+    ("date -d '1 hour ago' +%s", True, None),
+    ("date --iso-8601=seconds", True, None),
+    ("date -s '2020-01-01'", False, None),
+    ("date --set=now", False, None),
+    ("date 01010000", False, None),
+    ("date -f README.md", False, None),
+    ("date -r README.md", False, None),
+    ("ps", True, None),
+    ("ps -e", True, None),
+    ("ps -eo pid,etime,pcpu,comm", True, None),
+    ("ps -o pid=,etime= -p 123", True, None),
+    ("ps -eo pid,etime,pcpu,args", False, None),
+    ("ps -eo cmd", False, None),
+    ("ps -ef", False, None),
+    ("ps aux", False, None),
+    ("ps e", False, None),
+)
+
+
+def opens_as_prefix(command: str, patterns: list[str]) -> bool:
+    """Whether a `Bash(<prefix>:*)` pattern admits the command by word prefix."""
+    words = command.split()
+    for pattern in patterns:
+        if not (pattern.startswith("Bash(") and pattern.endswith(":*)")):
+            continue
+        prefix = pattern[len("Bash("):-len(":*)")].split()
+        if words[:len(prefix)] == prefix:
+            return True
+    return False
+
+
+class InspectionToolTests(PolicyTestCase):
+    """`sed -n`, `date` and `ps` follow one decision in both barriers (#464)."""
+
+    ROLES = ("implement", "resolve", "review", "rereview", "issue_review")
+
+    def test_table_driven_hook_and_first_barrier_agree(self) -> None:
+        for role in self.ROLES:
+            policy = self.policy(role)
+            patterns = sp.allowed_tool_patterns(policy)
+            for command, hook_allows, first_barrier in INSPECTION_TABLE:
+                with self.subTest(role=role, command=command):
+                    decision = sp.check(command, policy, cwd=ROOT.as_posix(),
+                                        run=on_branch("issue-142"))
+                    self.assertEqual(hook_allows, decision.allowed, decision.reason)
+                    if hook_allows:
+                        # The hook never accepts what the first barrier does not open.
+                        self.assertTrue(opens_as_prefix(command, patterns))
+                    if first_barrier is not None:
+                        self.assertEqual(first_barrier, opens_as_prefix(command, patterns))
+
+    def test_the_sed_patterns_are_the_read_only_openings_and_never_bare_sed(self) -> None:
+        patterns = sp.allowed_tool_patterns(self.policy("implement"))
+        self.assertNotIn("Bash(sed:*)", patterns)
+        for option in sp.SED_FIRST_OPTIONS:
+            self.assertIn(f"Bash(sed {option}:*)", patterns)
+        self.assertIn("Bash(date:*)", patterns)
+        self.assertIn("Bash(ps:*)", patterns)
+
+    def test_a_refused_inspection_is_recorded_under_the_command_table_rule(self) -> None:
+        policy = self.policy("implement")
+        for command in ("sed -i s/a/b/ README.md", "date -s now", "ps -eo args"):
+            with self.subTest(command=command):
+                decision = self.denied(command, policy)
+                self.assertEqual("command_table", decision.rule)
+
+    def test_the_read_operands_of_sed_are_its_files_and_never_its_script(self) -> None:
+        self.assertEqual(["a", "b"], sp.read_operands(["sed", "-n", "1,2p", "a", "b"]))
+        self.assertEqual(["a"], sp.read_operands(["sed", "-n", "-e", "1p", "a"]))
+        # Options are permuted: with any -e, every non-option word is a file (REV-001).
+        self.assertEqual(["/tmp/p", "README.md"],
+                         sp.read_operands(["sed", "-n", "/tmp/p", "-e", "1p", "README.md"]))
+        self.assertEqual(["/tmp/p"], sp.read_operands(["sed", "-n", "/tmp/p", "--expression=1p"]))
+        self.assertEqual([], sp.read_operands(["date", "+%s"]))
+        self.assertEqual([], sp.read_operands(["ps", "-e"]))
+
+    def test_a_script_whose_two_readings_differ_is_refused(self) -> None:
+        for script in ("s/[/]/x/;w out/", "s/[/]/;w f/;p", "s/a[/b/p"):
+            with self.subTest(script=script):
+                with self.assertRaises(sp.PolicyError):
+                    sp.check_sed(["-n", script, "README.md"])
+
+
 class GitTests(PolicyTestCase):
     def test_reads_are_shared_and_review_reads_reach_reviews(self) -> None:
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
@@ -830,6 +952,8 @@ class AllowedToolsTests(PolicyTestCase):
                 if words[-2:] in (["api", "graphql"],) or words[-1] in {"push", "comment",
                                                                        "review", "edit"}:
                     continue  # need arguments the prefix cannot carry
+                if "sed" in words:
+                    continue  # a script and a file; InspectionToolTests covers the openings
                 non_completable = {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",
                                    "mv", "view", "diff", "checks", "create", "list"}
                 if words[-1] in non_completable and words[0:2] != ["gh", "issue"]:

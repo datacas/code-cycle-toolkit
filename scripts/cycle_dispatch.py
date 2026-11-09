@@ -289,9 +289,17 @@ class StageDispatch:
             # The sandbox stayed as it was; a person answers before any rerun.
             self.report.permission_requests = list(self.consent.pending)
             asked = self.consent.pending[0]
-            return self.stop(f"the {asked.role} stage needs permission: {asked.grant.id} "
-                        f"({asked.grant.resource})", reported=reported,
-                        stop_reason="permission_required")
+            because = (f"the {asked.role} stage needs permission: {asked.grant.id} "
+                       f"({asked.grant.resource})")
+            command = (asked.blocker or {}).get("command")
+            if self.consent.prompt is None and asked.grant.operation and command:
+                # Nobody can answer a run without a human channel (`--detach`, no
+                # terminal): the stop names the authorization it lacks and the
+                # decision stays pending in the decisions record (#464).
+                because += (f"; no one was attached to answer, nothing was granted: "
+                            f"`{self.api.readable(str(command), 200)}` is pending as a decision "
+                            f"(answer it with --grant {asked.grant.id}=cycle|persistent|forever|deny)")
+            return self.stop(because, reported=reported, stop_reason="permission_required")
         if not outcome.succeeded:
             if outcome.result is not None and outcome.result.failure_code in {
                     "suspected_external_change", "review_target_changed", "publication_violation",
@@ -418,6 +426,46 @@ class StageDispatch:
             self.report.note(f"  publication breach  {self.api.json.dumps(breach.evidence(), sort_keys=True)}")
         return self.stop(result.explain(role), reported=reported,
                     stop_reason="publication_violation")
+
+    def record_resume_point(self: Any, role: str, reported: Reported, status: str,
+                            cause: str) -> None:
+        """Leave the journal point a rerun resumes from (#464); never raises."""
+        if (self.local_only or (self.code_host or self.policy_code_host) not in {None, "github"}
+                or role not in {"implement", "resolve"} or not reported.payload):
+            return
+        import cycle_resume
+        try:
+            branch = (self.api._git_line(self.cwd, ["branch", "--show-current"], 30)
+                      if self.cwd else None)
+            cycle_resume.record_resume_point(
+                self.journal, role, reported.payload, cause=self.api.readable(cause, 500),
+                status=status, branch=branch)
+        except Exception:
+            pass  # a missing point only keeps the manual `--from` and `--pr`
+
+    def blocked_cause(self: Any, role: str, reported: Reported) -> tuple[str | None, bool]:
+        """The real cause of a stage that stopped after refusals, apart from the refusals (#464).
+
+        Returns the cause and whether it is itself a refused operation. A stage
+        that did its work and met only incidental refusals is named for what
+        actually stopped it; an essential refusal is named with its command.
+        """
+        from command_permissions import RECONCILABLE_DENIALS
+        runtime = reported.runtime or {}
+        record = runtime.get("reconciliation")
+        if not isinstance(record, dict) or record.get("reconciled") is True:
+            return None, False
+        denials = [item for item in record.get("denials") or [] if isinstance(item, dict)]
+        serious = next((item for item in denials
+                        if item.get("class") not in RECONCILABLE_DENIALS), None)
+        if serious is not None:
+            return (f"the {role} stage needed a refused operation it could not run: "
+                    f"`{self.api.readable(serious.get('command'), 200)}` "
+                    f"({serious.get('class')}, rule {serious.get('rule')}); "
+                    f"{self.api.readable(record.get('reason'), 300)}"), True
+        reason = self.api.readable(record.get("reason"), 300)
+        return (f"{reason} (the stage's {len(denials)} refused command(s) were incidental "
+                "and are listed as warnings)" if denials else reason), False
 
     def review_issue(self: Any) -> CycleReport | None:
         """The readiness gate: only a confirmed READY lets `implement` run.
@@ -743,12 +791,26 @@ class StageDispatch:
                                        if pull_request_id else {}))
         if not reported.completes(role, self.ci_policy):
             because = reported.explain(role, self.ci_policy)
+            cause, refusal_is_cause = self.blocked_cause(role, reported)
+            if cause:
+                because += f"; cause: {cause}"
+            if not refusal_is_cause:
+                # The stage's own result proves its work done and no operation it
+                # needed was refused: a rerun of the work item resumes after it.
+                self.record_resume_point(role, reported, "blocked_done", cause or because)
             if (role == "rereview" and not self.local_only
                     and (self.code_host or self.policy_code_host) == "github"):
                 because += self.manual_hint(reported)
             return reported, self.stop(because,
                                   "BLOCKED" if (reported.payload or {}).get("publication_pending") is True
-                                  else self.api.UNRESOLVED_END, reported=reported)
+                                  else self.api.UNRESOLVED_END, reported=reported,
+                                  refusals_are_warnings=bool(cause) and not refusal_is_cause)
+        reconciled = (reported.runtime or {}).get("reconciliation")
+        self.record_resume_point(
+            role, reported, "completed",
+            "the stage completed after refused commands the runtime reconciled"
+            if isinstance(reconciled, dict) and reconciled.get("reconciled") is True
+            else "the stage completed")
         if (role in {"review", "rereview"} and self.execution_plan.stage("security").selected
                 and self.plan_managed and (reported.payload or {}).get("security_audit_ran") is not True):
             return reported, self.stop("the required security audit was omitted or unverified",

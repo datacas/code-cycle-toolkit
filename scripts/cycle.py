@@ -30,6 +30,7 @@ availability untouched, so the question stays visible.
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 import sqlite3
@@ -1559,6 +1560,25 @@ class CycleRecorder:
                               correlation={"rule": record.get("rule"),
                                            "operation": record.get("operation"),
                                            "stage": record.get("stage")})
+                if self.consent is not None and self.consent.prompt is None:
+                    # No human channel (`--detach`, no terminal): the refusal is a
+                    # denial that grants nothing, and the question it would have
+                    # raised is asked afterwards from the decisions record (#464).
+                    self._journal(
+                        "decision_asked", role=role, attempt_id=attempt_id,
+                        component="unattended_denial",
+                        decision_key=f"denial:{record.get('operation')}",
+                        status="unanswered", command=record.get("command"),
+                        reason=(f"{record.get('command')} was refused in the "
+                                f"{record.get('stage') or role} stage by rule "
+                                f"{record.get('rule')}: {record.get('reason')}"),
+                        detail=json.dumps(["allow this cycle", "allow this repository",
+                                           "allow forever", "deny"]),
+                        correlation={"stage": record.get("stage"), "role": role,
+                                     "rule": record.get("rule"),
+                                     "operation": record.get("operation"),
+                                     "class": record.get("class"), "pending": "true",
+                                     "channel": "none"})
         for failure in artifacts.get("sandbox_startup_failures") or []:
             if isinstance(failure, dict):
                 self._journal("refusal", role=role, attempt_id=attempt_id,
