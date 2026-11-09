@@ -209,12 +209,16 @@ credential guards account for `cd` options and directory-stack changes from
 `command`, and `env -C`/`--chdir` in any spelling `env` accepts (combined
 short options such as `-vC` or `-uNAME -C`, abbreviations such as `--c=`, and
 a `-C` or `--c…` anywhere inside an `env -S` value, which counts as
-unresolved), also when `env` runs behind another program word such as
-`command`, `nice`, `nohup` or `timeout 5`. Tilde prefixes resolve as bash
+unresolved), also when `env` runs behind any other program word, such as
+`command`, `nice`, `timeout -s KILL 5`, `sudo -u root` or `xargs`; only
+programs that print or search their arguments (`echo`, `printf`, `grep`,
+`egrep`, `fgrep`, `rg`) are exempt. Tilde prefixes resolve as bash
 reads them: `~` and `~/…` name the home directory, `~user/…` that user's home
 directory, and `~+/…` the segment's working directory. The parser removes
-backslash-newline continuations and decodes ANSI-C `$'…'` and locale `$"…"`
-quoting before the guards compare a word.
+backslash-newline continuations, also inside a `$` expansion (`$HO\` newline
+`ME`), decodes ANSI-C `$'…'` quoting exactly as bash does (octal, `\x`, `\u`,
+`\U`, `\cX`, ending at the first NUL) and reads locale `$"…"` quoting as a
+double-quoted string before the guards compare a word.
 They compare glob and brace operands, the
 value of a `name=value` word and an attached short-option value such as
 `-C~/.ssh` to the protected stores without reading them. Globs match one path
