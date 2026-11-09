@@ -113,6 +113,24 @@ The hook validates arguments, not only the program, and it is fail-closed:
   `gh api user --jq .login` and resolve's three thread calls;
 - `find -exec`, `-execdir`, `-ok`, `-okdir`, `-delete` and `-fprint*` are
   refused, and the read-only shell tools may not redirect output;
+- `sed`, `date` and `ps` are read-only tools only in the forms below (#464);
+  any other form is the exact consent question of the rest of this page.
+  `sed` must start with `-n`, `-E` or `-e` (or `-ne`, `-nE`, `-En`), may add
+  `-r`, `-s`, `-z` and further `-e`, needs a file operand inside the workspace
+  and a script made only of line, `$` and `/regex/` addresses with
+  `p d q Q = l P n N` and `s` without the `w` and `e` flags. `-i`,
+  `--in-place`, `-f`, `--file`, the `w W e r R` commands and a script that
+  sed's POSIX and GNU bracket parsing read differently are refused. `date`
+  prints a time: `+FORMAT`, `-u`, `-I`, `-R`, `--rfc-3339`, `-d`/`--date`;
+  `-s`, `--set`, `-f`, `-r` and a positional time are refused. `ps` takes
+  `-e`, `-A`, `-a`, `--no-headers`, `-o`/`--format` fields that name no
+  command line (`pid`, `ppid`, `etime`, `pcpu`, `comm`, …) and `-p`; `args`,
+  `command`, `cmd`, `-f` and BSD forms such as `ps aux` are refused, because
+  another process's arguments can carry a credential. The hook and the
+  `--allowedTools` patterns read the same sets: `sed` appears only as the
+  prefixes `sed -n`, `sed -E`, `sed -e`, `sed -ne`, `sed -nE` and `sed -En`,
+  and `date` and `ps` as their program prefix with the hook reading the
+  arguments, as for `find` and `grep`;
 - every Docker command needs the `docker_host` grant first, also with an
   environment prefix; with it, `docker compose up|down|ps|logs|build` is in the
   table and `docker compose run`, `docker run`, `docker exec` and every other
@@ -378,6 +396,62 @@ evidence. For `implement` and `resolve` the runtime classifies every refusal
 itself and completes the stage only when the remote head, the local HEAD and
 the PR head agree: see
 [a publishing stage that reported `BLOCKED`](role-workspace-policy.md#a-publishing-stage-that-reported-blocked-after-a-verified-publication-364).
+
+### Detached and unattended runs
+
+<a id="detached-and-unattended-runs"></a>
+
+A run with no human channel, `--detach` or no terminal on stdin and stderr, has
+nobody to answer a question. The policy applies to every hook command-table
+refusal in such a run, not only `--detach` (#464):
+
+1. **A saved grant applies first.** An answer stored by #406 (`--grant`, this
+   cycle, this repository, forever) is read before anything else.
+2. **Otherwise the refusal is a denial that grants nothing.** The runtime
+   records it for every refused command with its command, stage, role, rule,
+   reason and runtime class (`denial_classification`), and as a pending
+   decision (`decision_asked`, component `unattended_denial`, status
+   `unanswered`). The decisions record of the cycle lists it afterwards, and
+   `--grant command_<sha256>=…` answers it on the next run.
+3. **An incidental denial continues.** A stage whose work is done, whose
+   publication is verified and whose refusals were only inspection or
+   redundant keeps its status. The checks it could not run stay `not_verified`.
+4. **An essential denial stops the cycle** with `HUMAN_INTERVENTION`
+   (`stop_reason=permission_required`), naming the command, the pending
+   decision and the `--grant` that answers it. `docker_host` and
+   configured-check consent keep `permission_required`; they are persisted as
+   pending and the cycle never waits for them.
+5. **Sandbox limits are unchanged.** A missing socket, `bubblewrap` or network
+   is a real limit of the host, reported as before; this policy does not grant
+   it.
+
+An attended run asks as before, and records no `unattended_denial`.
+
+**The cause of a `BLOCKED` stage.** A refused command is not assumed to be why
+a stage ended. The stop names the cause the runtime verified, apart from the
+refusals: the missing completion evidence, a failed publication check, or the
+essential refused operation with its command, rule and class. The incidental
+refusals of that stage are listed as warnings. A publishing stage that reports
+`BLOCKED` without a `completed_status` is judged on its structured result: a
+full head, the change request, planned work units and tests that ran for
+`implement`, or finding outcomes for `resolve`. With that evidence and a
+verified publication the runtime derives `IMPLEMENTED` or `RESOLVED` itself and
+records `inferred: true`; without it the stage stays `BLOCKED`.
+
+**Resume without `--from` and `--pr`.** When a publishing stage's result proves
+its work done, the runtime writes a *resume point* to the cycle journal
+(`resume_point`, with the change request, the full head, the branch and the
+next stage), whether the stage completed or ended `BLOCKED` with no refused
+operation it needed. Running the same work item again reads it: `implement`
+resumes at `review` and `resolve` at `rereview`. It is used only when the
+earlier run recorded its stop, no later stage began, the persisted state is
+consistent, and the change request is open at the recorded head. Any mismatch
+stops the run and names it. The resume is idempotent: it is recorded
+(`auto_resume`, with the block reason, the recovery stage and the checks made),
+a second rerun beside a run still in progress is refused, and once a stage of
+the resumed run has begun nothing is left to resume. A pull request existing is
+not completion. `--no-auto-resume` starts the work item over; `--from` and
+`--pr` resume by hand as before.
 
 List or revoke decisions with `consent_control.py list|revoke --repo owner/repo
 --executor claude`; revoke also needs `--grant-id command_<sha256>`, with
