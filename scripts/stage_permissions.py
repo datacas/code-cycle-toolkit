@@ -31,6 +31,7 @@ directory outside the agent's workspace and temporary directory.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import fnmatch
 import itertools
@@ -517,8 +518,24 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
     while i < len(source):
         char = source[i]
         if char == "\\" and quote != "'" and i + 1 < len(source):
-            word.append(source[i + 1])
+            # A backslash-newline is a line continuation: bash removes both.
+            if source[i + 1] != "\n":
+                word.append(source[i + 1])
             i += 2
+            continue
+        if char == "$" and quote is None and source.startswith("$'", i):
+            # ANSI-C quoting: decode the escapes bash decodes, so the guards
+            # see the path the program receives.
+            end = i + 2
+            while end < len(source) and source[end] != "'":
+                end += 2 if source[end] == "\\" else 1
+            body = source[i + 2:min(end, len(source))]
+            word.append(codecs.decode(body.encode("latin-1", "backslashreplace"), "unicode_escape"))
+            i = end + 1
+            continue
+        if char == "$" and quote is None and source.startswith('$"', i):
+            # Locale quoting `$"…"` reads as a double-quoted string.
+            i += 1
             continue
         if char == "'" and quote != '"':
             quote = None if quote == "'" else "'"
@@ -627,7 +644,9 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         elif char == "~" and not word and quote is None:
             # Only a bare `~` names $HOME. `~user`, `~+`, `~-` and `~N` keep
             # their prefix so the guards resolve what bash reads (REV-009).
-            bare = i + 1 == len(source) or source[i + 1] in "/ \t|&;\n()<>"
+            # Braces expand first (`~{,}/x` is `~/x`): expanding `~` keeps
+            # the brace part, which may then name any home entry.
+            bare = i + 1 == len(source) or source[i + 1] in "/ \t|&;\n()<>{"
             word.append(os.path.expanduser("~") if bare else "~")
         else:
             word.append(char)
@@ -3369,6 +3388,17 @@ def _tilde_directory(value: str) -> tuple[str, str] | None:
     return (match[1], value[match.end():]) if match and match[1] else None
 
 
+#: Programs that run the next word as a program (REV-010).
+_RUNNERS = frozenset({"builtin", "command", "exec", "nice", "nohup", "timeout", "stdbuf", "ionice",
+                      "setsid", "chrt", "taskset", "time", "sudo", "doas", "unbuffer"})
+
+
+def _runner_word(word: str) -> bool:
+    """Whether a word before a program may belong to a runner prefix."""
+    return (os.path.basename(word).removesuffix(".exe") in _RUNNERS or word.startswith("-")
+            or re.fullmatch(r"[0-9.]+[a-z]?|[A-Za-z_][A-Za-z0-9_]*=.*", word) is not None)
+
+
 def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
     """Whether a relative operand from an unknown directory may name a store.
 
@@ -3663,10 +3693,10 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
             # `env -C` runs its program in another directory (REV-008), also
-            # behind `command`, `nice`, `timeout` and other runners (REV-010):
-            # any `env` word that changes directory counts.
+            # behind `command`, `nice`, `timeout` and other runners (REV-010).
             chdir = next((found for index, word in enumerate(words)
                           if os.path.basename(word).removesuffix(".exe") == "env"
+                          and all(_runner_word(previous) for previous in words[:index])
                           for found in (_env_chdir(words[index:]),) if found is not None), None)
             if chdir is not None:
                 tilde = _tilde_directory(chdir)

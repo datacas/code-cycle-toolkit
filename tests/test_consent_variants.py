@@ -484,8 +484,9 @@ class ConsentVariantsTests(unittest.TestCase):
                                 "cd ~/x; cd /tmp; cat ~-/../.ssh/id_rsa", 'cd "$X" && cat ~+/id_rsa',
                                 "cat ~-/.ssh/id_rsa", "cat ~2/.codex/auth.json", "cat ~+1/id_rsa",
                                 "cd ~-; cat id_rsa", "cd ~ && cd ~+/.ssh; cat id_rsa","env -C ~- cat id_rsa",
-                                "PWD=~; cat ~+/.ssh/id_rsa", "cat < ~-/.ssh/id_rsa",
-                                f"cd ~{entry.pw_name}/.codex && cat auth.json"):
+                                "export PWD=~; cat ~+/.ssh/id_rsa", "cat < ~-/.ssh/id_rsa",
+                                f"cd ~{entry.pw_name}/.codex && cat auth.json", "cat ~{,}/.ssh/id_rsa",
+                                "cat ~{+,}/.codex/auth.json", "cat ~{a,}/.ssh/id_rsa"):
                     with self.subTest(command=command):
                         current, _ = self.approved(policy, command)
                         self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
@@ -509,10 +510,29 @@ class ConsentVariantsTests(unittest.TestCase):
                 current, _ = self.approved(policy, command)
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
-        for safe in ("nice env -C /outside/api cat schema.json", "command env -C /outside/api cat schema.json"):
+        for safe in ("nice env -C /outside/api cat schema.json", "command env -C /outside/api cat schema.json",
+                     'echo env -C "$X" id_rsa', 'grep env -C "$N" config'):
             with self.subTest(command=safe):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
                 current, _ = self.approved(policy, safe)
                 self.assertTrue(sp.check(safe, current).allowed)
+
+    @posix_shell
+    def test_shell_quoting_and_continuations_reach_the_guard_decoded(self):
+        policy = sp.StagePolicy("resolve")
+        home = str(Path.home())
+        for command in (f"cat $'{home}/.ssh/id_rsa'", f"cat $'{home}/.s\\x73h/id_rsa'",
+                        f'cat $"{home}/.codex/auth.json"', "cat ~/.s\\\nsh/id_rsa",
+                        f'cat "{home}/.co\\\ndex/auth.json"'):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        self.assertEqual([["printf", "a\nb"]], [item.words for item in sp.parse_command("printf $'a\\nb' | cat",
+                                                                                         None).segments][:1])
+        for safe in ("printf $'%s\\n' done", "echo first \\\n  second"):
+            with self.subTest(command=safe):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
 
     @posix_shell
     def test_unresolved_directory_asks_for_project_paths_below_it(self):
