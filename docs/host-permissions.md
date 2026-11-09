@@ -224,8 +224,15 @@ value of a `name=value` word and an attached short-option value such as
 `-C~/.ssh` to the protected stores without reading them. Globs match one path
 component at a time, as bash expands them: `*` never crosses a `/`, a bracket
 expression matches one character, and a leading `*` or `?` does not match a
-dotfile unless the source mentions `dotglob` or `GLOBIGNORE`, or the inherited
-`BASHOPTS` or `GLOBIGNORE` enables it. A `..` after a glob, inside braces, or a
+dotfile unless decoded words name `dotglob` or `GLOBIGNORE`, or the inherited
+`BASHOPTS` or `GLOBIGNORE` enables it. Decoded `nocaseglob` and inherited
+`BASHOPTS=nocaseglob` make glob comparisons case-insensitive. Extglob operands
+(`@(...)`, `+(...)`, `!(...)`, `*(...)`, `?(...)`) stay one operand during
+analysis, including spaces and shell-looking alternatives; their components
+conservatively match any name, while substitutions inside them are still
+guarded separately. At command position `!(...)` also retains its possible
+negation/subshell interpretation. Extglob directory targets are unresolved,
+including targets of `env -C`. A `..` after a glob, inside braces, or a
 brace alternative holding `/` or `~` may lead to any directory. Glob
 characters in the working directory itself are literal. Since a directory
 change may fail, be conditional or run in a subshell, analysis retains earlier
@@ -234,8 +241,8 @@ unexpectedly refuses.
 
 A directory change the hook cannot resolve is a `cd`/`pushd`/`env -C` target
 with a variable, substitution or glob, a `pushd`/`popd` without a known stack,
-any relative target while `CDPATH` is set in the environment or mentioned in
-the source, a bare `cd`, `~` or home target when the source names `HOME`
+any relative target while `CDPATH` is set in the environment or named in
+decoded words, a bare `cd`, `~` or home target when decoded words name `HOME`
 other than as an expansion (`HOME=`, `read HOME`, `printf -v HOME`) or uses a
 builtin that may assign a quoted or computed name (`declare`, `export`, `read`,
 `printf`, …), `cd -` when it names `OLDPWD`, a `~-`, `~N`, `~+N` or `~-N`
@@ -243,7 +250,13 @@ prefix (the previous directory or a directory-stack entry) on any operand or
 target, `~+` when the source may assign `PWD` in the same way as `HOME`,
 and anything after `eval`, `source`, `.`,
 `trap` or `alias` (also through `builtin` or `command`). The unknown directory
-may be any directory, so after one a relative operand (or `name=value` value,
+may be any directory. Settings are derived after continuation removal, quote
+joining and ANSI-C decoding, including environment prefixes. An assigning
+builtin may change any of `HOME`, `PWD`, `OLDPWD`, `CDPATH`, `GLOBIGNORE` or
+`BASHOPTS`; computed names retain this conservative fallback. A computed
+`shopt`/`set` option may enable either glob mode. These cases can therefore
+refuse a credential-like operand even when the actual setting is unrelated;
+the PA-28 limitation applies. After an unresolved change a relative operand (or `name=value` value,
 or redirect target) receives no grant when it may spell the rest of a store's
 path from a parent (such as `auth.json`, `.codex/*`, `.ssh/x` or `*`), when it
 names a store's parent below the home directory (`.codex`, `.claude`,

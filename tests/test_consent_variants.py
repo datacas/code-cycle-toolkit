@@ -522,6 +522,155 @@ class ConsentVariantsTests(unittest.TestCase):
                 self.assertTrue(sp.check(safe, current).allowed)
 
     @posix_shell
+    def test_rev011_decoded_settings_cannot_hide_credential_reads(self):
+        commands = ("shopt -s dot\\\nglob; cat ~/*/id_rsa",
+                    'shopt -s "dot""glob"; cat ~/*/id_rsa',
+                    "shopt -s $'\\x64otglob'; cat ~/*/id_rsa",
+                    "CD\\\nPATH=~ cd .ssh; cat id_rsa",
+                    'export "CD""PATH=~"; cd .ssh; cat id_rsa',
+                    'HO\\\nME="$X" cd; cat id_rsa',
+                    'cd /tmp; export "OLD""PWD=$X"; cd -; cat id_rsa',
+                    'export "GLOB""IGNORE=x"; cat ~/*/id_rsa',
+                    'export "P""WD=$X"; cat ~+/id_rsa',
+                    'declare "$n=$X"; cd .ssh; cat id_rsa',
+                    'read "$n"; cd -; cat id_rsa',
+                    'printf -v "$n" %s "$X"; cat ~/*/id_rsa')
+        for role in ("resolve", "rereview"):
+            policy = sp.StagePolicy(role)
+            grant = grants.make_pattern_grant(r".+", role, "claude", "linux", compound=True,
+                proposer="test", justification="exercise retained guards",
+                positive=["printf hello | cat"], negative=["\n"])
+            current = replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertIsNone(sp.matching_answer("Bash", {"command": command}, current, None))
+                    self.assertFalse(sp.check(command, current).allowed)
+            for command in ('export "CD""PATH=~"; cd src; cat README.md',
+                            'read "$n"; cd -; cat schema.json',
+                            'shopt -s "dot""glob"; cat /outside/api/*.json'):
+                with self.subTest(role=role, command=command):
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNotNone(cp.refused_operation([command], policy,
+                        grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
+                    self.assertTrue(sp.check(command, current).allowed)
+
+    @posix_shell
+    def test_rev012_glob_options_keep_credential_guards(self):
+        for role in ("resolve", "rereview"):
+            policy = sp.StagePolicy(role)
+            for command in ("shopt -s nocaseglob; cat ~/.SS?/id_rsa",
+                            'shopt -s "nocase""glob"; cat ~/.CODE?/auth.json',
+                            "shopt -s noca\\\nseglob; cat ~/.SS?/id_rsa",
+                            "shopt -s $'\\x6eocaseglob'; cat ~/.SS?/id_rsa",
+                            "shopt -s extglob; cat ~/@(.ssh|other)/id_rsa",
+                            "shopt -s extglob; cat ~/.s@(sh|foo bar)/id_rsa",
+                            "shopt -s extglob; cat ~/.c@(odex|foo; bar)/auth.json",
+                            'cd "$X"; shopt -s nocaseglob; cat .SS?/id_rsa',
+                            'cd "$X"; shopt -s extglob; cat @(.ssh|other)/id_rsa',
+                            "shopt -s extglob; cat ~/+(x|.ssh)/../.ssh/id_rsa"):
+                with self.subTest(role=role, command=command):
+                    current, _ = self.approved(policy, command)
+                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertFalse(sp.check(command, current).allowed)
+            for inherited, command in (("nocaseglob", "cat ~/.SS?/id_rsa"),
+                                        ("extglob", "cat ~/@(.ssh|other)/id_rsa")):
+                with self.subTest(inherited=inherited), patch.dict(os.environ, {"BASHOPTS": inherited}):
+                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+            with patch.dict(os.environ, {"BASHOPTS": "", "GLOBIGNORE": ""}):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": "cat ~/.SS?/id_rsa"}, policy, None))
+            for command in ("shopt -s nocaseglob; cat /outside/api/*.JSON",
+                            "shopt -s extglob; cat /outside/api/@(schema|types).json"):
+                with self.subTest(command=command):
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    current, _ = self.approved(policy, command)
+                    self.assertTrue(sp.check(command, current).allowed)
+
+    @posix_shell
+    def test_rev011_rev012_bash_fixture_paths_reach_the_guard(self):
+        # Only disposable names are expanded; no real credential is read.
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root, "home")
+            store = home / ".ssh"
+            store.mkdir(parents=True)
+            (store / "id_rsa").touch()
+            cases = (("shopt -s dot\\\nglob; ", "~/*/id_rsa"),
+                     ('shopt -s "dot""glob"; ', "~/*/id_rsa"),
+                     ("shopt -s $'\\x64otglob'; ", "~/*/id_rsa"),
+                     ("CD\\\nPATH=~ cd .ssh; ", '"$PWD/id_rsa"'),
+                     ('export "CD""PATH=~"; cd .ssh; ', '"$PWD/id_rsa"'),
+                     ('HO\\\nME="$X" cd; ', '"$PWD/id_rsa"'),
+                     ('cd /tmp; export "OLD""PWD=$X"; cd -; ', '"$PWD/id_rsa"'),
+                     ('shopt -s "nocase""glob"; ', "~/.SS?/id_rsa"),
+                     ("shopt -s extglob; ", "~/@(.ssh|other)/id_rsa"),
+                     ("shopt -s extglob; ", "~/.s@(sh|foo bar)/id_rsa"))
+            environment = {**os.environ, "HOME": str(home), "X": str(store), "CDPATH": "", "GLOBIGNORE": ""}
+            with patch.dict(os.environ, environment), patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
+                for prefix, operand in cases:
+                    with self.subTest(prefix=prefix):
+                        baseline = subprocess.run(["bash", "--noprofile", "--norc", "-O", "extglob", "-c",
+                            prefix + "printf '%s\\n' " + operand], cwd=root, env=environment,
+                            capture_output=True, text=True)
+                        self.assertEqual(0, baseline.returncode, baseline.stderr)
+                        self.assertEqual(str(store / "id_rsa"), baseline.stdout.splitlines()[-1])
+                        command = prefix + "cat " + operand
+                        for role in ("resolve", "rereview"):
+                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command},
+                                sp.StagePolicy(role), root))
+
+    @posix_shell
+    def test_rev012_extglob_directory_targets_remain_unresolved(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root, "work")
+            store = Path(root, "secret/.ssh")
+            work.mkdir()
+            store.mkdir(parents=True)
+            (work / "link").symlink_to(store, target_is_directory=True)
+            target = str(work / "@(link)")
+            baseline = subprocess.run(["bash", "--noprofile", "--norc", "-O", "extglob", "-c",
+                                       "cd " + target + "; pwd -P"], cwd=root, capture_output=True, text=True)
+            self.assertEqual((0, str(store)), (baseline.returncode, baseline.stdout.strip()))
+            with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
+                for role in ("resolve", "rereview"):
+                    policy = sp.StagePolicy(role)
+                    for program in ("cd", "pushd", "env -C"):
+                        suffix = " cat id_rsa" if program == "env -C" else "; cat id_rsa"
+                        command = program + " " + target + suffix
+                        with self.subTest(role=role, program=program):
+                            current, _ = self.approved(policy, command)
+                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, root))
+                            self.assertFalse(sp.check(command, current, cwd=root).allowed)
+                    safe = "cd " + target + "; cat schema.json"
+                    self.assertTrue(sp.unresolved_directory(safe, policy, root))
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, root))
+                    current, _ = self.approved(policy, safe)
+                    self.assertTrue(sp.check(safe, current, cwd=root).allowed)
+
+    @posix_shell
+    def test_rev012_extglob_data_and_negated_subshells_are_distinct(self):
+        policy = sp.StagePolicy("resolve")
+        for command in ("!(git push --force origin main)", "true; !(git push --force origin main)",
+                        "time -- !(git push --force origin main)",
+                        "time -p -- !(git push --force origin main)",
+                        "if !(git push --force origin main); then true; fi",
+                        "while !(git push --force origin main); do true; done",
+                        "cat @(x|$(git push --force origin main))",
+                        "cat @(x|`git push --force origin main`)"):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        for operand in ("@(a;git push --force origin main)", "@(x|foo bar)",
+                        "@(x|foo>bar)", "!(x|foo bar)"):
+            command = "printf '%s' " + operand
+            with self.subTest(operand=operand):
+                self.assertEqual([["printf", "%s", operand]],
+                                 [segment.words for segment in sp.parse_command(command, None).segments])
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                current, _ = self.approved(policy, command)
+                self.assertTrue(sp.check(command, current).allowed)
+
+    @posix_shell
     def test_shell_quoting_and_continuations_reach_the_guard_decoded(self):
         policy = sp.StagePolicy("resolve")
         home = str(Path.home())
