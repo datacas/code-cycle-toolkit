@@ -419,6 +419,30 @@ class StageDispatch:
         return self.stop(result.explain(role), reported=reported,
                     stop_reason="publication_violation")
 
+    def blocked_cause(self: Any, role: str, reported: Reported) -> tuple[str | None, bool]:
+        """The real cause of a stage that stopped after refusals, apart from the refusals (#464).
+
+        Returns the cause and whether it is itself a refused operation. A stage
+        that did its work and met only incidental refusals is named for what
+        actually stopped it; an essential refusal is named with its command.
+        """
+        from command_permissions import RECONCILABLE_DENIALS
+        runtime = reported.runtime or {}
+        record = runtime.get("reconciliation")
+        if not isinstance(record, dict) or record.get("reconciled") is True:
+            return None, False
+        denials = [item for item in record.get("denials") or [] if isinstance(item, dict)]
+        serious = next((item for item in denials
+                        if item.get("class") not in RECONCILABLE_DENIALS), None)
+        if serious is not None:
+            return (f"the {role} stage needed a refused operation it could not run: "
+                    f"`{self.api.readable(serious.get('command'), 200)}` "
+                    f"({serious.get('class')}, rule {serious.get('rule')}); "
+                    f"{self.api.readable(record.get('reason'), 300)}"), True
+        reason = self.api.readable(record.get("reason"), 300)
+        return (f"{reason} (the stage's {len(denials)} refused command(s) were incidental "
+                "and are listed as warnings)" if denials else reason), False
+
     def review_issue(self: Any) -> CycleReport | None:
         """The readiness gate: only a confirmed READY lets `implement` run.
 
@@ -743,12 +767,16 @@ class StageDispatch:
                                        if pull_request_id else {}))
         if not reported.completes(role, self.ci_policy):
             because = reported.explain(role, self.ci_policy)
+            cause, refusal_is_cause = self.blocked_cause(role, reported)
+            if cause:
+                because += f"; cause: {cause}"
             if (role == "rereview" and not self.local_only
                     and (self.code_host or self.policy_code_host) == "github"):
                 because += self.manual_hint(reported)
             return reported, self.stop(because,
                                   "BLOCKED" if (reported.payload or {}).get("publication_pending") is True
-                                  else self.api.UNRESOLVED_END, reported=reported)
+                                  else self.api.UNRESOLVED_END, reported=reported,
+                                  refusals_are_warnings=bool(cause) and not refusal_is_cause)
         if (role in {"review", "rereview"} and self.execution_plan.stage("security").selected
                 and self.plan_managed and (reported.payload or {}).get("security_audit_ran") is not True):
             return reported, self.stop("the required security audit was omitted or unverified",

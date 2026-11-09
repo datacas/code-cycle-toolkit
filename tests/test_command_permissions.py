@@ -807,6 +807,79 @@ class BlockedReconciliationTests(unittest.TestCase):
                 payload, _ = self.settle([self.bash("pwd")], published(), completed=completed)
                 self.assert_stopped(payload, "no completion status valid")
 
+    def test_464_incident_read_refusals_and_no_claimed_status_are_reconciled_from_the_result(self):
+        # #446: five `sed -n`, a `ps`, a `date` and a `git grep`, then BLOCKED
+        # with the reason "implemented and opened as PR, CI pending" and no
+        # completed_status. The structured result proves the work is done.
+        events = [self.bash("sed -n 1,20p scripts/run_cycle.py"), self.bash("sed -n '5,9p' README.md"),
+                  self.bash("ps -eo pid,etime,pcpu,comm"), self.bash("date +%H:%M:%S")]
+        done = {"work_units": [{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                "tests": {"ran": True, "passed": True, "checks": []}}
+        payload, records = self.settle(events, published(), completed=None, **done)
+        self.assert_reconciled(payload)
+        self.assertEqual({cp.AUXILIARY_DENIAL}, {record["class"] for record in records})
+        recorded = payload["reconciliation"]
+        self.assertTrue(recorded["inferred"])
+        self.assertEqual("IMPLEMENTED", recorded["completed_status"])
+        self.assertIn("inferred", recorded["reason"])
+
+    def test_an_inferred_completion_needs_the_structured_evidence_and_the_verified_publication(self):
+        done = {"work_units": [{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                "tests": {"ran": True, "checks": []}}
+        for label, fields, publication, contains in (
+                ("no work units", {"tests": done["tests"]}, published(), "no completion status valid"),
+                ("no tests", {"work_units": done["work_units"]}, published(), "no completion status valid"),
+                ("tests did not run", {**done, "tests": {"ran": False}}, published(),
+                 "no completion status valid"),
+                ("no change request", {**done, "change_request_id": None}, published(),
+                 "no completion status valid"),
+                ("remote behind", done, published(remote_head=OTHER), "diverge"),
+                ("no pull request", done, published(pr=None), "pull_request"),
+                ("unobserved", done, None, "could not be observed"),
+                ("pending publication", {**done, "publication_pending": True}, published(),
+                 "publication is pending")):
+            with self.subTest(label):
+                payload, _ = self.settle([self.bash("sed -n 1,5p README.md")], publication,
+                                         completed=None, **fields)
+                self.assert_stopped(payload, contains)
+
+    def test_an_inferred_completion_never_hides_a_serious_denial(self):
+        done = {"work_units": [{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                "tests": {"ran": True, "checks": []}}
+        for command, contains in (("git push origin task-435", "essential_permission denial"),
+                                  ("sed -i s/a/b/ README.md", "unknown denial"),
+                                  ("date -s now", "unknown denial"),
+                                  ("ps -eo pid,args", "unknown denial"),
+                                  ("mkdir out", "unknown denial")):
+            with self.subTest(command=command):
+                payload, _ = self.settle([self.bash("sed -n 1,5p README.md"), self.bash(command)],
+                                         published(remote_head=OTHER) if "push" in command else published(),
+                                         completed=None, **done)
+                self.assert_stopped(payload, contains)
+
+    def test_resolve_infers_its_status_from_the_finding_outcomes(self):
+        resolved = [{"id": "REV-001", "status": "resolved"}, {"id": "REV-002", "status": "not_applicable"}]
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed=None,
+                                 finding_outcomes=resolved)
+        self.assertEqual("RESOLVED", payload["status"])
+        partial = [*resolved, {"id": "REV-003", "status": "open"}]
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed=None,
+                                 finding_outcomes=partial)
+        self.assertEqual("PARTIALLY_RESOLVED", payload["status"])
+        payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed=None)
+        self.assert_stopped(payload, "no completion status valid")
+
+    def test_inspection_refusals_are_classified_by_their_form_not_their_program(self):
+        for command, expected in (("sed -n 1,5p README.md", cp.AUXILIARY_DENIAL),
+                                  ("date +%s", cp.AUXILIARY_DENIAL),
+                                  ("ps -e", cp.AUXILIARY_DENIAL),
+                                  ("sed -i s/a/b/ README.md", cp.UNKNOWN_DENIAL),
+                                  ("date -s now", cp.UNKNOWN_DENIAL),
+                                  ("ps -eo pid,args", cp.UNKNOWN_DENIAL)):
+            with self.subTest(command=command):
+                _, records = self.settle([self.bash(command)], published())
+                self.assertEqual(expected, records[0]["class"])
+
     def test_resolve_is_reconciled_with_its_own_completion_status(self):
         payload, _ = self.settle([self.bash("pwd")], published(), role="resolve", completed="RESOLVED")
         self.assertEqual("RESOLVED", payload["status"])
@@ -1020,6 +1093,54 @@ class ReconciledCycleTests(RunCycleTestCase):
         self.assertEqual({"pwd"}, {row["command"] for row in classified if row["command"] == "pwd"})
         self.assertTrue(all(row["correlation"]["rule"] and row["correlation"]["operation"]
                             for row in classified))
+
+    def test_464_a_finished_stage_with_read_refusals_and_no_claimed_status_continues(self):
+        denials = [{"tool": "Bash", "input": {"command": "sed -n 1,20p scripts/run_cycle.py"}},
+                   {"tool": "Bash", "input": {"command": "ps -eo pid,etime,pcpu,comm"}},
+                   {"tool": "Bash", "input": {"command": "date +%H:%M:%S"}}]
+        report, claude = self.cycle(
+            denials, published(), completed=None,
+            work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+            tests={"ran": True, "passed": True, "checks": []})
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual(2, len(claude.dispatched))  # implement, then review: no stop
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual(["reconciled"], [row["status"] for row in recorded])
+        self.assertEqual("IMPLEMENTED", recorded[0]["correlation"]["completed_status"])
+
+    def test_464_the_stop_names_the_real_cause_apart_from_the_refusals(self):
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
+                               published(remote_head=OTHER))
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertIn("cause: the implement stage needed a refused operation it could not run",
+                      report.stopped_because)
+        self.assertIn("unknown", report.stopped_because)
+
+    def test_464_blocked_cause_separates_an_incidental_refusal_from_the_real_cause(self):
+        from types import SimpleNamespace
+        from cycle_dispatch import StageDispatch
+        driver = SimpleNamespace(api=rc)
+        incidental = {"class": "auxiliary_denial", "command": "sed -n 1,5p README.md",
+                      "rule": "command_table"}
+        serious = {"class": "essential_permission", "command": "git push origin task-435",
+                   "rule": "command_table"}
+
+        def cause(*denials, reconciled=False, reason="the block declares no completion status"):
+            reported = rc.Reported(present=True, status="BLOCKED", runtime={"reconciliation": {
+                "reconciled": reconciled, "reason": reason, "denials": list(denials)}})
+            return StageDispatch.blocked_cause(driver, "implement", reported)
+
+        text, refusal = cause(incidental)
+        self.assertFalse(refusal)
+        self.assertIn("no completion status", text)
+        self.assertIn("incidental", text)
+        text, refusal = cause(incidental, serious, reason="essential_permission denial: git push")
+        self.assertTrue(refusal)
+        self.assertIn("`git push origin task-435`", text)
+        self.assertIn("rule command_table", text)
+        self.assertEqual((None, False), cause(incidental, reconciled=True))
+        self.assertEqual((None, False), StageDispatch.blocked_cause(
+            driver, "implement", rc.Reported(present=True, status="BLOCKED")))
 
     def test_diverging_shas_stop_as_before_and_say_so(self):
         report, claude = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
