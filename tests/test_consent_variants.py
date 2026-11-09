@@ -757,6 +757,84 @@ class ConsentVariantsTests(unittest.TestCase):
                                 for role in ("resolve", "rereview"):
                                     self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, sp.StagePolicy(role), root))
 
+    #: `case` clauses inside substitutions whose later command Bash runs
+    #: (REV-014). `{cmd}` is replaced by the hidden command.
+    REV014_FORMS = ('printf \'%s\' "$(case a in a) {cmd} ;; esac)"',
+                    "echo $(case a in a) {cmd} ;; esac)",
+                    "echo $(case a in b) true ;& a) {cmd} ;; esac)",
+                    "echo $(case a in a) true ;;& a) {cmd} ;; esac)",
+                    "echo $(case a in (a) {cmd} ;; esac)",
+                    "echo $(case a in (b) true ;; a | c) {cmd} ;; esac)",
+                    "echo $(case a in a) {cmd}\nesac)",
+                    "echo $(case a in\n  # comment )\n  a) {cmd} ;;\nesac)",
+                    "echo $(true; case a in a) case b in b) {cmd} ;; esac ;; esac)",
+                    "echo $( (case a in a) true ;; esac) ; {cmd})",
+                    "echo $(if true; then case a in a) {cmd} ;; esac; fi)",
+                    "echo $(case \"$(printf a)\" in a) {cmd} ;; esac)",
+                    'echo "$(case a in a) true ;; esac)"; {cmd}',
+                    "cat <(case a in a) {cmd} ;; esac)",
+                    "echo ${x:-$(case a in a) {cmd} ;; esac)}")
+
+    def rev014_grant(self, role, executor):
+        grant = grants.make_pattern_grant(r".+", role, executor, "linux", compound=True,
+            proposer="test", justification="exercise retained guards",
+            positive=["printf hello | cat"], negative=["\n"])
+        return replace(sp.StagePolicy(role), command_permissions=({"operation": grant.operation, "decision": "allow"},))
+
+    @posix_shell
+    def test_rev014_case_patterns_do_not_end_substitutions(self):
+        for executor in ("claude", "codex"):
+            for role in ("resolve", "rereview"):
+                current = self.rev014_grant(role, executor)
+                for form in self.REV014_FORMS:
+                    command = form.replace("{cmd}", "git push --force origin main")
+                    with self.subTest(executor=executor, role=role, command=command), \
+                            tempfile.TemporaryDirectory() as root:
+                        parsed = sp.parse_command(command, None)
+                        self.assertIn(["git", "push", "--force", "origin", "main"],
+                                      [segment.words for segment in parsed.segments])
+                        self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, current, root)).lower())
+                        self.assertFalse(sp.check(command, current, cwd=root).allowed)
+                        self.assertIsNone(cp.refused_operation([command], current,
+                            grants.ConsentBroker("owner/repo", platform="linux"), executor))
+                    command = form.replace("{cmd}", "cat ~/.ssh/id_rsa")
+                    with self.subTest(executor=executor, role=role, command=command):
+                        self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                        self.assertFalse(sp.check(command, current).allowed)
+
+    @posix_shell
+    def test_rev014_case_words_as_arguments_keep_their_boundaries(self):
+        policy = sp.StagePolicy("resolve")
+        for body in ("echo case a in a", "echo then case a in a", "echo \\; case a in a",
+                     "echo $(true) case a in a", "printf '%s' esac", "case a in a) printf ok ;; esac"):
+            command = 'printf "%s" "$(' + body + ')"; printf done'
+            with self.subTest(command=command):
+                self.assertEqual(["printf", "done"], sp.parse_command(command, None).segments[-1].words)
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+        for command in ("echo $(case a in a", "echo $(case a in a) true ;; esac"):
+            with self.subTest(command=command), self.assertRaisesRegex(sp.PolicyError, "unterminated"):
+                sp.parse_command(command, None)
+
+    @posix_shell
+    def test_rev014_bash_fixture_runs_the_command_after_the_pattern(self):
+        # Prove Bash's boundary using a disposable file, never a real store.
+        with tempfile.TemporaryDirectory() as root:
+            store = Path(root, "fixture-store")
+            store.mkdir()
+            target = store / "fixture.txt"
+            target.write_text("hidden command ran\n", encoding="utf-8")
+            for form in self.REV014_FORMS:
+                command = form.replace("{cmd}", "cat " + str(target))
+                with self.subTest(command=command):
+                    baseline = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=root,
+                        env={**os.environ, "BASH_ENV": "/dev/null"}, capture_output=True, text=True)
+                    self.assertEqual(0, baseline.returncode, baseline.stderr)
+                    self.assertIn("hidden command ran", baseline.stdout)
+                    with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
+                        for role in ("resolve", "rereview"):
+                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command},
+                                                                     sp.StagePolicy(role), root))
+
     @posix_shell
     def test_rev012_extglob_data_and_negated_subshells_are_distinct(self):
         policy = sp.StagePolicy("resolve")

@@ -234,7 +234,12 @@ guarded separately. At command position `!(...)` also retains its possible
 negation/subshell interpretation. Nested `${…}` and `$[…]` expansions have
 their own delimiters: parentheses inside them never consume a later command
 into the extglob operand (REV-013). Their nested command substitutions retain
-the segment guards. Unterminated extglobs or nested expansions fail closed
+the segment guards. Inside a command or process substitution, a `case`
+clause recognised at command position is tracked to its `esac`: the `)` that
+ends a pattern, with or without its optional `(`, and the `;;`, `;&` and `;;&`
+terminators never end the substitution, so the commands of each clause are
+separate segments with their own guards (REV-014). A `case` word in argument
+position is data. Unterminated extglobs or nested expansions fail closed
 instead of accepting a partial analysis. Extglob directory targets are unresolved,
 including targets of `env -C`. A `..` after a glob, inside braces, or a
 brace alternative holding `/` or `~` may lead to any directory. Glob

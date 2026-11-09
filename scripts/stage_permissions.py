@@ -551,6 +551,43 @@ def _splice_dollar(source: str, start: int) -> str:
     return source
 
 
+#: Reserved words after which the next word is again in command position.
+_COMMAND_PREFIX_WORD = re.compile(r"(?<![^ \t\n;&|()])(?:then|do|else|elif|if|while|until|time|!|\{)$")
+
+
+def _shell_keyword(source: str, i: int, word: str) -> bool:
+    """Whether `word` is a whole unquoted word at `i`."""
+    end = i + len(word)
+    return source.startswith(word, i) and (end == len(source) or source[end] in " \t\n;&|()<>")
+
+
+def _command_position(source: str, start: int, i: int, pattern_close: int) -> bool:
+    """Whether a word at `i` is where bash recognises a reserved word.
+
+    `start` is the first character of the command list and `pattern_close`
+    the `)` that last ended a `case` pattern. Any other `)` ends a nested
+    expansion or group, after which a word is an argument.
+    """
+    end = i
+    while True:
+        before = source[start:end].rstrip(" \t")
+        if not before:
+            return True
+        last, rest = before[-1], before[:-1]
+        if (len(rest) - len(rest.rstrip("\\"))) % 2:
+            return False  # an escaped separator or a line continuation
+        if last in ";&|\n":
+            return True
+        if last == ")":
+            return start + len(before) - 1 == pattern_close
+        if last == "(":
+            return not rest or rest[-1] not in "@+*?$<>"
+        keyword = _COMMAND_PREFIX_WORD.search(before)
+        if keyword is None:
+            return False
+        end = start + keyword.start()
+
+
 def _shell_expansion_end(source: str, start: int, depth: int, substitutions: list[str]) -> int:
     """Find a nested expansion's delimiter without counting its parentheses
     against an enclosing extglob (REV-013). Never evaluate the expansion.
@@ -572,6 +609,11 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
     shell = opening == "(" and not (source[start] == "$" and source[marker + 1:marker + 2] == "(")
     heredocs: list[tuple[str, bool]] = []
     word_active = False
+    # Open `case` clauses (REV-014): [state, nesting, pattern_started], where
+    # state is "head" (before `in`), "pattern" or "body". A pattern list ends
+    # with an unmatched `)` that does not close the substitution.
+    cases: list[list[Any]] = []
+    pattern_close = -1
     while i < len(source):
         char = source[i]
         if char == "\\" and quote != "'":
@@ -579,6 +621,19 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
                 word_active = True
             i += 2
             continue
+        if shell and quote is None and cases and cases[-1][0] == "pattern" and not cases[-1][2] \
+                and char not in " \t\n#":
+            # The first character of a pattern: `esac` ends the clause list
+            # and an opening `(` is optional syntax, not a nested group.
+            if _shell_keyword(source, i, "esac"):
+                cases.pop()
+                word_active = True
+                i += 4
+                continue
+            cases[-1][2] = True
+            if char == "(":
+                i += 1
+                continue
         nested_marker = marker_at(i) if char in "$<>" else i
         if quote is None and char == "$" and source[nested_marker:nested_marker + 1] == "'":
             # ANSI-C quotes permit escaped single quotes. Treat the whole
@@ -646,6 +701,34 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
                         i += closing_line.end()
                     heredocs.clear()
                     word_active = False
+                    continue
+                if shell and cases and cases[-1][1] == nesting:
+                    clause = cases[-1]
+                    if clause[0] == "pattern" and char == ")":
+                        clause[0], word_active, pattern_close = "body", False, i
+                        i += 1
+                        continue
+                    terminator = re.match(r";;&|;;|;&", source[i:]) if clause[0] == "body" else None
+                    if terminator:
+                        clause[0], clause[2], word_active = "pattern", False, False
+                        i += terminator.end()
+                        continue
+                    if not word_active and clause[0] == "head" and _shell_keyword(source, i, "in"):
+                        clause[0], clause[2], word_active = "pattern", False, True
+                        i += 2
+                        continue
+                    if (not word_active and clause[0] == "body" and _shell_keyword(source, i, "esac")
+                            and _command_position(source, marker + 1, i, pattern_close)):
+                        cases.pop()
+                        word_active = True
+                        i += 4
+                        continue
+                if (shell and not word_active and _shell_keyword(source, i, "case")
+                        and not (cases and cases[-1][0] != "body")
+                        and _command_position(source, marker + 1, i, pattern_close)):
+                    cases.append(["head", nesting, False])
+                    word_active = True
+                    i += 4
                     continue
                 # A parameter expansion ends at the first unquoted }, except
                 # inside another expansion. A literal { does not nest it.
