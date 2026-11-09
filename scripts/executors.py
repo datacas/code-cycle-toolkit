@@ -996,7 +996,16 @@ class NativeAdapter(Adapter):
 
     def extra_artifacts(self, stdout: str) -> dict:
         """Facts from the complete output that a short tail would lose."""
-        return {}
+        executed = []
+        for event in _events(stdout):
+            item = event.get("item")
+            if (event.get("type") == "item.completed" and isinstance(item, dict)
+                    and item.get("type") == "command_execution"
+                    and isinstance(item.get("exit_code"), int)
+                    and item.get("status") not in {"denied", "declined"}
+                    and isinstance(item.get("command"), str)):
+                executed.append(item["command"])
+        return {"command_executions": executed} if executed else {}
 
     def environment_restriction(self, message: str) -> str | None:
         """An executor error that means its sandbox could not start, or None."""
@@ -1556,6 +1565,24 @@ class NativeAdapter(Adapter):
                         )
                     else:
                         completed = runner(worker_argv, timeout=timeout, cwd=cwd, **run_options)
+                    # Retain normalized audit evidence while temporary symlinks
+                    # and files still exist. This is never authorization data.
+                    observed_commands = self.extra_artifacts(completed.stdout or "").get("command_executions", [])
+                    has_patterns = policy is not None and any(
+                        entry.get("operation", {}).get("version") == 2
+                        for entry in policy.command_permissions)
+                    if has_patterns and policy is not None and observed_commands and worker_env and worker_env.get("TMPDIR"):
+                        audit_policy = replace(policy, tmpdir=worker_env["TMPDIR"])
+                        records = []
+                        for command in observed_commands:
+                            try:
+                                if sp.protected_reason("Bash", {"command": command}, audit_policy, worker_cwd) is None:
+                                    records.append({"command": command, "operation": sp.operation(
+                                        "Bash", {"command": command}, audit_policy, worker_cwd)})
+                            except (ValueError, OSError, TypeError):
+                                continue
+                        if records:
+                            policy_note["command_execution_operations"] = records
                 finally:
                     if publishes and writes:
                         policy_note["publication_transport"] = []
@@ -3115,6 +3142,7 @@ class ClaudeAdapter(NativeAdapter):
         # (#306). The hook records its denials itself, so it is kept apart.
         layer: list[dict[str, object]] = []
         command_refusals: list[dict[str, Any]] = []
+        completed_commands: list[str] = []
 
         def add(command) -> None:
             if isinstance(command, str) and command.strip():
@@ -3206,6 +3234,16 @@ class ClaudeAdapter(NativeAdapter):
                         if failure not in sandbox_startup_failures:
                             sandbox_startup_failures.append(failure)
         artifacts: dict[str, object] = {"permission_denials": denied} if denied else {}
+        # A command is evidence only when its observed tool result completed.
+        for event in _events(stdout):
+            message = event.get("message")
+            contents = message.get("content", []) if isinstance(message, dict) else []
+            for content in contents if isinstance(contents, list) else []:
+                if (isinstance(content, dict) and content.get("type") == "tool_result"
+                        and not content.get("is_error") and content.get("tool_use_id") in bash_calls):
+                    completed_commands.append(bash_calls[content["tool_use_id"]])
+        if completed_commands:
+            artifacts["command_executions"] = completed_commands
         if command_refusals:
             artifacts["command_refusals"] = command_refusals
         if layer:

@@ -12,11 +12,10 @@ replaces that, for Claude on a GitHub cycle, with two barriers:
   prevail over another hook's `allow`, so a permissive global rule or the RTK
   rewrite hook cannot reopen what this one closes.
 
-The parser is fail-closed. It accepts one simple command: words, single and
-double quotes, `$TMPDIR` and one output redirection into the dispatch's own
-temporary directory. Chaining, pipes, substitutions, other expansions, globs and
-anything it cannot read are refused. Allowing a command it does not understand
-would make the table a suggestion.
+Literal commands use the default table. Shell syntax is analysed without
+evaluation and requests whole-operation interpreter consent. Concrete segment
+guards remain in force; pattern grants lift only table membership. Opaque
+interpreter internals always depend on external isolation.
 
 Codex gets no table: in Codex 0.163.0 permission profiles do not filter
 commands and execpolicy rules load only from configuration layers. Its stages
@@ -318,6 +317,8 @@ class ParsedCommand:
     words: list[str] = field(default_factory=list)
     #: `(fd, operator, target)`; `target` is None for `2>&1`.
     redirects: list[tuple[str, str, str | None]] = field(default_factory=list)
+    shell_source: str | None = None
+    segments: list["ParsedCommand"] = field(default_factory=list)
 
 
 def _number(reference: str | None, markers: tuple[str, ...]) -> str | None:
@@ -340,7 +341,7 @@ _OPERATORS = set(";&|<>()`")
 _GLOB = set("*?[]{}")
 
 
-def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
+def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
     """Split one simple shell command into literal words, or refuse it.
 
     Only `$TMPDIR` and `${TMPDIR}` expand, to the dispatch's directory; every
@@ -459,6 +460,182 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     return parsed
 
 
+def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
+    """Literal commands use the table; shell syntax uses explicit consent.
+
+    Shell text stays exact, including quotes and delimiters. Analysis never
+    evaluates an expansion or executes a command. Each visible segment and
+    nested substitution is retained for the concrete-command guards.
+    """
+    try:
+        return _parse_simple(command, tmpdir)
+    except PolicyError as error:
+        if not isinstance(command, str) or not command.strip() or "\x00" in command:
+            raise
+        if str(error) in {"unterminated quote", "trailing backslash", "a redirection needs a target", "no command"}:
+            raise
+    segments = _shell_segments(command, tmpdir)
+    return ParsedCommand(shell_source=command, segments=segments)
+
+
+def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[ParsedCommand]:
+    if depth > 32 or len(source) > 65536:
+        raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
+    result: list[ParsedCommand] = []
+    word: list[str] = []
+    words: list[str] = []
+    redirects: list[tuple[str, str, str | None]] = []
+    pending: str | None = None
+    quote: str | None = None
+    i = 0
+
+    def finish_word():
+        nonlocal word, pending
+        if not word:
+            return
+        value = "".join(word)
+        word = []
+        if pending:
+            redirects.append(("1", pending, value))
+            pending = None
+        else:
+            words.append(value)
+
+    def finish_segment():
+        nonlocal words, redirects
+        finish_word()
+        while words and words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
+            words = words[1:]
+        if words[:1] == ["time"]:
+            words = words[2:] if words[1:2] == ["-p"] else words[1:]
+        if words or redirects:
+            result.append(ParsedCommand(words=words, redirects=redirects))
+        words, redirects = [], []
+
+    while i < len(source):
+        char = source[i]
+        if char == "\\" and quote != "'" and i + 1 < len(source):
+            word.append(source[i + 1])
+            i += 2
+            continue
+        if char == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            i += 1
+            continue
+        if char == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            i += 1
+            continue
+        if quote == "'":
+            word.append(char)
+            i += 1
+            continue
+        # Substitutions inside double quotes execute too. Preserve their text
+        # in the outer word and analyse the body separately for direct guards.
+        prefix = next((p for p in ("$(", "<(", ">(") if source.startswith(p, i)), None)
+        if prefix or char == "`":
+            start = i
+            if char == "`":
+                end = i + 1
+                while end < len(source) and (source[end] != "`" or source[end - 1] == "\\"):
+                    end += 1
+                body = source[i + 1:end]
+            else:
+                end, nesting, inner_quote = i + 2, 1, None
+                while end < len(source) and nesting:
+                    inner = source[end]
+                    if inner == "\\":
+                        end += 2
+                        continue
+                    if inner in "\"'":
+                        if inner_quote == inner:
+                            inner_quote = None
+                        elif inner_quote is None:
+                            inner_quote = inner
+                    elif inner_quote is None:
+                        if inner == "(":
+                            nesting += 1
+                        elif inner == ")":
+                            nesting -= 1
+                            if not nesting:
+                                break
+                    end += 1
+                body = source[i + 2:end]
+            result.extend(_shell_segments(body, tmpdir, depth + 1))
+            word.append(source[start:min(end + 1, len(source))])
+            i = end + 1
+            continue
+        if char == "$":
+            home_spelling = next((p for p in ("${HOME}", "$HOME") if source.startswith(p, i)
+                                  and (p.endswith("}") or i + len(p) == len(source)
+                                       or not (source[i + len(p)].isalnum() or source[i + len(p)] == "_"))), None)
+            if home_spelling:
+                word.append(str(Path.home()))
+                i += len(home_spelling)
+                continue
+            spelling = next((p for p in ("${TMPDIR}", "$TMPDIR") if source.startswith(p, i)
+                             and (p.endswith("}") or i + len(p) == len(source)
+                                  or not (source[i + len(p)].isalnum() or source[i + len(p)] == "_"))), None)
+            if spelling and tmpdir:
+                word.append(tmpdir)
+                i += len(spelling)
+                continue
+        if quote is None and char in " \t":
+            finish_word()
+        elif quote is None and char == "#" and not word:
+            end = source.find("\n", i)
+            i = len(source) if end < 0 else end
+            continue
+        elif quote is None and source.startswith("<<", i):
+            # Heredoc contents are data, except substitutions of an unquoted
+            # delimiter. The original text still requires shell consent.
+            finish_word()
+            match = re.match(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", source[i:])
+            if match:
+                body_start = source.find("\n", i + match.end())
+                if body_start >= 0:
+                    closing = re.search(r"(?m)^\t*" + re.escape(match[3]) + r"\s*$", source[body_start + 1:])
+                    if closing:
+                        body_end = body_start + 1 + closing.start()
+                        result.extend(_shell_segments(source[i + match.end():body_start], tmpdir, depth + 1))
+                        if not match[2]:
+                            # Scan only expansions: other heredoc text is not code.
+                            result.extend(_heredoc_substitutions(source[body_start + 1:body_end], tmpdir, depth))
+                        i = body_start + 1 + closing.end()
+                        continue
+            pending = "<<"
+            i += 2
+            continue
+        elif quote is None and char in "<>":
+            descriptor = "".join(word) if word and "".join(word).isdecimal() else "1"
+            if word and "".join(word).isdecimal():
+                word = []
+            finish_word()
+            duplication = re.match(r"([<>])&([0-9]+|-)", source[i:])
+            if duplication:
+                redirects.append((descriptor, duplication[1] + "&", None))
+                i += duplication.end()
+                continue
+            pending = char
+            if i + 1 < len(source) and source[i + 1] == char:
+                pending += char
+                i += 1
+        elif quote is None and char in "|&;\n()":
+            finish_segment()
+        else:
+            word.append(os.path.expanduser(char) if char == "~" and not word and quote is None else char)
+        i += 1
+    finish_segment()
+    return result
+
+
+def _heredoc_substitutions(body: str, tmpdir: str | None, depth: int) -> list[ParsedCommand]:
+    # Treat the body as double-quoted data, which shares heredoc expansion
+    # semantics for command substitutions; quotes in the body are literal.
+    escaped = body.replace('"', '\\"')
+    return _shell_segments('"' + escaped + '"', tmpdir, depth + 1)[:-1]
+
+
 #: The files a non-writing stage writes in its `$TMPDIR` (#272): the comment,
 #: report and thread-reply bodies its skills publish, and check logs named
 #: after the check. Claude keeps its own session state in the same directory
@@ -519,6 +696,16 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
             return Decision(False, "the user denied this exact operation; skip it, checks not_verified",
                             rule="user_denial")
         parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is not None:
+            guard = protected_reason("Bash", {"command": command}, policy, cwd)
+            if guard:
+                return Decision(False, guard, rule="compound_guard")
+            for segment in parsed.segments:
+                _, segment_words = command_parts(segment.words)
+                if segment_words and _program(segment_words[0]) == "docker" and not policy.docker:
+                    raise _DockerDenied("docker needs the docker_host grant")
+            raise PolicyError("shell syntax needs operation consent; interpreter internals "
+                              "depend on external isolation; each segment retains its guards")
         words = list(parsed.words)
         if words[0] == "rtk":
             if not policy.rtk:
@@ -527,7 +714,7 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
             if not words:
                 raise PolicyError("rtk needs a command")
         for _, _, target in parsed.redirects:
-            if target is not None and not inside_tmpdir(target, policy.tmpdir):
+            if target is not None and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir):
                 raise PolicyError("output may be redirected only into $TMPDIR")
         protected = credential_reason(words[1:], policy, cwd)
         if protected:
@@ -540,7 +727,16 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                 and matching_answer("Bash", {"command": command}, policy, cwd) == "allow"
                 and protected_reason("Bash", {"command": command}, policy, cwd) is None):
             return Decision(True, "allowed by exact operation consent")
-        return Decision(False, str(error), rule="command_table")
+        reason = str(error)
+        patterns = [entry.get("operation", {}).get("pattern", {}).get("regex")
+                    for entry in policy.command_permissions if entry.get("operation", {}).get("version") == 2]
+        if patterns:
+            try:
+                normalized = normalized_command(operation("Bash", {"command": command}, policy, cwd))
+                reason += f"; existing patterns {patterns!r} did not authorize full normalized command {normalized!r}"
+            except (ValueError, OSError, TypeError):
+                pass
+        return Decision(False, reason, rule="command_table")
     except Exception as error:  # fail closed on anything unexpected
         return Decision(False, f"the command could not be validated ({type(error).__name__})",
                         rule="validation_error")
@@ -696,7 +892,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             and is_tmpdir_helper(words[2], policy.tmpdir)):
         return
     for command in (() if policy.static_only else policy.commands):
-        expected = parse_command(command, None).words
+        expected = _parse_simple(command, None).words
         if words[:len(expected)] == expected:
             return
     for configured in policy.verification_commands:
@@ -1911,6 +2107,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             if entry.get("decision") == "allow":
                 op = entry["operation"]
                 if op["tool"] == "Bash":
+                    if op.get("version") == 2 or op.get("check") or op["pattern"].get("words", [])[:1] == ["<SHELL>"]:
+                        # The regex/compound/env shape cannot be expressed in
+                        # Claude's prefix grammar. The hook remains the concrete
+                        # gate and runs before every Bash call, including guards.
+                        wildcards.append("*")
+                        continue
                     # The broad first barrier never replaces exact hook matching.
                     _, command_words = split_environment(op["pattern"]["words"])
                     program = command_words[0] if command_words else None
@@ -2035,9 +2237,15 @@ def prompt_note(policy: StagePolicy) -> str:
     return (
         foreground +
         f" Command policy for this {policy.role} stage: a runtime hook validates "
-        "every Bash command against this stage's closed table. Run one simple "
-        "command per call, without chaining, pipes, substitutions or redirections "
-        "other than into $TMPDIR. " + verification +
+        "every Bash command against this stage's table. Prefer one simple "
+        "command per call. Compound syntax needs interpreter consent with "
+        "per-segment guards. " + verification +
+        " Run configured checks as written, without prefixes or redirects. "
+        "Toolkit refusals carry [layer=toolkit_hook]; an unlabelled refusal "
+        "comes from the host permission layer. A toolkit grant does not widen "
+        "host or operating-system permissions. Propose a reusable matcher in "
+        "command_pattern_proposals with command, pattern, proposer, justification, "
+        "positive and negative examples; only the user's answer authorizes it. " +
         " When a command you need is denied, distinguish a forbidden operation "
         "from an unavailable executable. For authorized source reads, use an "
         "available search alternative: `git grep` or `grep`. Do not bypass a "
@@ -2045,7 +2253,7 @@ def prompt_note(policy: StagePolicy) -> str:
         "remains. Explicit project tool, command and integration choices take "
         "precedence over the built-in table; a table warning is informational "
         "only. Write multiline temporary helpers with the native file-write "
-        "tools, then publish using --body-file; shell heredocs are unsupported."
+        "tools, then publish using --body-file."
         + tmpdir_note
     )
 
@@ -2383,7 +2591,7 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     except Exception as error:
         reason = f"the stage policy could not run ({type(error).__name__})"
         note = _journal_denial(policy, None, "hook_bash", None, reason) if policy else None
-        print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: {reason}"
+        print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {HOOK_DENIAL_MARKER}: {reason}"
                                    f"{_journal_note(note)}. {DENY_ADVICE}"), file=stdout)
         return 0
     if not decision.allowed:
@@ -2408,7 +2616,7 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         intent = None if editing else pr_edit_intent(command, policy)
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
                                command, decision.reason, rule=rule, operation_id=operation_id)
-        print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
+        print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
                                    f"{decision.reason}{_journal_note(note)}. {advice} "
                                    f"COMMAND_PERMISSION_TMPDIR={json.dumps(policy.tmpdir)} "
                                    f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
@@ -2521,6 +2729,7 @@ def _journal_denial(policy: StagePolicy, event: dict[str, object] | None, compon
             policy, component=component,
             command=command if isinstance(command, str) else None, reason=reason,
             correlation={"tool_use_id": event.get("tool_use_id"),
+                         "layer": "toolkit_hook",
                          "session_id": event.get("session_id"),
                          "rule": rule, "operation": operation_id})
     except Exception as error:
@@ -2619,8 +2828,8 @@ def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str
     """
     if not os.path.isabs(value):
         return None
-    if policy.tmpdir and inside_tmpdir(value, policy.tmpdir):
-        return {"tmpdir": Path(value).resolve().relative_to(Path(policy.tmpdir).resolve()).as_posix()}
+    if _tmp_operand(value, policy.tmpdir):
+        return {"tmpdir": _tmp_relative(value, policy)}
     if root is not None:
         try:
             resolved = Path(value).resolve()
@@ -2631,6 +2840,47 @@ def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str
     return None
 
 
+def _tmp_relative(value: str, policy: Any) -> str:
+    relative = Path(value).resolve().relative_to(Path(policy.tmpdir).resolve()).as_posix()
+    for field, placeholder in (("attempt_id", "<ATTEMPT_ID>"), ("cycle_id", "<CYCLE_ID>")):
+        identifier = getattr(policy, field, None)
+        if isinstance(identifier, str) and identifier:
+            relative = relative.replace(identifier, placeholder)
+    return relative
+
+
+def _tmp_operand(value: str, tmpdir: str | None) -> bool:
+    """Normalize the directory itself too; redirect guards stay strict children."""
+    return bool(tmpdir) and (Path(value).resolve() == Path(tmpdir).resolve()
+                            or inside_tmpdir(value, tmpdir))
+
+
+def _shell_identity(parsed: ParsedCommand, policy: Any, cwd: str | None) -> str:
+    source = parsed.shell_source or ""
+    for segment in parsed.segments:
+        environment, words = command_parts(segment.words)
+        operands = [item.partition("=")[2] for item in environment]
+        operands += [word for index, word in enumerate(words) if index and words[index - 1] not in {"-c", "-e", "--eval"}]
+        operands += [target for _, _, target in segment.redirects if target is not None]
+        for operand in operands:
+            candidate = str(Path(cwd or ".") / operand)
+            if not (os.path.isabs(operand) or operand.startswith(("./", "../"))
+                    or "/" in operand or Path(candidate).exists()):
+                continue
+            if not _tmp_operand(candidate, policy.tmpdir):
+                continue
+            replacement = "<TMPDIR>/" + _tmp_relative(candidate, policy)
+            # Replace a complete operand, never a substring of opaque code.
+            forms = [operand]
+            if policy.tmpdir and operand.startswith(policy.tmpdir + "/"):
+                suffix = operand[len(policy.tmpdir):]
+                forms += ["$TMPDIR" + suffix, "${TMPDIR}" + suffix]
+            for form in forms:
+                source = re.sub(r"(?<![A-Za-z0-9_./-])" + re.escape(form)
+                                + r"(?=$|[\s'\"<>|&;)])", lambda _: replacement, source)
+    return source
+
+
 def configured_check_id(words: list[str], policy: Any) -> str | None:
     """The configured check this exact command is, if any (#398).
 
@@ -2639,22 +2889,32 @@ def configured_check_id(words: list[str], policy: Any) -> str | None:
     when it is the configured command itself, with or without environment
     prefixes, or a verification prefix followed by more words.
     """
-    _, command_words = split_environment(words)
+    environment, command_words = command_parts(words)
     for candidate in (words, command_words):
         if policy.test_command:
             try:
-                if candidate == list(parse_command(policy.test_command, None).words):
+                if candidate == list(_parse_simple(policy.test_command, None).words):
                     return "configured-test"
             except PolicyError:
                 pass
         for prefix in getattr(policy, "verify_prefixes", ()) or ():
             try:
-                expected = list(parse_command(prefix, None).words)
+                expected = list(_parse_simple(prefix, None).words)
             except PolicyError:
                 continue
             if expected and candidate[:len(expected)] == expected:
                 return f"verify:{prefix}"
     return None
+
+
+def command_parts(words: list[str]) -> tuple[list[str], list[str]]:
+    """Unwrap RTK on either side of ordinary environment assignments."""
+    environment, command = split_environment(words)
+    if command[:1] == ["rtk"]:
+        command = command[2:] if command[1:2] == ["proxy"] else command[1:]
+        inner_environment, command = split_environment(command)
+        environment += inner_environment
+    return environment, command
 
 
 #: Seconds Claude Code waits for the hook before cancelling it.
@@ -2885,12 +3145,13 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         if not isinstance(command, str):
             raise ValueError("command must be a string")
         parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is not None:
+            return {"version": 1, "role": consent_role(policy.role), "tool": tool,
+                    "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []}}
         words = list(parsed.words)
-        if words[:1] == ["rtk"]:
-            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
         if not words:
             raise ValueError("empty command")
-        environment, command_words = split_environment(words)
+        environment, command_words = command_parts(words)
         if not command_words:
             raise ValueError("an environment prefix needs a command")
         hidden = hidden_program(environment, command_words)
@@ -2903,25 +3164,30 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             name, _, value = assignment.partition("=")
             placeholder = _relative_value(value, policy, root)
             normalized.append({"env": name, **placeholder} if placeholder else assignment)
-        data_operands = os.path.basename(command_words[0]) in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
+        # Normalize path operands for every program. Inline code remains opaque:
+        # a string containing a path is not itself a filesystem operand.
         for index, word in enumerate(command_words):
-            if index and data_operands and os.path.isabs(word) and inside_tmpdir(word, policy.tmpdir):
-                normalized.append({"tmpdir": str(Path(word).resolve().relative_to(
-                    Path(policy.tmpdir).resolve()))})
+            candidate = str((Path(cwd or ".") / word).resolve())
+            path_operand = (os.path.isabs(word) or word.startswith(("./", "../"))
+                            or "/" in word and _program(command_words[0]) != "gh"
+                            or Path(candidate).exists())
+            inline_code = index > 0 and command_words[index - 1] in {"-c", "-e", "--eval", "--execute"}
+            if index and path_operand and not word.startswith("-") and not inline_code and _tmp_operand(candidate, policy.tmpdir):
+                normalized.append({"tmpdir": _tmp_relative(candidate, policy)})
             elif index and docker and (placeholder := _relative_value(word, policy, root)):
                 normalized.append(placeholder)
-            elif (index and docker and word.startswith("-") and "=" in word
-                  and (placeholder := _relative_value(word.partition("=")[2], policy, root))):
+            elif (index and word.startswith("-") and "=" in word
+                  and (placeholder := _relative_value(word.partition("=")[2], policy, root if docker else None))):
                 normalized.append({"option": word.partition("=")[0], **placeholder})
             else:
                 normalized.append(word)
         redirects = []
         for fd, operator, target in parsed.redirects:
+            target = str(Path(cwd or ".") / target) if target is not None else None
             if target is not None and not inside_tmpdir(target, policy.tmpdir):
                 raise ValueError("output may be redirected only into $TMPDIR")
             redirects.append([fd, operator, None if target is None else
-                              "<TMPDIR>/" + str(Path(target).resolve().relative_to(
-                                  Path(policy.tmpdir).resolve()))])
+                              "<TMPDIR>/" + _tmp_relative(target, policy)])
         pattern: dict[str, Any] = {"words": normalized, "redirects": redirects}
         extra: dict[str, Any] = {}
         if docker:
@@ -2935,7 +3201,8 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             # the host: the socket question comes first (#398), and an
             # identity without a digest matches no stored Compose consent.
             if command_words[1:2] == ["compose"] and getattr(policy, "docker", False):
-                values = dict(assignment.partition("=")[::2] for assignment in environment)
+                values = {assignment.partition("=")[0]: assignment.partition("=")[2]
+                          for assignment in environment}
                 extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
         check_id = configured_check_id(words, policy)
         if check_id:
@@ -2955,8 +3222,28 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
 
 def same_operation(stored: Any, op: dict[str, Any]) -> bool:
     """Exact equality, with a stored rereview decision read as a review one."""
-    return (isinstance(stored, dict)
-            and {**stored, "role": consent_role(stored.get("role"))} == op)
+    if not isinstance(stored, dict):
+        return False
+    def ordinary(value):
+        for word in value.get("pattern", {}).get("words", []):
+            name = (word.get("env") if isinstance(word, dict) else
+                    word.partition("=")[0] if _ENV_ASSIGNMENT.match(word) else None)
+            if name and (_GUARD_DEFEATING_ENV.match(name) or _RESOLVER_UNSAFE_ENV.match(name)):
+                return False
+        return True
+    if (stored.get("check") and stored.get("check") == op.get("check")
+            and ordinary(stored) and ordinary(op)):
+        def check_words(value):
+            words = value.get("pattern", {}).get("words", [])
+            return [word for word in words if not (
+                isinstance(word, dict) and "env" in word
+                or isinstance(word, str) and _ENV_ASSIGNMENT.match(word))]
+        return (consent_role(stored.get("role")) == consent_role(op.get("role"))
+                and stored.get("tool") == op.get("tool") == "Bash"
+                and stored.get("compose") == op.get("compose")
+                and stored.get("pattern", {}).get("cwd") == op.get("pattern", {}).get("cwd")
+                and check_words(stored) == check_words(op))
+    return {**stored, "role": consent_role(stored.get("role"))} == op
 
 
 def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
@@ -2969,11 +3256,44 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
     for entry in policy.command_permissions:
         if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}:
             return entry["decision"]
+    # Pattern authorization lifts table membership, never a concrete guard.
+    patterns = [entry for entry in policy.command_permissions
+                if entry.get("operation", {}).get("version") == 2]
+    if patterns and tool == "Bash" and protected_reason(tool, tool_input, policy, cwd) is None:
+        from grants import pattern_matches
+        command = normalized_command(op)
+        for entry in patterns:
+            stored = entry.get("operation", {})
+            if (stored.get("version") == 2 and stored.get("tool") == "Bash"
+                    and consent_role(stored.get("role")) == consent_role(policy.role)
+                    and entry.get("decision") in {"allow", "deny"}
+                    and pattern_matches(stored.get("pattern", {}).get("regex", ""), command)):
+                return entry["decision"]
     return None
 
 
+def normalized_command(op: dict[str, Any]) -> str:
+    """The documented single-space text on which regex grants fullmatch."""
+    pattern = op.get("pattern", {})
+    if pattern.get("words", [])[:1] == ["<SHELL>"]:
+        return pattern["words"][1]
+    words = []
+    for word in pattern.get("words", []):
+        if isinstance(word, dict):
+            value = ("<TMPDIR>/" + word["tmpdir"] if "tmpdir" in word
+                     else "<CHECKOUT>/" + word["checkout"])
+            prefix = word.get("env", word.get("option"))
+            words.append((prefix + "=" if prefix else "") + value)
+        else:
+            words.append(word)
+    for fd, operator, target in pattern.get("redirects", []):
+        words.append(fd + operator + (target or "1"))
+    return " ".join(words)
 
-def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
+
+
+def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None,
+                     *, _parsed: ParsedCommand | None = None) -> str | None:
     """Guards consent cannot remove on directly expressed operations.
 
     Never pretend to inspect code inside an interpreter or a project program.
@@ -2983,14 +3303,30 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             command = tool_input.get("command")
             if not isinstance(command, str):
                 return "command must be a string"
-            parsed = parse_command(command, policy.tmpdir)
+            parsed = _parsed or parse_command(command, policy.tmpdir)
+            if parsed.shell_source is not None:
+                segment_cwd = cwd
+                for segment in parsed.segments:
+                    guard = protected_reason(tool, tool_input, policy, segment_cwd, _parsed=segment)
+                    if guard:
+                        return guard
+                    _, segment_words = command_parts(segment.words)
+                    if segment_words[:1] == ["cd"]:
+                        targets = [word for word in segment_words[1:] if word != "--"]
+                        target = targets[0] if targets else str(Path.home())
+                        if target != "-" and "$" not in target:
+                            segment_cwd = str((Path(segment_cwd or ".") / os.path.expanduser(target)).resolve())
+                return None
+            for _, operator, target in parsed.redirects:
+                if (target is not None and operator.startswith(">")
+                        and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir)):
+                    return "output may be redirected only into $TMPDIR; pattern grants do not remove this guard"
+            redirect_paths = [target for _, _, target in parsed.redirects if target is not None]
             words = list(parsed.words)
-            if words[:1] == ["rtk"]:
-                words = words[2:] if words[1:2] == ["proxy"] else words[1:]
             if not words:
-                return "empty command"
+                return credential_reason(redirect_paths, policy, cwd)
             # An environment prefix never hides the program from its guards.
-            environment, words = split_environment(words)
+            environment, words = command_parts(words)
             if not words:
                 return "an environment prefix needs a command"
             hidden = hidden_program(environment, words)
@@ -3017,7 +3353,7 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             elif program == "find":
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
-            paths = [assignment.partition("=")[2] for assignment in environment] + words[1:]
+            paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
         else:
             paths = [tool_input.get(FILE_EDIT_TOOLS[tool], "")]
         stores = [Path(os.path.expanduser(store)).resolve()

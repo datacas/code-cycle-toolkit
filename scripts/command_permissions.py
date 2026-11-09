@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from execution_plan import completion_statuses
-from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question,
+from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, make_pattern_grant, GrantError, from_entry, refusal_question,
                     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
 from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
                                consent_role, split_environment, same_operation, configured_check_id)
@@ -108,8 +108,6 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
                 continue
             if not isinstance(pattern, dict):
                 return False
-            if set(pattern) == {"tmpdir"} and not (data_read or program == "docker"):
-                return False
             if not (index or "env" in pattern) or not placeholder(raw, pattern):
                 return False
         redirects = op["pattern"]["redirects"]
@@ -183,9 +181,28 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
         if guard is not None:
             continue
         grant = make_grant(op, executor, broker.platform)
+        proposal = event.get("pattern_proposal")
+        if isinstance(proposal, dict) and tool == "Bash":
+            try:
+                grant = make_pattern_grant(
+                    proposal["pattern"], policy.role, executor, broker.platform,
+                    proposer=proposal["proposer"], justification=proposal["justification"],
+                    positive=proposal["positive"], negative=proposal["negative"])
+                from grants import pattern_matches
+                from stage_permissions import normalized_command
+                if not pattern_matches(proposal["pattern"], normalized_command(op)):
+                    raise GrantError("proposed pattern does not cover the refused command")
+            except (GrantError, KeyError, TypeError) as error:
+                broker.notes.append(f"pattern rejected: {error}")
+                grant = make_grant(op, executor, broker.platform)
         broker.operations[grant.id] = grant
         command = command if tool == "Bash" else f"{tool} {op['pattern']['target']}"
-        return request_record(grant, command, reason)
+        request = request_record(grant, command, reason)
+        check = op.get("check", "")
+        configured = check.removeprefix("verify:") if check.startswith("verify:") else policy.test_command
+        if configured:
+            request["configured_command"] = configured
+        return request
     return None
 
 
@@ -438,6 +455,8 @@ def denial_records(denials: object, policy: Any, executor: str,
         identity = event.get("operation_id") or denial_operation_id(requested, command)
         records.setdefault((identity, command), {
             "tool": tool, "command": command, "stage": policy.role, "reason": reason,
+            "layer": event.get("layer") or ("toolkit_hook" if event.get("rule") else
+                                             f"{executor}_permission"),
             "rule": rule or "executor_permission_layer", "operation": identity,
             "target": target if isinstance(target, str) else None,
             "intent": event.get("intent") if isinstance(event.get("intent"), dict) else None,

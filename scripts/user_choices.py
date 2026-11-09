@@ -32,8 +32,8 @@ def load(config: dict) -> dict[str, tuple[str, ...]]:
                 raise PolicyError("a selected tool must name one executable")
             if key == "commands":
                 parsed = parse_command(entry, None)
-                if parsed.redirects:
-                    raise PolicyError("selected commands cannot contain redirections")
+                if parsed.redirects or parsed.shell_source is not None or not parsed.words:
+                    raise PolicyError("selected command prefixes must be literal commands without redirections")
             if key == "integrations" and not re.fullmatch(r"mcp__[a-zA-Z0-9_*-]+", entry):
                 raise PolicyError("an integration must name an MCP tool or server pattern")
             if key == "registry_domains" and not re.fullmatch(

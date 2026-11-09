@@ -963,14 +963,14 @@ class RuntimePolicyTests(unittest.TestCase):
         policy = sp.StagePolicy(role="implement", repo="owner/api",
                                 test_command="python3 -m unittest")
         prompt = rc.compose("implement", "owner/api", "142", command_policy=policy)
-        self.assertIn("closed table", prompt)
+        self.assertIn("stage's table", prompt)
         self.assertIn("`python3 -m unittest`", prompt)
         self.assertIn("available search alternative", prompt)
         self.assertIn("Do not bypass a forbidden operation", prompt)
         inactive = rc.compose("implement", "owner/api", "142",
                               command_policy=replace(policy, code_host="bitbucket"),
                               allowed_test_command="python3 -m unittest")
-        self.assertNotIn("closed table", inactive)
+        self.assertNotIn("stage's table", inactive)
         self.assertIn("permits this exact test command", inactive)
         for text in (prompt, inactive):
             self.assertIn("Never use `run_in_background: true`", text)
@@ -1028,7 +1028,7 @@ class RuntimeStopTests(unittest.TestCase):
                          (policy.role, policy.repo, policy.work_item_id, policy.base_branch))
         self.assertTrue(policy.active)
         self.assertEqual(("python3 scripts/validate-package.py",), policy.verify_prefixes)
-        self.assertIn("closed table", implementer.dispatched[0])
+        self.assertIn("stage's table", implementer.dispatched[0])
 
     def test_tools_outside_the_table_are_noticed_once_and_never_stop_the_cycle(self) -> None:
         from test_run_cycle import Talker

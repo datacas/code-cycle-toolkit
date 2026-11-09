@@ -91,8 +91,9 @@ for consent. See [Configuration → Allowed commands](configuration.md#allowed-c
 
 The hook validates arguments, not only the program, and it is fail-closed:
 
-- one simple command per call; chaining (`&&`, `;`, `|`), substitutions, other
-  variable expansions, globs and control characters are refused;
+- simple literal commands use the table. Chaining (`&&`, `;`, `|`), heredocs,
+  substitutions, other expansions and globs use shell-operation consent,
+  with every visible segment checked against the concrete guards (#439);
 - `$TMPDIR` is the only expansion, and only when it is the dispatch's own
   runtime directory (`<parent>/code-cycle-tmp-*`). A path given to
   `--body-file`, `git … --output` or an output redirection (`>`, `>>`, `2>`)
@@ -143,8 +144,78 @@ The hook validates arguments, not only the program, and it is fail-closed:
   `SSH_ASKPASS*` and `SSH_*COMMAND` prefixes on `git` or `gh`, in any letter
   case, are refused: they redirect the program, or choose a program it starts,
   where the guards cannot see it. A command whose program the runtime cannot
-  identify, after an append-style `NAME+=value` prefix, after a prefix before
-  `rtk`, or after a nested `rtk`, stays refused and is never a consent question.
+  identify after an append-style `NAME+=value` prefix or nested `rtk` retains
+  its guard. Ordinary assignments before or after one `rtk` wrapper are
+  recognized.
+
+### Reusable command consent (#439)
+
+An exact grant for a configured check also covers ordinary `NAME=value`
+prefixes, one leading `rtk` (optionally `proxy`), and output redirects into the
+current `$TMPDIR`, in combination. The underlying configured argv must stay
+the same: a verify prefix may still have its configured extra arguments, but
+a grant does not cover different arguments. Other scripts, the underlying
+runner and names in `_GUARD_DEFEATING_ENV` or `_RESOLVER_UNSAFE_ENV` (including
+`DOCKER_CONFIG`) are different operations. Their consent question names the
+exact configured test command. Run checks as written, without prefixes or
+redirects, to avoid unnecessary questions.
+
+For a regex, shell-source or configured-check grant the generated Claude
+`--allowedTools` rule uses `Bash(*)` because its prefix grammar cannot express
+these families. The mandatory hook still validates every concrete command;
+the broad host allow never bypasses a guard or authorizes another operation.
+User-defined host deny rules and external isolation remain in force.
+
+All path operands under the current dispatch's `$TMPDIR` become placeholders,
+including relative paths resolved against the command's working directory.
+Membership uses real paths after resolving symlinks and `..`. Another
+dispatch's directory stays literal. A grant created in an earlier dispatch
+therefore matches the corresponding path in a later one; reusing an old
+absolute path does not gain this normalization. Inline code stays opaque.
+
+An agent can include `command_pattern_proposals` in its stage result. Each
+proposal has `command` (the exact observed refused command), `pattern` (a
+regular expression), `proposer`, `justification`, and non-empty `positive`
+and `negative` arrays of normalized example commands. This is a proposal,
+never authorization. The consent record displays the complete regex, examples,
+justification, role, risks and executor scope. The user chooses this cycle,
+this repository, forever, or deny. A global grant never applies to review or
+rereview. The user can edit a pattern through the prompt callback answer:
+`{"answer":"persistent","pattern":"...","positive":["..."],"negative":["..."]}`.
+An edited pattern must pass the same validation. Widening requires a new
+approval. The terminal prompt accepts this JSON answer too.
+
+Matching is `re.fullmatch` against program and arguments joined with single
+spaces; temporary operands are `<TMPDIR>/relative/path`. Redirects append
+their fd, operator and normalized destination. Compound shell source preserves
+its exact quoting and delimiters, so a grant for a simple segment never
+authorizes a pipeline or another segment. A pattern can intentionally cover
+interpreters and compound source. There is no program denylist for patterns.
+The question warns that shell and interpreter internals require external
+isolation. Each visible segment, including command and process substitutions,
+retains the Git, publication, credential and redirect guards. A matching
+pattern grants nothing for a protected command, including a forbidden push,
+a credential-store read or an output redirect outside `$TMPDIR`.
+
+Validation rejects an empty, invalid or empty-matching regex, nested
+repetitions, repeated alternatives, backreferences and lookarounds. Patterns
+are limited to 1024 characters and commands to 4096. Positive examples must
+match and negative examples must not match before saving. Matching runs in a
+separate process with a 500 ms budget to bound regex backtracking. A failed
+match grants nothing; ordinary exact-command consent remains available.
+
+Pattern grants use `ConsentStore` schema 2 alongside existing exact grants;
+old schema 1 and 2 entries stay readable without a user migration. The store
+records proposer, justification, examples, user approval and observed completed
+commands. List and revoke them with the same `consent_control.py` selectors
+used for exact grants. Cycle, repository and global records retain their own
+revocation history.
+
+Hook refusal messages carry `[layer=toolkit_hook]`. The journal records the
+layer separately from the rule, including Claude permission-layer and Codex
+sandbox refusals. An unlabelled refusal comes from the host permission layer;
+the prompt note explains this split. A toolkit grant does not grant host or OS
+access. Those real limits remain visible in verification results.
 
 The hook is registered with `"onFailure": "block"` (Claude Code 2.1.295 or
 later). Without it a `PreToolUse` hook that fails or reaches its 60-second
@@ -360,15 +431,17 @@ lacking an answer.
 
 An operation ID is `command_<sha256>`, computed from its structured pattern and
 stage role; `review` and `rereview` share one role key, and a stored `rereview`
-decision still matches. Matching is exact except for verified per-dispatch
-paths: TMPDIR operands of the read tools, the values of environment prefixes
+decision still matches. Exact grants use the configured-check variant rule
+above, or otherwise exact matching except for verified per-dispatch
+paths: TMPDIR operands of every program, the values of environment prefixes
 that lie in TMPDIR or the checkout, and Docker arguments that do. Membership is
 checked after resolving symlinks and `..`. A Docker operation also carries its
 directory relative to the checkout, a Compose one the digest and warnings of its
 effective configuration, and a configured check its check identity
 ([Declared Docker checks](verification.md#declared-docker-checks-and-declined-checks)).
-Interpreter code, Git destinations, sensitive paths, flags and actions are never
-generalized.
+Exact grants preserve interpreter code, Git destinations, sensitive paths,
+flags and actions. Separately approved regex grants match the normalized
+command family described above and retain the same concrete guards.
 An allow applies to matching operations in later dispatches and retries of the
 selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
 ID; **this repository** persists across issues and resumed runs; **forever**
