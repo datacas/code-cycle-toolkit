@@ -231,7 +231,11 @@ dotfile unless decoded words name `dotglob` or `GLOBIGNORE`, or the inherited
 analysis, including spaces and shell-looking alternatives; their components
 conservatively match any name, while substitutions inside them are still
 guarded separately. At command position `!(...)` also retains its possible
-negation/subshell interpretation. Extglob directory targets are unresolved,
+negation/subshell interpretation. Nested `${…}` and `$[…]` expansions have
+their own delimiters: parentheses inside them never consume a later command
+into the extglob operand (REV-013). Their nested command substitutions retain
+the segment guards. Unterminated extglobs or nested expansions fail closed
+instead of accepting a partial analysis. Extglob directory targets are unresolved,
 including targets of `env -C`. A `..` after a glob, inside braces, or a
 brace alternative holding `/` or `~` may lead to any directory. Glob
 characters in the working directory itself are literal. Since a directory

@@ -551,6 +551,118 @@ def _splice_dollar(source: str, start: int) -> str:
     return source
 
 
+def _shell_expansion_end(source: str, start: int, depth: int, substitutions: list[str]) -> int:
+    """Find a nested expansion's delimiter without counting its parentheses
+    against an enclosing extglob (REV-013). Never evaluate the expansion.
+    """
+    if depth > 32:
+        raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
+    def marker_at(position: int) -> int:
+        marker = position + 1
+        if source[position] == "$":
+            while source.startswith("\\\n", marker):
+                marker += 2
+        return marker
+
+    marker = marker_at(start)
+    opening = source[marker]
+    closing = {"{": "}", "[": "]", "(": ")"}[opening]
+    nesting, i = 1, marker + 1
+    quote: str | None = None
+    shell = opening == "(" and not (source[start] == "$" and source[marker + 1:marker + 2] == "(")
+    heredocs: list[tuple[str, bool]] = []
+    word_active = False
+    while i < len(source):
+        char = source[i]
+        if char == "\\" and quote != "'":
+            if source[i + 1:i + 2] != "\n":
+                word_active = True
+            i += 2
+            continue
+        nested_marker = marker_at(i) if char in "$<>" else i
+        if quote is None and char == "$" and source[nested_marker:nested_marker + 1] == "'":
+            # ANSI-C quotes permit escaped single quotes. Treat the whole
+            # string as data, including braces and expansion-looking text.
+            i = nested_marker + 1
+            word_active = True
+            while i < len(source) and source[i] != "'":
+                i += 2 if source[i] == "\\" else 1
+            if i >= len(source):
+                break
+            i += 1
+            continue
+        if char in "\"'" and (quote is None or quote == char):
+            word_active = True
+            quote = None if quote == char else char
+            i += 1
+            continue
+        if quote != "'":
+            if (char == "$" and source[nested_marker:nested_marker + 1] in {"{", "[", "("}
+                    or char in "<>" and source[nested_marker:nested_marker + 1] == "("):
+                nested: list[str] = []
+                word_active = True
+                end = _shell_expansion_end(source, i, depth + 1, nested)
+                if (source[nested_marker] == "("
+                        and not (char == "$" and source[nested_marker + 1:nested_marker + 2] == "(")):
+                    # Keep the original quoting. Heredoc-style quote escaping
+                    # changes which ')' ends a command substitution.
+                    substitutions.append(source[nested_marker + 1:end])
+                else:
+                    substitutions.extend(nested)
+                i = end + 1
+                continue
+            if char == "`":
+                word_active = True
+                body_start = i + 1
+                i += 1
+                while i < len(source) and source[i] != "`":
+                    i += 2 if source[i] == "\\" else 1
+                if i >= len(source):
+                    break
+                substitutions.append(source[body_start:i])
+                i += 1
+                continue
+            if quote is None:
+                if shell and char == "#" and not word_active:
+                    newline = source.find("\n", i)
+                    if newline < 0:
+                        break
+                    i = newline
+                    continue
+                if shell and source.startswith("<<", i) and not source.startswith("<<<", i):
+                    match = re.match(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", source[i:])
+                    if match:
+                        heredocs.append((match[3], bool(match[1])))
+                        word_active = True
+                        i += match.end()
+                        continue
+                if shell and char == "\n" and heredocs:
+                    i += 1
+                    for delimiter, strip_tabs in heredocs:
+                        closing_line = re.search(r"(?m)^" + (r"\t*" if strip_tabs else "")
+                                                 + re.escape(delimiter) + r"(?:\n|$)", source[i:])
+                        if closing_line is None:
+                            raise PolicyError("unterminated shell heredoc")
+                        i += closing_line.end()
+                    heredocs.clear()
+                    word_active = False
+                    continue
+                # A parameter expansion ends at the first unquoted }, except
+                # inside another expansion. A literal { does not nest it.
+                if char == opening and opening != "{":
+                    nesting += 1
+                elif char == closing:
+                    nesting -= 1
+                    if nesting == 0:
+                        if opening == "{" and source[marker + 1:marker + 2] in {" ", "\t", "\n", "|"}:
+                            substitutions[:] = [source[marker + 1:i].lstrip("|")]
+                        return i
+                if shell:
+                    word_active = char not in " \t\n;|&()<>"
+        i += 1
+    raise PolicyError("unterminated shell expansion")
+
+
 def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[ParsedCommand]:
     if depth > 32 or len(source) > 65536:
         raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
@@ -621,6 +733,14 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             word.append(char)
             i += 1
             continue
+        if extglob_depth and source.startswith(("${", "$["), i):
+            substitutions: list[str] = []
+            end = _shell_expansion_end(source, i, depth + 1, substitutions)
+            for body in substitutions:
+                result.extend(_shell_segments(body, tmpdir, depth + 1))
+            word.append(source[i:end + 1])
+            i = end + 1
+            continue
         # Substitutions inside double quotes execute too. Preserve their text
         # in the outer word and analyse the body separately for direct guards.
         prefix = next((p for p in ("$(", "<(", ">(") if source.startswith(p, i)), None)
@@ -632,25 +752,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
                     end += 1
                 body = source[i + 1:end]
             else:
-                end, nesting, inner_quote = i + 2, 1, None
-                while end < len(source) and nesting:
-                    inner = source[end]
-                    if inner == "\\":
-                        end += 2
-                        continue
-                    if inner in "\"'":
-                        if inner_quote == inner:
-                            inner_quote = None
-                        elif inner_quote is None:
-                            inner_quote = inner
-                    elif inner_quote is None:
-                        if inner == "(":
-                            nesting += 1
-                        elif inner == ")":
-                            nesting -= 1
-                            if not nesting:
-                                break
-                    end += 1
+                end = _shell_expansion_end(source, i, depth + 1, [])
                 body = source[i + 2:end]
             result.extend(_shell_segments(body, tmpdir, depth + 1))
             word.append(source[start:min(end + 1, len(source))])
@@ -738,6 +840,8 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         else:
             word.append(char)
         i += 1
+    if extglob_depth:
+        raise PolicyError("unterminated extglob")
     finish_segment()
     return result
 

@@ -647,6 +647,117 @@ class ConsentVariantsTests(unittest.TestCase):
                     self.assertTrue(sp.check(safe, current, cwd=root).allowed)
 
     @posix_shell
+    def test_rev013_nested_expansions_do_not_hide_later_segments(self):
+        for operator in ("@", "!", "*", "+", "?"):
+            for expansion in ("${x:-(}", "${x/(/y}", "$[(1)]", "${x:-${y:-(}}"):
+                for comment in ("", " # )"):
+                    command = "shopt -s extglob\nls " + operator + "(" + expansion + "); cat ~/.ssh/id_rsa /dev/null" + comment
+                    for role in ("resolve", "rereview"):
+                        with self.subTest(operator=operator, expansion=expansion, comment=comment, role=role):
+                            policy = sp.StagePolicy(role)
+                            parsed = sp.parse_command(command, None)
+                            self.assertEqual("cat", parsed.segments[-1].words[0])
+                            current, _ = self.approved(policy, command)
+                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                            self.assertFalse(sp.check(command, current).allowed)
+
+    @posix_shell
+    def test_rev013_expansion_substitutions_stay_guarded_and_safe_forms_get_consent(self):
+        for role in ("resolve", "rereview"):
+            policy = sp.StagePolicy(role)
+            grant = grants.make_pattern_grant(r".+", role, "claude", "linux", compound=True,
+                proposer="test", justification="exercise retained guards",
+                positive=["printf hello | cat"], negative=["\n"])
+            current = replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+            for expansion in ("${x:-(}", "${x/(/y}", "$[(1)]", "${x:-$(cat ~/.ssh/id_rsa)}",
+                              "${x:-$[1 + $(cat ~/.ssh/id_rsa)]}"):
+                command = "shopt -s extglob\nls @(" + expansion + "); cat ~/.ssh/id_rsa # )"
+                with self.subTest(role=role, expansion=expansion):
+                    self.assertIsNone(sp.matching_answer("Bash", {"command": command}, current, None))
+                    self.assertFalse(sp.check(command, current).allowed)
+                    self.assertIsNone(cp.refused_operation([command], current,
+                        grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
+            for expansion in ("${x:-$(git push --force origin main)}", "$[1 + $(git push --force origin main)]"):
+                command = "ls @(" + expansion + ")"
+                with self.subTest(role=role, expansion=expansion):
+                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertFalse(sp.check(command, current).allowed)
+            for expansion in ('${x:-$(printf ")"; git push --force origin main)}',
+                              '$[1 + $(printf ")"; git push --force origin main)]',
+                              '${x:-${y:-$(printf ")"; git push --force origin main)}}',
+                              '${x:-`printf ")"; git push --force origin main`}',
+                              "${x:-$'\\\'})(\'$(printf \" )\"; git push --force origin main)}",
+                              "${x:-${y:-a}$\\\n'\\\'})(\'$(printf \" )\"; git push --force origin main)}",
+                              '${x:-$(printf x # )\ngit push --force origin main\n)}',
+                              '${x:-$(cat <<EOF\n)\nEOF\ngit push --force origin main\n)}'):
+                command = "shopt -s extglob\nprintf '%s' @(" + expansion + ")"
+                with self.subTest(role=role, expansion=expansion), tempfile.TemporaryDirectory() as root:
+                    # Keep the cwd away from stores so the outer brace operand
+                    # cannot mask a lost substitution's Git guard.
+                    self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, current, root)).lower())
+                    self.assertFalse(sp.check(command, current, cwd=root).allowed)
+            # Slash-bearing brace operands retain the existing conservative
+            # credential guard (PA-28); they are not benign-consent examples.
+            for expansion in ("${x:-(}", "$[(1)]", "${x:-${y:-(}}",
+                              "${x:-\"}\"}", "${x:-\\}}", "${x:-$'('}"):
+                command = "ls /outside/api/@(" + expansion + "); printf done"
+                with self.subTest(role=role, expansion=expansion):
+                    self.assertEqual("printf", sp.parse_command(command, None).segments[-1].words[0])
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNotNone(cp.refused_operation([command], policy,
+                        grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
+                    self.assertTrue(sp.check(command, current).allowed)
+
+    @posix_shell
+    def test_rev013_escaped_space_does_not_start_a_shell_comment(self):
+        commands = ('(printf "%s\\n" "$(printf a\\ #)"; git push --force origin main\ntrue )',
+                    '(printf "%s\\n" "$(printf a\\ #)"; git push --force origin main\ntrue ) # )',
+                    '(printf "%s\\n" "$(printf a\\ #)"; git push --force origin main\ntrue ) # "',
+                    'printf "%s" $(printf ""#); git push --force origin main',
+                    'printf "%s" $(printf \\ #); git push --force origin main')
+        for role in ("resolve", "rereview"):
+            for command in commands:
+                with self.subTest(role=role, command=command), tempfile.TemporaryDirectory() as root:
+                    policy, _ = self.approved(sp.StagePolicy(role), command)
+                    self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, policy, root)).lower())
+                    self.assertFalse(sp.check(command, policy, cwd=root).allowed)
+
+    @posix_shell
+    def test_rev013_unterminated_extglobs_and_expansions_fail_closed(self):
+        for command in ("ls @(foo", "ls @(${x:-(}", "ls @(${x:-foo)", "ls @($[(1))",
+                        "ls @(${x:-$(printf x)}", "ls @(${x:-`printf x})"):
+            with self.subTest(command=command), self.assertRaisesRegex(sp.PolicyError, "unterminated"):
+                sp.parse_command(command, None)
+        command = "ls @(" + "${x:-" * 40 + "x" + "}" * 40 + ")"
+        with self.assertRaisesRegex(sp.PolicyError, "resource limit"):
+            sp.parse_command(command, None)
+
+    @posix_shell
+    def test_rev013_bash_fixture_executes_the_later_segment(self):
+        # Prove Bash's boundary using a disposable file, never a real store.
+        with tempfile.TemporaryDirectory() as root:
+            store = Path(root, "fixture-store")
+            store.mkdir()
+            target = store / "fixture.txt"
+            target.write_text("later segment ran\n", encoding="utf-8")
+            for operator in ("@", "!", "*", "+", "?"):
+                # Older Bash versions count parentheses in the parameter
+                # forms differently. Arithmetic expansion reproduces the
+                # hidden segment on those versions too; all reported forms
+                # retain conservative parser coverage in the test above.
+                for expansion in ("$[(1)]",):
+                    for comment in ("", " # )"):
+                        command = "shopt -s extglob\nls " + operator + "(" + expansion + "); cat " + str(target) + comment
+                        with self.subTest(operator=operator, expansion=expansion, comment=comment):
+                            baseline = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=root,
+                                env={**os.environ, "x": "", "BASH_ENV": "/dev/null"}, capture_output=True, text=True)
+                            self.assertEqual(0, baseline.returncode, baseline.stderr)
+                            self.assertTrue(baseline.stdout.endswith("later segment ran\n"), baseline.stdout)
+                            with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
+                                for role in ("resolve", "rereview"):
+                                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, sp.StagePolicy(role), root))
+
+    @posix_shell
     def test_rev012_extglob_data_and_negated_subshells_are_distinct(self):
         policy = sp.StagePolicy("resolve")
         for command in ("!(git push --force origin main)", "true; !(git push --force origin main)",
