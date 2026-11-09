@@ -1172,6 +1172,57 @@ class ReconciledCycleTests(RunCycleTestCase):
                       report.stopped_because)
         self.assertIn("unknown", report.stopped_because)
 
+    def resume_points(self):
+        return self.journal_rows("resume_point")
+
+    def journal_rows(self, component):
+        from cycle_journal import events
+        return [row for row in events(self.store.path, "owner/api") if row["component"] == component]
+
+    def test_464_a_blocked_stage_with_proven_work_leaves_a_resume_point_and_the_rerun_uses_it(self):
+        # #446: the stage published, then ended BLOCKED with "CI pending".
+        import cycle_resume
+        done = dict(work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                    tests={"ran": True, "passed": True, "checks": []})
+        report, claude = self.cycle([], published(), completed=None, **done)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual(1, len(claude.dispatched))
+        points = self.resume_points()
+        self.assertEqual(["blocked_done"], [row["status"] for row in points])
+        self.assertEqual("442", points[0]["change_request_id"])
+        self.assertEqual({"head_sha": SHA, "next_stage": "review", "branch": None},
+                         {**points[0]["correlation"], "branch": None})
+        # The rerun reads it back: review at the same change request, no flags.
+        resume = cycle_resume.auto_resume(
+            self.store.path, "owner/api", "435",
+            read_pull=lambda number: {"state": "OPEN", "headRefOid": SHA, "headRefName": "task-435"})
+        self.assertEqual(("review", "442", SHA), (resume.start_from, resume.change_request_id,
+                                                  resume.head_sha))
+        self.assertIn("stage_not_completed", "stage_not_completed")
+
+    def test_464_a_blocked_stage_without_proof_or_with_a_serious_refusal_leaves_no_point(self):
+        report, _ = self.cycle([], published(), completed=None)
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual([], self.resume_points())
+        self.setUp()
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
+                               published(remote_head=OTHER), completed=None,
+                               work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                               tests={"ran": True, "passed": True, "checks": []})
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual([], self.resume_points())
+
+    def test_464_a_completed_stage_leaves_a_point_so_an_interrupted_cycle_does_not_redo_it(self):
+        denials = [{"tool": "Bash", "input": {"command": "sed -n 1,20p scripts/run_cycle.py"}}]
+        report, _ = self.cycle(
+            denials, published(), completed=None,
+            work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+            tests={"ran": True, "passed": True, "checks": []})
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        points = self.resume_points()
+        self.assertEqual(["completed"], [row["status"] for row in points])
+        self.assertIn("reconciled", points[0]["reason"])
+
     def test_464_blocked_cause_separates_an_incidental_refusal_from_the_real_cause(self):
         from types import SimpleNamespace
         from cycle_dispatch import StageDispatch
