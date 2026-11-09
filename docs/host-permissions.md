@@ -156,8 +156,9 @@ current `$TMPDIR`, in combination. The underlying configured argv must stay
 the same: a verify prefix may still have its configured extra arguments, but
 a grant does not cover different arguments. Other scripts, the underlying
 runner and names in `_GUARD_DEFEATING_ENV` or `_RESOLVER_UNSAFE_ENV` (including
-`DOCKER_CONFIG`) are different operations. Their consent question names the
-exact configured test command. Run checks as written, without prefixes or
+`DOCKER_CONFIG`) are different operations. A variant using the same underlying
+runner names the exact configured command in its consent question; unrelated
+commands do not. Run checks as written, without prefixes or
 redirects, to avoid unnecessary questions.
 
 For a regex, shell-source or configured-check grant the generated Claude
@@ -182,20 +183,33 @@ justification, role, risks and executor scope. The user chooses this cycle,
 this repository, forever, or deny. A global grant never applies to review or
 rereview. The user can edit a pattern through the prompt callback answer:
 `{"answer":"persistent","pattern":"...","positive":["..."],"negative":["..."]}`.
-An edited pattern must pass the same validation. Widening requires a new
-approval. The terminal prompt accepts this JSON answer too.
+An edited pattern must pass the same validation and cover the refused normalized
+operation. Invalid edits and unavailable scopes (including `forever` for review)
+show the reason and ask again without saving a grant. EOF leaves the original
+request pending. Widening requires a new approval. The terminal prompt accepts
+this JSON answer too.
 
 Matching is `re.fullmatch` against program and arguments joined with single
 spaces; temporary operands are `<TMPDIR>/relative/path`. Redirects append
 their fd, operator and normalized destination. Compound shell source preserves
 its exact quoting and delimiters, so a grant for a simple segment never
 authorizes a pipeline or another segment. A pattern can intentionally cover
-interpreters and compound source. There is no program denylist for patterns.
+interpreters and compound source. To authorize compound source, the proposal or
+edited answer must include `"compound":true`; this opt-in is stored in the
+grant's operation and the question explicitly says that it authorizes every
+segment of matching shell source. Existing pattern entries without this field
+cover simple commands only. There is no program denylist for patterns.
 The question warns that shell and interpreter internals require external
 isolation. Each visible segment, including command and process substitutions,
 retains the Git, publication, credential and redirect guards. A matching
 pattern grants nothing for a protected command, including a forbidden push,
-a credential-store read or an output redirect outside `$TMPDIR`.
+a credential-store read or an output redirect outside `$TMPDIR`. Static
+credential guards account for `cd` options and directory-stack changes from
+`pushd`/`popd` (including `-n`), and compare glob and brace prefixes to the
+protected stores without reading them. Since a directory change may fail, be
+conditional or run in a subshell, analysis retains earlier possible working
+directories when checking relative paths. Relative operands after an unresolved directory change receive no grant;
+use an explicit absolute path so the guard can inspect it.
 
 Validation rejects an empty, invalid or empty-matching regex, nested
 repetitions, repeated alternatives, backreferences and lookarounds. Patterns

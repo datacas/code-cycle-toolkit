@@ -284,7 +284,9 @@ Configured-check grants reuse the same underlying argv across ordinary env,
 RTK and `$TMPDIR` redirect variants. Regex grants can authorize a reusable
 normalized command family after positive/negative example validation and user
 approval. Compound commands request interpreter consent with per-segment
-guards. See [reusable command consent](host-permissions.md#reusable-command-consent-439)
+guards; a regex additionally needs explicit `compound: true` approval to match
+shell source. Invalid edited answers show the reason and ask again without
+saving authorization. See [reusable command consent](host-permissions.md#reusable-command-consent-439)
 for matching, edited answers, persistence, limits and refusal layers.
 
 Command answers reuse `ConsentStore` outside the checkout. `--grant command_<sha256>=cycle|persistent|forever|deny` answers a previously shown question; `persistent` means this repository. A cycle grant reaches retries and dispatches of the same cycle ID; a repository grant also reaches later issues, and a global grant reaches other repositories. A global grant never covers `review` or `rereview`, which judge untrusted changes: their questions offer only this cycle, this repository or deny, `forever` is refused for them, and a stored global entry for those roles is ignored. Exact grants include the stage role and arguments, with the configured-check variants and verified per-dispatch path normalization described above. Separately approved regex grants can generalize normalized command text, including interpreter code; concrete guards still run on each command. A grant does not change direct Git/GitHub argument, publication or workspace guards, foreground execution, redirect rules or the external sandbox.

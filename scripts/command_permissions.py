@@ -187,10 +187,10 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                 grant = make_pattern_grant(
                     proposal["pattern"], policy.role, executor, broker.platform,
                     proposer=proposal["proposer"], justification=proposal["justification"],
-                    positive=proposal["positive"], negative=proposal["negative"])
-                from grants import pattern_matches
-                from stage_permissions import normalized_command
-                if not pattern_matches(proposal["pattern"], normalized_command(op)):
+                    positive=proposal["positive"], negative=proposal["negative"],
+                    compound=proposal.get("compound", False))
+                from grants import pattern_covers_operation
+                if not pattern_covers_operation(grant.operation or {}, op):
                     raise GrantError("proposed pattern does not cover the refused command")
             except (GrantError, KeyError, TypeError) as error:
                 broker.notes.append(f"pattern rejected: {error}")
@@ -198,8 +198,20 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
         broker.operations[grant.id] = grant
         command = command if tool == "Bash" else f"{tool} {op['pattern']['target']}"
         request = request_record(grant, command, reason)
-        check = op.get("check", "")
-        configured = check.removeprefix("verify:") if check.startswith("verify:") else policy.test_command
+        if grant.operation != op:
+            request["refused_operation"] = op
+        from stage_permissions import command_parts
+        configured = None
+        if tool == "Bash":
+            parsed = parse_command(command, observed_policy.tmpdir)
+            _, words = command_parts(parsed.words)
+            for candidate in (policy.test_command, *policy.verify_prefixes):
+                if not candidate:
+                    continue
+                _, expected = command_parts(parse_command(candidate, None).words)
+                if words and expected and words[0] == expected[0]:
+                    configured = candidate
+                    break
         if configured:
             request["configured_command"] = configured
         return request

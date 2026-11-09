@@ -180,7 +180,10 @@ def validate_pattern(pattern: str, positive: list[str], negative: list[str]) -> 
         raise GrantError(f"invalid pattern: {error}") from error
     if compiled.fullmatch("") is not None:
         raise GrantError("pattern matches the empty command")
-    if not positive or not negative or any(not isinstance(item, str) or not item
+    if (not isinstance(positive, list) or not isinstance(negative, list)
+            or not positive or not negative):
+        raise GrantError("positive and negative example commands must be non-empty lists")
+    if any(not isinstance(item, str) or not item
                                            for item in [*positive, *negative]):
         raise GrantError("positive and negative example commands are required")
     for example in positive:
@@ -193,14 +196,26 @@ def validate_pattern(pattern: str, positive: list[str], negative: list[str]) -> 
 
 def make_pattern_grant(pattern: str, role: str, executor: str, platform: str, *,
                        proposer: str, justification: str, positive: list[str],
-                       negative: list[str]) -> SensitiveGrant:
+                       negative: list[str], compound: bool = False) -> SensitiveGrant:
+    if not isinstance(compound, bool):
+        raise GrantError("compound must be a boolean")
     validate_pattern(pattern, positive, negative)
     if not proposer or not justification:
         raise GrantError("a pattern needs its proposer and justification")
     op = {"version": 2, "role": consent_role(role), "tool": "Bash",
           "pattern": {"regex": pattern}, "proposer": proposer,
           "justification": justification, "positive": positive, "negative": negative}
+    if compound:
+        op["compound"] = True
     return make_grant(op, executor, platform)
+
+
+def pattern_covers_operation(pattern: dict[str, Any], op: dict[str, Any]) -> bool:
+    """A simple-command matcher never implicitly authorizes shell source."""
+    from stage_permissions import normalized_command
+    shell = op.get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]
+    return (not shell or pattern.get("compound") is True) and pattern_matches(
+        pattern.get("pattern", {}).get("regex", ""), normalized_command(op))
 
 
 
@@ -244,6 +259,8 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
         risks += (" A regex grants every matching normalized command, including interpreters. "
                   "Git, publication, credential and redirect guards still apply to each command; "
                   "a match grants nothing for a protected command.")
+        if op.get("compound"):
+            risks += " Compound pattern: authorizes every segment of matching shell source."
     return SensitiveGrant(
         identifier(op), "the command pattern" if op.get("version") == 2 else "the exact stage operation", "outside the stage table",
         (GrantScope(executor, platform, pattern, risks, True),),
@@ -270,7 +287,8 @@ def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
             return make_pattern_grant(op["pattern"]["regex"], op["role"],
                                       str(entry.get("executor")), str(entry.get("platform")),
                                       proposer=op["proposer"], justification=op["justification"],
-                                      positive=op["positive"], negative=op["negative"])
+                                      positive=op["positive"], negative=op["negative"],
+                                      compound=op.get("compound", False))
         except (GrantError, KeyError, TypeError, AttributeError):
             return None
     if (not isinstance(op, dict) or op.get("version") != 1
@@ -311,11 +329,14 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     configured = str((blocker or {}).get("configured_command") or "")
     detail = (f" Configured command: {configured}." if configured else "")
     regex = op.get("pattern", {}).get("regex")
-    detail += f" Regex: {regex}." if regex else ""
+    compound = ("Compound pattern: all segments of matching shell source are authorized. "
+                if op.get("compound") else "")
+    regex_note = f" Regex: {regex[:80]}." if regex else ""
     return {"id": question_id,
-            "prompt": (f"{role}: {command[:60]}.{detail} {warned}{skip}"
+            "prompt": (f"{role}: {compound}{command[:140]}.{detail} {warned}"
                        "Pattern grants never bypass Git, credential or redirect guards. "
                        "Interpreter internals require external isolation. "
+                       f"{regex_note} {skip}"
                        f"Outside table: {reason[:40]}. Risk: {scope.risks[:60]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
                        "Protected commands receive no pattern authorization.")[:600],
@@ -703,7 +724,7 @@ class ConsentBroker:
 
     def record_executions(self, commands: list[str], executor: str, policy: Any,
                           cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:
-        from stage_permissions import operation, normalized_command, protected_reason
+        from stage_permissions import operation, protected_reason
         if self.store is None:
             return
         pattern_grants = [grant for grant in self.registry.values()
@@ -718,13 +739,12 @@ class ConsentBroker:
                 continue
             try:
                 op = retained.get(command) or operation("Bash", {"command": command}, policy, cwd)
-                normalized = normalized_command(op)
                 for grant in pattern_grants:
                     stored = grant.operation or {}
                     scope = grant.scope_for(executor, self.platform)
                     if (stored.get("version") != 2 or scope is None
                             or consent_role(stored.get("role")) != consent_role(policy.role)
-                            or not pattern_matches(stored["pattern"]["regex"], normalized)):
+                            or not pattern_covers_operation(stored, op)):
                         continue
                     for repo in (self.cycle_scope, self.repo_id, "*"):
                         if repo and self.store.load(repo, grant, scope) == "allow":
@@ -823,12 +843,12 @@ class ConsentBroker:
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
         if answer == ALLOW_GLOBAL:
-            if grant.operation is None or self.store is None:
-                raise GrantError("global answers require an exact command and a consent store")
-            if grant.operation.get("role") in NO_GLOBAL_ROLES:
+            if grant.operation and grant.operation.get("role") in NO_GLOBAL_ROLES:
                 raise GrantError(
                     f"{grant.id}: a global grant never covers {grant.operation['role']}; "
                     "answer this cycle or this repository")
+            if grant.operation is None or self.store is None:
+                raise GrantError("global answers require an exact command and a consent store")
             if not persist:
                 return self.apply_answer(grant, scope, ALLOW_CYCLE, persist=False)
             self.store.save("*", grant, scope, "allow")
@@ -874,25 +894,49 @@ class ConsentBroker:
             self._observed[grant.fingerprint(scope)] = answer
             self._observe("decision_answered", grant, scope, role, answer, source)
             return answer
-        if answer is None and self.prompt is not None:
+        validation_error = ""
+        while answer is None and self.prompt is not None:
             self._observe("decision_asked", grant, scope, role)
             source = "interactive"
             asked = question(grant, scope, role=role, blocker=blocker)
+            if validation_error:
+                asked = {**asked, "validation_error": validation_error,
+                         "prompt": f"Invalid answer: {validation_error}. " + asked["prompt"]}
             if grant.operation:
                 asked = {**asked, "permission_record": PermissionRequest(grant, scope, role, asked, blocker).record()}
-            answer = self.prompt(asked)
-            # A structured answer is the user's edited matcher, never an
-            # instruction from the proposing agent. Widening is a new grant.
-            if isinstance(answer, dict):
-                edited = answer
-                answer = edited.get("answer")
-                if "pattern" in edited:
-                    grant = make_pattern_grant(
-                        edited["pattern"], role, executor, self.platform,
-                        proposer="user edit", justification=edited.get("justification", "edited consent pattern"),
-                        positive=edited.get("positive", []), negative=edited.get("negative", []))
-                    scope = grant.scopes[0]
+            response = self.prompt(asked)
+            if response is None:
+                break
+            try:
+                candidate, candidate_scope = grant, scope
+                answer = response
+                # Edited matchers are new grants; reject before storing any
+                # authorization, and retain the original request for retries.
+                if isinstance(response, dict):
+                    answer = response.get("answer")
+                    if "pattern" in response:
+                        candidate = make_pattern_grant(
+                            response["pattern"], role, executor, self.platform,
+                            proposer="user edit", justification=response.get("justification", "edited consent pattern"),
+                            positive=response.get("positive", []), negative=response.get("negative", []),
+                            compound=response.get("compound", False))
+                        refused = (blocker or {}).get("refused_operation") or grant.operation
+                        if (not isinstance(refused, dict) or refused.get("version") != 1
+                                or not pattern_covers_operation(candidate.operation or {}, refused)):
+                            raise GrantError("edited pattern does not cover the refused command")
+                        candidate_scope = candidate.scopes[0]
+                if not isinstance(answer, str) or answer not in ANSWERS:
+                    raise GrantError(f"answer must be one of {', '.join(ANSWERS)}")
+                answer = self.apply_answer(candidate, candidate_scope, answer)
+                grant, scope = candidate, candidate_scope
+                if grant.operation:
                     self.operations[grant.id] = grant
+            except GrantError as error:
+                validation_error = str(error)
+                self.notes.append(f"consent answer rejected: {validation_error}")
+                answer = None
+                continue
+            break
         if answer is None:
             self._observe("decision_asked", grant, scope, role)
             self.pending.append(PermissionRequest(
@@ -902,7 +946,8 @@ class ConsentBroker:
             return PENDING
         if answer not in ANSWERS:
             raise GrantError(f"{grant.id}: {answer!r} is not one of {', '.join(ANSWERS)}")
-        answer = self.apply_answer(grant, scope, answer)
+        if source != "interactive":
+            answer = self.apply_answer(grant, scope, answer)
         self._observed[grant.fingerprint(scope)] = answer
         self._observe("decision_answered", grant, scope, role, answer, source)
         if answer == DENY:
