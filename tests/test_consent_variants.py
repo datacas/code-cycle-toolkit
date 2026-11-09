@@ -506,7 +506,10 @@ class ConsentVariantsTests(unittest.TestCase):
         policy = sp.StagePolicy("resolve")
         for command in ('command env -C "$X" cat id_rsa', 'nice env -C "$X" cat id_rsa',
                         'timeout 5 env -C "$X" cat id_rsa', "nohup env -C ~/.ssh cat id_rsa",
-                        "command env --chdir ~/.codex cat auth.json", "nice -n 5 /usr/bin/env -C ~/.ssh cat id_rsa"):
+                        "command env --chdir ~/.codex cat auth.json", "nice -n 5 /usr/bin/env -C ~/.ssh cat id_rsa",
+                        f"timeout -s KILL 5 env -C {Path.home()} cat .codex/auth.json",
+                        'stdbuf -o L env -C "$X" cat id_rsa', "sudo -u root env -C ~/.ssh cat id_rsa",
+                        'xargs -a /dev/null env -C "$X" cat id_rsa', "exec -a name env -C ~/.ssh cat id_rsa"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
@@ -524,14 +527,19 @@ class ConsentVariantsTests(unittest.TestCase):
         home = str(Path.home())
         for command in (f"cat $'{home}/.ssh/id_rsa'", f"cat $'{home}/.s\\x73h/id_rsa'",
                         f'cat $"{home}/.codex/auth.json"', "cat ~/.s\\\nsh/id_rsa",
-                        f'cat "{home}/.co\\\ndex/auth.json"'):
+                        f'cat "{home}/.co\\\ndex/auth.json"', f"cat {home}/.codex$'\\u2f'auth.json",
+                        "cat ~/$'\\u2e'ssh/id_rsa", f"cat {home}/.s$'\\c@'sh/id_rsa",
+                        f"cat {home}/.s$'s\\0x'h/id_rsa", f"cat $\\\n'{home}/.ssh/id_rsa'",
+                        "cat $HO\\\nME/.ssh/id_rsa", "cat ${HO\\\nME}/.codex/auth.json"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         self.assertEqual([["printf", "a\nb"]], [item.words for item in sp.parse_command("printf $'a\\nb' | cat",
                                                                                          None).segments][:1])
-        for safe in ("printf $'%s\\n' done", "echo first \\\n  second", "printf $'\\x \\E[0m\\c'"):
+        for safe in ("printf $'%s\\n' done", "echo first \\\n  second", "printf $'\\x \\E[0m\\c'",
+                     "find . -print0 | while IFS= read -r -d $'\\0' f; do echo \"$f\"; done",
+                     "printf '%s' $'\\x00' | cat", "# note \\\ncat README.md"):
             with self.subTest(command=safe), warnings.catch_warnings():
                 warnings.simplefilter("error")
                 self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))

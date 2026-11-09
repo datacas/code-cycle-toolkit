@@ -31,7 +31,6 @@ directory outside the agent's workspace and temporary directory.
 """
 from __future__ import annotations
 
-import codecs
 import hashlib
 import fnmatch
 import itertools
@@ -43,7 +42,6 @@ import signal
 import subprocess
 import sys
 import time
-import warnings
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -482,6 +480,77 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     return ParsedCommand(shell_source=command, segments=segments)
 
 
+#: ANSI-C escapes with a fixed meaning, as bash decodes them in `$'…'`.
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                   "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    """The text of a `$'…'` body, decoded exactly as bash decodes it.
+
+    Octal takes 1-3 digits, `\\x` 1-2, `\\u` 1-4 and `\\U` 1-8 hex digits;
+    `\\cX` is a control character; an unknown escape keeps its backslash; the
+    result ends at the first NUL, as the C string bash builds does.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] != "\\" or i + 1 == len(body):
+            out.append(body[i])
+            i += 1
+            continue
+        code = body[i + 1]
+        digits = None
+        if code in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[code])
+            i += 2
+        elif code in "01234567":
+            digits = re.match(r"[0-7]{1,3}", body[i + 1:])
+            assert digits is not None
+            out.append(chr(int(digits[0], 8) & 0xFF))
+            i += 1 + len(digits[0])
+        elif code in "xuU" and (digits := re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}[code],
+                                                    body[i + 2:])):
+            out.append(chr(min(int(digits[0], 16), 0x10FFFF)))
+            i += 2 + len(digits[0])
+        elif code == "c" and i + 2 < len(body):
+            control = body[i + 2]
+            # `\c\\` names control-backslash and consumes both backslashes.
+            width = 4 if control == "\\" and body[i + 3:i + 4] == "\\" else 3
+            out.append("\x7f" if control == "?" else chr(ord(control.upper()) & 0x1F))
+            i += width
+        else:
+            out.append("\\" + code)
+            i += 2
+    return "".join(out).split("\0", 1)[0]
+
+
+def _splice_dollar(source: str, start: int) -> str:
+    """Remove line continuations inside the `$` expansion at `start`.
+
+    Bash removes backslash-newline before it reads `$'`, `$"`, `$(`, `${…}`
+    or a name, so a continuation cannot split them from their `$`.
+    """
+    position = start + 1
+    braced = False
+    while position < len(source):
+        if source.startswith("\\\n", position):
+            source = source[:position] + source[position + 2:]
+            continue
+        char = source[position]
+        if position == start + 1 and char in "'\"(":
+            break
+        if position == start + 1 and char == "{":
+            braced = True
+        elif braced:
+            if char == "}":
+                break
+        elif not (char.isalnum() or char == "_"):
+            break
+        position += 1
+    return source
+
+
 def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[ParsedCommand]:
     if depth > 32 or len(source) > 65536:
         raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
@@ -518,6 +587,8 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
 
     while i < len(source):
         char = source[i]
+        if char == "$" and quote != "'":
+            source = _splice_dollar(source, i)
         if char == "\\" and quote != "'" and i + 1 < len(source):
             # A backslash-newline is a line continuation: bash removes both.
             if source[i + 1] != "\n":
@@ -530,12 +601,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             end = i + 2
             while end < len(source) and source[end] != "'":
                 end += 2 if source[end] == "\\" else 1
-            body = source[i + 2:min(end, len(source))]
-            with warnings.catch_warnings():
-                # Bash-only escapes (`\E`, `\cX`) stay literal, as in bash.
-                warnings.simplefilter("ignore", DeprecationWarning)
-                word.append(codecs.decode(body.encode("latin-1", "backslashreplace"),
-                                          "unicode_escape", "backslashreplace"))
+            word.append(_ansi_c(source[i + 2:min(end, len(source))]))
             i = end + 1
             continue
         if char == "$" and quote is None and source.startswith('$"', i):
@@ -3393,15 +3459,9 @@ def _tilde_directory(value: str) -> tuple[str, str] | None:
     return (match[1], value[match.end():]) if match and match[1] else None
 
 
-#: Programs that run the next word as a program (REV-010).
-_RUNNERS = frozenset({"builtin", "command", "exec", "nice", "nohup", "timeout", "stdbuf", "ionice",
-                      "setsid", "chrt", "taskset", "time", "sudo", "doas", "unbuffer"})
-
-
-def _runner_word(word: str) -> bool:
-    """Whether a word before a program may belong to a runner prefix."""
-    return (os.path.basename(word).removesuffix(".exe") in _RUNNERS or word.startswith("-")
-            or re.fullmatch(r"[0-9.]+[a-z]?|[A-Za-z_][A-Za-z0-9_]*=.*", word) is not None)
+#: Programs that only print or search their arguments, so an `env` argument
+#: never runs (REV-010). Every other program may run `env` as a runner.
+_ARGUMENT_READERS = frozenset({"echo", "printf", "grep", "egrep", "fgrep", "rg"})
 
 
 def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
@@ -3698,11 +3758,13 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
             # `env -C` runs its program in another directory (REV-008), also
-            # behind `command`, `nice`, `timeout` and other runners (REV-010).
-            chdir = next((found for index, word in enumerate(words)
-                          if os.path.basename(word).removesuffix(".exe") == "env"
-                          and all(_runner_word(previous) for previous in words[:index])
-                          for found in (_env_chdir(words[index:]),) if found is not None), None)
+            # behind `command`, `nice`, `timeout -s KILL 5` or any other runner
+            # (REV-010). Only a program that just prints or searches its
+            # arguments cannot run `env`.
+            chdir = None if program in _ARGUMENT_READERS else next(
+                (found for index, word in enumerate(words)
+                 if os.path.basename(word).removesuffix(".exe") == "env"
+                 for found in (_env_chdir(words[index:]),) if found is not None), None)
             if chdir is not None:
                 tilde = _tilde_directory(chdir)
                 if tilde:
