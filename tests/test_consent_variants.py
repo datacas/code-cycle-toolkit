@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from unittest.mock import patch
 from dataclasses import replace
 
@@ -530,8 +531,9 @@ class ConsentVariantsTests(unittest.TestCase):
                 self.assertFalse(sp.check(command, current).allowed)
         self.assertEqual([["printf", "a\nb"]], [item.words for item in sp.parse_command("printf $'a\\nb' | cat",
                                                                                          None).segments][:1])
-        for safe in ("printf $'%s\\n' done", "echo first \\\n  second"):
-            with self.subTest(command=safe):
+        for safe in ("printf $'%s\\n' done", "echo first \\\n  second", "printf $'\\x \\E[0m\\c'"):
+            with self.subTest(command=safe), warnings.catch_warnings():
+                warnings.simplefilter("error")
                 self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
 
     @posix_shell

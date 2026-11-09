@@ -43,6 +43,7 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -530,7 +531,11 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             while end < len(source) and source[end] != "'":
                 end += 2 if source[end] == "\\" else 1
             body = source[i + 2:min(end, len(source))]
-            word.append(codecs.decode(body.encode("latin-1", "backslashreplace"), "unicode_escape"))
+            with warnings.catch_warnings():
+                # Bash-only escapes (`\E`, `\cX`) stay literal, as in bash.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                word.append(codecs.decode(body.encode("latin-1", "backslashreplace"),
+                                          "unicode_escape", "backslashreplace"))
             i = end + 1
             continue
         if char == "$" and quote is None and source.startswith('$"', i):
