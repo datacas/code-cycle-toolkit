@@ -167,7 +167,7 @@ def auto_resume(database: Any, repo_id: str, task_id: str, *,
     facts = point.get("correlation") or {}
     role, head, number = point.get("role"), facts.get("head_sha"), point.get("change_request_id")
     if (role not in NEXT_STAGE or not isinstance(head, str) or not FULL_SHA.fullmatch(head)
-            or not isinstance(number, str) or not number.isdigit()
+            or not isinstance(number, str) or not re.fullmatch(r"[1-9][0-9]{0,9}", number)
             or facts.get("next_stage") != NEXT_STAGE[role]):
         raise ResumeRefused("the persisted resume point is inconsistent: "
                             f"role={role!r}, head={head!r}, change request={number!r}, "

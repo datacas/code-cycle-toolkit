@@ -35,7 +35,9 @@ def auto_resume_of(api: Any, args: argparse.Namespace, config: dict, repo: str,
     if resume is None:
         return None
     args.start_from, args.change_request = resume.start_from, resume.change_request_id
-    cycle_resume.record_auto_resume(database, repo, args.task, resume)
+    # The same validation an explicit `--from` and `--pr` get.
+    api.validate_start(args.start_from, args.change_request, local_only=args.local_only,
+                       continue_work=args.continue_work)
     print(resume.notice())
     return resume
 
@@ -238,6 +240,13 @@ def main(api: Any, argv: list[str] | None = None) -> int:
         # Everything that can be refused was refused above, where a person is
         # still reading; the detached run repeats those checks on its own.
         return api.detach(list(api.sys.argv[1:] if argv is None else argv), args.database)
+
+    if resumed is not None:
+        # Recorded only now that every preflight check passed: a rerun that
+        # failed before dispatching must not look like a run still in progress.
+        import cycle_resume
+        database_path = api.Path(args.database) if args.database else api.default_database_path()
+        cycle_resume.record_auto_resume(database_path, repo, args.task, resumed)
 
     change_bases = api.change_bases_of(config)
     # Already validated by `load_config`; read here so the run carries it.

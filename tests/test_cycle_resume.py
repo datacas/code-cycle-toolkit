@@ -157,8 +157,7 @@ class AutoResumeTests(JournalCase):
         for label, change in (
                 ("a short head", {"head": "abc"}),
                 ("the wrong next stage", {"next_stage": "rereview"}),
-                ("no change request", {"number": None}),
-                ("a stage that publishes nothing", {"role": "review"})):
+                ("no change request", {"number": None}),                ("a stage that publishes nothing", {"role": "review"})):
             with self.subTest(label):
                 self.setUp()
                 self.point(**change)
@@ -217,7 +216,8 @@ class CliTests(JournalCase):
 
     def api(self):
         return SimpleNamespace(Path=Path, default_database_path=lambda: self.database,
-                               CycleDriverError=RuntimeError)
+                               CycleDriverError=RuntimeError,
+                               validate_start=lambda *args, **kwargs: None)
 
     def apply(self, args, config=None):
         return cycle_cli.auto_resume_of(self.api(), args, config or {}, REPO,
@@ -230,6 +230,11 @@ class CliTests(JournalCase):
         resume = self.apply(args)
         self.assertEqual(("review", "463"), (args.start_from, args.change_request))
         self.assertEqual("review", resume.start_from)
+        # Nothing is recorded until the run itself starts, so a rerun that fails
+        # a preflight check does not look like a run in progress.
+        self.assertEqual([], [row for row in cycle_journal.events(self.database, REPO, task_id=TASK)
+                              if row["component"] == cr.RESUMED])
+        self.assertEqual("review", self.apply(self.args()).start_from)
 
     def test_resolve_resumes_from_rereview_without_from_and_pr(self) -> None:
         self.point("resolve")
