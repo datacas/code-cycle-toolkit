@@ -206,7 +206,11 @@ pattern grants nothing for a protected command, including a forbidden push,
 a credential-store read or an output redirect outside `$TMPDIR`. Static
 credential guards account for `cd` options and directory-stack changes from
 `pushd`/`popd` (including `-n`), also when run through `builtin` or
-`command`, and `env -C`/`--chdir`. They compare glob and brace operands, the
+`command`, and `env -C`/`--chdir` in any spelling `env` accepts (combined
+short options such as `-vC` or `-uNAME -C`, abbreviations such as `--c=`, and
+a `-C` or `--c…` anywhere inside an `env -S` value, which counts as
+unresolved).
+They compare glob and brace operands, the
 value of a `name=value` word and an attached short-option value such as
 `-C~/.ssh` to the protected stores without reading them. Globs match one path
 component at a time, as bash expands them: `*` never crosses a `/`, a bracket
@@ -222,23 +226,34 @@ unexpectedly refuses.
 A directory change the hook cannot resolve is a `cd`/`pushd`/`env -C` target
 with a variable, substitution or glob, a `pushd`/`popd` without a known stack,
 any relative target while `CDPATH` is set in the environment or mentioned in
-the source, and anything after `eval`, `source`, `.`, `trap` or `alias`
-(also through `builtin` or `command`). The unknown directory may be any
-directory, so after one a relative operand (or `name=value` value, or
-redirect target) receives no grant when it may spell the rest of a store's
+the source, a bare `cd`, `~` or home target when the source names `HOME`
+other than as an expansion (`HOME=`, `read HOME`, `printf -v HOME`) or uses a
+builtin that may assign a quoted or computed name (`declare`, `export`, `read`,
+`printf`, …), `cd -` when it names `OLDPWD`, and anything after `eval`, `source`, `.`,
+`trap` or `alias` (also through `builtin` or `command`). The unknown directory
+may be any directory, so after one a relative operand (or `name=value` value,
+or redirect target) receives no grant when it may spell the rest of a store's
 path from a parent (such as `auth.json`, `.codex/*`, `.ssh/x` or `*`), when it
 names a store's parent below the home directory (`.codex`, `.claude`,
-`.config`), when its last part may name a file of a directory store (`id_*`,
+`.config`), when its last part looks like a key file at any depth (`id_*`,
 `*_rsa`, `*_ed25519`, `*_key`, `*.pem`, `*.key`, `known_hosts`,
-`authorized_keys`, `credentials`, `config`, `hosts.yml`), or when one of its
-parts may name a token cache
-directory (`sso`, `cli`). What follows a `..` may start anywhere. Use an
-explicit absolute path so the guard can inspect it. Every other operand gets
-the ordinary consent question, which warns that the directory cannot be
-resolved; the refusal request carries `"unresolved_directory": true`. This
-name check is a static best effort: an operand that is itself a variable or
-substitution, or a directory-wide operand such as `.` inside a store directory,
-is not caught, and external isolation still denies the stores.
+`authorized_keys`, `credentials`, or a glob with at least two literal
+characters that may match one, such as `*rsa`), when it is a bare wildcard,
+brace, `config` or `hosts.yml` that stands alone or below a part that may name
+a store directory (`*`, `config`, `.s?h/*`) or directly below a leading
+`cache` (`cache/*`, but not `build/cache/*`), or when it holds a token cache
+(`sso/cache`, `cli/cache`). What follows a `..` may start anywhere. Use an
+explicit absolute path so the guard can inspect it. Every other operand, such
+as `tests/cli/test_main.py` or `build/*`, gets the ordinary consent question,
+which warns that the directory cannot be resolved; the refusal request carries
+`"unresolved_directory": true`. This name check is a static best effort that
+judges each word by its spelling alone. An operand that is itself a variable or
+substitution, a directory-wide operand such as `.`, or a store subdirectory
+named on its own (`sso`) gets the question rather than a refusal, and external
+isolation still denies the stores. A subcommand word that is also a store file
+name, such as `config` in `git config`, a glob such as `build/*/*`, or an
+unusual glob that may match a key name (`lib/*ts`) is still refused; use an
+explicit absolute directory instead of the unresolved one.
 
 Validation rejects an empty, invalid or empty-matching regex, nested
 repetitions, repeated alternatives, backreferences and lookarounds. Patterns

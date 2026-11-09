@@ -428,6 +428,53 @@ class ConsentVariantsTests(unittest.TestCase):
             command = "cd sub && make build"
             self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
 
+    def test_rev008_env_options_and_reassigned_home_or_oldpwd_are_guarded(self):
+        policy = sp.StagePolicy("resolve")
+        for command in ('env --c="$X" cat id_rsa', "env --c=$HOME/.codex cat auth.json",
+                        'env -uLC_ALL -C "$X" cat id_rsa', "env -iu LC_ALL -C ~/.ssh cat id_rsa",
+                        "env - -C ~/.codex cat auth.json", "env --u LC_ALL --chdir ~/.ssh cat id_rsa",
+                        'HOME="$X" cd; cat id_rsa', 'export HOME="$X"; cd ~; cat auth.json',
+                        'export HOME="$X"; cd $HOME; cat auth.json', 'printf -v HOME %s "$X"; cd; cat id_rsa',
+                        "read -r HOME; cd; cat id_rsa", 'cd /tmp; export OLDPWD="$X"; cd -; cat id_rsa',
+                        'env "-S-C $X" cat id_rsa', 'env -S "-C $X" cat id_rsa',
+                        'env --split-string="--chdir=$X" cat id_rsa', "env '-S-i\\_-C\\_${X}' cat id_rsa",
+                        'declare "HO""ME=$X"; cd; cat id_rsa'):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        for safe in ("env -u LC_ALL cat schema.json", "env -uLC_ALL cat schema.json", "cd /tmp; cd -; ls",
+                     'env -S "perl -w" cat schema.json', 'cd "${HOME}/proj" && cat schema.json'):
+            with self.subTest(command=safe):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
+
+    def test_unresolved_directory_asks_for_project_paths_below_it(self):
+        # Code loaders and variable targets make the directory unknown; a
+        # nested project path still names no credential store, so it asks.
+        for role in ("resolve", "rereview"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as root:
+                policy = sp.StagePolicy(role, tmpdir=root)
+                for command in ("source .venv/bin/activate && pytest tests/cli/test_main.py",
+                                'eval "$(pyenv init -)" && rm -rf build/*', 'cd "$X" && ls src/*',
+                                ". venv/bin/activate && cat app/config/settings.py",
+                                'cd "$X" && cat .github/workflows/*.yml',
+                                "source .venv/bin/activate && rm -rf build/cache/*",
+                                'cd "$X" && cp -r cli/templates "$TMPDIR/t"'):
+                    with self.subTest(command=command):
+                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertTrue(sp.unresolved_directory(command, policy, root))
+                        current, _ = self.approved(policy, command, cwd=root)
+                        self.assertTrue(sp.check(command, current, cwd=root).allowed)
+        policy = sp.StagePolicy("resolve")
+        for command in ('cd "$X" && cat keys/id_rsa', 'cd "$X" && cat certs/server.pem',
+                        "source x.sh && cat .ssh/*", 'cd "$X" && cat aws/sso/cache/t.json',
+                        'cd "$X" && cp -r sso/cache "$TMPDIR/c"', 'cd "$X" && cat keys/*rsa',
+                        'cd "$X" && cat sub/id*', 'cd "$X" && cat x/*pem', 'cd "$X" && cat cache/*'):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+
     def test_rev004_invalid_answers_retry_without_saving_rejected_grants(self):
         for role in ("resolve", "rereview"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as root:

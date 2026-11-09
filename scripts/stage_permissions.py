@@ -3304,6 +3304,9 @@ _CREDENTIAL_FILE_PATTERNS = ("id_*", "*_rsa", "*_ed25519", "*_ecdsa", "*_dsa", "
                              "credentials", "config", "hosts.yml")
 _CREDENTIAL_FILE_EXAMPLES = ("id_rsa", "github_rsa", "deploy_key", "key.pem", "server.key",
                              "known_hosts", "authorized_keys", "credentials", "config", "hosts.yml")
+#: The key-like names above, which may lie at any depth of a directory store.
+_CREDENTIAL_KEY_PATTERNS = tuple(name for name in _CREDENTIAL_FILE_PATTERNS if name not in {"config", "hosts.yml"})
+_CREDENTIAL_KEY_EXAMPLES = tuple(name for name in _CREDENTIAL_FILE_EXAMPLES if name not in {"config", "hosts.yml"})
 _CREDENTIAL_SUBDIRECTORIES = ("sso", "cli")
 #: A brace part may expand to any single name, dotfiles included.
 _ANY_PART = "\0any-part"
@@ -3377,11 +3380,27 @@ def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
                and all(_part_matches(part, name, dotglob) for part, name in zip(pattern, store[index:]))
                for store in stores for index in range(home, len(store))):
             return True
+        # A key-like last part (`id_rsa`, `x/*.pem`, `keys/*rsa`) may name a
+        # file of a directory store at any depth. A bare wildcard, a brace,
+        # `config` or `hosts.yml` does so only when it stands alone, so the
+        # unknown directory may be the store, or when its parent may name a
+        # store's directory (`.s?h/*`, `cache/*`): `build/*` below an
+        # unknown directory names no store.
         last = pattern[-1]
-        if (any(_part_matches(last, name, dotglob) for name in _CREDENTIAL_FILE_EXAMPLES)
-                or any(fnmatch.fnmatchcase(last, name) for name in _CREDENTIAL_FILE_PATTERNS)
-                or any(_part_matches(part, name, dotglob)
-                       for part in pattern[:-1] for name in _CREDENTIAL_SUBDIRECTORIES)):
+        literal = len(_BRACKET.sub("", last).replace("*", "").replace("?", ""))
+        store_names = {name for store in stores for name in store[home:]}
+        if (any(fnmatch.fnmatchcase(last, name) for name in _CREDENTIAL_KEY_PATTERNS)
+                or (last != _ANY_PART and literal >= 2
+                    and any(_part_matches(last, name, dotglob) for name in _CREDENTIAL_KEY_EXAMPLES))
+                or (any(_part_matches(last, name, dotglob) for name in _CREDENTIAL_FILE_EXAMPLES)
+                    and (len(pattern) == 1
+                         or any(_part_matches(pattern[-2], name, dotglob) for name in store_names)
+                         # `cache/*` from inside `sso` or `cli`; `build/cache/*` is no cache.
+                         or (len(pattern) == 2 and _part_matches(pattern[0], "cache", dotglob))))):
+            return True
+        # Token caches sit in `sso/cache` and `cli/cache`.
+        if any(_part_matches(part, name, dotglob) and _part_matches(following, "cache", dotglob)
+               for part, following in zip(pattern, pattern[1:]) for name in _CREDENTIAL_SUBDIRECTORIES):
             return True
     return False
 
@@ -3391,27 +3410,43 @@ def _environment_dotglob() -> bool:
     return bool(os.environ.get("GLOBIGNORE")) or "dotglob" in os.environ.get("BASHOPTS", "")
 
 
+#: A `-C`/`--chdir` option inside an `env -S` value, whatever separates its
+#: arguments (`env` also splits on `\_`).
+_SPLIT_CHDIR = re.compile(r"-(?:[A-Za-z0-9]*C|-c)")
+
+
 def _env_chdir(words: list[str]) -> str | None:
     """The directory `env -C`/`--chdir` runs its program in, if any."""
     index = 1
     while index < len(words):
         word = words[index]
-        name, equals, value = word.partition("=")
-        if name.startswith("--") and len(name) > 3 and "--chdir".startswith(name):
-            # Long options may be abbreviated: --chd=dir.
-            if equals:
-                return value
-            return words[index + 1] if index + 1 < len(words) else None
-        if word.startswith("-") and not word.startswith("--") and "C" in word:
-            # Combined short options: -vC dir, -iCdir.
-            attached = word[word.index("C") + 1:]
-            if attached:
-                return attached
-            return words[index + 1] if index + 1 < len(words) else None
-        if word in {"-u", "--unset", "-S", "--split-string"}:
-            index += 2
-            continue
-        if not word.startswith("-") and not _ENV_ASSIGNMENT.match(word):
+        following = words[index + 1] if index + 1 < len(words) else None
+        if word == "--":
+            return None
+        if word.startswith("--"):
+            # Long options may be abbreviated to any unique prefix: --c=dir.
+            name, equals, value = word[2:].partition("=")
+            if name and "chdir".startswith(name):
+                return value if equals else following
+            if name and "split-string".startswith(name) and _SPLIT_CHDIR.search((value if equals else following) or ""):
+                return "$SPLIT_STRING"
+            if not equals and name and any(option.startswith(name) for option in ("unset", "split-string", "argv0")):
+                index += 1
+        elif word.startswith("-"):
+            # Combined short options: -vC dir, -iCdir. The value of -u, -S
+            # or -a is the rest of the word or the next word: -uLC_ALL.
+            for position, letter in enumerate(word[1:], start=2):
+                rest = word[position:]
+                if letter == "C":
+                    return rest or following
+                if letter in "uSa":
+                    # -S splits its value into options: "-S-C dir" changes directory.
+                    if letter == "S" and _SPLIT_CHDIR.search(rest or following or ""):
+                        return "$SPLIT_STRING"
+                    if not rest:
+                        index += 1
+                    break
+        elif not _ENV_ASSIGNMENT.match(word):
             return None
         index += 1
     return None
@@ -3427,6 +3462,16 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
     dotglob = "dotglob" in source or "GLOBIGNORE" in source or _environment_dotglob()
     # CDPATH resolves a relative cd target through other directories.
     cdpath = "CDPATH" in source or bool(os.environ.get("CDPATH"))
+    # A reassigned HOME moves `cd` and `cd ~`, and the parser expands $HOME
+    # to the real home; a reassigned OLDPWD moves `cd -`.
+    # Any HOME that is not an expansion may set it (HOME=, read HOME,
+    # printf -v HOME), and so may a builtin that assigns a quoted or
+    # computed name (declare "HO""ME=…").
+    home_assigned = (re.search(r"(?<![$A-Za-z0-9_{])HOME(?![A-Za-z0-9_])", source) is not None
+                     or re.search(r"\b(?:declare|typeset|export|local|readonly|read|printf|mapfile|readarray)\b",
+                                  source) is not None)
+    oldpwd_assigned = "OLDPWD" in source
+    home = str(Path.home())
     segment_cwd: str | None = str(Path(cwd or ".").resolve())
     possible_cwds: set[str | None] = {segment_cwd, os.path.abspath(cwd or ".")}
     previous_cwd: str | None = None
@@ -3481,14 +3526,16 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
             else:
                 segment_cwd = None
             continue
-        target = args[0] if args else str(Path.home())
+        target = args[0] if args else home
         if (cdpath and target != "-" and not target.startswith(("+", "-"))
                 and not os.path.isabs(os.path.expanduser(target))):
             target = "$CDPATH"
+        if home_assigned and (target.startswith("~") or target == home or target.startswith(home + "/")):
+            target = "$HOME"
         if program == "pushd":
             directory_stack.append(segment_cwd)
         if target == "-" and program == "cd":
-            segment_cwd, previous_cwd = previous_cwd, segment_cwd
+            segment_cwd, previous_cwd = None if oldpwd_assigned else previous_cwd, segment_cwd
             continue
         previous_cwd, current = segment_cwd, segment_cwd
         expanded = os.path.expanduser(target)
