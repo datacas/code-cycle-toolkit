@@ -323,6 +323,9 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     warnings = compose_warnings(op)
     # A disclosed host access comes before the generic risk, so it is never cut.
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
+    if (blocker or {}).get("unresolved_directory"):
+        warned += ("WARNING: a directory change cannot be resolved; relative operands are "
+                   "checked only for credential-store names. ")
     check = op.get("check")
     skip = (f"Alternative: skip; check {str(check)[:60]} stays unverified and the cycle continues. "
             if check else "Alternative: skip; affected checks stay not_verified. ")

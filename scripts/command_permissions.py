@@ -214,6 +214,10 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                     break
         if configured:
             request["configured_command"] = configured
+        from stage_permissions import unresolved_directory
+        if tool == "Bash" and unresolved_directory(command, observed_policy, cwd):
+            # The hook cannot see where relative operands point (#439 REV-006).
+            request["unresolved_directory"] = True
         return request
     return None
 

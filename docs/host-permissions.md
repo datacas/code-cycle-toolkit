@@ -205,11 +205,40 @@ retains the Git, publication, credential and redirect guards. A matching
 pattern grants nothing for a protected command, including a forbidden push,
 a credential-store read or an output redirect outside `$TMPDIR`. Static
 credential guards account for `cd` options and directory-stack changes from
-`pushd`/`popd` (including `-n`), and compare glob and brace prefixes to the
-protected stores without reading them. Since a directory change may fail, be
-conditional or run in a subshell, analysis retains earlier possible working
-directories when checking relative paths. Relative operands after an unresolved directory change receive no grant;
-use an explicit absolute path so the guard can inspect it.
+`pushd`/`popd` (including `-n`), also when run through `builtin` or
+`command`, and `env -C`/`--chdir`. They compare glob and brace operands, the
+value of a `name=value` word and an attached short-option value such as
+`-C~/.ssh` to the protected stores without reading them. Globs match one path
+component at a time, as bash expands them: `*` never crosses a `/`, a bracket
+expression matches one character, and a leading `*` or `?` does not match a
+dotfile unless the source mentions `dotglob` or `GLOBIGNORE`, or the inherited
+`BASHOPTS` or `GLOBIGNORE` enables it. A `..` after a glob, inside braces, or a
+brace alternative holding `/` or `~` may lead to any directory. Glob
+characters in the working directory itself are literal. Since a directory
+change may fail, be conditional or run in a subshell, analysis retains earlier
+possible working directories when checking relative paths. A guard that fails
+unexpectedly refuses.
+
+A directory change the hook cannot resolve is a `cd`/`pushd`/`env -C` target
+with a variable, substitution or glob, a `pushd`/`popd` without a known stack,
+any relative target while `CDPATH` is set in the environment or mentioned in
+the source, and anything after `eval`, `source`, `.`, `trap` or `alias`
+(also through `builtin` or `command`). The unknown directory may be any
+directory, so after one a relative operand (or `name=value` value, or
+redirect target) receives no grant when it may spell the rest of a store's
+path from a parent (such as `auth.json`, `.codex/*`, `.ssh/x` or `*`), when it
+names a store's parent below the home directory (`.codex`, `.claude`,
+`.config`), when its last part may name a file of a directory store (`id_*`,
+`*_rsa`, `*_ed25519`, `*_key`, `*.pem`, `*.key`, `known_hosts`,
+`authorized_keys`, `credentials`, `config`, `hosts.yml`), or when one of its
+parts may name a token cache
+directory (`sso`, `cli`). What follows a `..` may start anywhere. Use an
+explicit absolute path so the guard can inspect it. Every other operand gets
+the ordinary consent question, which warns that the directory cannot be
+resolved; the refusal request carries `"unresolved_directory": true`. This
+name check is a static best effort: an operand that is itself a variable or
+substitution, or a directory-wide operand such as `.` inside a store directory,
+is not caught, and external isolation still denies the stores.
 
 Validation rejects an empty, invalid or empty-matching regex, nested
 repetitions, repeated alternatives, backreferences and lookarounds. Patterns

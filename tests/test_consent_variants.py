@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
@@ -309,6 +310,123 @@ class ConsentVariantsTests(unittest.TestCase):
             policy, _ = self.approved(sp.StagePolicy("resolve", tmpdir=root), command)
             with patch.object(sp, "CREDENTIAL_STORES", (str(protected),)):
                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
+
+    def test_rev006_unresolved_directory_asks_for_non_credential_operands(self):
+        for role in ("resolve", "rereview"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as root:
+                policy = sp.StagePolicy(role, tmpdir=root)
+                for command in ('cd "$X" && echo done', 'cd "$REPO_ROOT" && make test',
+                                'cd "$(git rev-parse --show-toplevel)" && pytest tests',
+                                "builtin cd $X; ls -la", 'cd "$X" && cat *.py',
+                                'cd "$REPO_ROOT" && make build', 'cd "$X" && pytest config/tests',
+                                'cd "$X" && cat config/settings.py', 'cd "$X" && make VAR=x test'):
+                    with self.subTest(command=command):
+                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertTrue(sp.unresolved_directory(command, policy, root))
+                        decision = sp.check(command, policy, cwd=root)
+                        self.assertEqual("command_table", decision.rule)
+                        broker = grants.ConsentBroker("owner/repo", platform="linux")
+                        request = cp.refused_operation([command], policy, broker, "claude", root)
+                        self.assertTrue(request["unresolved_directory"])
+                        grant = broker.operations[request["resource"]]
+                        asked = grants.question(grant, grant.scopes[0], role=role, blocker=request)
+                        self.assertIn("WARNING: a directory change cannot be resolved", asked["prompt"])
+                        self.assertLessEqual(len(asked["prompt"]), 600)
+                        current, _ = self.approved(policy, command, cwd=root)
+                        self.assertTrue(sp.check(command, current, cwd=root).allowed)
+                command = 'cd "$X" && echo done'
+                baseline = subprocess.run(["bash", "-c", command], cwd=root,
+                                          env={**os.environ, "X": root}, capture_output=True)
+                self.assertEqual((0, b"done\n"), (baseline.returncode, baseline.stdout))
+                self.assertIsNone(cp.refused_operation(["cd ~/.codex && cat auth.json"], policy,
+                                                       grants.ConsentBroker("owner/repo", platform="linux"),
+                                                       "claude", root))
+
+    def test_rev006_unresolved_directory_keeps_credential_names_guarded(self):
+        policy = sp.StagePolicy("resolve")
+        for command in ('cd "$X" && cat auth.json', 'cd "$X"; cat id_rsa', 'cd "$X" && cat *',
+                        'cd "$X" && cat ../.ssh/x', 'cd "$X" && cat {a,b}', 'cd "$X" && cat < .credentials.json',
+                        'cd "$X" && grep --file=hosts.yml x', 'cd "$X" && cat .codex/auth.json',
+                        'cd "$X" && cat ../../id_ed25519', 'cd "$X" && cat .claude.json',
+                        'cd "$X" && cat .codex/*', 'cd "$X" && cat .claude/.cred*',
+                        'cd "$X" && cat .config/g?/hosts.y*', 'cd "$X" && cat ../user/.s?h/id_*',
+                        'cd "$X" && cat sub/../id_*', 'cd "$X" && cat sso/cache/*.json',
+                        'cd "$X" && cat github_rsa', 'cd "$X" && cat deploy_key',
+                        'cd "$X" && dd if=id_rsa of=$TMPDIR/k', 'env -C "$X" cat auth.json',
+                        'cd "$X" && cat config', 'cd "$X" && tar czf $TMPDIR/a.tgz .codex',
+                        'cd "$X" && cp -r .claude $TMPDIR/', 'cd "$X" && ls .config'):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+
+    def test_rev007_globs_match_one_component_at_a_time(self):
+        policy = sp.StagePolicy("resolve")
+        users = str(Path.home().parent)
+        for command in (f"ls {users}/*/project", "ls ~/*", "du -sh /h*", f'find {users} -path "{users}/*/x"',
+                        "ls ~/*/notes"):
+            with self.subTest(command=command):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                self.assertNotEqual("credential_guard", sp.check(command, policy).rule)
+                current, _ = self.approved(policy, command)
+                self.assertTrue(sp.check(command, current).allowed)
+        for command in ("ls ~/.*", "cat ~/.*/id_rsa", "cat ~/{x,.ssh}/id_rsa", "cat ~/.c*/auth.json",
+                        "cat /tmp/{..,x}" + str(Path.home()) + "/.ssh/id_rsa", "cat ~/.ss?/id_rsa",
+                        "shopt -s dotglob; cat ~/*/auth.json", "cat ~/**/.ssh/id_rsa",
+                        "cat ~/.s[^x]h/id_rsa", "cat ~/.codex/aut[[:alpha:]].json", "cat {~/.ssh,x}/id_rsa",
+                        f"diff --from-file={Path.home()}/.ssh/id_rsa /dev/null", "tar -C~/.ssh -cf x y"):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        with patch.dict(os.environ, {"BASHOPTS": "checkwinsize:dotglob"}):
+            self.assertIsNotNone(sp.protected_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
+        with patch.dict(os.environ, {"BASHOPTS": "checkwinsize", "GLOBIGNORE": ""}):
+            self.assertIsNone(sp.protected_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
+
+    def test_rev007_deep_globstar_fails_closed_quickly(self):
+        policy = sp.StagePolicy("resolve")
+        command = "cat /" + "**/" * 990 + "x"
+        started = time.monotonic()
+        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+        cp.refused_operation([command], policy, grants.ConsentBroker("owner/repo", platform="linux"), "claude")
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_rev007_glob_characters_in_working_directory_are_literal(self):
+        with tempfile.TemporaryDirectory() as root:
+            cwd = Path(root, "a[b]*", "child")
+            cwd.mkdir(parents=True)
+            policy = sp.StagePolicy("resolve", tmpdir=root)
+            for command in ("ls ..", "cat ../README.md", "cat ./notes.txt"):
+                with self.subTest(command=command):
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(cwd)))
+
+    def test_rev008_builtin_command_and_cdpath_directory_changes_are_guarded(self):
+        policy = sp.StagePolicy("resolve")
+        for command in ("builtin cd ~/.codex; cat auth.json", "command cd ~/.ssh && cat id_rsa",
+                        "command -p cd ~/.codex; cat auth.json", "builtin pushd ~/.codex; cat auth.json",
+                        "command -- cd ~/.codex; cat auth.json", "builtin cd -P ~/.ssh; cat config",
+                        "CDPATH=~ cd .codex; cat auth.json", "export CDPATH=~; cd .codex; cat auth.json",
+                        "CDPATH=~ pushd .ssh; cat known_hosts", 'eval "cd ~/.codex"; cat auth.json',
+                        "source ./env.sh; cat auth.json", "builtin eval 'cd ~/.codex'; cat auth.json",
+                        "command source ./x.sh; cat auth.json", "trap 'cd ~/.codex' DEBUG; cat auth.json",
+                        "env -C ~/.claude cat .credentials.json", "env --chdir=$HOME/.codex cat auth.json",
+                        "env -C ~/.ssh cat id_rsa", "true; env --chdir ~/.codex cat auth.json",
+                        "env -vC ~/.claude cat .credentials.json", "env -iC~/.codex cat auth.json",
+                        "env --chd=$HOME/.codex cat auth.json", "env --chd ~/.codex cat auth.json"):
+            with self.subTest(command=command):
+                current, _ = self.approved(policy, command)
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertFalse(sp.check(command, current).allowed)
+        for safe in ("command -v cd; cat schema.json", "env -C /outside/api cat schema.json"):
+            current, _ = self.approved(policy, safe)
+            self.assertTrue(sp.check(safe, current).allowed)
+        with patch.dict(os.environ, {"CDPATH": str(Path.home())}):
+            command = "cd .codex; cat auth.json"
+            current, _ = self.approved(policy, command)
+            self.assertFalse(sp.check(command, current).allowed)
+            command = "cd sub && make build"
+            self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
 
     def test_rev004_invalid_answers_retry_without_saving_rejected_grants(self):
         for role in ("resolve", "rereview"):

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import fnmatch
+import itertools
 import json
 import os
 import re
@@ -3291,9 +3292,239 @@ def normalized_command(op: dict[str, Any]) -> str:
     return " ".join(words)
 
 
+#: Builtins that change the working directory, also through `builtin` or
+#: `command` (#439 REV-008), and builtins that run code which may change it.
+_DIRECTORY_CHANGES = frozenset({"cd", "pushd", "popd"})
+_CODE_LOADERS = frozenset({"eval", "source", ".", "trap", "alias"})
+#: Files found inside directory credential stores, and subdirectories that
+#: hold cached tokens. After a directory change the hook cannot resolve, the
+#: unknown directory may lie inside such a store (REV-006).
+_CREDENTIAL_FILE_PATTERNS = ("id_*", "*_rsa", "*_ed25519", "*_ecdsa", "*_dsa", "*_key", "deploy_key*",
+                             "*.pem", "*.key", "*.ppk", "known_hosts*", "authorized_keys*",
+                             "credentials", "config", "hosts.yml")
+_CREDENTIAL_FILE_EXAMPLES = ("id_rsa", "github_rsa", "deploy_key", "key.pem", "server.key",
+                             "known_hosts", "authorized_keys", "credentials", "config", "hosts.yml")
+_CREDENTIAL_SUBDIRECTORIES = ("sso", "cli")
+#: A brace part may expand to any single name, dotfiles included.
+_ANY_PART = "\0any-part"
+#: A '..' after an expanded part may lead to any directory.
+_ANY_PARTS = "\0any-parts"
+#: A working-directory component: compared literally, never as a glob.
+_LITERAL = "\0literal:"
+#: A bracket expression, including negation and character classes.
+_BRACKET = re.compile(r"\[[!^]?\]?(?:\[:[a-z]+:\]|[^\]])*\]")
+
+
+def _unwrapped_builtin(words: list[str]) -> list[str] | None:
+    """The words a segment runs through builtin/command; None if only described."""
+    while words[:1] in (["builtin"], ["command"]):
+        prefix, words = words[0], words[1:]
+        while words and words[0].startswith("-"):
+            option, words = words[0], words[1:]
+            if option == "--":
+                break
+            if prefix == "builtin" or option != "-p":
+                # `command -v`/`-V` describe the builtin, never run it; an
+                # invalid option fails before any directory change.
+                return None
+    return words
+
+
+def _directory_builtin(words: list[str]) -> list[str] | None:
+    """The cd, pushd or popd words a segment runs, through builtin/command."""
+    words = _unwrapped_builtin(words) or []
+    return words if words[:1] and words[0] in _DIRECTORY_CHANGES else None
+
+
+def _operand_values(word: str) -> list[str]:
+    """The path spellings a word may carry: itself, `name=value`, `-Xvalue`."""
+    values = [] if word.startswith("-") else [word]
+    if "=" in word:
+        values.append(word.partition("=")[2])
+    if word.startswith("-") and not word.startswith("--") and len(word) > 2 and word[2] in "/~.":
+        values.append(word[2:])
+    return [value for value in values if value]
+
+
+def _could_name_credential(word: str, policy: Any, dotglob: bool) -> bool:
+    """Whether a relative operand from an unknown directory may name a store.
+
+    The unknown directory may be any directory: a store's parent, so the
+    operand must spell the rest of a store's path, or the inside of a
+    directory store, so the operand names one of its files.
+    """
+    dotglob = dotglob or _environment_dotglob()
+    stores = [candidate.parts
+              for store in _guarded_stores(policy)
+              for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
+    for value in _operand_values(word):
+        if os.path.isabs(os.path.expanduser(value)):
+            continue
+        parts = Path(value).parts
+        if ".." in parts:
+            # A '..' may cross a symlink: what follows starts anywhere.
+            parts = parts[len(parts) - parts[::-1].index(".."):]
+        if not parts:
+            continue
+        pattern = tuple(_ANY_PART if "{" in part or "}" in part else part for part in parts)
+        if any(_reaches(pattern, store[index:], dotglob)
+               for store in stores for index in range(1, len(store))):
+            return True
+        # A store's parent below the home directory, such as `.codex`, is
+        # read whole by recursive copies and archives.
+        home = len(Path.home().parts)
+        if any(len(pattern) < len(store) - index
+               and all(_part_matches(part, name, dotglob) for part, name in zip(pattern, store[index:]))
+               for store in stores for index in range(home, len(store))):
+            return True
+        last = pattern[-1]
+        if (any(_part_matches(last, name, dotglob) for name in _CREDENTIAL_FILE_EXAMPLES)
+                or any(fnmatch.fnmatchcase(last, name) for name in _CREDENTIAL_FILE_PATTERNS)
+                or any(_part_matches(part, name, dotglob)
+                       for part in pattern[:-1] for name in _CREDENTIAL_SUBDIRECTORIES)):
+            return True
+    return False
+
+
+def _environment_dotglob() -> bool:
+    """Whether the inherited shell state may let globs match dotfiles."""
+    return bool(os.environ.get("GLOBIGNORE")) or "dotglob" in os.environ.get("BASHOPTS", "")
+
+
+def _env_chdir(words: list[str]) -> str | None:
+    """The directory `env -C`/`--chdir` runs its program in, if any."""
+    index = 1
+    while index < len(words):
+        word = words[index]
+        name, equals, value = word.partition("=")
+        if name.startswith("--") and len(name) > 3 and "--chdir".startswith(name):
+            # Long options may be abbreviated: --chd=dir.
+            if equals:
+                return value
+            return words[index + 1] if index + 1 < len(words) else None
+        if word.startswith("-") and not word.startswith("--") and "C" in word:
+            # Combined short options: -vC dir, -iCdir.
+            attached = word[word.index("C") + 1:]
+            if attached:
+                return attached
+            return words[index + 1] if index + 1 < len(words) else None
+        if word in {"-u", "--unset", "-S", "--split-string"}:
+            index += 2
+            continue
+        if not word.startswith("-") and not _ENV_ASSIGNMENT.match(word):
+            return None
+        index += 1
+    return None
+
+
+def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedCommand,
+                       policy: Any, cwd: str | None) -> tuple[str | None, bool]:
+    """Guard every segment of shell source against every directory it may run in.
+
+    Returns the guard, and whether a directory change could not be resolved.
+    """
+    source = parsed.shell_source or ""
+    dotglob = "dotglob" in source or "GLOBIGNORE" in source or _environment_dotglob()
+    # CDPATH resolves a relative cd target through other directories.
+    cdpath = "CDPATH" in source or bool(os.environ.get("CDPATH"))
+    segment_cwd: str | None = str(Path(cwd or ".").resolve())
+    possible_cwds: set[str | None] = {segment_cwd, os.path.abspath(cwd or ".")}
+    previous_cwd: str | None = None
+    directory_stack: list[str | None] = []
+    for segment in parsed.segments:
+        _, segment_words = command_parts(segment.words)
+        # A cd may fail, be conditional or run in a subshell. The
+        # flattened analysis cannot discard any earlier cwd.
+        possible_cwds.add(segment_cwd)
+        for possible_cwd in possible_cwds:
+            if possible_cwd is None:
+                operands = segment_words[1:] + [target for _, _, target in segment.redirects if target]
+                if any(_could_name_credential(word, policy, dotglob) for word in operands):
+                    return ("cannot guard an operand that may name a credential store after an "
+                            "unresolved directory change; use an explicit absolute path"), True
+            guard = protected_reason(tool, tool_input, policy, possible_cwd, _parsed=segment, _dotglob=dotglob)
+            if guard:
+                return guard, None in possible_cwds
+        unwrapped = _unwrapped_builtin(segment_words) or []
+        if unwrapped[:1] and unwrapped[0] in _CODE_LOADERS:
+            segment_cwd = None
+            continue
+        directory_words = _directory_builtin(segment_words)
+        if directory_words is None:
+            continue
+        program = directory_words[0]
+        args = directory_words[1:]
+        no_chdir = False
+        while args and args[0].startswith("-") and args[0] != "-":
+            option, args = args[0], args[1:]
+            if option == "--":
+                break
+            if option == "-n" and program in {"pushd", "popd"}:
+                no_chdir = True
+            elif option not in {"-L", "-P", "-e", "-@"}:
+                args = ["$UNKNOWN"]
+                break
+        if no_chdir:
+            # -n changes only the stack, never the working
+            # directory. Do not infer its later restored path.
+            if program == "pushd":
+                directory_stack.append(None)
+            elif directory_stack:
+                directory_stack.pop()
+            continue
+        if program == "popd":
+            segment_cwd = directory_stack.pop() if directory_stack and not args else None
+            continue
+        if program == "pushd" and not args:
+            if directory_stack:
+                segment_cwd, directory_stack[-1] = directory_stack[-1], segment_cwd
+            else:
+                segment_cwd = None
+            continue
+        target = args[0] if args else str(Path.home())
+        if (cdpath and target != "-" and not target.startswith(("+", "-"))
+                and not os.path.isabs(os.path.expanduser(target))):
+            target = "$CDPATH"
+        if program == "pushd":
+            directory_stack.append(segment_cwd)
+        if target == "-" and program == "cd":
+            segment_cwd, previous_cwd = previous_cwd, segment_cwd
+            continue
+        previous_cwd, current = segment_cwd, segment_cwd
+        expanded = os.path.expanduser(target)
+        if not any(char in target for char in "$`*?["):
+            # Relative cd must transition every possible
+            # cwd, not just the last scanned one. Retain
+            # logical (-L) and physical (-P) spellings.
+            bases = {"/"} if os.path.isabs(expanded) else set(possible_cwds)
+            for base in bases:
+                if base is None:
+                    possible_cwds.add(None)
+                else:
+                    joined = Path(base) / expanded
+                    possible_cwds.update((os.path.abspath(joined), str(joined.resolve())))
+            if len(possible_cwds) > 64:
+                possible_cwds = {None}
+        segment_cwd = (str((Path(current or ".") / expanded).resolve())
+                       if not any(char in target for char in "$`*?[")
+                       and (current is not None or os.path.isabs(expanded))
+                       and not (program == "pushd" and target.startswith(("+", "-"))) else None)
+    return None, None in possible_cwds or segment_cwd is None
+
+
+def unresolved_directory(command: str, policy: Any, cwd: str | None = None) -> bool:
+    """Whether shell source changes into a directory the hook cannot resolve."""
+    try:
+        parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is None:
+            return False
+        return _compound_analysis("Bash", {"command": command}, parsed, policy, cwd)[1]
+    except (PolicyError, ValueError, TypeError, OSError, KeyError):
+        return False
+
 
 def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None,
-                     *, _parsed: ParsedCommand | None = None) -> str | None:
+                     *, _parsed: ParsedCommand | None = None, _dotglob: bool = False) -> str | None:
     """Guards consent cannot remove on directly expressed operations.
 
     Never pretend to inspect code inside an interpreter or a project program.
@@ -3305,80 +3536,7 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 return "command must be a string"
             parsed = _parsed or parse_command(command, policy.tmpdir)
             if parsed.shell_source is not None:
-                segment_cwd = str(Path(cwd or ".").resolve())
-                possible_cwds: set[str | None] = {segment_cwd, os.path.abspath(cwd or ".")}
-                previous_cwd: str | None = None
-                directory_stack: list[str | None] = []
-                for segment in parsed.segments:
-                    _, segment_words = command_parts(segment.words)
-                    # A cd may fail, be conditional or run in a subshell. The
-                    # flattened analysis cannot discard any earlier cwd.
-                    possible_cwds.add(segment_cwd)
-                    for possible_cwd in possible_cwds:
-                        if possible_cwd is None:
-                            operands = segment_words[1:] + [target for _, _, target in segment.redirects if target]
-                            if any(not word.startswith("-") and not os.path.isabs(os.path.expanduser(word))
-                                   for word in operands):
-                                return "cannot guard relative operands after an unresolved directory change"
-                        guard = protected_reason(tool, tool_input, policy, possible_cwd, _parsed=segment)
-                        if guard:
-                            return guard
-                    if segment_words[:1] in (["cd"], ["pushd"], ["popd"]):
-                        program = segment_words[0]
-                        args = segment_words[1:]
-                        no_chdir = False
-                        while args and args[0].startswith("-") and args[0] != "-":
-                            option, args = args[0], args[1:]
-                            if option == "--":
-                                break
-                            if option == "-n" and program in {"pushd", "popd"}:
-                                no_chdir = True
-                            elif option not in {"-L", "-P", "-e", "-@"}:
-                                args = ["$UNKNOWN"]
-                                break
-                        if no_chdir:
-                            # -n changes only the stack, never the working
-                            # directory. Do not infer its later restored path.
-                            if program == "pushd":
-                                directory_stack.append(None)
-                            elif directory_stack:
-                                directory_stack.pop()
-                            continue
-                        if program == "popd":
-                            segment_cwd = directory_stack.pop() if directory_stack and not args else None
-                            continue
-                        if program == "pushd" and not args:
-                            if directory_stack:
-                                segment_cwd, directory_stack[-1] = directory_stack[-1], segment_cwd
-                            else:
-                                segment_cwd = None
-                            continue
-                        target = args[0] if args else str(Path.home())
-                        if program == "pushd":
-                            directory_stack.append(segment_cwd)
-                        if target == "-" and program == "cd":
-                            segment_cwd, previous_cwd = previous_cwd, segment_cwd
-                        else:
-                            previous_cwd, current = segment_cwd, segment_cwd
-                            expanded = os.path.expanduser(target)
-                            if not any(char in target for char in "$`*?["):
-                                # Relative cd must transition every possible
-                                # cwd, not just the last scanned one. Retain
-                                # logical (-L) and physical (-P) spellings.
-                                bases = {"/"} if os.path.isabs(expanded) else set(possible_cwds)
-                                for base in bases:
-                                    if base is None:
-                                        possible_cwds.add(None)
-                                    else:
-                                        joined = Path(base) / expanded
-                                        possible_cwds.update((os.path.abspath(joined), str(joined.resolve())))
-                                if len(possible_cwds) > 64:
-                                    possible_cwds = {None}
-                            segment_cwd = (str((Path(current or ".") / os.path.expanduser(target)).resolve())
-                                           if not any(char in target for char in "$`*?[")
-                                           and (current is not None or os.path.isabs(os.path.expanduser(target)))
-                                           and not (program == "pushd" and target.startswith(("+", "-"))) else None)
-                return None
+                return _compound_analysis(tool, tool_input, parsed, policy, cwd)[0]
             for _, operator, target in parsed.redirects:
                 if (target is not None and operator.startswith(">")
                         and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir)):
@@ -3386,7 +3544,7 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             redirect_paths = [target for _, _, target in parsed.redirects if target is not None]
             words = list(parsed.words)
             if not words:
-                return credential_reason(redirect_paths, policy, cwd)
+                return credential_reason(redirect_paths, policy, cwd, dotglob=_dotglob)
             # An environment prefix never hides the program from its guards.
             environment, words = command_parts(words)
             if not words:
@@ -3416,9 +3574,21 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
+            chdir = _env_chdir(words) if program == "env" else None
+            if chdir is not None:
+                # `env -C` runs its program in another directory (REV-008).
+                if any(char in chdir for char in "$`*?[{}"):
+                    if any(_could_name_credential(path, policy, _dotglob) for path in paths):
+                        return ("cannot guard an operand that may name a credential store after an "
+                                "unresolved directory change; use an explicit absolute path")
+                else:
+                    protected = credential_reason(
+                        paths, policy, str(Path(cwd or ".") / os.path.expanduser(chdir)), dotglob=_dotglob)
+                    if protected:
+                        return protected
         else:
             paths = [tool_input.get(FILE_EDIT_TOOLS[tool], "")]
-        protected = credential_reason(paths, policy, cwd)
+        protected = credential_reason(paths, policy, cwd, dotglob=_dotglob)
         if protected:
             return protected
         for path in paths:
@@ -3430,27 +3600,121 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 return "Git configuration edits defeat command validation; use external administration"
     except (PolicyError, ValueError, TypeError, OSError, KeyError) as error:
         return str(error)
+    except Exception as error:  # fail closed: a guard that cannot run grants nothing
+        return f"the guard could not inspect the command ({type(error).__name__})"
     return None
 
 
 
-def credential_reason(words, policy, cwd: str | None) -> str | None:
-    stores = [candidate
-              for store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)
-              if store not in policy.credential_reads and not
-              (store == GH_CREDENTIAL_STORE and policy.credential_publishing)
+def _guarded_stores(policy: Any) -> list[str]:
+    return [store for store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)
+            if store not in policy.credential_reads and not
+            (store == GH_CREDENTIAL_STORE and policy.credential_publishing)]
+
+
+def _part_matches(pattern: str, name: str, dotglob: bool) -> bool:
+    """Whether one path component pattern may match one name, as bash globs."""
+    if pattern.startswith(_LITERAL):
+        return pattern[len(_LITERAL):] == name
+    if pattern in {_ANY_PART, name}:
+        return True
+    if not any(char in pattern for char in "*?["):
+        return False
+    # Without dotglob, a leading * or ? never matches a dotfile.
+    if name.startswith(".") and pattern[:1] in {"*", "?"} and not dotglob:
+        return False
+    # fnmatch knows neither negation with ^ nor character classes: a bracket
+    # expression matches one character, which is enough to stay conservative.
+    return fnmatch.fnmatchcase(name, _BRACKET.sub("?", pattern))
+
+
+def _reaches(pattern: tuple[str, ...], store: tuple[str, ...], dotglob: bool) -> bool:
+    """Whether a path spelled by these parts may be the store or inside it.
+
+    Iterative over (pattern, store) positions: bounded by their product, so
+    no input recurses or backtracks exponentially.
+    """
+    seen: set[tuple[int, int]] = set()
+    pending = [(0, 0)]
+    while pending:
+        state = pending.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        index, depth = state
+        if depth == len(store):
+            return True
+        if index == len(pattern):
+            continue
+        head = pattern[index]
+        if head == _ANY_PARTS:
+            pending += [(index + 1, depth), (index, depth + 1)]
+        elif head == "**":
+            pending.append((index + 1, depth))
+            if _part_matches("*", store[depth], dotglob):
+                pending.append((index, depth + 1))
+        elif _part_matches(head, store[depth], dotglob):
+            pending.append((index + 1, depth + 1))
+    return False
+
+
+def _brace_crosses_path(value: str) -> bool:
+    """Whether a brace alternative holds a '/' or '~', so may start anywhere."""
+    depth = 0
+    for char in value:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(depth - 1, 0)
+        elif depth and char in "/~":
+            return True
+    return False
+
+
+def credential_reason(words, policy, cwd: str | None, *, dotglob: bool = False) -> str | None:
+    dotglob = dotglob or _environment_dotglob()
+    stores = [candidate.parts
+              for store in _guarded_stores(policy)
               for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
+    base = Path(os.path.abspath(cwd or "."))
+    real_base = Path(cwd or ".").resolve()
+
+    def literal(parts: tuple[str, ...], prefix: tuple[str, ...]) -> tuple[str, ...]:
+        # The working directory is a real path: its glob characters are literal.
+        count = len(prefix) if parts[:len(prefix)] == prefix else 0
+        return tuple(_LITERAL + part for part in parts[:count]) + parts[count:]
+
     for word in words:
-        path = Path(cwd or ".") / os.path.expanduser(word)
-        # Retain both spellings: a glob cannot resolve a symlink in a filename.
-        for candidate in (Path(os.path.abspath(path)), path.resolve()):
-            # Brace alternatives also expand before a program receives argv.
-            glob_candidate = Path(*(part if not any(char in part for char in "{}") else "*"
-                                    for part in candidate.parts))
-            # Compare prefixes without enumerating credential directories.
-            if any(fnmatch.fnmatchcase(str(root), str(prefix))
-                   for root in stores for prefix in (glob_candidate, *glob_candidate.parents)):
-                return "protected credential reads cannot be granted"
+        for value in dict.fromkeys([word, *_operand_values(word)]):
+            operand = Path(os.path.expanduser(value))
+            own = operand.parts
+            path = base / operand
+            lexical = Path(os.path.abspath(path)).parts
+            normalized = Path(os.path.normpath(operand)).parts
+            ups = len(normalized) - len(tuple(itertools.dropwhile(lambda part: part == "..", normalized)))
+            kept = base.parts[:max(1, len(base.parts) - ups)]
+            # Retain both spellings: a glob cannot resolve a symlink in a filename.
+            spellings = [lexical if operand.is_absolute() else literal(lexical, kept),
+                         path.resolve().parts if operand.is_absolute()
+                         else literal((real_base / operand).resolve().parts, real_base.parts)]
+            expanded = [index for index, part in enumerate(own) if any(char in part for char in "{}*?[")]
+            if expanded:
+                # Lexical normalization cannot cross an expanded part: a '..'
+                # after one, or inside braces, may lead to any directory.
+                escapes = [index for index, part in enumerate(own)
+                           if (part == ".." and index > expanded[0])
+                           or (".." in part and ("{" in part or "}" in part))]
+                if escapes:
+                    spellings.append((_ANY_PARTS, *own[escapes[-1] + 1:]))
+            if _brace_crosses_path(value):
+                spellings.append((_ANY_PARTS, *own))
+            for parts in spellings:
+                # Brace alternatives expand before a program receives argv. Match
+                # one component at a time, so `*` never crosses a '/'.
+                pattern = tuple(_ANY_PART if ("{" in part or "}" in part) and not part.startswith(_LITERAL)
+                                else part for part in parts)
+                if any(_reaches(pattern, store, dotglob) for store in stores):
+                    return "protected credential reads cannot be granted"
     return None
 
 
