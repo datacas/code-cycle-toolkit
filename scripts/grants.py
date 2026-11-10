@@ -21,10 +21,12 @@ question, and a later run applies the answer through `--grant`.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 import sys
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -106,14 +108,135 @@ def consent_role(role: str | None) -> str | None:
     return "review" if role in NO_GLOBAL_ROLES else role
 
 
-def command_options(role: str) -> list[str]:
+def command_options(role: str, *, unique_path: str | None = None) -> list[str]:
+    """The scopes offered for an exact operation.
+
+    An operation naming a path unique to one dispatch or session can never
+    match again, so only this cycle is offered; a pattern grant stays
+    available as an edited answer (#439 AC-14).
+    """
+    if unique_path:
+        return ["this cycle", "deny"]
     return [option for option in COMMAND_OPTIONS
             if option != "forever" or role not in NO_GLOBAL_ROLES]
+
+
+def unique_path(op: dict[str, Any] | None) -> str | None:
+    """The dispatch- or session-unique path an exact operation names, if any."""
+    from stage_permissions import dispatch_unique_path
+    return dispatch_unique_path(op)
 
 
 def identifier(op: dict[str, Any]) -> str:
     return "command_" + hashlib.sha256(json.dumps(
         op, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+PATTERN_COMMAND_LIMIT = 4096
+PATTERN_LIMIT = 1024
+
+
+def pattern_matches(pattern: str, command: str) -> bool:
+    """Run Python's regex engine in a time-bounded process, never in the hook.
+
+    Structural validation rejects dangerous forms at creation; the process
+    budget also covers ambiguous alternatives and adjacent repetitions.
+    No shell is involved and no command being matched is executed.
+    """
+    if len(command) > PATTERN_COMMAND_LIMIT or len(pattern) > PATTERN_LIMIT:
+        return False
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import json,re,sys; p,c=json.load(sys.stdin); print(int(re.fullmatch(p,c) is not None))"],
+            input=json.dumps([pattern, command]), text=True, capture_output=True, timeout=0.5)
+        return result.returncode == 0 and result.stdout.strip() == "1"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def validate_pattern(pattern: str, positive: list[str], negative: list[str]) -> None:
+    """Validate before asking or saving, with an actionable rejection reason."""
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise GrantError("pattern is empty")
+    if len(pattern) > PATTERN_LIMIT:
+        raise GrantError(f"pattern exceeds {PATTERN_LIMIT} characters")
+    try:
+        compiled = re.compile(pattern)
+        # Python's own regex AST avoids guessing repetition from escaped text.
+        # Python 3.11+ keeps the parser in the re package; the sre_* shims are
+        # deprecated and absent from newer interpreters.
+        try:
+            _parser = importlib.import_module("re._parser")
+            _constants = importlib.import_module("re._constants")
+        except ImportError:
+            _parser = importlib.import_module("sre_parse")
+            _constants = importlib.import_module("sre_constants")
+        tree = _parser.parse(pattern, 0)
+        repeats = {_constants.MAX_REPEAT, _constants.MIN_REPEAT}
+        if (possessive := getattr(_constants, "POSSESSIVE_REPEAT", None)) is not None:
+            repeats.add(possessive)
+
+        def inspect(nodes, repeated=False):
+            for kind, value in nodes:
+                if kind in repeats:
+                    minimum, maximum, children = value
+                    if repeated:
+                        raise GrantError("nested repetition can cause catastrophic backtracking")
+                    if maximum != _constants.MAXREPEAT and maximum > PATTERN_COMMAND_LIMIT:
+                        raise GrantError("pattern repetition exceeds command length limit")
+                    inspect(children, True)
+                elif kind == _constants.SUBPATTERN:
+                    inspect(value[-1], repeated)
+                elif kind == _constants.BRANCH:
+                    if repeated:
+                        raise GrantError("repeated alternatives can cause catastrophic backtracking")
+                    for branch in value[1]:
+                        inspect(branch, repeated)
+                elif kind in {_constants.GROUPREF, _constants.GROUPREF_EXISTS,
+                              _constants.ASSERT, _constants.ASSERT_NOT}:
+                    raise GrantError("backreferences and lookarounds are not bounded pattern grants")
+        inspect(tree)
+    except (re.error, OverflowError) as error:
+        raise GrantError(f"invalid pattern: {error}") from error
+    if compiled.fullmatch("") is not None:
+        raise GrantError("pattern matches the empty command")
+    if (not isinstance(positive, list) or not isinstance(negative, list)
+            or not positive or not negative):
+        raise GrantError("positive and negative example commands must be non-empty lists")
+    if any(not isinstance(item, str) or not item
+                                           for item in [*positive, *negative]):
+        raise GrantError("positive and negative example commands are required")
+    for example in positive:
+        if not pattern_matches(pattern, example):
+            raise GrantError(f"positive example does not match within the budget: {example}")
+    for example in negative:
+        if len(example) > PATTERN_COMMAND_LIMIT or pattern_matches(pattern, example):
+            raise GrantError(f"negative example matches or exceeds the length limit: {example}")
+
+
+def make_pattern_grant(pattern: str, role: str, executor: str, platform: str, *,
+                       proposer: str, justification: str, positive: list[str],
+                       negative: list[str], compound: bool = False) -> SensitiveGrant:
+    if not isinstance(compound, bool):
+        raise GrantError("compound must be a boolean")
+    validate_pattern(pattern, positive, negative)
+    if not proposer or not justification:
+        raise GrantError("a pattern needs its proposer and justification")
+    op = {"version": 2, "role": consent_role(role), "tool": "Bash",
+          "pattern": {"regex": pattern}, "proposer": proposer,
+          "justification": justification, "positive": positive, "negative": negative}
+    if compound:
+        op["compound"] = True
+    return make_grant(op, executor, platform)
+
+
+def pattern_covers_operation(pattern: dict[str, Any], op: dict[str, Any]) -> bool:
+    """A simple-command matcher never implicitly authorizes shell source."""
+    from stage_permissions import normalized_command
+    shell = op.get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]
+    return (not shell or pattern.get("compound") is True) and pattern_matches(
+        pattern.get("pattern", {}).get("regex", ""), normalized_command(op))
 
 
 
@@ -153,15 +276,22 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
                   "Docker without a per-operation check.")
     risks += (" An interpreter's internal operations cannot be inspected by the hook; "
               "only external isolation enforces restrictions inside it.")
+    if op.get("version") == 2:
+        risks += (" A regex grants every matching normalized command, including interpreters. "
+                  "Git, publication, credential and redirect guards still apply to each command; "
+                  "a match grants nothing for a protected command.")
+        if op.get("compound"):
+            risks += " Compound pattern: authorizes every segment of matching shell source."
     return SensitiveGrant(
-        identifier(op), "the exact stage operation", "outside the stage table",
+        identifier(op), "the command pattern" if op.get("version") == 2 else "the exact stage operation", "outside the stage table",
         (GrantScope(executor, platform, pattern, risks, True),),
         operation=op)
 
 
 #: The placeholder shapes a stored Bash word may take (#398).
 _WORD_SHAPES = ({"tmpdir"}, {"checkout"}, {"env", "tmpdir"}, {"env", "checkout"},
-                {"option", "tmpdir"}, {"option", "checkout"})
+                {"option", "tmpdir"}, {"option", "checkout"}, {"tool_results"},
+                {"env", "tool_results"}, {"option", "tool_results"})
 
 
 def _valid_word(word: Any) -> bool:
@@ -172,6 +302,17 @@ def _valid_word(word: Any) -> bool:
 
 def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
     op = entry.get("operation")
+    if isinstance(op, dict) and op.get("version") == 2:
+        try:
+            if op.get("tool") != "Bash" or not isinstance(op.get("role"), str):
+                return None
+            return make_pattern_grant(op["pattern"]["regex"], op["role"],
+                                      str(entry.get("executor")), str(entry.get("platform")),
+                                      proposer=op["proposer"], justification=op["justification"],
+                                      positive=op["positive"], negative=op["negative"],
+                                      compound=op.get("compound", False))
+        except (GrantError, KeyError, TypeError, AttributeError):
+            return None
     if (not isinstance(op, dict) or op.get("version") != 1
             or not isinstance(op.get("role"), str) or not isinstance(op.get("pattern"), dict)
             or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -204,16 +345,41 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     warnings = compose_warnings(op)
     # A disclosed host access comes before the generic risk, so it is never cut.
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
+    if (blocker or {}).get("unresolved_directory"):
+        warned += ("WARNING: a directory change cannot be resolved; relative operands are "
+                   "checked only for credential-store names. ")
     check = op.get("check")
     skip = (f"Alternative: skip; check {str(check)[:60]} stays unverified and the cycle continues. "
             if check else "Alternative: skip; affected checks stay not_verified. ")
+    configured = str((blocker or {}).get("configured_command") or "")
+    detail = (f" Configured command: {configured}." if configured else "")
+    regex = op.get("pattern", {}).get("regex")
+    compound = ("Compound pattern: all segments of matching shell source are authorized. "
+                if op.get("compound") else "")
+    regex_note = f" Regex: {regex[:80]}." if regex else ""
+    unique = unique_path(op)
+    # Said before the generic text, so the 600-character cut never drops it.
+    scope_note = (f" Offered for this cycle or as a pattern grant only: {unique[-60:]} is unique "
+                  "to one dispatch or session, so a repository or forever grant could never "
+                  "match again." if unique else "")
+    from stage_permissions import TOOL_RESULTS_OPERAND, normalized_command
+    try:
+        saved = TOOL_RESULTS_OPERAND in normalized_command(op) if op.get("tool") == "Bash" else False
+    except (KeyError, TypeError, AttributeError):
+        saved = False
+    if saved:
+        scope_note += (f" {TOOL_RESULTS_OPERAND} matches any saved output of the current "
+                       "session, whose content may be untrusted.")
     return {"id": question_id,
-            "prompt": (f"{role}: {command[:140]}. Outside table: {reason[:100]}. {warned}"
-                       f"Risk: {scope.risks[:180]} "
+            "prompt": (f"{role}: {compound}{command[:140]}.{scope_note}{detail[:120]} {warned}"
+                       "Pattern grants never bypass Git, credential or redirect guards. "
+                       "Interpreter internals require external isolation. "
+                       f"{regex_note} {skip}"
+                       f"Outside table: {reason[:40]}. Risk: {scope.risks[:60]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
-                       f"{skip}"
-                       "Authorizes the exact pattern in the accompanying permission record.")[:600],
-            "options": command_options(str((grant.operation or {}).get("role", role))),
+                       "Protected commands receive no pattern authorization.")[:600],
+            "options": command_options(str((grant.operation or {}).get("role", role)),
+                                       unique_path=unique),
             "recommended": None,
             "blocks": [f"grant:{grant.id}"]}
 
@@ -420,7 +586,21 @@ class ConsentStore:
             "platform": scope.platform,
             "decided_at": datetime.now(timezone.utc).isoformat(),
             **({"operation": grant.operation} if getattr(grant, "operation", None) else {}),
+            "user_approval": {"decision": decision, "source": "consent answer"},
+            "executed_commands": [],
         }
+        self._write(payload)
+
+    def record_execution(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope,
+                         command: str) -> None:
+        """Append observed execution evidence; never creates authorization."""
+        payload = self._read()
+        entries = (payload["repos"].get(repo_id) or {}).get(grant.id, {})
+        entry = entries.get(grant.fingerprint(scope))
+        if not isinstance(entry, dict) or entry.get("decision") != "allow":
+            raise GrantError("cannot record execution without an existing approved grant")
+        entry.setdefault("executed_commands", []).append({
+            "command": command, "at": datetime.now(timezone.utc).isoformat()})
         self._write(payload)
 
     def _write(self, payload: dict[str, Any]) -> None:
@@ -508,6 +688,8 @@ class PermissionRequest:
                 "pros": "finish the requested operation",
                 "cons": "extra user-level access for the selected scope",
                 "global_never_covers": sorted(NO_GLOBAL_ROLES),
+                **({"dispatch_unique_path": unique_path(op), "offered_scope": "cycle or pattern grant"}
+                   if unique_path(op) else {}),
                 **({"warnings": compose_warnings(op)} if compose_warnings(op) else {}),
                 **({"check": op["check"],
                     "alternative": "skip; the check is recorded unverified and the cycle continues"}
@@ -528,7 +710,7 @@ class ConsentBroker:
     #: Grants the project configuration authorizes in advance.
     preauthorized: frozenset[str] = frozenset()
     #: Asks a person and returns an answer token, or None when nobody can answer.
-    prompt: Callable[[dict], str | None] | None = None
+    prompt: Callable[[dict], str | dict[str, Any] | None] | None = None
     granted_ids: set[str] = field(default_factory=set)
     denied_ids: set[str] = field(default_factory=set)
     pending: list[PermissionRequest] = field(default_factory=list)
@@ -581,6 +763,40 @@ class ConsentBroker:
                     entries.append({"operation": op, "decision": "deny" if answer == DENY else "allow"})
         return tuple(entries)
 
+    def record_executions(self, commands: list[str], executor: str, policy: Any,
+                          cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:
+        from stage_permissions import operation, protected_reason
+        if self.store is None:
+            return
+        pattern_grants = [grant for grant in self.registry.values()
+                          if (grant.operation or {}).get("version") == 2]
+        if not pattern_grants:
+            return
+        retained = {record["command"]: record["operation"] for record in observed or []
+                    if isinstance(record, dict) and isinstance(record.get("command"), str)
+                    and isinstance(record.get("operation"), dict)}
+        for command in commands:
+            if command not in retained and protected_reason("Bash", {"command": command}, policy, cwd):
+                continue
+            try:
+                op = retained.get(command) or operation("Bash", {"command": command}, policy, cwd)
+                for grant in pattern_grants:
+                    stored = grant.operation or {}
+                    scope = grant.scope_for(executor, self.platform)
+                    if (stored.get("version") != 2 or scope is None
+                            or consent_role(stored.get("role")) != consent_role(policy.role)
+                            or not pattern_covers_operation(stored, op)):
+                        continue
+                    for repo in (self.cycle_scope, self.repo_id, "*"):
+                        if repo and self.store.load(repo, grant, scope) == "allow":
+                            try:
+                                self.store.record_execution(repo, grant, scope, command)
+                                break
+                            except GrantError:
+                                continue
+            except (ValueError, OSError, TypeError) as error:
+                self.notes.append(f"execution audit unavailable: {type(error).__name__}")
+
     def _observe(self, kind, grant, scope, role, answer=None, source=None) -> None:
         if self.observer is not None:
             try:
@@ -619,7 +835,8 @@ class ConsentBroker:
             # The answer persists only for the scope its question showed; every
             # other registered scope receives it for this run alone.
             persist = key in self.asked
-            self.apply_answer(grant, scope, answer, persist=persist)
+            # A dispatch-unique operation keeps a wider answer for this cycle (#439 AC-14).
+            answer = self.apply_answer(grant, scope, answer, persist=persist)
             self._consumed_answers.add(key)
             if persist or answer == ALLOW_CYCLE:
                 return answer, "--grant"
@@ -667,13 +884,19 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        unique = unique_path(grant.operation) if answer in {ALLOW_PERSISTENT, ALLOW_GLOBAL} else None
+        if unique:
+            # Kept for this cycle, where it can still match; never refused (#439 AC-14).
+            self.notes.append(f"{grant.id}: {answer} kept for this cycle only; {unique} is "
+                              "unique to one dispatch or session and could never match again")
+            answer = ALLOW_CYCLE
         if answer == ALLOW_GLOBAL:
-            if grant.operation is None or self.store is None:
-                raise GrantError("global answers require an exact command and a consent store")
-            if grant.operation.get("role") in NO_GLOBAL_ROLES:
+            if grant.operation and grant.operation.get("role") in NO_GLOBAL_ROLES:
                 raise GrantError(
                     f"{grant.id}: a global grant never covers {grant.operation['role']}; "
                     "answer this cycle or this repository")
+            if grant.operation is None or self.store is None:
+                raise GrantError("global answers require an exact command and a consent store")
             if not persist:
                 return self.apply_answer(grant, scope, ALLOW_CYCLE, persist=False)
             self.store.save("*", grant, scope, "allow")
@@ -719,13 +942,49 @@ class ConsentBroker:
             self._observed[grant.fingerprint(scope)] = answer
             self._observe("decision_answered", grant, scope, role, answer, source)
             return answer
-        if answer is None and self.prompt is not None:
+        validation_error = ""
+        while answer is None and self.prompt is not None:
             self._observe("decision_asked", grant, scope, role)
             source = "interactive"
             asked = question(grant, scope, role=role, blocker=blocker)
+            if validation_error:
+                asked = {**asked, "validation_error": validation_error,
+                         "prompt": f"Invalid answer: {validation_error}. " + asked["prompt"]}
             if grant.operation:
                 asked = {**asked, "permission_record": PermissionRequest(grant, scope, role, asked, blocker).record()}
-            answer = self.prompt(asked)
+            response = self.prompt(asked)
+            if response is None:
+                break
+            try:
+                candidate, candidate_scope = grant, scope
+                answer = response
+                # Edited matchers are new grants; reject before storing any
+                # authorization, and retain the original request for retries.
+                if isinstance(response, dict):
+                    answer = response.get("answer")
+                    if "pattern" in response:
+                        candidate = make_pattern_grant(
+                            response["pattern"], role, executor, self.platform,
+                            proposer="user edit", justification=response.get("justification", "edited consent pattern"),
+                            positive=response.get("positive", []), negative=response.get("negative", []),
+                            compound=response.get("compound", False))
+                        refused = (blocker or {}).get("refused_operation") or grant.operation
+                        if (not isinstance(refused, dict) or refused.get("version") != 1
+                                or not pattern_covers_operation(candidate.operation or {}, refused)):
+                            raise GrantError("edited pattern does not cover the refused command")
+                        candidate_scope = candidate.scopes[0]
+                if not isinstance(answer, str) or answer not in ANSWERS:
+                    raise GrantError(f"answer must be one of {', '.join(ANSWERS)}")
+                answer = self.apply_answer(candidate, candidate_scope, answer)
+                grant, scope = candidate, candidate_scope
+                if grant.operation:
+                    self.operations[grant.id] = grant
+            except GrantError as error:
+                validation_error = str(error)
+                self.notes.append(f"consent answer rejected: {validation_error}")
+                answer = None
+                continue
+            break
         if answer is None:
             self._observe("decision_asked", grant, scope, role)
             self.pending.append(PermissionRequest(
@@ -735,7 +994,8 @@ class ConsentBroker:
             return PENDING
         if answer not in ANSWERS:
             raise GrantError(f"{grant.id}: {answer!r} is not one of {', '.join(ANSWERS)}")
-        answer = self.apply_answer(grant, scope, answer)
+        if source != "interactive":
+            answer = self.apply_answer(grant, scope, answer)
         self._observed[grant.fingerprint(scope)] = answer
         self._observe("decision_answered", grant, scope, role, answer, source)
         if answer == DENY:
@@ -792,12 +1052,12 @@ def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
     )
 
 
-def terminal_prompt(stream_in=None, stream_out=None) -> Callable[[dict], str | None]:
+def terminal_prompt(stream_in=None, stream_out=None) -> Callable[[dict], str | dict[str, Any] | None]:
     """Ask on a terminal, one question at a time, and return the answer token."""
     stream_in = stream_in or sys.stdin
     stream_out = stream_out or sys.stderr
 
-    def ask(asked: dict) -> str | None:
+    def ask(asked: dict) -> str | dict[str, Any] | None:
         print(f"\nPermission request {asked['id']}: {asked['prompt']}", file=stream_out)
         if "permission_record" in asked:
             print(json.dumps(asked["permission_record"], ensure_ascii=True), file=stream_out)
@@ -809,6 +1069,13 @@ def terminal_prompt(stream_in=None, stream_out=None) -> Callable[[dict], str | N
             if not line:
                 return None
             choice = line.strip()
+            if choice.startswith("{"):
+                try:
+                    edited = json.loads(choice)
+                    if isinstance(edited, dict) and edited.get("answer") in ANSWERS:
+                        return edited
+                except ValueError:
+                    pass
             if choice.isdigit() and 1 <= int(choice) <= len(asked["options"]):
                 return answer_from_option(asked["options"][int(choice) - 1])
 

@@ -410,7 +410,7 @@ class OperationTests(unittest.TestCase):
 
     def test_interpreter_script_targets_and_marker_literals_never_generalize(self):
         script, _ = self.grant(shlex.join(["python3", str(self.root / "helper.py")]))
-        self.assertEqual(str(self.root / 'helper.py'), script.operation["pattern"]["words"][1])
+        self.assertEqual({"tmpdir": "helper.py"}, script.operation["pattern"]["words"][1])
         actual, _ = self.grant(shlex.join(["stat", str(self.root / "snapshot")]))
         literal, _ = self.grant("stat '<TMPDIR>/snapshot'")
         self.assertNotEqual(actual.id, literal.id)
@@ -758,7 +758,7 @@ class BlockedReconciliationTests(unittest.TestCase):
             for key in ("command", "reason", "rule", "operation"):
                 self.assertTrue(record[key], key)
         self.assertNotEqual(records[0]["operation"], records[1]["operation"])
-        self.assertTrue(records[0]["operation"].startswith("refused_"))
+        self.assertTrue(records[0]["operation"].startswith("command_"))
 
     def test_a_redundant_edit_is_judged_on_the_metadata_not_the_sha(self):
         for label, pull, contains in (
@@ -1184,10 +1184,9 @@ class ReconciledCycleTests(RunCycleTestCase):
     def test_464_the_stop_names_the_real_cause_apart_from_the_refusals(self):
         report, _ = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
                                published(remote_head=OTHER))
-        self.assertEqual("stage_not_completed", report.stop_reason)
-        self.assertIn("cause: the implement stage needed a refused operation it could not run",
-                      report.stopped_because)
-        self.assertIn("unknown", report.stopped_because)
+        # #439 makes the formerly unparseable heredoc a grantable question.
+        self.assertEqual("permission_required", report.stop_reason)
+        self.assertIn("python3", report.stopped_because)
 
     def resume_points(self):
         return self.journal_rows("resume_point")
@@ -1226,7 +1225,7 @@ class ReconciledCycleTests(RunCycleTestCase):
                                published(remote_head=OTHER), completed=None,
                                work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
                                tests={"ran": True, "passed": True, "checks": []})
-        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual("permission_required", report.stop_reason)
         self.assertEqual([], self.resume_points())
 
     def test_464_a_completed_stage_leaves_a_point_so_an_interrupted_cycle_does_not_redo_it(self):
@@ -1269,7 +1268,7 @@ class ReconciledCycleTests(RunCycleTestCase):
     def test_diverging_shas_stop_as_before_and_say_so(self):
         report, claude = self.cycle([{"tool": "Bash", "input": {"command": "python3 - <<'EOF'\nx\nEOF"}}],
                                     published(remote_head=OTHER))
-        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual("permission_required", report.stop_reason)
         self.assertEqual(1, len(claude.dispatched))
         recorded = self.journal(report, "reconciliation")
         self.assertEqual(["not_reconciled"], [row["status"] for row in recorded])

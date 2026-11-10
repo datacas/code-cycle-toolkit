@@ -1135,6 +1135,16 @@ class CycleRecorder:
             events = result.artifacts.get("command_refusals") or result.artifacts.get("permission_denials")
             cwd = run.dispatch_kwargs.get("cwd")
             executor = attempt.target.executor
+            self.consent.record_executions(result.artifacts.get("command_executions") or [],
+                                           executor, command_policy, cwd,
+                                           observed=result.artifacts.get("command_execution_operations"))
+            block = _result_block(result.agent_output)
+            payload = block[2] if block is not None else {}
+            proposals = payload.get("command_pattern_proposals") or []
+            if isinstance(proposals, list) and isinstance(events, list):
+                events = [{**event, "pattern_proposal": next((item for item in proposals
+                           if isinstance(item, dict) and item.get("command") == event.get("input", {}).get("command")), None)}
+                          if isinstance(event, dict) else event for event in events]
             grantable = {item["command"]: item for item in refused_operations(
                 events, command_policy, self.consent, executor, cwd)}
             # Every refusal is recorded and classified by the runtime, grantable
@@ -1543,14 +1553,15 @@ class CycleRecorder:
         preflight = artifacts.get("policy_preflight_refusal")
         if isinstance(preflight, str):
             self._journal("refusal", role=role, attempt_id=attempt_id,
-                          component="policy_preflight", status="refused", reason=preflight)
+                          component="policy_preflight", status="refused", reason=preflight,
+                          correlation={"layer": "toolkit_hook"})
         for denial in artifacts.get("claude_permission_denials") or []:
             if isinstance(denial, dict):
                 self._journal("refusal", role=role, attempt_id=attempt_id,
                               component="claude_permission", status="denied",
                               command=denial.get("command") or denial.get("tool"),
                               reason=f"Claude's permission layer denied {denial.get('tool')}",
-                              correlation={"tool_use_id": denial.get("tool_use_id")})
+                              correlation={"tool_use_id": denial.get("tool_use_id"), "layer": "claude_permission"})
         for record in artifacts.get("denial_records") or []:
             # What the runtime made of every refusal, grantable or not (#364).
             if isinstance(record, dict):
@@ -1558,6 +1569,7 @@ class CycleRecorder:
                               component="denial_classification", status=record.get("class"),
                               command=record.get("command"), reason=record.get("why"),
                               correlation={"rule": record.get("rule"),
+                                           "layer": record.get("layer"),
                                            "operation": record.get("operation"),
                                            "stage": record.get("stage")})
                 if self.consent is not None and self.consent.prompt is None:
@@ -1591,7 +1603,7 @@ class CycleRecorder:
                           component=f"{executor}_sandbox", status=str(blocker.get("kind")),
                           command=blocker.get("command"),
                           reason=f"the agent reported {blocker.get('kind')}: "
-                                 f"{blocker.get('error')}")
+                                 f"{blocker.get('error')}", correlation={"layer": f"{executor}_sandbox"})
 
     def _observe_shadow(self, role: str, decision: RoutingDecision,
                         signals: dict) -> None:
