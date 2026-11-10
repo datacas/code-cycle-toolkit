@@ -1184,15 +1184,14 @@ def inside_tool_results(path: str, policy: Any) -> bool:
 
     The same membership rule as `$TMPDIR`: symlinks and `..` are resolved
     first, so neither leads into it from elsewhere or out of it. The directory
-    itself must be a real directory, not a symlink to another one, and must
-    stay beside its session transcript.
+    itself must be a real directory, not a symlink to another one.
     """
     results = getattr(policy, "tool_results", None)
     if not results:
         return False
     try:
         directory = Path(results)
-        if directory.is_symlink() or directory.resolve(strict=True).parent != directory.parent.resolve(strict=True):
+        if directory.is_symlink() or not directory.resolve(strict=True).is_dir():
             return False
     except (OSError, RuntimeError):
         return False
