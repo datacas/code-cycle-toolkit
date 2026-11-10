@@ -1517,6 +1517,60 @@ class ConsentVariantsTests(unittest.TestCase):
                 with self.subTest(command=command):
                     self.assertIsNone(sp.dispatch_unique_path(sp.operation("Bash", {"command": command}, policy, root)))
 
+    @posix_shell
+    def test_ac13_ac14_edges_tilde_mounts_markers_grant_answers_and_root_symlinks(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as root:
+            project, files = self.sessions(home)
+            own = files["11111111-aaaa"]
+            policy = replace(sp.StagePolicy("resolve", tmpdir=root), tool_results=str(own.parent))
+            # `~/…` names the same saved output for the hook and the identity.
+            with patch.dict(os.environ, {"HOME": home}):
+                tilde = "~/" + own.relative_to(home).as_posix()
+                for command in (f"cat {tilde}", f"grep -n line {tilde} | head -n 1", f"sort {tilde}"):
+                    with self.subTest(command=command):
+                        op = sp.operation("Bash", {"command": command}, policy, root)
+                        self.assertIn(sp.TOOL_RESULTS_OPERAND, sp.normalized_command(op), op)
+                        self.assertIsNone(sp.dispatch_unique_path(op))
+            # A mount or option value is a dispatch-unique path too.
+            for command in ("docker run -v /tmp/code-cycle-review-abc:/src image",
+                            "tool --input=/tmp/code-cycle-tmp-old/x,/y", "ls [/tmp/code-cycle-tmp-old]"):
+                with self.subTest(command=command):
+                    self.assertIsNotNone(sp.dispatch_unique_path(
+                        {"version": 1, "tool": "Bash", "role": "resolve",
+                         "pattern": {"words": command.split(), "redirects": []}}))
+            self.assertIsNone(sp.dispatch_unique_path(
+                {"version": 1, "tool": "Bash", "role": "resolve",
+                 "pattern": {"words": ["ls", "/srv/my-code-cycle-tmp-x/", "/a/" * 5000], "redirects": []}}))
+            # A printed marker of another shape cannot name a directory.
+            for value in (home, str(Path(home, "tool-results")), str(own.parent) + "/../tool-results"):
+                with self.subTest(marker=value):
+                    self.assertIsNone(cp._observed_policy(policy, {"tool_results": value}).tool_results)
+            self.assertEqual(str(own.parent), cp._observed_policy(policy, {"tool_results": str(own.parent)}).tool_results)
+            # A tool-results directory that is a symlink elsewhere covers nothing.
+            fake = Path(home, ".claude", "projects", "p", "33333333-cccc")
+            fake.mkdir(parents=True)
+            (fake / "tool-results").symlink_to(home)
+            linked = replace(policy, tool_results=str(fake / "tool-results"))
+            self.assertFalse(sp.inside_tool_results(str(fake / "tool-results" / "outside.txt"), linked))
+            # `--grant id=persistent` for a unique operation reports and keeps a cycle answer.
+            command = f"cat {files['22222222-bbbb']}"
+            broker = grants.ConsentBroker("owner/repo", platform="linux",
+                                          store=grants.ConsentStore(Path(home) / "consents.json"))
+            request = cp.refused_operation([command], policy, broker, "claude", root)
+            grant = broker.operations[request["resource"]]
+            broker = grants.ConsentBroker("owner/repo", platform="linux", store=broker.store,
+                                          answers={grant.id: "persistent"},
+                                          asked=frozenset({grant.fingerprint(grant.scopes[0])}))
+            self.assertEqual("cycle", broker.request(grant, "claude", role="resolve", blocker=request))
+            self.assertEqual([], broker.store.list("owner/repo"))
+            asked = grants.question(grant, grant.scopes[0], role="resolve", blocker=request)
+            self.assertNotIn(sp.TOOL_RESULTS_OPERAND, asked["prompt"])
+            saved = sp.operation("Bash", {"command": f"sort {own}"}, policy, root)
+            asked = grants.question(grants.make_grant(saved, "claude", "linux"),
+                                    grants.make_grant(saved, "claude", "linux").scopes[0], role="resolve")
+            self.assertIn("matches any saved output of the current session", asked["prompt"])
+            self.assertIn("this repository", asked["options"])
+
     def test_ac13_prompt_note_tells_the_reviewer_how_to_read_large_outputs(self):
         for role in ("review", "rereview", "resolve"):
             note = sp.prompt_note(sp.StagePolicy(role))

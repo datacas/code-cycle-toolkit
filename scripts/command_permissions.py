@@ -13,7 +13,7 @@ from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, mak
                     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
 from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
                                consent_role, split_environment, same_operation, configured_check_id,
-                               TOOL_RESULT_OUTPUT)
+                               TOOL_RESULT_OUTPUT, is_session_tool_results)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -146,6 +146,19 @@ def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str
                 "warnings": list(compose.get("warnings") or [])} if compose else {})}
 
 
+def _observed_policy(policy: Any, event: dict[str, Any]) -> Any:
+    """The policy as the hook saw it: its `$TMPDIR` and session tool-results directory.
+
+    The tool-results value must have the shape Claude Code gives it,
+    `…/<project-dir>/<session_id>/tool-results`; anything else is ignored, so a
+    printed marker cannot name another directory (#439 AC-13).
+    """
+    results = event.get("tool_results")
+    if not is_session_tool_results(results):
+        results = None
+    return replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir, tool_results=results)
+
+
 def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                       cwd: str | None = None) -> dict[str, Any] | None:
     """Turn runtime-observed refusals into a request; never authorize from prose."""
@@ -161,9 +174,7 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         if not isinstance(tool, str) or (tool == "Bash" and not isinstance(data.get("command"), str)):
             continue
-        results = event.get("tool_results")
-        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir,
-                                  tool_results=results if isinstance(results, str) else None)
+        observed_policy = _observed_policy(policy, event)
         if tool == "Bash" and check(data["command"], observed_policy, cwd=cwd).needs_docker:
             # The docker_host socket permission is asked first, on its own (#398);
             # an exact-command consent never stands in for it.
@@ -457,7 +468,7 @@ def denial_records(denials: object, policy: Any, executor: str,
         tool, data = event.get("tool", "Bash"), event.get("input", {})
         if not isinstance(tool, str) or not isinstance(data, dict):
             continue
-        observed = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        observed = _observed_policy(policy, event)
         target = None
         if tool == "Bash":
             if not isinstance(data.get("command"), str):

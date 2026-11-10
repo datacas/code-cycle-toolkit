@@ -362,8 +362,16 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     scope_note = (f" Offered for this cycle or as a pattern grant only: {unique[-60:]} is unique "
                   "to one dispatch or session, so a repository or forever grant could never "
                   "match again." if unique else "")
+    from stage_permissions import TOOL_RESULTS_OPERAND, normalized_command
+    try:
+        saved = TOOL_RESULTS_OPERAND in normalized_command(op) if op.get("tool") == "Bash" else False
+    except (KeyError, TypeError, AttributeError):
+        saved = False
+    if saved:
+        scope_note += (f" {TOOL_RESULTS_OPERAND} matches any saved output of the current "
+                       "session, whose content may be untrusted.")
     return {"id": question_id,
-            "prompt": (f"{role}: {compound}{command[:140]}.{detail}{scope_note} {warned}"
+            "prompt": (f"{role}: {compound}{command[:140]}.{scope_note}{detail[:120]} {warned}"
                        "Pattern grants never bypass Git, credential or redirect guards. "
                        "Interpreter internals require external isolation. "
                        f"{regex_note} {skip}"
@@ -827,7 +835,8 @@ class ConsentBroker:
             # The answer persists only for the scope its question showed; every
             # other registered scope receives it for this run alone.
             persist = key in self.asked
-            self.apply_answer(grant, scope, answer, persist=persist)
+            # A dispatch-unique operation keeps a wider answer for this cycle (#439 AC-14).
+            answer = self.apply_answer(grant, scope, answer, persist=persist)
             self._consumed_answers.add(key)
             if persist or answer == ALLOW_CYCLE:
                 return answer, "--grant"

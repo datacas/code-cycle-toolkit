@@ -184,9 +184,13 @@ with no question. Any other operation names such an operand
 `<TOOL_RESULTS>/<OUTPUT>` (`{"tool_results": "<OUTPUT>"}` in a stored
 operation): each saved output has a fresh random name, so a grant given in an
 earlier dispatch of the same stage matches the output of the current session
-in a later one. Membership uses real paths after resolving symlinks and `..`;
-another session's directory stays literal and still asks. The hook reports the
-directory it used as `COMMAND_PERMISSION_TOOL_RESULTS`. The stage prompt tells
+in a later one; the question says that the placeholder matches any saved
+output of the current session. Membership uses real paths after resolving
+symlinks, `..` and a bare `~`; a tool-results directory that is itself a
+symlink covers nothing, and another session's directory stays literal and
+still asks. The hook reports the directory it used as
+`COMMAND_PERMISSION_TOOL_RESULTS`; the runtime accepts that marker only in the
+`…/projects/<project-dir>/<session_id>/tool-results` shape. The stage prompt tells
 the agent to read large outputs in smaller pieces or to write them under the
 supplied `$TMPDIR`.
 

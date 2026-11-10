@@ -1140,7 +1140,7 @@ def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
 
 
 #: A Claude Code session identifier as it appears in its transcript name.
-_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 #: How a stored operation spells an operand under the session's tool-results
 #: directory. Claude Code names each saved output with a fresh random
 #: identifier, so the whole operand is the placeholder (#439 AC-13).
@@ -1161,30 +1161,53 @@ def session_tool_results(event: Any) -> str | None:
         return None
     session, transcript = event.get("session_id"), event.get("transcript_path")
     if not (isinstance(session, str) and isinstance(transcript, str)
-            and _SESSION_ID.fullmatch(session) and os.path.isabs(transcript)):
+            and SESSION_ID.fullmatch(session) and os.path.isabs(transcript)):
         return None
     path = Path(transcript)
-    if path.name != session + ".jsonl":
+    if path.name != session + ".jsonl" or not is_session_tool_results(path.parent / session / "tool-results"):
         return None
     return str(path.parent / session / "tool-results")
+
+
+def is_session_tool_results(path: Any) -> bool:
+    """Whether `path` has the shape `…/projects/<project-dir>/<session>/tool-results`."""
+    if not isinstance(path, (str, Path)) or not os.path.isabs(path):
+        return False
+    path = Path(path)
+    return (path.name == "tool-results" and ".." not in path.parts and len(path.parts) > 4
+            and SESSION_ID.fullmatch(path.parent.name) is not None
+            and path.parent.parent.parent.name == "projects")
 
 
 def inside_tool_results(path: str, policy: Any) -> bool:
     """Whether `path` really lies in the current session's tool-results directory.
 
     The same membership rule as `$TMPDIR`: symlinks and `..` are resolved
-    first, so neither leads into it from elsewhere or out of it.
+    first, so neither leads into it from elsewhere or out of it. The directory
+    itself must be a real directory, not a symlink to another one, and must
+    stay beside its session transcript.
     """
-    return inside_tmpdir(path, getattr(policy, "tool_results", None))
+    results = getattr(policy, "tool_results", None)
+    if not results:
+        return False
+    try:
+        directory = Path(results)
+        if directory.is_symlink() or directory.resolve(strict=True).parent != directory.parent.resolve(strict=True):
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return inside_tmpdir(os.path.expanduser(path) if path.startswith("~/") else path, results)
 
 
 #: Directories created once per dispatch or per session: a review clone, a
 #: dispatch's `$TMPDIR`, and a Claude session's tool-results directory. A
-#: literal path under one of them can never occur again (#439 AC-14).
+#: literal path under one of them can never occur again (#439 AC-14). One
+#: path component at a time, with no leading repetition: linear in the text.
+_UNIQUE_COMPONENT = r"[^\s\"'<>|&;()/:,=\[\]{}]+"
 _DISPATCH_UNIQUE_PATH = re.compile(
-    r"/(?:[^\s\"'<>|&;()/]+/)*?(?:code-cycle-(?:tmp|review)-[A-Za-z0-9_]+"
-    r"|\.claude/projects/[^\s\"'<>|&;()/]+/[^\s\"'<>|&;()/]+/tool-results)"
-    r"(?=$|[/\s\"'<>|&;)])")
+    r"(?:^|(?<=[/\s\"'=:,\[{]))(?:code-cycle-(?:tmp|review)-[A-Za-z0-9_]+"
+    r"|\.claude/projects/" + _UNIQUE_COMPONENT + "/" + _UNIQUE_COMPONENT + "/tool-results)"
+    r"(?=$|[/\s\"'<>|&;:,\]})=])")
 
 
 def dispatch_unique_path(op: Any) -> str | None:
@@ -3422,6 +3445,10 @@ def _shell_identity(parsed: ParsedCommand, policy: Any, cwd: str | None) -> str:
                 continue
             # Replace a complete operand, never a substring of opaque code.
             forms = [operand]
+            home = os.path.expanduser("~")
+            if home != "~" and operand.startswith(home.rstrip("/") + "/"):
+                # The parser expanded a bare `~`; the source still spells it.
+                forms.append("~" + operand[len(home.rstrip("/")):])
             if policy.tmpdir and operand.startswith(policy.tmpdir + "/"):
                 suffix = operand[len(policy.tmpdir):]
                 forms += ["$TMPDIR" + suffix, "${TMPDIR}" + suffix]
@@ -3725,7 +3752,7 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             if index and path_operand and not word.startswith("-") and not inline_code and _tmp_operand(candidate, policy.tmpdir):
                 normalized.append({"tmpdir": _tmp_relative(candidate, policy)})
             elif (index and path_operand and not word.startswith("-") and not inline_code
-                  and inside_tool_results(candidate, policy)):
+                  and inside_tool_results(word if word.startswith("~/") else candidate, policy)):
                 # A saved output of the current session (#439 AC-13).
                 normalized.append({"tool_results": TOOL_RESULT_OUTPUT})
             elif index and docker and (placeholder := _relative_value(word, policy, root)):
