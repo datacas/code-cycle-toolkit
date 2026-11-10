@@ -248,7 +248,17 @@ header must itself start at command position, and an arithmetic header ends at
 its matching parentheses rather than spanning earlier argument data. Argument
 words such as `echo for x do case` remain data. The `do` after a positional
 `for` or `select` header also starts a new executable segment, so its first
-body command retains its own guards even without a `case` clause. Keywords split by
+body command retains its own guards even without a `case` clause. Executable
+headers are removed repeatedly before segment guards run: `function NAME`,
+`coproc` (with a name before a compound body), `time` and negation cannot hide
+the first body program (REV-015). Bare `coproc CMD`, `time CMD` and `! CMD`
+also use shell consent even without another shell operator. The same header
+rule decides whether `!(` after those headers is negation followed by a
+subshell rather than an extglob operand. Header words in argument position
+remain data. Brace loop bodies require the separator that
+the installed Bash accepts; regression baselines distinguish those executable
+forms from the conservatively analysed single-line `for NAME {` spelling.
+Keywords split by
 backslash-newline are recognised without changing the original source offsets
 or quoted data. A `case` word in argument position is data. The regression
 baseline executes supported forms in disposable Bash; conservative parser

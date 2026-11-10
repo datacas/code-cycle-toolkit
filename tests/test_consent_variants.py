@@ -928,6 +928,117 @@ class ConsentVariantsTests(unittest.TestCase):
                             self.assertIsNotNone(sp.protected_reason("Bash", {"command": command},
                                                                      sp.StagePolicy(role), root))
 
+    REV015_FORMS = (
+        'function f { {cmd}; }; f',
+        'function f-x { {cmd}; }; f-x',
+        'function f/x { {cmd}; }; f/x',
+        'function f { {cmd}; }; printf "%s" "$(f)"',
+        'printf "%s" "$(function f { {cmd}; }; f)"',
+        'coproc {cmd}',
+        'coproc {cmd}; wait',
+        'coproc { {cmd}; }; wait',
+        'coproc worker { {cmd}; }; wait',
+        'coproc worker ( {cmd} ); wait',
+        'coproc git { {cmd}; }; wait',
+        'function f() { {cmd}; }; f',
+        'time ! {cmd}',
+        'printf "%s" "$(coproc worker { {cmd}; }; wait)"',
+        'time coproc {cmd}',
+        '! coproc {cmd}',
+        'function f if {cmd}; then true; fi; f',
+        'set -- 1; for x\n{ {cmd}; }',
+        'set -- 1; select x\n{ {cmd}; break; }',
+        # Negation followed by a subshell behind the same headers is not an
+        # extglob operand: the `!(` check peels the same headers.
+        'function f { !({cmd}); }; f',
+        'coproc { !({cmd}); }; wait',
+        'set -- 1; select x\n{ !({cmd}); break; }',
+        'function f if !({cmd}); then :; fi; f',
+    )
+
+    @posix_shell
+    def test_rev015_body_programs_keep_their_guards(self):
+        bodies = ('git push --force origin main', 'git branch -D task',
+                  'gh pr merge 468 --repo owner/repo', 'find . -exec echo unsafe \\;',
+                  'cat ~/.ssh/id_rsa')
+        # Include the review's single-line loop spellings conservatively,
+        # without claiming this Bash accepts them (the baseline below does not).
+        forms = (*self.REV015_FORMS, 'set -- 1; for x { {cmd}; }',
+                 'set -- 1; select x { {cmd}; break; }')
+        with tempfile.TemporaryDirectory() as root:
+            for executor in ('claude', 'codex'):
+                for role in ('resolve', 'rereview'):
+                    policy = self.rev014_grant(role, executor)
+                    for form in forms:
+                        for body in bodies:
+                            command = form.replace('{cmd}', body)
+                            with self.subTest(executor=executor, role=role, command=command):
+                                segments = sp.parse_command(command, None).segments
+                                self.assertTrue(any(segment.words[:1] == [body.split()[0]]
+                                                    for segment in segments), segments)
+                                self.assertIsNotNone(sp.protected_reason('Bash', {'command': command}, policy, root))
+                                self.assertFalse(sp.check(command, policy, cwd=root).allowed)
+                                self.assertIsNone(cp.refused_operation([command], policy,
+                                    grants.ConsentBroker('owner/repo', platform='linux'), executor, root))
+
+    @posix_shell
+    def test_rev015_bash_baseline_and_real_hook_allow_and_deny(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root, 'marker')
+            # Every protected-looking program is a Bash function writing only
+            # to this fixture. No push, ref deletion, gh write or find runs.
+            stub = ('record() { printf executed > ' + str(marker) + '; }; '
+                    'git() { record; }; gh() { record; }; find() { record; }; ')
+            path = Path(root, 'policy.json')
+            for form in self.REV015_FORMS:
+                for body, allowed in (('printf safe', True), ('git push --force origin main', False),
+                                      ('git branch -D task', False),
+                                      ('gh pr merge 468 --repo owner/repo', False),
+                                      ('find . -exec echo unsafe \\;', False)):
+                    command = form.replace('{cmd}', body)
+                    with self.subTest(command=command):
+                        marker.unlink(missing_ok=True)
+                        baseline = subprocess.run(['bash', '--noprofile', '--norc', '-c',
+                            stub + command + '\nwait'], cwd=root, input='1\n', capture_output=True,
+                            text=True, timeout=10, env={**os.environ, 'BASH_ENV': '/dev/null'})
+                        self.assertEqual(0, baseline.returncode, baseline.stderr)
+                        if not allowed:
+                            self.assertEqual('executed', marker.read_text())
+                        for role in ('resolve', 'rereview'):
+                            policy = self.rev014_grant(role, 'claude')
+                            if allowed:
+                                # Exact grants also cover newline-bearing forms.
+                                policy, _ = self.approved(sp.StagePolicy(role), command, cwd=root)
+                            path.write_text(policy.to_json(), encoding='utf-8')
+                            completed = subprocess.run([sys.executable, str(Path(sp.__file__)), 'hook', str(path)],
+                                input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': command}, 'cwd': root}),
+                                capture_output=True, text=True, timeout=10)
+                            self.assertEqual(0, completed.returncode, completed.stderr)
+                            self.assertEqual(allowed, completed.stdout == '', completed.stdout)
+                            if not allowed:
+                                self.assertIn('[layer=toolkit_hook]', completed.stdout)
+
+    def test_rev015_coproc_name_is_not_a_program(self):
+        for command in ('coproc worker ( printf ok ); wait', 'coproc worker { printf ok; }; wait',
+                        'coproc worker [[ -n x ]]; wait'):
+            with self.subTest(command=command):
+                programs = [segment.words[:1] for segment in sp.parse_command(command, None).segments]
+                self.assertNotIn(['worker'], programs)
+        # Unnamed simple coproc: the first word is the program, not a name.
+        self.assertEqual([['printf', 'ok']],
+                         [segment.words for segment in sp.parse_command('coproc printf ok', None).segments])
+
+    @posix_shell
+    def test_rev015_header_words_in_arguments_remain_data(self):
+        for command in ('printf "%s" function f { git push --force origin main; printf done',
+                        'echo coproc git push --force origin main; printf done',
+                        'echo for x { git push --force origin main; printf done',
+                        'echo time coproc git push --force origin main; printf done'):
+            with self.subTest(command=command):
+                policy, _ = self.approved(sp.StagePolicy('resolve'), command)
+                self.assertIsNone(sp.protected_reason('Bash', {'command': command}, policy, None))
+                self.assertTrue(sp.check(command, policy).allowed)
+
     @posix_shell
     def test_rev012_extglob_data_and_negated_subshells_are_distinct(self):
         policy = sp.StagePolicy("resolve")

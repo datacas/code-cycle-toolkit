@@ -470,7 +470,13 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     nested substitution is retained for the concrete-command guards.
     """
     try:
-        return _parse_simple(command, tmpdir)
+        parsed = _parse_simple(command, tmpdir)
+        # These reserved words execute the following command even without an
+        # operator or expansion. They must take the same segment path as their
+        # compound forms, rather than hiding the program from its guards.
+        start = len(command) - len(command.lstrip())
+        if not any(_shell_keyword(command, start, prefix) for prefix in ("coproc", "time", "!")):
+            return parsed
     except PolicyError as error:
         if not isinstance(command, str) or not command.strip() or "\x00" in command:
             raise
@@ -819,6 +825,38 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
     raise PolicyError("unterminated shell expansion")
 
 
+def _peel_command_headers(words: list[str], before_subshell: bool = False) -> list[str]:
+    """The words of a segment once its leading reserved-word headers are gone.
+
+    Peel headers together, repeatedly: e.g. `time coproc`, `function f {`, or
+    `coproc NAME {` (REV-015). Only a leading header changes command position;
+    the same words in printf/echo arguments stay data. `before_subshell` says
+    that a `(` ends the segment, as in `coproc NAME ( … )`.
+    """
+    while words:
+        if words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
+            words = words[1:]
+        elif words[0] == "time":
+            words = words[1:]
+            if words[:1] == ["-p"]:
+                words = words[1:]
+            if words[:1] == ["--"]:
+                words = words[1:]
+        elif words[0] == "function" and len(words) > 1:
+            words = words[2:]
+        elif words[0] in {"for", "select"} and words[2:3] == ["{"]:
+            words = words[3:]
+        elif words[0] == "coproc":
+            # A name is optional only before a compound command. For a simple
+            # command `coproc git push`, git is the executable.
+            named = ((len(words) > 2 and words[2] in {"{", "[[", "if", "while", "until", "for", "select", "case"})
+                     or (before_subshell and len(words) == 2))
+            words = words[2:] if named else words[1:]
+        else:
+            break
+    return words
+
+
 def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[ParsedCommand]:
     if depth > 32 or len(source) > 65536:
         raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
@@ -844,13 +882,10 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         else:
             words.append(value)
 
-    def finish_segment():
+    def finish_segment(before_subshell: bool = False):
         nonlocal words, redirects, segment_start
         finish_word()
-        while words and words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
-            words = words[1:]
-        if words[:1] == ["time"]:
-            words = words[2:] if words[1:2] == ["-p"] else words[1:]
+        words = _peel_command_headers(words, before_subshell)
         if words or redirects:
             result.append(ParsedCommand(words=words, redirects=redirects))
         words, redirects = [], []
@@ -942,9 +977,8 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
                 i += len(spelling)
                 continue
         if (quote is None and char in "@+!*?" and source[i + 1:i + 2] == "("
-                and not (char == "!" and not word and all(
-                    prefix in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}", "time", "-p", "--"}
-                    or _ENV_ASSIGNMENT.match(prefix) for prefix in words))):
+                and not (char == "!" and not word and not _peel_command_headers(
+                    [prefix for prefix in words if not _ENV_ASSIGNMENT.match(prefix)]))):
             # An extglob is one operand, even with spaces or shell-looking
             # alternatives. Substitutions above still get their own guards.
             # At command position `!(...)` may instead be negation followed
@@ -997,7 +1031,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
                 pending += char
                 i += 1
         elif quote is None and char in "|&;\n()":
-            finish_segment()
+            finish_segment(before_subshell=char == "(")
         elif char == "~" and not word and quote is None:
             # Only a bare `~` names $HOME. `~user`, `~+`, `~-` and `~N` keep
             # their prefix so the guards resolve what bash reads (REV-009).
