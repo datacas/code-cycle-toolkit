@@ -773,7 +773,35 @@ class ConsentVariantsTests(unittest.TestCase):
                     "echo $(case \"$(printf a)\" in a) {cmd} ;; esac)",
                     'echo "$(case a in a) true ;; esac)"; {cmd}',
                     "cat <(case a in a) {cmd} ;; esac)",
-                    "echo ${x:-$(case a in a) {cmd} ;; esac)}")
+                    "echo ${x:-$(case a in a) {cmd} ;; esac)}",
+                    'printf \'%s\' "$(f() case a in a) {cmd} ;; esac; f)"',
+                    "echo $(function f case a in a) {cmd} ;; esac; f)",
+                    "echo $(function f() case a in a) {cmd} ;; esac; f)",
+                    'printf "%s" "$(f-x() case a in a) {cmd} ;; esac; f-x)"',
+                    'printf "%s" "$(function f-x case a in a) {cmd} ;; esac; f-x)"',
+                    'printf "%s" "$(function f/x() case a in a) {cmd} ;; esac; f/x)"',
+                    'printf "%s" "$(Ω() case a in a) {cmd} ;; esac; Ω)"',
+                    'printf "%s" "$(+() case a in a) {cmd} ;; esac; +)"',
+                    'printf "%s" "$(function @ case a in a) {cmd} ;; esac; @)"',
+                    'printf "%s" "$(printf pre' + "\\" * 2 + '\ncase a in a) {cmd} ;; esac)"',
+                    'printf "%s" "$(printf pre' + "\\" * 4 + '\ncase a in a) {cmd} ;; esac)"',
+                    'printf "%s" "$(case a in a) if case b in b) {cmd} ;; esac; then true; fi ;; esac)"',
+                    'printf "%s" "$(case a in a) time case b in b) {cmd} ;; esac ;; esac)"',
+                    'printf "%s" "$(case a in a) while case b in b) {cmd} ;; esac; do break; done ;; esac)"',
+                    'printf "%s" "$(case a in a) \\\ncase b in b) {cmd} ;; esac ;; esac)"',
+                    "echo $(coproc case a in a) {cmd} ;; esac; cat <&${COPROC[0]}; wait)",
+                    "echo $(coproc worker case a in a) {cmd} ;; esac; cat <&${worker[0]}; wait)",
+                    "echo $(ca\\\nse a in a) {cmd} ;; esac)",
+                    "echo $(case a i\\\nn a) {cmd} ;; esac)",
+                    "echo $(case a in a) {cmd} ;; es\\\nac)",
+                    "cat <(f() case a in a) {cmd} ;; esac; f)",
+                    "echo $(f\\\n() ca\\\nse a i\\\nn a) {cmd} ;; es\\\nac; f)")
+
+    # Some Bash versions reject these TIMEOPT/TIMEIGN forms. Retain their
+    # conservative parser coverage without claiming a successful Bash baseline.
+    REV014_TIME_FORMS = ("echo $(time -p case a in a) {cmd} ;; esac)",
+                        "echo $(time -- case a in a) {cmd} ;; esac)",
+                        "echo $(time -p -- case a in a) {cmd} ;; esac)")
 
     def rev014_grant(self, role, executor):
         grant = grants.make_pattern_grant(r".+", role, executor, "linux", compound=True,
@@ -786,7 +814,7 @@ class ConsentVariantsTests(unittest.TestCase):
         for executor in ("claude", "codex"):
             for role in ("resolve", "rereview"):
                 current = self.rev014_grant(role, executor)
-                for form in self.REV014_FORMS:
+                for form in (*self.REV014_FORMS, *self.REV014_TIME_FORMS):
                     command = form.replace("{cmd}", "git push --force origin main")
                     with self.subTest(executor=executor, role=role, command=command), \
                             tempfile.TemporaryDirectory() as root:
@@ -806,7 +834,11 @@ class ConsentVariantsTests(unittest.TestCase):
     def test_rev014_case_words_as_arguments_keep_their_boundaries(self):
         policy = sp.StagePolicy("resolve")
         for body in ("echo case a in a", "echo then case a in a", "echo \\; case a in a",
-                     "echo $(true) case a in a", "printf '%s' esac", "case a in a) printf ok ;; esac"):
+                     "echo $(true) case a in a", "echo function f case a in a",
+                     "echo coproc worker case a in a", "echo time -p case a in a",
+                     "echo @() case a in a", "echo +() case a in a", "echo *() case a in a",
+                     "echo ?() case a in a", "echo !() case a in a",
+                     "echo ca\\\nse a in a", "printf '%s' esac", "case a in a) printf ok ;; esac"):
             command = 'printf "%s" "$(' + body + ')"; printf done'
             with self.subTest(command=command):
                 self.assertEqual(["printf", "done"], sp.parse_command(command, None).segments[-1].words)
@@ -814,6 +846,31 @@ class ConsentVariantsTests(unittest.TestCase):
         for command in ("echo $(case a in a", "echo $(case a in a) true ;; esac"):
             with self.subTest(command=command), self.assertRaisesRegex(sp.PolicyError, "unterminated"):
                 sp.parse_command(command, None)
+
+    @posix_shell
+    def test_rev014_safe_cases_get_consent_and_real_hook_retains_guards(self):
+        with tempfile.TemporaryDirectory() as root:
+            for role in ("resolve", "rereview"):
+                for form in self.REV014_FORMS:
+                    command = form.replace("{cmd}", "printf safe")
+                    with self.subTest(role=role, command=command):
+                        policy = sp.StagePolicy(role, tmpdir=root)
+                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertIsNotNone(cp.refused_operation([command], policy,
+                            grants.ConsentBroker("owner/repo", platform="linux"), "claude", root))
+                        approved, _ = self.approved(policy, command, cwd=root)
+                        self.assertTrue(sp.check(command, approved, cwd=root).allowed)
+                path = Path(root, "policy.json")
+                path.write_text(self.rev014_grant(role, "claude").to_json(), encoding="utf-8")
+                for body, allowed in (("printf safe", True), ("git push --force origin main", False)):
+                    command = self.REV014_FORMS[15].replace("{cmd}", body)
+                    completed = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
+                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": root}),
+                        capture_output=True, text=True)
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertEqual(allowed, completed.stdout == "", completed.stdout)
+                    if not allowed:
+                        self.assertIn("[layer=toolkit_hook]", completed.stdout)
 
     @posix_shell
     def test_rev014_bash_fixture_runs_the_command_after_the_pattern(self):

@@ -238,8 +238,15 @@ the segment guards. Inside a command or process substitution, a `case`
 clause recognised at command position is tracked to its `esac`: the `)` that
 ends a pattern, with or without its optional `(`, and the `;;`, `;&` and `;;&`
 terminators never end the substitution, so the commands of each clause are
-separate segments with their own guards (REV-014). A `case` word in argument
-position is data. Unterminated extglobs or nested expansions fail closed
+separate segments with their own guards (REV-014). Function-body headers
+(`f()`, `function f`, `function f()`, including Bash's non-POSIX names such
+as `f-x` and `f/x`), `coproc` with an optional name and
+`time` option prefixes retain command position. Keywords split by
+backslash-newline are recognised without changing the original source offsets
+or quoted data. A `case` word in argument position is data. The regression
+baseline executes supported forms in disposable Bash; conservative parser
+coverage of `time -p case` and `time -- case` does not claim those forms run
+on Bash versions that reject them. Unterminated extglobs or nested expansions fail closed
 instead of accepting a partial analysis. Extglob directory targets are unresolved,
 including targets of `env -C`. A `..` after a glob, inside braces, or a
 brace alternative holding `/` or `~` may lead to any directory. Glob

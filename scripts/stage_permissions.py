@@ -552,25 +552,57 @@ def _splice_dollar(source: str, start: int) -> str:
 
 
 #: Reserved words after which the next word is again in command position.
-_COMMAND_PREFIX_WORD = re.compile(r"(?<![^ \t\n;&|()])(?:then|do|else|elif|if|while|until|time|!|\{)$")
+#: Bash permits non-POSIX function names: any unquoted shell word without $.
+_FUNCTION_NAME = r"[^ \t\n;&|()<>$'\"\\]+"
+_COMMAND_PREFIX_WORD = re.compile(
+    r"(?<![^ \t\n;&|()])(?:then|do|else|elif|if|while|until|!|\{|"
+    r"time(?:[ \t]+-p)?(?:[ \t]+--)?|coproc(?:[ \t]+" + _FUNCTION_NAME + r")?|"
+    r"function[ \t]+" + _FUNCTION_NAME + r")$")
+_FUNCTION_HEADER = re.compile(r"(?<![^ \t\n;&|()])(?:function[ \t]+)?" + _FUNCTION_NAME + r"[ \t]*\([ \t]*\)$")
 
 
-def _shell_keyword(source: str, i: int, word: str) -> bool:
-    """Whether `word` is a whole unquoted word at `i`."""
-    end = i + len(word)
-    return source.startswith(word, i) and (end == len(source) or source[end] in " \t\n;&|()<>")
+def _shell_keyword(source: str, i: int, word: str) -> int:
+    """Width of an unquoted keyword, including Bash line continuations.
+
+    Keep offsets into the original source: globally removing continuations
+    would also change quoted data and the substitution slices we reanalyse.
+    """
+    end = i
+    for letter in word:
+        while source.startswith("\\\n", end):
+            end += 2
+        if source[end:end + 1] != letter:
+            return 0
+        end += 1
+    while source.startswith("\\\n", end):
+        end += 2
+    return end - i if end == len(source) or source[end] in " \t\n;&|()<>" else 0
 
 
 def _command_position(source: str, start: int, i: int, pattern_close: int) -> bool:
     """Whether a word at `i` is where bash recognises a reserved word.
 
     `start` is the first character of the command list and `pattern_close`
-    the `)` that last ended a `case` pattern. Any other `)` ends a nested
-    expansion or group, after which a word is an argument.
+    the `)` that last ended a `case` pattern. A function header's `)` also
+    starts a compound body; a substitution's `)` leaves an argument position.
     """
-    end = i
+    # Preserve original offsets while removing continuations. Escaped
+    # backslashes are pairs, so an even run leaves a real newline separator.
+    # The mapping also retains a pattern ')' after stripping `if`, `time`,
+    # etc. from the suffix, including when continuations follow that ')'.
+    characters: list[str] = []
+    offsets: list[int] = []
+    position = start
+    while position < i:
+        if source.startswith("\\\n", position):
+            position += 2
+            continue
+        width = 2 if source[position] == "\\" and position + 1 < i else 1
+        characters.extend(source[position:position + width])
+        offsets.extend(range(position, position + width))
+        position += width
+    before = "".join(characters).rstrip(" \t")
     while True:
-        before = source[start:end].rstrip(" \t")
         if not before:
             return True
         last, rest = before[-1], before[:-1]
@@ -579,13 +611,21 @@ def _command_position(source: str, start: int, i: int, pattern_close: int) -> bo
         if last in ";&|\n":
             return True
         if last == ")":
-            return start + len(before) - 1 == pattern_close
+            if offsets[len(before) - 1] == pattern_close:
+                return True
+            header = _FUNCTION_HEADER.search(before)
+            if header is None:
+                return False
+            # `echo @()` is an extglob argument, not a function declaration.
+            # The header must itself start where a command can start.
+            before = before[:header.start()].rstrip(" \t")
+            continue
         if last == "(":
             return not rest or rest[-1] not in "@+*?$<>"
         keyword = _COMMAND_PREFIX_WORD.search(before)
         if keyword is None:
             return False
-        end = start + keyword.start()
+        before = before[:keyword.start()].rstrip(" \t")
 
 
 def _shell_expansion_end(source: str, start: int, depth: int, substitutions: list[str]) -> int:
@@ -625,10 +665,10 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
                 and char not in " \t\n#":
             # The first character of a pattern: `esac` ends the clause list
             # and an opening `(` is optional syntax, not a nested group.
-            if _shell_keyword(source, i, "esac"):
+            if keyword_width := _shell_keyword(source, i, "esac"):
                 cases.pop()
                 word_active = True
-                i += 4
+                i += keyword_width
                 continue
             cases[-1][2] = True
             if char == "(":
@@ -713,22 +753,23 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
                         clause[0], clause[2], word_active = "pattern", False, False
                         i += terminator.end()
                         continue
-                    if not word_active and clause[0] == "head" and _shell_keyword(source, i, "in"):
+                    if (not word_active and clause[0] == "head"
+                            and (keyword_width := _shell_keyword(source, i, "in"))):
                         clause[0], clause[2], word_active = "pattern", False, True
-                        i += 2
+                        i += keyword_width
                         continue
-                    if (not word_active and clause[0] == "body" and _shell_keyword(source, i, "esac")
+                    if (not word_active and clause[0] == "body" and (keyword_width := _shell_keyword(source, i, "esac"))
                             and _command_position(source, marker + 1, i, pattern_close)):
                         cases.pop()
                         word_active = True
-                        i += 4
+                        i += keyword_width
                         continue
-                if (shell and not word_active and _shell_keyword(source, i, "case")
+                if (shell and not word_active and (keyword_width := _shell_keyword(source, i, "case"))
                         and not (cases and cases[-1][0] != "body")
                         and _command_position(source, marker + 1, i, pattern_close)):
                     cases.append(["head", nesting, False])
                     word_active = True
-                    i += 4
+                    i += keyword_width
                     continue
                 # A parameter expansion ends at the first unquoted }, except
                 # inside another expansion. A literal { does not nest it.
