@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,29 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import fast_path  # noqa: E402
+
+
+@contextlib.contextmanager
+def tracked_snapshot():
+    """A copy of the files Git tracks, so a scan sees what CI sees.
+
+    The privacy scan walks every file under its root. A developer's working tree
+    also holds untracked notes and ignored worktrees that CI never has, and they
+    must not decide whether the scan itself works. Without Git (an unpacked
+    archive) the root itself is the snapshot.
+    """
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=False)
+    if listed.returncode != 0:
+        yield ROOT
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        for name in listed.stdout.decode("utf-8").split("\0"):
+            source = ROOT / name
+            if name and source.is_file():
+                target = Path(directory) / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        yield Path(directory)
 
 
 def git(directory: Path, *arguments: str) -> str:
@@ -430,13 +455,14 @@ class ReportTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def run_script(self, *arguments: str, **environment: str) -> subprocess.CompletedProcess:
+    def run_script(self, *arguments: str, root: Path = ROOT,
+                   **environment: str) -> subprocess.CompletedProcess:
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("GITHUB_", "FAST_PATH_"))}
         env.update(environment)
         return subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "fast_path.py"), *arguments],
-            capture_output=True, text=True, env=env, cwd=ROOT,
+            [sys.executable, str(root / "scripts" / "fast_path.py"), *arguments],
+            capture_output=True, text=True, env=env, cwd=root,
         )
 
     def test_classify_fails_closed_and_still_exits_successfully(self) -> None:
@@ -459,11 +485,11 @@ class CommandTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
 
     def test_run_fast_runs_the_scan_and_the_mapped_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, tracked_snapshot() as snapshot:
             summary = Path(directory) / "summary.md"
 
             result = self.run_script(
-                "run-fast", "--job", "validate", "--scan",
+                "run-fast", "--job", "validate", "--scan", root=snapshot,
                 FAST_PATH_TESTS="test_spike_fixture_runner", GITHUB_STEP_SUMMARY=str(summary),
             )
 
@@ -524,7 +550,8 @@ class ScanOnlyTests(unittest.TestCase):
             any("possible private data in docs/guide.md" in error for error in normalized_errors)
         )
         self.assertTrue(any("metadata sidecar" in error for error in normalized_errors))
-        self.assertEqual([], module.scan_for_private_data(ROOT))
+        with tracked_snapshot() as snapshot:
+            self.assertEqual([], module.scan_for_private_data(snapshot))
 
 
 if __name__ == "__main__":
