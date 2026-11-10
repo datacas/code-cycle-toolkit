@@ -775,8 +775,9 @@ def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
         try:
             op = operation("Bash", {"command": command}, policy, cwd)
         except (ValueError, OSError, TypeError) as error:
-            context.append(f"Declared Compose check `{command}` could not be identified ({error}). "
-                           "Do not run it; record it unverified with that cause.")
+            context.append(f"Declared Compose check `{command}` could not be identified by the "
+                           f"runtime ({error}), so no consent was asked and none is recorded. "
+                           "Run it as declared if the project needs it and report what happened.")
             try:
                 check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
             except ValueError:
@@ -852,18 +853,11 @@ def stored_check_denials(policy: Any, executor: str, platform: str, cwd: str | N
     for command in dict.fromkeys(policy.verification_commands):
         try:
             op = operation("Bash", {"command": command}, policy, cwd)
-        except (ValueError, OSError, TypeError) as error:
-            # Its identity, and so any stored denial of it, cannot be read now;
-            # the hook refuses such a run too. It stays unverified, never passed.
-            try:
-                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
-            except ValueError:
-                check_id = None
-            if check_id and check_id not in seen:
-                outcomes.append({"grant": None, "command": command, "answer": "unidentified",
-                                 "essential": False, "checks": [], "check": check_id,
-                                 "error": str(error), "source": "identity unavailable"})
-                seen.add(check_id)
+        except (ValueError, OSError, TypeError):
+            # Its identity cannot be read now, so no stored denial can be matched
+            # to it: that is the toolkit's limit, not a person's decision, and
+            # it never declines the check (#450). If the agent ran it, its own
+            # evidence counts; if not, the plan leaves it unverified.
             continue
         if not op.get("check") or op["check"] in seen:
             continue

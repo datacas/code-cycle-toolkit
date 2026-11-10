@@ -254,6 +254,15 @@ number that is not an integer, a boolean, an entry that is neither an object nor
 a string) is rejected with the field, the received type and the expected shape.
 `evidence` is not normalized this way.
 
+A report that names a frozen check (`configured-test`, `verify:<command>`) and
+leaves out part of its identity (`command`, `executor`, `profile`, `context`,
+`required`, `level`, `criteria`) is the same check: the runtime takes the missing
+fields from the frozen one. A field the report does give still has to match.
+A tests block the runtime cannot read at all never ends the cycle `BLOCKED`:
+the stage's report is accepted, a note and a warning name the field, its checks
+stay `not_verified`, and the verification barrier asks about them at the end like
+any other unverified check.
+
 Freeze each check before execution. A result names the same check ID, command,
 executor/profile and context. The runtime supplies frozen check identities to
 later code stages. Copy that identity, including its owning executor/profile,
@@ -555,7 +564,10 @@ that obeys the denial and never tries the check again. The cycle ends
 the pending check; any other final state names it too. To authorize it, revoke
 the denial with `consent_control.py revoke --repo owner/repo --executor
 claude|codex --grant-id command_<sha256>`, resume, and allow it when asked, or
-pass `--grant command_<sha256>=persistent`. A stage that reports `BLOCKED` over
+pass `--grant command_<sha256>=persistent`. A configured check whose
+identity the runtime cannot read (`unidentified`) was declined by nobody: it is
+not recorded as declined, carries no grant to answer, and the agent's own
+evidence, or the plan's `unverified`, decides it. A stage that reports `BLOCKED` over
 the declined check without a structured completion claim stays `BLOCKED`: the
 runtime never invents a verdict, and the stop names the check. A denial that
 would break repository integrity, publication, credentials or security

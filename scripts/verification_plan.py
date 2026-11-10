@@ -197,6 +197,25 @@ def identity_conflict(frozen: Check, proposed: Check) -> tuple[str, ...]:
                  if not same(field, getattr(frozen, field), getattr(proposed, field)))
 
 
+def _with_frozen_identity(entry: Mapping[str, Any], plan: VerificationPlan) -> Mapping[str, Any]:
+    """A reported check with what it leaves out taken from the frozen check of its ID.
+
+    A report that names a check the runtime already froze (`configured-test`,
+    `verify:<command>`) and only says how it ended is the same check, not a
+    malformed one (#450). Fields the report does give are kept as given, so a
+    real identity change is still caught by `extend`.
+    """
+    frozen = next((check for check in plan.checks if check.id == entry.get("id")), None)
+    if frozen is None:
+        return entry
+    defaults = {"command": frozen.command, "executor": frozen.executor,
+                "profile": frozen.profile, "context": frozen.context,
+                "required": frozen.required, "level": frozen.level,
+                "criteria": list(frozen.criteria), "provenance": frozen.provenance,
+                "reason": frozen.reason}
+    return {**{key: value for key, value in defaults.items() if key not in entry}, **entry}
+
+
 def safe_value(field: str, value: Any) -> str:
     """A diagnostic form that never reveals a command, path or free text.
 
@@ -522,7 +541,7 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         if not isinstance(entry, dict):
             raise _invalid_field(f"checks[{index}]", entry, "a check object")
         try:
-            check = Check.from_dict(entry)
+            check = Check.from_dict(_with_frozen_identity(entry, plan))
         except (VerificationError, KeyError, TypeError, ValueError) as error:
             detail = str(error) or type(error).__name__
             raise VerificationError(f"checks[{index}] {detail}") from error
