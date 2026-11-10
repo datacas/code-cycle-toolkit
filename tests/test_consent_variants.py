@@ -1398,8 +1398,11 @@ class ConsentVariantsTests(unittest.TestCase):
         return value
 
     def test_ac13_session_tool_results_directory_comes_only_from_the_host_event(self):
-        transcript = "/srv/agent/.claude/projects/-tmp-x/abc-1.jsonl"
-        self.assertEqual(str(Path("/srv/agent/.claude/projects/-tmp-x/abc-1/tool-results")),
+        # A rooted path without a drive letter is not absolute on Windows, so
+        # build the project directory from the platform's own root.
+        project = Path(os.path.abspath(os.sep), "srv", "agent", ".claude", "projects", "-tmp-x")
+        transcript = str(project / "abc-1.jsonl")
+        self.assertEqual(str(project / "abc-1" / "tool-results"),
                          sp.session_tool_results({"session_id": "abc-1", "transcript_path": transcript}))
         for event in ({"session_id": "other", "transcript_path": transcript},
                       {"session_id": "abc-1", "transcript_path": "projects/abc-1.jsonl"},
