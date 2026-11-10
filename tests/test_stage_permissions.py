@@ -72,23 +72,22 @@ class ParserTests(PolicyTestCase):
         parsed = sp.parse_command("""git log --format='%H %s' "a b" c\\ d""", None)
         self.assertEqual(["git", "log", "--format=%H %s", "a b", "c d"], parsed.words)
 
-    def test_chaining_pipes_substitutions_and_other_expansions_are_refused(self) -> None:
+    def test_shell_forms_are_analysed_for_consent_and_malformed_input_is_rejected(self) -> None:
         for command in ("git status && git push", "git status; ls", "git log | head",
                         "git status & ls", "echo $(id)", "echo `id`", 'echo "$(id)"',
                         "cat $HOME/.ssh/id_rsa", "cat ${HOME}", "cat $TMPDIRX", "ls *",
                         "ls ~/", "cat < /etc/passwd", "(git status)", "git status\nls",
-                        "git status\rls", "git status #comment", "", "   ", "'unterminated",
-                        '"unterminated', "trailing\\", "ls >", "ls > > a", "ls 3>&1",
-                        "ls 1>&2"):
+                        "git status\rls", "git status #comment", "ls 3>&1", "ls 1>&2"):
             with self.subTest(command=command):
-                with self.assertRaises(sp.PolicyError):
-                    sp.parse_command(command, str(self.tmpdir))
+                self.assertEqual(command, sp.parse_command(command, str(self.tmpdir)).shell_source)
+        for command in ("", "   ", "'unterminated", '"unterminated', "trailing\\", "ls >", "ls > > a"):
+            with self.subTest(command=command), self.assertRaises(sp.PolicyError):
+                sp.parse_command(command, str(self.tmpdir))
 
     def test_only_tmpdir_expands_and_only_when_the_runtime_set_it(self) -> None:
         parsed = sp.parse_command('cat "$TMPDIR/a" ${TMPDIR}/b', str(self.tmpdir))
         self.assertEqual(["cat", f"{self.tmpdir}/a", f"{self.tmpdir}/b"], parsed.words)
-        with self.assertRaises(sp.PolicyError):
-            sp.parse_command("cat $TMPDIR/a", None)
+        self.assertEqual("cat $TMPDIR/a", sp.parse_command("cat $TMPDIR/a", None).shell_source)
 
     def test_redirections_are_recorded_for_validation(self) -> None:
         parsed = sp.parse_command("python3 -m unittest > $TMPDIR/t.log 2>&1", str(self.tmpdir))

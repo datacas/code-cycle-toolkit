@@ -2,7 +2,7 @@
   "groups": {
     "command-consent-documentation": {
       "paths": ["docs/host-permissions.md", "docs/configuration.md"],
-      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits"]
+      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract"]
     },
     "orca-plan-documentation": {
       "paths": ["docs/orca-execution-plan.md"],
@@ -39,7 +39,7 @@
     },
     "capability-parity-documentation": {
       "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md", "docs/ROADMAP_V2.md"],
-      "tests": ["test_capability_parity_audit"]
+      "tests": ["test_capability_parity_audit", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract"]
     },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],

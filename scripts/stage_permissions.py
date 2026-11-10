@@ -12,11 +12,10 @@ replaces that, for Claude on a GitHub cycle, with two barriers:
   prevail over another hook's `allow`, so a permissive global rule or the RTK
   rewrite hook cannot reopen what this one closes.
 
-The parser is fail-closed. It accepts one simple command: words, single and
-double quotes, `$TMPDIR` and one output redirection into the dispatch's own
-temporary directory. Chaining, pipes, substitutions, other expansions, globs and
-anything it cannot read are refused. Allowing a command it does not understand
-would make the table a suggestion.
+Literal commands use the default table. Shell syntax is analysed without
+evaluation and requests whole-operation interpreter consent. Concrete segment
+guards remain in force; pattern grants lift only table membership. Opaque
+interpreter internals always depend on external isolation.
 
 Codex gets no table: in Codex 0.163.0 permission profiles do not filter
 commands and execpolicy rules load only from configuration layers. Its stages
@@ -33,6 +32,8 @@ directory outside the agent's workspace and temporary directory.
 from __future__ import annotations
 
 import hashlib
+import fnmatch
+import itertools
 import json
 import os
 import re
@@ -208,6 +209,9 @@ class StagePolicy:
     command_permissions: tuple[dict[str, Any], ...] = ()
     #: Exact read-only evidence files supplied by the runtime, outside the checkout.
     evidence_paths: tuple[str, ...] = ()
+    #: The current Claude session's own tool-results directory (#439 AC-13).
+    #: The hook sets it from the event Claude Code sends; the runtime never does.
+    tool_results: str | None = None
 
     @property
     def triage_validator_path(self) -> str:
@@ -318,6 +322,8 @@ class ParsedCommand:
     words: list[str] = field(default_factory=list)
     #: `(fd, operator, target)`; `target` is None for `2>&1`.
     redirects: list[tuple[str, str, str | None]] = field(default_factory=list)
+    shell_source: str | None = None
+    segments: list["ParsedCommand"] = field(default_factory=list)
 
 
 def _number(reference: str | None, markers: tuple[str, ...]) -> str | None:
@@ -340,7 +346,7 @@ _OPERATORS = set(";&|<>()`")
 _GLOB = set("*?[]{}")
 
 
-def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
+def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
     """Split one simple shell command into literal words, or refuse it.
 
     Only `$TMPDIR` and `${TMPDIR}` expand, to the dispatch's directory; every
@@ -459,6 +465,630 @@ def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
     return parsed
 
 
+def parse_command(command: str, tmpdir: str | None) -> ParsedCommand:
+    """Literal commands use the table; shell syntax uses explicit consent.
+
+    Shell text stays exact, including quotes and delimiters. Analysis never
+    evaluates an expansion or executes a command. Each visible segment and
+    nested substitution is retained for the concrete-command guards.
+    """
+    try:
+        parsed = _parse_simple(command, tmpdir)
+        # These reserved words execute the following command even without an
+        # operator or expansion. They must take the same segment path as their
+        # compound forms, rather than hiding the program from its guards.
+        start = len(command) - len(command.lstrip())
+        if not any(_shell_keyword(command, start, prefix) for prefix in ("coproc", "time", "!")):
+            return parsed
+    except PolicyError as error:
+        if not isinstance(command, str) or not command.strip() or "\x00" in command:
+            raise
+        if str(error) in {"unterminated quote", "trailing backslash", "a redirection needs a target", "no command"}:
+            raise
+    segments = _shell_segments(command, tmpdir)
+    return ParsedCommand(shell_source=command, segments=segments)
+
+
+#: ANSI-C escapes with a fixed meaning, as bash decodes them in `$'…'`.
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                   "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    """The text of a `$'…'` body, decoded exactly as bash decodes it.
+
+    Octal takes 1-3 digits, `\\x` 1-2, `\\u` 1-4 and `\\U` 1-8 hex digits;
+    `\\cX` is a control character; an unknown escape keeps its backslash; the
+    result ends at the first NUL, as the C string bash builds does.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        if body[i] != "\\" or i + 1 == len(body):
+            out.append(body[i])
+            i += 1
+            continue
+        code = body[i + 1]
+        digits = None
+        if code in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[code])
+            i += 2
+        elif code in "01234567":
+            digits = re.match(r"[0-7]{1,3}", body[i + 1:])
+            assert digits is not None
+            out.append(chr(int(digits[0], 8) & 0xFF))
+            i += 1 + len(digits[0])
+        elif code in "xuU" and (digits := re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}[code],
+                                                    body[i + 2:])):
+            out.append(chr(min(int(digits[0], 16), 0x10FFFF)))
+            i += 2 + len(digits[0])
+        elif code == "c" and i + 2 < len(body):
+            control = body[i + 2]
+            # `\c\\` names control-backslash and consumes both backslashes.
+            width = 4 if control == "\\" and body[i + 3:i + 4] == "\\" else 3
+            out.append("\x7f" if control == "?" else chr(ord(control.upper()) & 0x1F))
+            i += width
+        else:
+            out.append("\\" + code)
+            i += 2
+    return "".join(out).split("\0", 1)[0]
+
+
+def _splice_dollar(source: str, start: int) -> str:
+    """Remove line continuations inside the `$` expansion at `start`.
+
+    Bash removes backslash-newline before it reads `$'`, `$"`, `$(`, `${…}`
+    or a name, so a continuation cannot split them from their `$`.
+    """
+    position = start + 1
+    braced = False
+    while position < len(source):
+        if source.startswith("\\\n", position):
+            source = source[:position] + source[position + 2:]
+            continue
+        char = source[position]
+        if position == start + 1 and char in "'\"(":
+            break
+        if position == start + 1 and char == "{":
+            braced = True
+        elif braced:
+            if char == "}":
+                break
+        elif not (char.isalnum() or char == "_"):
+            break
+        position += 1
+    return source
+
+
+#: Reserved words after which the next word is again in command position.
+#: Bash permits non-POSIX function names: any unquoted shell word without $.
+_FUNCTION_NAME = r"[^ \t\n;&|()<>$'\"\\]+"
+_COMMAND_PREFIX_WORD = re.compile(
+    r"(?<![^ \t\n;&|()])(?:then|do|else|elif|if|while|until|!|\{|"
+    r"time(?:[ \t]+-p)?(?:[ \t]+--)?|coproc(?:[ \t]+" + _FUNCTION_NAME + r")?|"
+    r"function[ \t]+" + _FUNCTION_NAME + r")$")
+_FUNCTION_HEADER = re.compile(r"(?<![^ \t\n;&|()])(?:function[ \t]+)?" + _FUNCTION_NAME + r"[ \t]*\([ \t]*\)$")
+# Bash permits `do` (or an arithmetic for's `{`) immediately after a loop
+# header, without a separator. Only use this after finding that body opener.
+_LOOP_BODY_HEADER = re.compile(
+    r"(?<![^ \t\n;&|()])(?:for|select)[ \t]+[A-Za-z_][A-Za-z0-9_]*$")
+_ARITHMETIC_FOR_HEADER = re.compile(r"(?<![^ \t\n;&|()])for[ \t]*\(\(")
+
+
+def _loop_body_header(source: str, depth: int) -> int | None:
+    """Start of a loop header ending here, without consuming earlier data."""
+    if header := _LOOP_BODY_HEADER.search(source):
+        return header.start()
+    if not source.endswith("))"):
+        return None
+    for header in reversed(list(_ARITHMETIC_FOR_HEADER.finditer(source))):
+        # Reuse arithmetic expansion's quote/nesting rules, without evaluation.
+        # A regex alone can span an earlier extglob or another loop header.
+        arithmetic = "$" + source[header.end() - 2:]
+        try:
+            end = _shell_expansion_end(arithmetic, 0, depth + 1, [])
+        except PolicyError as error:
+            if str(error) != "unterminated shell expansion":
+                raise  # preserve the existing analysis resource limits
+            continue  # a header-looking word inside quoted data
+        if end == len(arithmetic) - 1:
+            return header.start()
+    return None
+
+
+def _shell_keyword(source: str, i: int, word: str) -> int:
+    """Width of an unquoted keyword, including Bash line continuations.
+
+    Keep offsets into the original source: globally removing continuations
+    would also change quoted data and the substitution slices we reanalyse.
+    """
+    end = i
+    for letter in word:
+        while source.startswith("\\\n", end):
+            end += 2
+        if source[end:end + 1] != letter:
+            return 0
+        end += 1
+    while source.startswith("\\\n", end):
+        end += 2
+    return end - i if end == len(source) or source[end] in " \t\n;&|()<>" else 0
+
+
+def _command_position(source: str, start: int, i: int, pattern_close: int, depth: int = 0) -> bool:
+    """Whether a word at `i` is where bash recognises a reserved word.
+
+    `start` is the first character of the command list and `pattern_close`
+    the `)` that last ended a `case` pattern. Function and loop headers also
+    start compound bodies; a substitution's `)` leaves an argument position.
+    """
+    # Preserve original offsets while removing continuations. Escaped
+    # backslashes are pairs, so an even run leaves a real newline separator.
+    # The mapping also retains a pattern ')' after stripping `if`, `time`,
+    # etc. from the suffix, including when continuations follow that ')'.
+    characters: list[str] = []
+    offsets: list[int] = []
+    position = start
+    while position < i:
+        if source.startswith("\\\n", position):
+            position += 2
+            continue
+        width = 2 if source[position] == "\\" and position + 1 < i else 1
+        characters.extend(source[position:position + width])
+        offsets.extend(range(position, position + width))
+        position += width
+    before = "".join(characters).rstrip(" \t")
+    while True:
+        if not before:
+            return True
+        last, rest = before[-1], before[:-1]
+        if (len(rest) - len(rest.rstrip("\\"))) % 2:
+            return False  # an escaped separator or a line continuation
+        if last in ";&|\n":
+            return True
+        if last == ")":
+            if offsets[len(before) - 1] == pattern_close:
+                return True
+            header = _FUNCTION_HEADER.search(before)
+            if header is None:
+                return False
+            # `echo @()` is an extglob argument, not a function declaration.
+            # The header must itself start where a command can start.
+            before = before[:header.start()].rstrip(" \t")
+            continue
+        if last == "(":
+            return not rest or rest[-1] not in "@+*?$<>"
+        keyword = _COMMAND_PREFIX_WORD.search(before)
+        if keyword is None:
+            return False
+        before = before[:keyword.start()].rstrip(" \t")
+        if keyword.group() in {"do", "{"}:
+            header = _loop_body_header(before, depth)
+            if header is not None:
+                # Check the header's own command position on the next pass:
+                # `echo for x do case` still contains only argument words.
+                before = before[:header].rstrip(" \t")
+
+
+def _shell_expansion_end(source: str, start: int, depth: int, substitutions: list[str]) -> int:
+    """Find a nested expansion's delimiter without counting its parentheses
+    against an enclosing extglob (REV-013). Never evaluate the expansion.
+    """
+    if depth > 32:
+        raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
+    def marker_at(position: int) -> int:
+        marker = position + 1
+        if source[position] == "$":
+            while source.startswith("\\\n", marker):
+                marker += 2
+        return marker
+
+    marker = marker_at(start)
+    opening = source[marker]
+    closing = {"{": "}", "[": "]", "(": ")"}[opening]
+    nesting, i = 1, marker + 1
+    quote: str | None = None
+    shell = opening == "(" and not (source[start] == "$" and source[marker + 1:marker + 2] == "(")
+    heredocs: list[tuple[str, bool]] = []
+    word_active = False
+    # Open `case` clauses (REV-014): [state, nesting, pattern_started], where
+    # state is "head" (before `in`), "pattern" or "body". A pattern list ends
+    # with an unmatched `)` that does not close the substitution.
+    cases: list[list[Any]] = []
+    pattern_close = -1
+    while i < len(source):
+        char = source[i]
+        if char == "\\" and quote != "'":
+            if source[i + 1:i + 2] != "\n":
+                word_active = True
+            i += 2
+            continue
+        if shell and quote is None and cases and cases[-1][0] == "pattern" and not cases[-1][2] \
+                and char not in " \t\n#":
+            # The first character of a pattern: `esac` ends the clause list
+            # and an opening `(` is optional syntax, not a nested group.
+            if keyword_width := _shell_keyword(source, i, "esac"):
+                cases.pop()
+                word_active = True
+                i += keyword_width
+                continue
+            cases[-1][2] = True
+            if char == "(":
+                i += 1
+                continue
+        nested_marker = marker_at(i) if char in "$<>" else i
+        if quote is None and char == "$" and source[nested_marker:nested_marker + 1] == "'":
+            # ANSI-C quotes permit escaped single quotes. Treat the whole
+            # string as data, including braces and expansion-looking text.
+            i = nested_marker + 1
+            word_active = True
+            while i < len(source) and source[i] != "'":
+                i += 2 if source[i] == "\\" else 1
+            if i >= len(source):
+                break
+            i += 1
+            continue
+        if char in "\"'" and (quote is None or quote == char):
+            word_active = True
+            quote = None if quote == char else char
+            i += 1
+            continue
+        if quote != "'":
+            if (char == "$" and source[nested_marker:nested_marker + 1] in {"{", "[", "("}
+                    or char in "<>" and source[nested_marker:nested_marker + 1] == "("):
+                nested: list[str] = []
+                word_active = True
+                end = _shell_expansion_end(source, i, depth + 1, nested)
+                if (source[nested_marker] == "("
+                        and not (char == "$" and source[nested_marker + 1:nested_marker + 2] == "(")):
+                    # Keep the original quoting. Heredoc-style quote escaping
+                    # changes which ')' ends a command substitution.
+                    substitutions.append(source[nested_marker + 1:end])
+                else:
+                    substitutions.extend(nested)
+                i = end + 1
+                continue
+            if char == "`":
+                word_active = True
+                body_start = i + 1
+                i += 1
+                while i < len(source) and source[i] != "`":
+                    i += 2 if source[i] == "\\" else 1
+                if i >= len(source):
+                    break
+                substitutions.append(source[body_start:i])
+                i += 1
+                continue
+            if quote is None:
+                if shell and char == "#" and not word_active:
+                    newline = source.find("\n", i)
+                    if newline < 0:
+                        break
+                    i = newline
+                    continue
+                if shell and source.startswith("<<", i) and not source.startswith("<<<", i):
+                    match = re.match(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", source[i:])
+                    if match:
+                        heredocs.append((match[3], bool(match[1])))
+                        word_active = True
+                        i += match.end()
+                        continue
+                if shell and char == "\n" and heredocs:
+                    i += 1
+                    for delimiter, strip_tabs in heredocs:
+                        closing_line = re.search(r"(?m)^" + (r"\t*" if strip_tabs else "")
+                                                 + re.escape(delimiter) + r"(?:\n|$)", source[i:])
+                        if closing_line is None:
+                            raise PolicyError("unterminated shell heredoc")
+                        i += closing_line.end()
+                    heredocs.clear()
+                    word_active = False
+                    continue
+                if shell and cases and cases[-1][1] == nesting:
+                    clause = cases[-1]
+                    if clause[0] == "pattern" and char == ")":
+                        clause[0], word_active, pattern_close = "body", False, i
+                        i += 1
+                        continue
+                    terminator = re.match(r";;&|;;|;&", source[i:]) if clause[0] == "body" else None
+                    if terminator:
+                        clause[0], clause[2], word_active = "pattern", False, False
+                        i += terminator.end()
+                        continue
+                    if (not word_active and clause[0] == "head"
+                            and (keyword_width := _shell_keyword(source, i, "in"))):
+                        clause[0], clause[2], word_active = "pattern", False, True
+                        i += keyword_width
+                        continue
+                    if (not word_active and clause[0] == "body" and (keyword_width := _shell_keyword(source, i, "esac"))
+                            and _command_position(source, marker + 1, i, pattern_close, depth)):
+                        cases.pop()
+                        word_active = True
+                        i += keyword_width
+                        continue
+                if (shell and not word_active and (keyword_width := _shell_keyword(source, i, "case"))
+                        and not (cases and cases[-1][0] != "body")
+                        and _command_position(source, marker + 1, i, pattern_close, depth)):
+                    cases.append(["head", nesting, False])
+                    word_active = True
+                    i += keyword_width
+                    continue
+                # A parameter expansion ends at the first unquoted }, except
+                # inside another expansion. A literal { does not nest it.
+                if char == opening and opening != "{":
+                    nesting += 1
+                elif char == closing:
+                    nesting -= 1
+                    if nesting == 0:
+                        if opening == "{" and source[marker + 1:marker + 2] in {" ", "\t", "\n", "|"}:
+                            substitutions[:] = [source[marker + 1:i].lstrip("|")]
+                        return i
+                if shell:
+                    word_active = char not in " \t\n;|&()<>"
+        i += 1
+    raise PolicyError("unterminated shell expansion")
+
+
+def _peel_command_headers(words: list[str], before_subshell: bool = False,
+                          quoted: list[bool] | None = None) -> list[str]:
+    """The words of a segment once its leading reserved-word headers are gone.
+
+    Peel headers together, repeatedly: e.g. `time coproc`, `function f {`, or
+    `coproc NAME {` (REV-015). Only a leading header changes command position;
+    the same words in printf/echo arguments stay data. `before_subshell` says
+    that a `(` ends the segment, as in `coproc NAME ( … )`. `quoted[i]` says
+    that `words[i]` had quoting: Bash recognises reserved words only when
+    unquoted, so `coproc find "if" src` is the simple command `find` (REV-016).
+    Peeling a quoted *leading* word stays conservative, because it only
+    exposes more words to the guards.
+    """
+    flags = list(quoted) if quoted is not None and len(quoted) == len(words) else [False] * len(words)
+    while words:
+        before = len(words)
+        words = _peel_one_header(words, before_subshell, flags)
+        if len(words) == before:
+            break
+        flags = flags[before - len(words):]
+    return words
+
+
+def _peel_one_header(words: list[str], before_subshell: bool, quoted: list[bool]) -> list[str]:
+    if words:
+        if words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
+            return words[1:]
+        if words[0] == "time":
+            words = words[1:]
+            if words[:1] == ["-p"]:
+                words = words[1:]
+            if words[:1] == ["--"]:
+                words = words[1:]
+            return words
+        if words[0] == "function" and len(words) > 1:
+            return words[2:]
+        if words[0] in {"for", "select"} and words[2:3] == ["{"]:
+            return words[3:]
+        if words[0] == "coproc":
+            # A name is optional only before a compound command. For a simple
+            # command `coproc git push`, git is the executable, and so is find
+            # in `coproc find "if" src` because a quoted word is never reserved.
+            named = ((len(words) > 2 and not quoted[2]
+                      and words[2] in {"{", "[[", "if", "while", "until", "for", "select", "case"})
+                     or (before_subshell and len(words) == 2))
+            return words[2:] if named else words[1:]
+    return words
+
+
+def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[ParsedCommand]:
+    if depth > 32 or len(source) > 65536:
+        raise PolicyError("shell analysis resource limit; use a script with interpreter consent")
+    result: list[ParsedCommand] = []
+    word: list[str] = []
+    words: list[str] = []
+    # Whether each word of `words` had quoting (REV-016). Bash decides
+    # reserved words and comments before quote removal, so `"if"` is not `if`,
+    # `""` is an empty argument and `""#` is not a comment.
+    quoted_words: list[bool] = []
+    word_quoted = False
+    redirects: list[tuple[str, str, str | None]] = []
+    pending: str | None = None
+    quote: str | None = None
+    extglob_depth = 0
+    i = 0
+    segment_start = 0
+
+    def finish_word():
+        nonlocal word, pending, word_quoted
+        if not word and not word_quoted:
+            return
+        value = "".join(word)
+        was_quoted = word_quoted
+        word, word_quoted = [], False
+        if pending:
+            redirects.append(("1", pending, value))
+            pending = None
+        else:
+            words.append(value)
+            quoted_words.append(was_quoted)
+
+    def finish_segment(before_subshell: bool = False):
+        nonlocal words, quoted_words, redirects, segment_start
+        finish_word()
+        words = _peel_command_headers(words, before_subshell, quoted_words)
+        if words or redirects:
+            result.append(ParsedCommand(words=words, redirects=redirects))
+        words, quoted_words, redirects = [], [], []
+        segment_start = i + 1
+
+    while i < len(source):
+        char = source[i]
+        if char == "$" and quote != "'":
+            source = _splice_dollar(source, i)
+        if char == "\\" and quote != "'" and i + 1 < len(source):
+            # A backslash-newline is a line continuation: bash removes both.
+            if source[i + 1] != "\n":
+                word.append(source[i + 1])
+                word_quoted = True
+            i += 2
+            continue
+        if char == "$" and quote is None and source.startswith("$'", i):
+            # ANSI-C quoting: decode the escapes bash decodes, so the guards
+            # see the path the program receives.
+            end = i + 2
+            while end < len(source) and source[end] != "'":
+                end += 2 if source[end] == "\\" else 1
+            word.append(_ansi_c(source[i + 2:min(end, len(source))]))
+            word_quoted = True
+            i = end + 1
+            continue
+        if char == "$" and quote is None and source.startswith('$"', i):
+            # Locale quoting `$"…"` reads as a double-quoted string.
+            i += 1
+            continue
+        if char == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            word_quoted = True
+            i += 1
+            continue
+        if char == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            word_quoted = True
+            i += 1
+            continue
+        if quote == "'":
+            word.append(char)
+            i += 1
+            continue
+        if (quote is None and not word and not extglob_depth
+                and (keyword_width := _shell_keyword(source, i, "do"))
+                and _loop_body_header(source[segment_start:i].rstrip(" \t"), depth) is not None
+                and _command_position(source, segment_start, i + keyword_width, -1, depth)):
+            # `for x do CMD` and `select x do CMD` have no operator between
+            # the header and the executable body. Do not fold CMD into `for`.
+            finish_segment()
+            i += keyword_width
+            segment_start = i
+            continue
+        if extglob_depth and source.startswith(("${", "$["), i):
+            substitutions: list[str] = []
+            end = _shell_expansion_end(source, i, depth + 1, substitutions)
+            for body in substitutions:
+                result.extend(_shell_segments(body, tmpdir, depth + 1))
+            word.append(source[i:end + 1])
+            i = end + 1
+            continue
+        # Substitutions inside double quotes execute too. Preserve their text
+        # in the outer word and analyse the body separately for direct guards.
+        prefix = next((p for p in ("$(", "<(", ">(") if source.startswith(p, i)), None)
+        if prefix or char == "`":
+            start = i
+            if char == "`":
+                end = i + 1
+                while end < len(source) and (source[end] != "`" or source[end - 1] == "\\"):
+                    end += 1
+                body = source[i + 1:end]
+            else:
+                end = _shell_expansion_end(source, i, depth + 1, [])
+                body = source[i + 2:end]
+            result.extend(_shell_segments(body, tmpdir, depth + 1))
+            word.append(source[start:min(end + 1, len(source))])
+            i = end + 1
+            continue
+        if char == "$":
+            home_spelling = next((p for p in ("${HOME}", "$HOME") if source.startswith(p, i)
+                                  and (p.endswith("}") or i + len(p) == len(source)
+                                       or not (source[i + len(p)].isalnum() or source[i + len(p)] == "_"))), None)
+            if home_spelling:
+                word.append(str(Path.home()))
+                i += len(home_spelling)
+                continue
+            spelling = next((p for p in ("${TMPDIR}", "$TMPDIR") if source.startswith(p, i)
+                             and (p.endswith("}") or i + len(p) == len(source)
+                                  or not (source[i + len(p)].isalnum() or source[i + len(p)] == "_"))), None)
+            if spelling and tmpdir:
+                word.append(tmpdir)
+                i += len(spelling)
+                continue
+        if (quote is None and char in "@+!*?" and source[i + 1:i + 2] == "("
+                and not (char == "!" and not word and not _peel_command_headers(
+                    [prefix for prefix in words if not _ENV_ASSIGNMENT.match(prefix)]))):
+            # An extglob is one operand, even with spaces or shell-looking
+            # alternatives. Substitutions above still get their own guards.
+            # At command position `!(...)` may instead be negation followed
+            # by a subshell; retain that executable interpretation too.
+            word.extend((char, "("))
+            extglob_depth += 1
+            i += 2
+            continue
+        if quote is None and extglob_depth:
+            word.append(char)
+            extglob_depth += (1 if char == "(" else -1 if char == ")" else 0)
+        elif quote is None and char in " \t":
+            finish_word()
+        elif quote is None and char == "#" and not word and not word_quoted:
+            end = source.find("\n", i)
+            i = len(source) if end < 0 else end
+            continue
+        elif quote is None and source.startswith("<<", i):
+            # Heredoc contents are data, except substitutions of an unquoted
+            # delimiter. The original text still requires shell consent.
+            finish_word()
+            match = re.match(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", source[i:])
+            if match:
+                body_start = source.find("\n", i + match.end())
+                if body_start >= 0:
+                    closing = re.search(r"(?m)^\t*" + re.escape(match[3]) + r"\s*$", source[body_start + 1:])
+                    if closing:
+                        body_end = body_start + 1 + closing.start()
+                        result.extend(_shell_segments(source[i + match.end():body_start], tmpdir, depth + 1))
+                        if not match[2]:
+                            # Scan only expansions: other heredoc text is not code.
+                            result.extend(_heredoc_substitutions(source[body_start + 1:body_end], tmpdir, depth))
+                        i = body_start + 1 + closing.end()
+                        continue
+            pending = "<<"
+            i += 2
+            continue
+        elif quote is None and char in "<>":
+            # A quoted `"2">x` is the argument 2 and a stdout redirection.
+            numbered = bool(word) and not word_quoted and "".join(word).isdecimal()
+            descriptor = "".join(word) if numbered else "1"
+            if numbered:
+                word = []
+            finish_word()
+            duplication = re.match(r"([<>])&([0-9]+|-)", source[i:])
+            if duplication:
+                redirects.append((descriptor, duplication[1] + "&", None))
+                i += duplication.end()
+                continue
+            pending = char
+            if i + 1 < len(source) and source[i + 1] == char:
+                pending += char
+                i += 1
+        elif quote is None and char in "|&;\n()":
+            finish_segment(before_subshell=char == "(")
+        elif char == "~" and not word and not word_quoted and quote is None:
+            # `""~` does not start with an unquoted `~`: bash keeps it literal.
+            # Only a bare `~` names $HOME. `~user`, `~+`, `~-` and `~N` keep
+            # their prefix so the guards resolve what bash reads (REV-009).
+            # Braces expand first (`~{,}/x` is `~/x`): expanding `~` keeps
+            # the brace part, which may then name any home entry.
+            bare = i + 1 == len(source) or source[i + 1] in "/ \t|&;\n()<>{"
+            word.append(os.path.expanduser("~") if bare else "~")
+        else:
+            word.append(char)
+        i += 1
+    if extglob_depth:
+        raise PolicyError("unterminated extglob")
+    finish_segment()
+    return result
+
+
+def _heredoc_substitutions(body: str, tmpdir: str | None, depth: int) -> list[ParsedCommand]:
+    # Treat the body as double-quoted data, which shares heredoc expansion
+    # semantics for command substitutions; quotes in the body are literal.
+    escaped = body.replace('"', '\\"')
+    return _shell_segments('"' + escaped + '"', tmpdir, depth + 1)[:-1]
+
+
 #: The files a non-writing stage writes in its `$TMPDIR` (#272): the comment,
 #: report and thread-reply bodies its skills publish, and check logs named
 #: after the check. Claude keeps its own session state in the same directory
@@ -509,6 +1139,110 @@ def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
     return target != root and root in target.parents
 
 
+#: A Claude Code session identifier as it appears in its transcript name.
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+#: How a stored operation spells an operand under the session's tool-results
+#: directory. Claude Code names each saved output with a fresh random
+#: identifier, so the whole operand is the placeholder (#439 AC-13).
+TOOL_RESULT_OUTPUT = "<OUTPUT>"
+TOOL_RESULTS_OPERAND = "<TOOL_RESULTS>/" + TOOL_RESULT_OUTPUT
+
+
+def session_tool_results(event: Any) -> str | None:
+    """The current session's own tool-results directory, from Claude Code's event.
+
+    Claude Code saves a large tool output under
+    `<projects>/<project-dir>/<session_id>/tool-results/`, beside the session
+    transcript `<projects>/<project-dir>/<session_id>.jsonl`. Both values come
+    from the host's hook event, never from the agent; any other shape names
+    no directory, and another session's directory is never this one.
+    """
+    if not isinstance(event, dict):
+        return None
+    session, transcript = event.get("session_id"), event.get("transcript_path")
+    if not (isinstance(session, str) and isinstance(transcript, str)
+            and SESSION_ID.fullmatch(session) and os.path.isabs(transcript)):
+        return None
+    path = Path(transcript)
+    if path.name != session + ".jsonl" or not is_session_tool_results(path.parent / session / "tool-results"):
+        return None
+    return str(path.parent / session / "tool-results")
+
+
+def is_session_tool_results(path: Any) -> bool:
+    """Whether `path` has the shape `…/projects/<project-dir>/<session>/tool-results`."""
+    if not isinstance(path, (str, Path)) or not os.path.isabs(path):
+        return False
+    path = Path(path)
+    return (path.name == "tool-results" and ".." not in path.parts and len(path.parts) > 4
+            and SESSION_ID.fullmatch(path.parent.name) is not None
+            and path.parent.parent.parent.name == "projects")
+
+
+def inside_tool_results(path: str, policy: Any) -> bool:
+    """Whether `path` really lies in the current session's tool-results directory.
+
+    The same membership rule as `$TMPDIR`: symlinks and `..` are resolved
+    first, so neither leads into it from elsewhere or out of it. The directory
+    itself must be a real directory, not a symlink to another one.
+    """
+    results = getattr(policy, "tool_results", None)
+    if not results:
+        return False
+    try:
+        directory = Path(results)
+        if directory.is_symlink() or not directory.resolve(strict=True).is_dir():
+            return False
+    except (OSError, RuntimeError):
+        return False
+    return inside_tmpdir(os.path.expanduser(path) if path.startswith("~/") else path, results)
+
+
+#: Directories created once per dispatch or per session: a review clone, a
+#: dispatch's `$TMPDIR`, and a Claude session's tool-results directory. A
+#: literal path under one of them can never occur again (#439 AC-14). One
+#: path component at a time, with no leading repetition: linear in the text.
+_UNIQUE_COMPONENT = r"[^\s\"'<>|&;()/:,=\[\]{}]+"
+_DISPATCH_UNIQUE_PATH = re.compile(
+    r"(?:^|(?<=[/\s\"'=:,\[{]))(?:code-cycle-(?:tmp|review)-[A-Za-z0-9_]+"
+    r"|\.claude/projects/" + _UNIQUE_COMPONENT + "/" + _UNIQUE_COMPONENT + "/tool-results)"
+    r"(?=$|[/\s\"'<>|&;:,\]})=])")
+
+
+def dispatch_unique_path(op: Any) -> str | None:
+    """A literal path in an exact operation that no later dispatch can repeat.
+
+    The current `$TMPDIR` and the current session's tool-results directory are
+    placeholders already; what remains under such a directory belongs to one
+    dispatch or one session, so a repository or forever grant for it would
+    never match again. A configured check ignores its environment prefixes
+    when it matches, so they do not count here. Pattern grants never apply.
+    """
+    if not isinstance(op, dict) or op.get("version") != 1:
+        return None
+    pattern = op.get("pattern")
+    if not isinstance(pattern, dict):
+        return None
+    if op.get("tool") != "Bash":
+        target = pattern.get("target")
+        texts = [target] if isinstance(target, str) else []
+    else:
+        words = pattern.get("words")
+        if op.get("check") and isinstance(words, list):
+            pattern = {**pattern, "words": [word for word in words if not (
+                isinstance(word, dict) and "env" in word
+                or isinstance(word, str) and _ENV_ASSIGNMENT.match(word))]}
+        try:
+            texts = [normalized_command({**op, "pattern": pattern})]
+        except (KeyError, TypeError, AttributeError):
+            return None
+    for text in texts:
+        found = _DISPATCH_UNIQUE_PATH.search(text.replace("\\", "/"))
+        if found:
+            return found.group(0)
+    return None
+
+
 # --- the table ---------------------------------------------------------------
 
 def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
@@ -519,6 +1253,16 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
             return Decision(False, "the user denied this exact operation; skip it, checks not_verified",
                             rule="user_denial")
         parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is not None:
+            guard = protected_reason("Bash", {"command": command}, policy, cwd)
+            if guard:
+                return Decision(False, guard, rule="compound_guard")
+            for segment in parsed.segments:
+                _, segment_words = command_parts(segment.words)
+                if segment_words and _program(segment_words[0]) == "docker" and not policy.docker:
+                    raise _DockerDenied("docker needs the docker_host grant")
+            raise PolicyError("shell syntax needs operation consent; interpreter internals "
+                              "depend on external isolation; each segment retains its guards")
         words = list(parsed.words)
         if words[0] == "rtk":
             if not policy.rtk:
@@ -527,7 +1271,7 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
             if not words:
                 raise PolicyError("rtk needs a command")
         for _, _, target in parsed.redirects:
-            if target is not None and not inside_tmpdir(target, policy.tmpdir):
+            if target is not None and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir):
                 raise PolicyError("output may be redirected only into $TMPDIR")
         protected = credential_reason(words[1:], policy, cwd)
         if protected:
@@ -540,7 +1284,16 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                 and matching_answer("Bash", {"command": command}, policy, cwd) == "allow"
                 and protected_reason("Bash", {"command": command}, policy, cwd) is None):
             return Decision(True, "allowed by exact operation consent")
-        return Decision(False, str(error), rule="command_table")
+        reason = str(error)
+        patterns = [entry.get("operation", {}).get("pattern", {}).get("regex")
+                    for entry in policy.command_permissions if entry.get("operation", {}).get("version") == 2]
+        if patterns:
+            try:
+                normalized = normalized_command(operation("Bash", {"command": command}, policy, cwd))
+                reason += f"; existing patterns {patterns!r} did not authorize full normalized command {normalized!r}"
+            except (ValueError, OSError, TypeError):
+                pass
+        return Decision(False, reason, rule="command_table")
     except Exception as error:  # fail closed on anything unexpected
         return Decision(False, f"the command could not be validated ({type(error).__name__})",
                         rule="validation_error")
@@ -696,7 +1449,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             and is_tmpdir_helper(words[2], policy.tmpdir)):
         return
     for command in (() if policy.static_only else policy.commands):
-        expected = parse_command(command, None).words
+        expected = _parse_simple(command, None).words
         if words[:len(expected)] == expected:
             return
     for configured in policy.verification_commands:
@@ -727,8 +1480,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             evidence = {Path(path).resolve() for path in policy.evidence_paths}
             for operand in read_operands(words):
                 path = (root / os.path.expanduser(operand)).resolve()
+                # The session's own saved outputs are read like `$TMPDIR` (#439 AC-13).
                 if (path != root and root not in path.parents and path not in evidence
-                        and not inside_tmpdir(str(path), policy.tmpdir)):
+                        and not inside_tmpdir(str(path), policy.tmpdir)
+                        and not inside_tool_results(str(path), policy)):
                     raise PolicyError("reading outside the stage workspace needs operation consent")
         return
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
@@ -1911,6 +2666,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             if entry.get("decision") == "allow":
                 op = entry["operation"]
                 if op["tool"] == "Bash":
+                    if op.get("version") == 2 or op.get("check") or op["pattern"].get("words", [])[:1] == ["<SHELL>"]:
+                        # The regex/compound/env shape cannot be expressed in
+                        # Claude's prefix grammar. The hook remains the concrete
+                        # gate and runs before every Bash call, including guards.
+                        wildcards.append("*")
+                        continue
                     # The broad first barrier never replaces exact hook matching.
                     _, command_words = split_environment(op["pattern"]["words"])
                     program = command_words[0] if command_words else None
@@ -2035,9 +2796,15 @@ def prompt_note(policy: StagePolicy) -> str:
     return (
         foreground +
         f" Command policy for this {policy.role} stage: a runtime hook validates "
-        "every Bash command against this stage's closed table. Run one simple "
-        "command per call, without chaining, pipes, substitutions or redirections "
-        "other than into $TMPDIR. " + verification +
+        "every Bash command against this stage's table. Prefer one simple "
+        "command per call. Compound syntax needs interpreter consent with "
+        "per-segment guards. " + verification +
+        " Run configured checks as written, without prefixes or redirects. "
+        "Toolkit refusals carry [layer=toolkit_hook]; an unlabelled refusal "
+        "comes from the host permission layer. A toolkit grant does not widen "
+        "host or operating-system permissions. Propose a reusable matcher in "
+        "command_pattern_proposals with command, pattern, proposer, justification, "
+        "positive and negative examples; only the user's answer authorizes it. " +
         " When a command you need is denied, distinguish a forbidden operation "
         "from an unavailable executable. For authorized source reads, use an "
         "available search alternative: `git grep` or `grep`. Do not bypass a "
@@ -2045,7 +2812,9 @@ def prompt_note(policy: StagePolicy) -> str:
         "remains. Explicit project tool, command and integration choices take "
         "precedence over the built-in table; a table warning is informational "
         "only. Write multiline temporary helpers with the native file-write "
-        "tools, then publish using --body-file; shell heredocs are unsupported."
+        "tools, then publish using --body-file. Read large outputs in smaller "
+        "pieces, or write them under the supplied $TMPDIR; a read under this "
+        "session's own tool-results directory is allowed like one under $TMPDIR."
         + tmpdir_note
     )
 
@@ -2369,6 +3138,8 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     try:
         policy = StagePolicy.from_json(Path(arguments[0]).read_text(encoding="utf-8"))
         event = json.loads(stdin.read())
+        # Only the host's event names the session; a stored policy never does.
+        policy = replace(policy, tool_results=session_tool_results(event))
         tool = event.get("tool_name")
         if tool in FILE_EDIT_TOOLS and not policy.active:
             return 0
@@ -2383,7 +3154,7 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     except Exception as error:
         reason = f"the stage policy could not run ({type(error).__name__})"
         note = _journal_denial(policy, None, "hook_bash", None, reason) if policy else None
-        print(_hook_output("deny", f"code-cycle {HOOK_DENIAL_MARKER}: {reason}"
+        print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {HOOK_DENIAL_MARKER}: {reason}"
                                    f"{_journal_note(note)}. {DENY_ADVICE}"), file=stdout)
         return 0
     if not decision.allowed:
@@ -2408,13 +3179,14 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         intent = None if editing else pr_edit_intent(command, policy)
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
                                command, decision.reason, rule=rule, operation_id=operation_id)
-        print(_hook_output("deny", f"code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
+        print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
                                    f"{decision.reason}{_journal_note(note)}. {advice} "
                                    f"COMMAND_PERMISSION_TMPDIR={json.dumps(policy.tmpdir)} "
                                    f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
                                    f"COMMAND_PERMISSION_RULE={json.dumps(rule)} "
                                    f"COMMAND_PERMISSION_ID={json.dumps(operation_id)} "
-                                   f"COMMAND_PERMISSION_INTENT={json.dumps(intent)}"),
+                                   f"COMMAND_PERMISSION_INTENT={json.dumps(intent)} "
+                                   f"COMMAND_PERMISSION_TOOL_RESULTS={json.dumps(policy.tool_results)}"),
               file=stdout)
     return 0
 
@@ -2521,6 +3293,7 @@ def _journal_denial(policy: StagePolicy, event: dict[str, object] | None, compon
             policy, component=component,
             command=command if isinstance(command, str) else None, reason=reason,
             correlation={"tool_use_id": event.get("tool_use_id"),
+                         "layer": "toolkit_hook",
                          "session_id": event.get("session_id"),
                          "rule": rule, "operation": operation_id})
     except Exception as error:
@@ -2619,8 +3392,10 @@ def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str
     """
     if not os.path.isabs(value):
         return None
-    if policy.tmpdir and inside_tmpdir(value, policy.tmpdir):
-        return {"tmpdir": Path(value).resolve().relative_to(Path(policy.tmpdir).resolve()).as_posix()}
+    if _tmp_operand(value, policy.tmpdir):
+        return {"tmpdir": _tmp_relative(value, policy)}
+    if inside_tool_results(value, policy):
+        return {"tool_results": TOOL_RESULT_OUTPUT}
     if root is not None:
         try:
             resolved = Path(value).resolve()
@@ -2631,6 +3406,57 @@ def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str
     return None
 
 
+def _tmp_relative(value: str, policy: Any) -> str:
+    relative = Path(value).resolve().relative_to(Path(policy.tmpdir).resolve()).as_posix()
+    for field, placeholder in (("attempt_id", "<ATTEMPT_ID>"), ("cycle_id", "<CYCLE_ID>")):
+        identifier = getattr(policy, field, None)
+        if isinstance(identifier, str) and identifier:
+            relative = relative.replace(identifier, placeholder)
+    return relative
+
+
+def _tmp_operand(value: str, tmpdir: str | None) -> bool:
+    """Normalize the directory itself too; redirect guards stay strict children."""
+    return bool(tmpdir) and (Path(value).resolve() == Path(tmpdir).resolve()
+                            or inside_tmpdir(value, tmpdir))
+
+
+def _shell_identity(parsed: ParsedCommand, policy: Any, cwd: str | None) -> str:
+    source = parsed.shell_source or ""
+    for segment in parsed.segments:
+        environment, words = command_parts(segment.words)
+        operands = [item.partition("=")[2] for item in environment]
+        operands += [word for index, word in enumerate(words) if index and words[index - 1] not in {"-c", "-e", "--eval"}]
+        operands += [target for _, _, target in segment.redirects if target is not None]
+        for operand in operands:
+            if not operand:
+                # An empty quoted word names no path; `Path(cwd) / ""` is cwd.
+                continue
+            candidate = str(Path(cwd or ".") / operand)
+            if not (os.path.isabs(operand) or operand.startswith(("./", "../"))
+                    or "/" in operand or Path(candidate).exists()):
+                continue
+            if _tmp_operand(candidate, policy.tmpdir):
+                replacement = "<TMPDIR>/" + _tmp_relative(candidate, policy)
+            elif inside_tool_results(candidate, policy):
+                replacement = TOOL_RESULTS_OPERAND
+            else:
+                continue
+            # Replace a complete operand, never a substring of opaque code.
+            forms = [operand]
+            home = os.path.expanduser("~")
+            if home != "~" and operand.startswith(home.rstrip("/") + "/"):
+                # The parser expanded a bare `~`; the source still spells it.
+                forms.append("~" + operand[len(home.rstrip("/")):])
+            if policy.tmpdir and operand.startswith(policy.tmpdir + "/"):
+                suffix = operand[len(policy.tmpdir):]
+                forms += ["$TMPDIR" + suffix, "${TMPDIR}" + suffix]
+            for form in forms:
+                source = re.sub(r"(?<![A-Za-z0-9_./-])" + re.escape(form)
+                                + r"(?=$|[\s'\"<>|&;)])", lambda _: replacement, source)
+    return source
+
+
 def configured_check_id(words: list[str], policy: Any) -> str | None:
     """The configured check this exact command is, if any (#398).
 
@@ -2639,22 +3465,32 @@ def configured_check_id(words: list[str], policy: Any) -> str | None:
     when it is the configured command itself, with or without environment
     prefixes, or a verification prefix followed by more words.
     """
-    _, command_words = split_environment(words)
+    environment, command_words = command_parts(words)
     for candidate in (words, command_words):
         if policy.test_command:
             try:
-                if candidate == list(parse_command(policy.test_command, None).words):
+                if candidate == list(_parse_simple(policy.test_command, None).words):
                     return "configured-test"
             except PolicyError:
                 pass
         for prefix in getattr(policy, "verify_prefixes", ()) or ():
             try:
-                expected = list(parse_command(prefix, None).words)
+                expected = list(_parse_simple(prefix, None).words)
             except PolicyError:
                 continue
             if expected and candidate[:len(expected)] == expected:
                 return f"verify:{prefix}"
     return None
+
+
+def command_parts(words: list[str]) -> tuple[list[str], list[str]]:
+    """Unwrap RTK on either side of ordinary environment assignments."""
+    environment, command = split_environment(words)
+    if command[:1] == ["rtk"]:
+        command = command[2:] if command[1:2] == ["proxy"] else command[1:]
+        inner_environment, command = split_environment(command)
+        environment += inner_environment
+    return environment, command
 
 
 #: Seconds Claude Code waits for the hook before cancelling it.
@@ -2885,12 +3721,13 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         if not isinstance(command, str):
             raise ValueError("command must be a string")
         parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is not None:
+            return {"version": 1, "role": consent_role(policy.role), "tool": tool,
+                    "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []}}
         words = list(parsed.words)
-        if words[:1] == ["rtk"]:
-            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
         if not words:
             raise ValueError("empty command")
-        environment, command_words = split_environment(words)
+        environment, command_words = command_parts(words)
         if not command_words:
             raise ValueError("an environment prefix needs a command")
         hidden = hidden_program(environment, command_words)
@@ -2903,25 +3740,34 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             name, _, value = assignment.partition("=")
             placeholder = _relative_value(value, policy, root)
             normalized.append({"env": name, **placeholder} if placeholder else assignment)
-        data_operands = os.path.basename(command_words[0]) in {"stat", "ls", "cat", "head", "tail", "wc", "grep"}
+        # Normalize path operands for every program. Inline code remains opaque:
+        # a string containing a path is not itself a filesystem operand.
         for index, word in enumerate(command_words):
-            if index and data_operands and os.path.isabs(word) and inside_tmpdir(word, policy.tmpdir):
-                normalized.append({"tmpdir": str(Path(word).resolve().relative_to(
-                    Path(policy.tmpdir).resolve()))})
+            candidate = str((Path(cwd or ".") / word).resolve())
+            path_operand = (os.path.isabs(word) or word.startswith(("./", "../"))
+                            or "/" in word and _program(command_words[0]) != "gh"
+                            or Path(candidate).exists())
+            inline_code = index > 0 and command_words[index - 1] in {"-c", "-e", "--eval", "--execute"}
+            if index and path_operand and not word.startswith("-") and not inline_code and _tmp_operand(candidate, policy.tmpdir):
+                normalized.append({"tmpdir": _tmp_relative(candidate, policy)})
+            elif (index and path_operand and not word.startswith("-") and not inline_code
+                  and inside_tool_results(word if word.startswith("~/") else candidate, policy)):
+                # A saved output of the current session (#439 AC-13).
+                normalized.append({"tool_results": TOOL_RESULT_OUTPUT})
             elif index and docker and (placeholder := _relative_value(word, policy, root)):
                 normalized.append(placeholder)
-            elif (index and docker and word.startswith("-") and "=" in word
-                  and (placeholder := _relative_value(word.partition("=")[2], policy, root))):
+            elif (index and word.startswith("-") and "=" in word
+                  and (placeholder := _relative_value(word.partition("=")[2], policy, root if docker else None))):
                 normalized.append({"option": word.partition("=")[0], **placeholder})
             else:
                 normalized.append(word)
         redirects = []
         for fd, operator, target in parsed.redirects:
+            target = str(Path(cwd or ".") / target) if target is not None else None
             if target is not None and not inside_tmpdir(target, policy.tmpdir):
                 raise ValueError("output may be redirected only into $TMPDIR")
             redirects.append([fd, operator, None if target is None else
-                              "<TMPDIR>/" + str(Path(target).resolve().relative_to(
-                                  Path(policy.tmpdir).resolve()))])
+                              "<TMPDIR>/" + _tmp_relative(target, policy)])
         pattern: dict[str, Any] = {"words": normalized, "redirects": redirects}
         extra: dict[str, Any] = {}
         if docker:
@@ -2935,7 +3781,8 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             # the host: the socket question comes first (#398), and an
             # identity without a digest matches no stored Compose consent.
             if command_words[1:2] == ["compose"] and getattr(policy, "docker", False):
-                values = dict(assignment.partition("=")[::2] for assignment in environment)
+                values = {assignment.partition("=")[0]: assignment.partition("=")[2]
+                          for assignment in environment}
                 extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
         check_id = configured_check_id(words, policy)
         if check_id:
@@ -2955,8 +3802,28 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
 
 def same_operation(stored: Any, op: dict[str, Any]) -> bool:
     """Exact equality, with a stored rereview decision read as a review one."""
-    return (isinstance(stored, dict)
-            and {**stored, "role": consent_role(stored.get("role"))} == op)
+    if not isinstance(stored, dict):
+        return False
+    def ordinary(value):
+        for word in value.get("pattern", {}).get("words", []):
+            name = (word.get("env") if isinstance(word, dict) else
+                    word.partition("=")[0] if _ENV_ASSIGNMENT.match(word) else None)
+            if name and (_GUARD_DEFEATING_ENV.match(name) or _RESOLVER_UNSAFE_ENV.match(name)):
+                return False
+        return True
+    if (stored.get("check") and stored.get("check") == op.get("check")
+            and ordinary(stored) and ordinary(op)):
+        def check_words(value):
+            words = value.get("pattern", {}).get("words", [])
+            return [word for word in words if not (
+                isinstance(word, dict) and "env" in word
+                or isinstance(word, str) and _ENV_ASSIGNMENT.match(word))]
+        return (consent_role(stored.get("role")) == consent_role(op.get("role"))
+                and stored.get("tool") == op.get("tool") == "Bash"
+                and stored.get("compose") == op.get("compose")
+                and stored.get("pattern", {}).get("cwd") == op.get("pattern", {}).get("cwd")
+                and check_words(stored) == check_words(op))
+    return {**stored, "role": consent_role(stored.get("role"))} == op
 
 
 def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
@@ -2969,11 +3836,390 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
     for entry in policy.command_permissions:
         if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}:
             return entry["decision"]
+    # Pattern authorization lifts table membership, never a concrete guard.
+    patterns = [entry for entry in policy.command_permissions
+                if entry.get("operation", {}).get("version") == 2]
+    if patterns and tool == "Bash" and protected_reason(tool, tool_input, policy, cwd) is None:
+        from grants import pattern_covers_operation
+        for entry in patterns:
+            stored = entry.get("operation", {})
+            if (stored.get("version") == 2 and stored.get("tool") == "Bash"
+                    and consent_role(stored.get("role")) == consent_role(policy.role)
+                    and entry.get("decision") in {"allow", "deny"}
+                    and pattern_covers_operation(stored, op)):
+                return entry["decision"]
     return None
 
 
+def normalized_command(op: dict[str, Any]) -> str:
+    """The documented single-space text on which regex grants fullmatch."""
+    pattern = op.get("pattern", {})
+    if pattern.get("words", [])[:1] == ["<SHELL>"]:
+        return pattern["words"][1]
+    words = []
+    for word in pattern.get("words", []):
+        if isinstance(word, dict):
+            value = ("<TMPDIR>/" + word["tmpdir"] if "tmpdir" in word
+                     else "<TOOL_RESULTS>/" + word["tool_results"] if "tool_results" in word
+                     else "<CHECKOUT>/" + word["checkout"])
+            prefix = word.get("env", word.get("option"))
+            words.append((prefix + "=" if prefix else "") + value)
+        else:
+            words.append(word)
+    for fd, operator, target in pattern.get("redirects", []):
+        words.append(fd + operator + (target or "1"))
+    return " ".join(words)
 
-def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
+
+#: Builtins that change the working directory, also through `builtin` or
+#: `command` (#439 REV-008), and builtins that run code which may change it.
+_DIRECTORY_CHANGES = frozenset({"cd", "pushd", "popd"})
+_CODE_LOADERS = frozenset({"eval", "source", ".", "trap", "alias"})
+#: Files found inside directory credential stores, and subdirectories that
+#: hold cached tokens. After a directory change the hook cannot resolve, the
+#: unknown directory may lie inside such a store (REV-006).
+_CREDENTIAL_FILE_PATTERNS = ("id_*", "*_rsa", "*_ed25519", "*_ecdsa", "*_dsa", "*_key", "deploy_key*",
+                             "*.pem", "*.key", "*.ppk", "known_hosts*", "authorized_keys*",
+                             "credentials", "config", "hosts.yml")
+_CREDENTIAL_FILE_EXAMPLES = ("id_rsa", "github_rsa", "deploy_key", "key.pem", "server.key",
+                             "known_hosts", "authorized_keys", "credentials", "config", "hosts.yml")
+#: The key-like names above, which may lie at any depth of a directory store.
+_CREDENTIAL_KEY_PATTERNS = tuple(name for name in _CREDENTIAL_FILE_PATTERNS if name not in {"config", "hosts.yml"})
+_CREDENTIAL_KEY_EXAMPLES = tuple(name for name in _CREDENTIAL_FILE_EXAMPLES if name not in {"config", "hosts.yml"})
+_CREDENTIAL_SUBDIRECTORIES = ("sso", "cli")
+#: A brace part may expand to any single name, dotfiles included.
+_ANY_PART = "\0any-part"
+#: A '..' after an expanded part may lead to any directory.
+_ANY_PARTS = "\0any-parts"
+#: A working-directory component: compared literally, never as a glob.
+_LITERAL = "\0literal:"
+#: A bracket expression, including negation and character classes.
+_BRACKET = re.compile(r"\[[!^]?\]?(?:\[:[a-z]+:\]|[^\]])*\]")
+
+
+def _unwrapped_builtin(words: list[str]) -> list[str] | None:
+    """The words a segment runs through builtin/command; None if only described."""
+    while words[:1] in (["builtin"], ["command"]):
+        prefix, words = words[0], words[1:]
+        while words and words[0].startswith("-"):
+            option, words = words[0], words[1:]
+            if option == "--":
+                break
+            if prefix == "builtin" or option != "-p":
+                # `command -v`/`-V` describe the builtin, never run it; an
+                # invalid option fails before any directory change.
+                return None
+    return words
+
+
+def _directory_builtin(words: list[str]) -> list[str] | None:
+    """The cd, pushd or popd words a segment runs, through builtin/command."""
+    words = _unwrapped_builtin(words) or []
+    return words if words[:1] and words[0] in _DIRECTORY_CHANGES else None
+
+
+def _operand_values(word: str) -> list[str]:
+    """The path spellings a word may carry: itself, `name=value`, `-Xvalue`."""
+    values = [] if word.startswith("-") else [word]
+    if "=" in word:
+        values.append(word.partition("=")[2])
+    if word.startswith("-") and not word.startswith("--") and len(word) > 2 and word[2] in "/~.":
+        values.append(word[2:])
+    return [value for value in values if value]
+
+
+#: The refusal for an operand that may name a store below an unknown directory.
+_UNRESOLVED_CREDENTIAL = ("cannot guard an operand that may name a credential store after an "
+                          "unresolved directory change; use an explicit absolute path")
+
+
+def _tilde_directory(value: str) -> tuple[str, str] | None:
+    """The `~+`, `~-` or `~N`/`~+N`/`~-N` prefix of a value, and the rest.
+
+    `~+` is $PWD, `~-` is $OLDPWD and the others name directory-stack
+    entries. A bare `~` and `~user` are left to `os.path.expanduser`.
+    """
+    match = re.match(r"~([+-]?[0-9]*)(?=/|$)", value)
+    return (match[1], value[match.end():]) if match and match[1] else None
+
+
+#: Programs that only print or search their arguments, so an `env` argument
+#: never runs (REV-010). Every other program may run `env` as a runner.
+_ARGUMENT_READERS = frozenset({"echo", "printf", "grep", "egrep", "fgrep", "rg"})
+
+
+def _could_name_credential(word: str, policy: Any, dotglob: bool, nocaseglob: bool = False) -> bool:
+    """Whether a relative operand from an unknown directory may name a store.
+
+    The unknown directory may be any directory: a store's parent, so the
+    operand must spell the rest of a store's path, or the inside of a
+    directory store, so the operand names one of its files.
+    """
+    dotglob = dotglob or _environment_dotglob()
+    nocaseglob = nocaseglob or _environment_nocaseglob()
+    stores = [candidate.parts
+              for store in _guarded_stores(policy)
+              for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
+    for value in _operand_values(word):
+        tilde = _tilde_directory(value)
+        if tilde:
+            # `~+/x`, `~-/x`: the rest is relative to an unknown directory.
+            value = tilde[1].lstrip("/")
+        if os.path.isabs(os.path.expanduser(value)):
+            continue
+        parts = Path(value).parts
+        if ".." in parts:
+            # A '..' may cross a symlink: what follows starts anywhere.
+            parts = parts[len(parts) - parts[::-1].index(".."):]
+        if not parts:
+            continue
+        pattern = tuple(_ANY_PART if "{" in part or "}" in part else part for part in parts)
+        if any(_reaches(pattern, store[index:], dotglob, nocaseglob)
+               for store in stores for index in range(1, len(store))):
+            return True
+        # A store's parent below the home directory, such as `.codex`, is
+        # read whole by recursive copies and archives.
+        home = len(Path.home().parts)
+        if any(len(pattern) < len(store) - index
+               and all(_part_matches(part, name, dotglob, nocaseglob) for part, name in zip(pattern, store[index:]))
+               for store in stores for index in range(home, len(store))):
+            return True
+        # A key-like last part (`id_rsa`, `x/*.pem`, `keys/*rsa`) may name a
+        # file of a directory store at any depth. A bare wildcard, a brace,
+        # `config` or `hosts.yml` does so only when it stands alone, so the
+        # unknown directory may be the store, or when its parent may name a
+        # store's directory (`.s?h/*`, `cache/*`): `build/*` below an
+        # unknown directory names no store.
+        last = pattern[-1]
+        literal = len(_BRACKET.sub("", last).replace("*", "").replace("?", ""))
+        store_names = {name for store in stores for name in store[home:]}
+        if (any(fnmatch.fnmatchcase(last, name) for name in _CREDENTIAL_KEY_PATTERNS)
+                or (last != _ANY_PART and literal >= 2
+                    and any(_part_matches(last, name, dotglob, nocaseglob) for name in _CREDENTIAL_KEY_EXAMPLES))
+                or (any(_part_matches(last, name, dotglob, nocaseglob) for name in _CREDENTIAL_FILE_EXAMPLES)
+                    and (len(pattern) == 1
+                         or any(_part_matches(pattern[-2], name, dotglob, nocaseglob) for name in store_names)
+                         # `cache/*` from inside `sso` or `cli`; `build/cache/*` is no cache.
+                         or (len(pattern) == 2 and _part_matches(pattern[0], "cache", dotglob, nocaseglob))))):
+            return True
+        # Token caches sit in `sso/cache` and `cli/cache`.
+        if any(_part_matches(part, name, dotglob, nocaseglob) and _part_matches(following, "cache", dotglob, nocaseglob)
+               for part, following in zip(pattern, pattern[1:]) for name in _CREDENTIAL_SUBDIRECTORIES):
+            return True
+    return False
+
+
+def _environment_dotglob() -> bool:
+    """Whether the inherited shell state may let globs match dotfiles."""
+    return bool(os.environ.get("GLOBIGNORE")) or "dotglob" in os.environ.get("BASHOPTS", "")
+
+
+def _environment_nocaseglob() -> bool:
+    return "nocaseglob" in os.environ.get("BASHOPTS", "").split(":")
+
+
+def _shell_settings(parsed: ParsedCommand) -> set[str]:
+    """Settings visible after the same decoding used by the operand guards.
+
+    Flattened shell analysis cannot prove order or computed assignment names.
+    An assigning builtin may therefore set any path/glob setting; an unknown
+    shopt/set option may enable either glob mode. No shell code is evaluated.
+    """
+    settings: set[str] = set()
+    names = {"CDPATH", "HOME", "OLDPWD", "PWD", "GLOBIGNORE", "BASHOPTS", "dotglob", "nocaseglob"}
+    assigners = {"declare", "typeset", "export", "local", "readonly", "read", "printf", "mapfile", "readarray"}
+    for segment in parsed.segments:
+        for word in segment.words:
+            settings.update(name for name in names if re.search(
+                r"(?<![$A-Za-z0-9_{])" + name + r"(?![A-Za-z0-9_])", word))
+        _, words = command_parts(segment.words)
+        words = _unwrapped_builtin(words) or []
+        if words[:1] and words[0] in assigners:
+            settings.update(names)
+        if words[:1] and words[0] in {"shopt", "set"} and any("$" in word or "`" in word for word in words[1:]):
+            settings.update({"dotglob", "nocaseglob"})
+    return settings
+
+
+#: A `-C`/`--chdir` option inside an `env -S` value, whatever separates its
+#: arguments (`env` also splits on `\_`).
+_SPLIT_CHDIR = re.compile(r"-(?:[A-Za-z0-9]*C|-c)")
+
+
+def _env_chdir(words: list[str]) -> str | None:
+    """The directory `env -C`/`--chdir` runs its program in, if any."""
+    index = 1
+    while index < len(words):
+        word = words[index]
+        following = words[index + 1] if index + 1 < len(words) else None
+        if word == "--":
+            return None
+        if word.startswith("--"):
+            # Long options may be abbreviated to any unique prefix: --c=dir.
+            name, equals, value = word[2:].partition("=")
+            if name and "chdir".startswith(name):
+                return value if equals else following
+            if name and "split-string".startswith(name) and _SPLIT_CHDIR.search((value if equals else following) or ""):
+                return "$SPLIT_STRING"
+            if not equals and name and any(option.startswith(name) for option in ("unset", "split-string", "argv0")):
+                index += 1
+        elif word.startswith("-"):
+            # Combined short options: -vC dir, -iCdir. The value of -u, -S
+            # or -a is the rest of the word or the next word: -uLC_ALL.
+            for position, letter in enumerate(word[1:], start=2):
+                rest = word[position:]
+                if letter == "C":
+                    return rest or following
+                if letter in "uSa":
+                    # -S splits its value into options: "-S-C dir" changes directory.
+                    if letter == "S" and _SPLIT_CHDIR.search(rest or following or ""):
+                        return "$SPLIT_STRING"
+                    if not rest:
+                        index += 1
+                    break
+        elif not _ENV_ASSIGNMENT.match(word):
+            return None
+        index += 1
+    return None
+
+
+def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedCommand,
+                       policy: Any, cwd: str | None) -> tuple[str | None, bool]:
+    """Guard every segment of shell source against every directory it may run in.
+
+    Returns the guard, and whether a directory change could not be resolved.
+    """
+    settings = _shell_settings(parsed)
+    dotglob = bool(settings & {"dotglob", "GLOBIGNORE", "BASHOPTS"}) or _environment_dotglob()
+    nocaseglob = bool(settings & {"nocaseglob", "BASHOPTS"}) or _environment_nocaseglob()
+    # CDPATH resolves a relative cd target through other directories.
+    cdpath = "CDPATH" in settings or bool(os.environ.get("CDPATH"))
+    # A reassigned HOME moves `cd` and `cd ~`, and the parser expands $HOME
+    # to the real home; a reassigned OLDPWD moves `cd -`.
+    # Any HOME that is not an expansion may set it (HOME=, read HOME,
+    # printf -v HOME), and so may a builtin that assigns a quoted or
+    # computed name (declare "HO""ME=…").
+    home_assigned = "HOME" in settings
+    oldpwd_assigned = "OLDPWD" in settings
+    # A reassigned PWD moves `~+` (REV-009).
+    pwd_assigned = "PWD" in settings
+    tilde_unresolved = False
+    home = str(Path.home())
+    segment_cwd: str | None = str(Path(cwd or ".").resolve())
+    possible_cwds: set[str | None] = {segment_cwd, os.path.abspath(cwd or ".")}
+    previous_cwd: str | None = None
+    directory_stack: list[str | None] = []
+    for segment in parsed.segments:
+        _, segment_words = command_parts(segment.words)
+        # A cd may fail, be conditional or run in a subshell. The
+        # flattened analysis cannot discard any earlier cwd.
+        possible_cwds.add(segment_cwd)
+        operands = segment_words[1:] + [target for _, _, target in segment.redirects if target]
+        # `~-`, `~N` and, after a PWD assignment, `~+` name a directory the
+        # hook cannot resolve, whatever the working directory (REV-009).
+        unknown_tilde = [value for word in operands for value in _operand_values(word)
+                         if (tilde := _tilde_directory(value)) and (tilde[0] != "+" or pwd_assigned)]
+        if unknown_tilde:
+            tilde_unresolved = True
+            if any(_could_name_credential(value, policy, dotglob, nocaseglob) for value in unknown_tilde):
+                return _UNRESOLVED_CREDENTIAL, True
+        for possible_cwd in possible_cwds:
+            if possible_cwd is None:
+                if any(_could_name_credential(word, policy, dotglob, nocaseglob) for word in operands):
+                    return _UNRESOLVED_CREDENTIAL, True
+            guard = protected_reason(tool, tool_input, policy, possible_cwd, _parsed=segment,
+                                     _dotglob=dotglob, _nocaseglob=nocaseglob)
+            if guard:
+                return guard, None in possible_cwds
+        unwrapped = _unwrapped_builtin(segment_words) or []
+        if unwrapped[:1] and unwrapped[0] in _CODE_LOADERS:
+            segment_cwd = None
+            continue
+        directory_words = _directory_builtin(segment_words)
+        if directory_words is None:
+            continue
+        program = directory_words[0]
+        args = directory_words[1:]
+        no_chdir = False
+        while args and args[0].startswith("-") and args[0] != "-":
+            option, args = args[0], args[1:]
+            if option == "--":
+                break
+            if option == "-n" and program in {"pushd", "popd"}:
+                no_chdir = True
+            elif option not in {"-L", "-P", "-e", "-@"}:
+                args = ["$UNKNOWN"]
+                break
+        if no_chdir:
+            # -n changes only the stack, never the working
+            # directory. Do not infer its later restored path.
+            if program == "pushd":
+                directory_stack.append(None)
+            elif directory_stack:
+                directory_stack.pop()
+            continue
+        if program == "popd":
+            segment_cwd = directory_stack.pop() if directory_stack and not args else None
+            continue
+        if program == "pushd" and not args:
+            if directory_stack:
+                segment_cwd, directory_stack[-1] = directory_stack[-1], segment_cwd
+            else:
+                segment_cwd = None
+            continue
+        target = args[0] if args else home
+        tilde = _tilde_directory(target)
+        if tilde:
+            # `cd ~+/x` stays relative to the current directory; `cd ~-` and
+            # stack entries go where the hook cannot follow.
+            target = "." + tilde[1] if tilde[0] == "+" and not pwd_assigned else "$TILDE"
+        if (cdpath and target != "-" and not target.startswith(("+", "-"))
+                and not os.path.isabs(os.path.expanduser(target))):
+            target = "$CDPATH"
+        if home_assigned and (target.startswith("~") or target == home or target.startswith(home + "/")):
+            target = "$HOME"
+        if program == "pushd":
+            directory_stack.append(segment_cwd)
+        if target == "-" and program == "cd":
+            segment_cwd, previous_cwd = None if oldpwd_assigned else previous_cwd, segment_cwd
+            continue
+        previous_cwd, current = segment_cwd, segment_cwd
+        expanded = os.path.expanduser(target)
+        dynamic_target = any(char in target for char in "$`*?[") or _has_extglob(target)
+        if not dynamic_target:
+            # Relative cd must transition every possible
+            # cwd, not just the last scanned one. Retain
+            # logical (-L) and physical (-P) spellings.
+            bases = {"/"} if os.path.isabs(expanded) else set(possible_cwds)
+            for base in bases:
+                if base is None:
+                    possible_cwds.add(None)
+                else:
+                    joined = Path(base) / expanded
+                    possible_cwds.update((os.path.abspath(joined), str(joined.resolve())))
+            if len(possible_cwds) > 64:
+                possible_cwds = {None}
+        segment_cwd = (str((Path(current or ".") / expanded).resolve())
+                       if not dynamic_target
+                       and (current is not None or os.path.isabs(expanded))
+                       and not (program == "pushd" and target.startswith(("+", "-"))) else None)
+    return None, None in possible_cwds or segment_cwd is None or tilde_unresolved
+
+
+def unresolved_directory(command: str, policy: Any, cwd: str | None = None) -> bool:
+    """Whether shell source changes into a directory the hook cannot resolve."""
+    try:
+        parsed = parse_command(command, policy.tmpdir)
+        if parsed.shell_source is None:
+            return False
+        return _compound_analysis("Bash", {"command": command}, parsed, policy, cwd)[1]
+    except (PolicyError, ValueError, TypeError, OSError, KeyError):
+        return False
+
+
+def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None,
+                     *, _parsed: ParsedCommand | None = None, _dotglob: bool = False,
+                     _nocaseglob: bool = False) -> str | None:
     """Guards consent cannot remove on directly expressed operations.
 
     Never pretend to inspect code inside an interpreter or a project program.
@@ -2983,14 +4229,19 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             command = tool_input.get("command")
             if not isinstance(command, str):
                 return "command must be a string"
-            parsed = parse_command(command, policy.tmpdir)
+            parsed = _parsed or parse_command(command, policy.tmpdir)
+            if parsed.shell_source is not None:
+                return _compound_analysis(tool, tool_input, parsed, policy, cwd)[0]
+            for _, operator, target in parsed.redirects:
+                if (target is not None and operator.startswith(">")
+                        and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir)):
+                    return "output may be redirected only into $TMPDIR; pattern grants do not remove this guard"
+            redirect_paths = [target for _, _, target in parsed.redirects if target is not None]
             words = list(parsed.words)
-            if words[:1] == ["rtk"]:
-                words = words[2:] if words[1:2] == ["proxy"] else words[1:]
             if not words:
-                return "empty command"
+                return credential_reason(redirect_paths, policy, cwd, dotglob=_dotglob, nocaseglob=_nocaseglob)
             # An environment prefix never hides the program from its guards.
-            environment, words = split_environment(words)
+            environment, words = command_parts(words)
             if not words:
                 return "an environment prefix needs a command"
             hidden = hidden_program(environment, words)
@@ -3017,17 +4268,35 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             elif program == "find":
                 if any(word in FIND_FORBIDDEN for word in words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
-            paths = [assignment.partition("=")[2] for assignment in environment] + words[1:]
+            paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
+            # `env -C` runs its program in another directory (REV-008), also
+            # behind `command`, `nice`, `timeout -s KILL 5` or any other runner
+            # (REV-010). Only a program that just prints or searches its
+            # arguments cannot run `env`.
+            chdir = None if program in _ARGUMENT_READERS else next(
+                (found for index, word in enumerate(words)
+                 if os.path.basename(word).removesuffix(".exe") == "env"
+                 for found in (_env_chdir(words[index:]),) if found is not None), None)
+            if chdir is not None:
+                tilde = _tilde_directory(chdir)
+                if tilde:
+                    chdir = "." + tilde[1] if tilde[0] == "+" else "$TILDE"
+                if any(char in chdir for char in "$`*?[{}") or _has_extglob(chdir):
+                    if any(_could_name_credential(path, policy, _dotglob, _nocaseglob) for path in paths):
+                        return _UNRESOLVED_CREDENTIAL
+                else:
+                    protected = credential_reason(
+                        paths, policy, str(Path(cwd or ".") / os.path.expanduser(chdir)),
+                        dotglob=_dotglob, nocaseglob=_nocaseglob)
+                    if protected:
+                        return protected
         else:
             paths = [tool_input.get(FILE_EDIT_TOOLS[tool], "")]
-        stores = [Path(os.path.expanduser(store)).resolve()
-                  for store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)
-                  if store not in policy.credential_reads
-                  and not (store == GH_CREDENTIAL_STORE and policy.credential_publishing)]
+        protected = credential_reason(paths, policy, cwd, dotglob=_dotglob, nocaseglob=_nocaseglob)
+        if protected:
+            return protected
         for path in paths:
             candidate = (Path(cwd or ".") / os.path.expanduser(path)).resolve()
-            if any(candidate == root or root in candidate.parents for root in stores):
-                return "protected credential reads cannot be granted"
             if tool != "Bash" and (any(
                     part.casefold().split(":", 1)[0].rstrip(" .") == ".git"
                     for part in candidate.parts) or any(
@@ -3035,19 +4304,142 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                 return "Git configuration edits defeat command validation; use external administration"
     except (PolicyError, ValueError, TypeError, OSError, KeyError) as error:
         return str(error)
+    except Exception as error:  # fail closed: a guard that cannot run grants nothing
+        return f"the guard could not inspect the command ({type(error).__name__})"
     return None
 
 
 
-def credential_reason(words, policy, cwd: str | None) -> str | None:
-    stores = [Path(os.path.expanduser(store)).resolve()
-              for store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)
-              if store not in policy.credential_reads and not
-              (store == GH_CREDENTIAL_STORE and policy.credential_publishing)]
+def _guarded_stores(policy: Any) -> list[str]:
+    return [store for store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)
+            if store not in policy.credential_reads and not
+            (store == GH_CREDENTIAL_STORE and policy.credential_publishing)]
+
+
+def _part_matches(pattern: str, name: str, dotglob: bool, nocaseglob: bool = False) -> bool:
+    """Whether one path component pattern may match one name, as bash globs."""
+    if pattern.startswith(_LITERAL):
+        return pattern[len(_LITERAL):] == name
+    if pattern in {_ANY_PART, name}:
+        return True
+    if _has_extglob(pattern):
+        # Alternatives, repetition and negation are not fnmatch syntax. A
+        # component may match any name; it still cannot cross a slash.
+        return True
+    if not any(char in pattern for char in "*?["):
+        return False
+    # Without dotglob, a leading * or ? never matches a dotfile.
+    if name.startswith(".") and pattern[:1] in {"*", "?"} and not dotglob:
+        return False
+    # fnmatch knows neither negation with ^ nor character classes: a bracket
+    # expression matches one character, which is enough to stay conservative.
+    pattern = _BRACKET.sub("?", pattern)
+    return fnmatch.fnmatchcase(name.casefold(), pattern.casefold()) if nocaseglob else fnmatch.fnmatchcase(name, pattern)
+
+
+def _reaches(pattern: tuple[str, ...], store: tuple[str, ...], dotglob: bool, nocaseglob: bool = False) -> bool:
+    """Whether a path spelled by these parts may be the store or inside it.
+
+    Iterative over (pattern, store) positions: bounded by their product, so
+    no input recurses or backtracks exponentially.
+    """
+    seen: set[tuple[int, int]] = set()
+    pending = [(0, 0)]
+    while pending:
+        state = pending.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        index, depth = state
+        if depth == len(store):
+            return True
+        if index == len(pattern):
+            continue
+        head = pattern[index]
+        if head == _ANY_PARTS:
+            pending += [(index + 1, depth), (index, depth + 1)]
+        elif head == "**":
+            pending.append((index + 1, depth))
+            if _part_matches("*", store[depth], dotglob, nocaseglob):
+                pending.append((index, depth + 1))
+        elif _part_matches(head, store[depth], dotglob, nocaseglob):
+            pending.append((index + 1, depth + 1))
+    return False
+
+
+def _brace_crosses_path(value: str) -> bool:
+    """Whether a brace alternative holds a '/' or '~', so may start anywhere."""
+    depth = 0
+    for char in value:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(depth - 1, 0)
+        elif depth and char in "/~":
+            return True
+    return False
+
+
+def _has_extglob(part: str) -> bool:
+    return any(operator + "(" in part for operator in "@+!*?")
+
+
+def credential_reason(words, policy, cwd: str | None, *, dotglob: bool = False,
+                      nocaseglob: bool = False) -> str | None:
+    dotglob = dotglob or _environment_dotglob()
+    nocaseglob = nocaseglob or _environment_nocaseglob()
+    stores = [candidate.parts
+              for store in _guarded_stores(policy)
+              for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
+    base = Path(os.path.abspath(cwd or "."))
+    real_base = Path(cwd or ".").resolve()
+
+    def literal(parts: tuple[str, ...], prefix: tuple[str, ...]) -> tuple[str, ...]:
+        # The working directory is a real path: its glob characters are literal.
+        count = len(prefix) if parts[:len(prefix)] == prefix else 0
+        return tuple(_LITERAL + part for part in parts[:count]) + parts[count:]
+
     for word in words:
-        candidate = (Path(cwd or ".") / os.path.expanduser(word)).resolve()
-        if any(candidate == root or root in candidate.parents for root in stores):
-            return "protected credential reads cannot be granted"
+        for value in dict.fromkeys([word, *_operand_values(word)]):
+            tilde = _tilde_directory(value)
+            if tilde:
+                # `~+` is the working directory; `~-` and stack entries are
+                # unknown, so only a name check applies (REV-009).
+                if tilde[0] != "+":
+                    if _could_name_credential(value, policy, dotglob, nocaseglob):
+                        return _UNRESOLVED_CREDENTIAL
+                    continue
+                value = "." + tilde[1]
+            operand = Path(os.path.expanduser(value))
+            own = operand.parts
+            path = base / operand
+            lexical = Path(os.path.abspath(path)).parts
+            normalized = Path(os.path.normpath(operand)).parts
+            ups = len(normalized) - len(tuple(itertools.dropwhile(lambda part: part == "..", normalized)))
+            kept = base.parts[:max(1, len(base.parts) - ups)]
+            # Retain both spellings: a glob cannot resolve a symlink in a filename.
+            spellings = [lexical if operand.is_absolute() else literal(lexical, kept),
+                         path.resolve().parts if operand.is_absolute()
+                         else literal((real_base / operand).resolve().parts, real_base.parts)]
+            expanded = [index for index, part in enumerate(own)
+                        if any(char in part for char in "{}*?[") or _has_extglob(part)]
+            if expanded:
+                # Lexical normalization cannot cross an expanded part: a '..'
+                # after one, or inside braces, may lead to any directory.
+                escapes = [index for index, part in enumerate(own)
+                           if (part == ".." and index > expanded[0])
+                           or (".." in part and ("{" in part or "}" in part))]
+                if escapes:
+                    spellings.append((_ANY_PARTS, *own[escapes[-1] + 1:]))
+            if _brace_crosses_path(value):
+                spellings.append((_ANY_PARTS, *own))
+            for parts in spellings:
+                # Brace alternatives expand before a program receives argv. Match
+                # one component at a time, so `*` never crosses a '/'.
+                pattern = tuple(_ANY_PART if ("{" in part or "}" in part) and not part.startswith(_LITERAL)
+                                else part for part in parts)
+                if any(_reaches(pattern, store, dotglob, nocaseglob) for store in stores):
+                    return "protected credential reads cannot be granted"
     return None
 
 

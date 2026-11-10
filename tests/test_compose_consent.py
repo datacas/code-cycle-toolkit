@@ -159,11 +159,11 @@ class FirstConsentTests(ComposeConsentCase):
                 self.assertIsNotNone(other_request)
                 self.assertNotEqual(request["resource"], other_request["resource"])
 
-    def test_ac6_only_unparseable_shell_syntax_stays_refused(self):
+    def test_ac6_shell_syntax_requests_its_own_whole_operation_consent(self):
         for command in (CHECK + "; rm -rf /", CHECK + " $(id)", CHECK + " | tee x"):
             with self.subTest(command=command):
                 self.assertFalse(sp.check(command, self.policy(), cwd=str(self.clone)).allowed)
-                self.assertIsNone(self.request(command)[0])
+                self.assertIsNotNone(self.request(command)[0])
 
     def test_ac8_hook_round_trip_first_authorization_reuse_and_revocation(self):
         path = self.root / "policy.json"
