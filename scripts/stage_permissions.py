@@ -559,6 +559,32 @@ _COMMAND_PREFIX_WORD = re.compile(
     r"time(?:[ \t]+-p)?(?:[ \t]+--)?|coproc(?:[ \t]+" + _FUNCTION_NAME + r")?|"
     r"function[ \t]+" + _FUNCTION_NAME + r")$")
 _FUNCTION_HEADER = re.compile(r"(?<![^ \t\n;&|()])(?:function[ \t]+)?" + _FUNCTION_NAME + r"[ \t]*\([ \t]*\)$")
+# Bash permits `do` (or an arithmetic for's `{`) immediately after a loop
+# header, without a separator. Only use this after finding that body opener.
+_LOOP_BODY_HEADER = re.compile(
+    r"(?<![^ \t\n;&|()])(?:for|select)[ \t]+[A-Za-z_][A-Za-z0-9_]*$")
+_ARITHMETIC_FOR_HEADER = re.compile(r"(?<![^ \t\n;&|()])for[ \t]*\(\(")
+
+
+def _loop_body_header(source: str, depth: int) -> int | None:
+    """Start of a loop header ending here, without consuming earlier data."""
+    if header := _LOOP_BODY_HEADER.search(source):
+        return header.start()
+    if not source.endswith("))"):
+        return None
+    for header in reversed(list(_ARITHMETIC_FOR_HEADER.finditer(source))):
+        # Reuse arithmetic expansion's quote/nesting rules, without evaluation.
+        # A regex alone can span an earlier extglob or another loop header.
+        arithmetic = "$" + source[header.end() - 2:]
+        try:
+            end = _shell_expansion_end(arithmetic, 0, depth + 1, [])
+        except PolicyError as error:
+            if str(error) != "unterminated shell expansion":
+                raise  # preserve the existing analysis resource limits
+            continue  # a header-looking word inside quoted data
+        if end == len(arithmetic) - 1:
+            return header.start()
+    return None
 
 
 def _shell_keyword(source: str, i: int, word: str) -> int:
@@ -579,12 +605,12 @@ def _shell_keyword(source: str, i: int, word: str) -> int:
     return end - i if end == len(source) or source[end] in " \t\n;&|()<>" else 0
 
 
-def _command_position(source: str, start: int, i: int, pattern_close: int) -> bool:
+def _command_position(source: str, start: int, i: int, pattern_close: int, depth: int = 0) -> bool:
     """Whether a word at `i` is where bash recognises a reserved word.
 
     `start` is the first character of the command list and `pattern_close`
-    the `)` that last ended a `case` pattern. A function header's `)` also
-    starts a compound body; a substitution's `)` leaves an argument position.
+    the `)` that last ended a `case` pattern. Function and loop headers also
+    start compound bodies; a substitution's `)` leaves an argument position.
     """
     # Preserve original offsets while removing continuations. Escaped
     # backslashes are pairs, so an even run leaves a real newline separator.
@@ -626,6 +652,12 @@ def _command_position(source: str, start: int, i: int, pattern_close: int) -> bo
         if keyword is None:
             return False
         before = before[:keyword.start()].rstrip(" \t")
+        if keyword.group() in {"do", "{"}:
+            header = _loop_body_header(before, depth)
+            if header is not None:
+                # Check the header's own command position on the next pass:
+                # `echo for x do case` still contains only argument words.
+                before = before[:header].rstrip(" \t")
 
 
 def _shell_expansion_end(source: str, start: int, depth: int, substitutions: list[str]) -> int:
@@ -759,14 +791,14 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
                         i += keyword_width
                         continue
                     if (not word_active and clause[0] == "body" and (keyword_width := _shell_keyword(source, i, "esac"))
-                            and _command_position(source, marker + 1, i, pattern_close)):
+                            and _command_position(source, marker + 1, i, pattern_close, depth)):
                         cases.pop()
                         word_active = True
                         i += keyword_width
                         continue
                 if (shell and not word_active and (keyword_width := _shell_keyword(source, i, "case"))
                         and not (cases and cases[-1][0] != "body")
-                        and _command_position(source, marker + 1, i, pattern_close)):
+                        and _command_position(source, marker + 1, i, pattern_close, depth)):
                     cases.append(["head", nesting, False])
                     word_active = True
                     i += keyword_width
@@ -798,6 +830,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
     quote: str | None = None
     extglob_depth = 0
     i = 0
+    segment_start = 0
 
     def finish_word():
         nonlocal word, pending
@@ -812,7 +845,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             words.append(value)
 
     def finish_segment():
-        nonlocal words, redirects
+        nonlocal words, redirects, segment_start
         finish_word()
         while words and words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
             words = words[1:]
@@ -821,6 +854,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         if words or redirects:
             result.append(ParsedCommand(words=words, redirects=redirects))
         words, redirects = [], []
+        segment_start = i + 1
 
     while i < len(source):
         char = source[i]
@@ -856,6 +890,16 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         if quote == "'":
             word.append(char)
             i += 1
+            continue
+        if (quote is None and not word and not extglob_depth
+                and (keyword_width := _shell_keyword(source, i, "do"))
+                and _loop_body_header(source[segment_start:i].rstrip(" \t"), depth) is not None
+                and _command_position(source, segment_start, i + keyword_width, -1, depth)):
+            # `for x do CMD` and `select x do CMD` have no operator between
+            # the header and the executable body. Do not fold CMD into `for`.
+            finish_segment()
+            i += keyword_width
+            segment_start = i
             continue
         if extglob_depth and source.startswith(("${", "$["), i):
             substitutions: list[str] = []

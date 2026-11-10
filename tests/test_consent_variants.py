@@ -757,6 +757,28 @@ class ConsentVariantsTests(unittest.TestCase):
                                 for role in ("resolve", "rereview"):
                                     self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, sp.StagePolicy(role), root))
 
+    REV014_EXTGLOB_FORMS = (
+        'printf \'%s\' "$(printf \'%s\' @(for ((0))); for ((;;)) do case a in a) {cmd} ;; esac; break; done)"',
+        'printf \'%s\' "$(printf \'%s\' @(for ((0))); for ((;;)) { case a in a) {cmd} ;; esac; break; })"')
+
+    REV014_LOOP_FORMS = (
+        'printf \'%s\' "$(for ((;;)) do case a in a) {cmd} ;; esac; break; done)"',
+        'printf \'%s\' "$(for ((;;)) { case a in a) {cmd} ;; esac; break; })"',
+        'printf \'%s\' "$(set -- 1; for x do case a in a) {cmd} ;; esac; done)"',
+        'printf \'%s\' "$(set -- 1; select x do case a in a) {cmd} ;; esac; break; done)"',
+        'echo $(for((;;))do case a in a) {cmd} ;; esac; break; done)',
+        'printf "%s" "$(for (((0);1;)) do case a in a) {cmd} ;; esac; break; done)"',
+        'printf "%s" "$(for ((;1;)) { case a in a) {cmd} ;; esac; break; })"',
+        'echo $(set -- 1; for x \\\ndo case a in a) {cmd} ;; esac; done)',
+        'echo $(for ((;;)) d\\\no ca\\\nse a in a) {cmd} ;; esac; break; done)',
+        'cat <(for ((;;)) do case a in a) {cmd} ;; esac; break; done)',
+        'echo $(for ((;;)) do if case a in a) {cmd} ;; esac; then break; fi; done)',
+        'echo $(case a in a) for ((;;)) do case b in b) {cmd} ;; esac; break; done ;; esac)',
+        'printf "%s" "$(for (( $(printf 0 \'for ((0))\') ;1; )) do case a in a) {cmd} ;; esac; break; done)"',
+        'printf "%s" "$(set -- 1; for x do {cmd}; done)"',
+        'printf "%s" "$(set -- 1; select x do {cmd}; break; done)"',
+        *REV014_EXTGLOB_FORMS)
+
     #: `case` clauses inside substitutions whose later command Bash runs
     #: (REV-014). `{cmd}` is replaced by the hidden command.
     REV014_FORMS = ('printf \'%s\' "$(case a in a) {cmd} ;; esac)"',
@@ -795,7 +817,8 @@ class ConsentVariantsTests(unittest.TestCase):
                     "echo $(case a i\\\nn a) {cmd} ;; esac)",
                     "echo $(case a in a) {cmd} ;; es\\\nac)",
                     "cat <(f() case a in a) {cmd} ;; esac; f)",
-                    "echo $(f\\\n() ca\\\nse a i\\\nn a) {cmd} ;; es\\\nac; f)")
+                    "echo $(f\\\n() ca\\\nse a i\\\nn a) {cmd} ;; es\\\nac; f)",
+                    *REV014_LOOP_FORMS)
 
     # Some Bash versions reject these TIMEOPT/TIMEIGN forms. Retain their
     # conservative parser coverage without claiming a successful Bash baseline.
@@ -836,6 +859,10 @@ class ConsentVariantsTests(unittest.TestCase):
         for body in ("echo case a in a", "echo then case a in a", "echo \\; case a in a",
                      "echo $(true) case a in a", "echo function f case a in a",
                      "echo coproc worker case a in a", "echo time -p case a in a",
+                     "echo for x do case a in a", "echo select x do case a in a",
+                     "echo for x do if case a in a", 'echo "for ((;;))" do case a in a',
+                     "printf '%s' 'for ((;;))' do case a in a",
+                     'for ((;;)) do break; done; printf "%s" @((a)) do case a in a',
                      "echo @() case a in a", "echo +() case a in a", "echo *() case a in a",
                      "echo ?() case a in a", "echo !() case a in a",
                      "echo ca\\\nse a in a", "printf '%s' esac", "case a in a) printf ok ;; esac"):
@@ -861,16 +888,24 @@ class ConsentVariantsTests(unittest.TestCase):
                         approved, _ = self.approved(policy, command, cwd=root)
                         self.assertTrue(sp.check(command, approved, cwd=root).allowed)
                 path = Path(root, "policy.json")
-                path.write_text(self.rev014_grant(role, "claude").to_json(), encoding="utf-8")
-                for body, allowed in (("printf safe", True), ("git push --force origin main", False)):
-                    command = self.REV014_FORMS[15].replace("{cmd}", body)
-                    completed = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
-                        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": root}),
-                        capture_output=True, text=True)
-                    self.assertEqual(0, completed.returncode, completed.stderr)
-                    self.assertEqual(allowed, completed.stdout == "", completed.stdout)
-                    if not allowed:
-                        self.assertIn("[layer=toolkit_hook]", completed.stdout)
+                for form in (self.REV014_FORMS[15], *self.REV014_LOOP_FORMS):
+                    for body, allowed in (("printf safe", True), ("git push --force origin main", False),
+                                          ("cat ~/.ssh/id_rsa", False)):
+                        command = form.replace("{cmd}", body)
+                        with self.subTest(role=role, command=command):
+                            policy = self.rev014_grant(role, "claude")
+                            if allowed:
+                                # `.+` does not match newlines. Use exact
+                                # consent for the continuation-form positives.
+                                policy, _ = self.approved(sp.StagePolicy(role), command, cwd=root)
+                            path.write_text(policy.to_json(), encoding="utf-8")
+                            completed = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
+                                input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": root}),
+                                capture_output=True, text=True)
+                            self.assertEqual(0, completed.returncode, completed.stderr)
+                            self.assertEqual(allowed, completed.stdout == "", completed.stdout)
+                            if not allowed:
+                                self.assertIn("[layer=toolkit_hook]", completed.stdout)
 
     @posix_shell
     def test_rev014_bash_fixture_runs_the_command_after_the_pattern(self):
@@ -883,8 +918,9 @@ class ConsentVariantsTests(unittest.TestCase):
             for form in self.REV014_FORMS:
                 command = form.replace("{cmd}", "cat " + str(target))
                 with self.subTest(command=command):
-                    baseline = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=root,
-                        env={**os.environ, "BASH_ENV": "/dev/null"}, capture_output=True, text=True)
+                    options = ["-O", "extglob"] if form in self.REV014_EXTGLOB_FORMS else []
+                    baseline = subprocess.run(["bash", "--noprofile", "--norc", *options, "-c", command], cwd=root,
+                        env={**os.environ, "BASH_ENV": "/dev/null"}, input="1\n", capture_output=True, text=True)
                     self.assertEqual(0, baseline.returncode, baseline.stderr)
                     self.assertIn("hidden command ran", baseline.stdout)
                     with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):

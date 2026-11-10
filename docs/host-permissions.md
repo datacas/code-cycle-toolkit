@@ -241,7 +241,14 @@ terminators never end the substitution, so the commands of each clause are
 separate segments with their own guards (REV-014). Function-body headers
 (`f()`, `function f`, `function f()`, including Bash's non-POSIX names such
 as `f-x` and `f/x`), `coproc` with an optional name and
-`time` option prefixes retain command position. Keywords split by
+`time` option prefixes retain command position. Loop bodies introduced by `do`
+after `for ((…))`, `for NAME` or `select NAME`, or by `{` after an arithmetic
+`for`, also retain command position without an intervening separator. The loop
+header must itself start at command position, and an arithmetic header ends at
+its matching parentheses rather than spanning earlier argument data. Argument
+words such as `echo for x do case` remain data. The `do` after a positional
+`for` or `select` header also starts a new executable segment, so its first
+body command retains its own guards even without a `case` clause. Keywords split by
 backslash-newline are recognised without changing the original source offsets
 or quoted data. A `case` word in argument position is data. The regression
 baseline executes supported forms in disposable Bash; conservative parser
