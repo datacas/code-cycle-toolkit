@@ -57,7 +57,8 @@ class ValidatePackageTests(unittest.TestCase):
         )
 
     def test_current_package_is_valid(self) -> None:
-        self.assertEqual([], VALIDATOR.validate_package(ROOT))
+        # A tracked-file copy: untracked local files are not part of the package.
+        self.assertEqual([], VALIDATOR.validate_package(self.copy_package()))
 
     def test_authorization_contract_rejects_missing_or_expanded_actions(self) -> None:
         package = self.copy_package()
