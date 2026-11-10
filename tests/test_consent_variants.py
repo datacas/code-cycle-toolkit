@@ -1039,6 +1039,124 @@ class ConsentVariantsTests(unittest.TestCase):
                 self.assertIsNone(sp.protected_reason('Bash', {'command': command}, policy, None))
                 self.assertTrue(sp.check(command, policy).allowed)
 
+    #: Quoted spellings of reserved words. Bash recognises a reserved word
+    #: only when it is unquoted, so after `coproc NAME` each one is an
+    #: argument of the simple command NAME (REV-016).
+    REV016_QUOTED = ('"if"', "'if'", '\\if', 'i""f', "$'if'", '"{"', "'{'", '\\{', "'[['",
+                     '"while"', '"until"', '"for"', '"select"', '"case"')
+    REV016_FORMS = ('coproc {cmd}; wait', 'printf "%s" "$(coproc {cmd}; wait)"',
+                    'time coproc {cmd}; wait', '! coproc {cmd}; wait')
+    #: The same loss of quoting: an empty quoted word is still a word, and a
+    #: `#` after a quoted prefix is not a comment.
+    REV016_WORD_FORMS = ('coproc {prog} "" if {args}; wait', "coproc {prog} '' if {args}; wait",
+                         '""#; {prog} {args}', "''# x; {prog} {args}", 'printf "%s" "$(""#; {prog} {args})"')
+
+    def rev016_commands(self, prog, args):
+        for form in self.REV016_FORMS:
+            for quoted in self.REV016_QUOTED:
+                yield form.replace('{cmd}', ' '.join((prog, quoted, args)))
+        for form in self.REV016_WORD_FORMS:
+            yield form.replace('{prog}', prog).replace('{args}', args)
+
+    @posix_shell
+    def test_rev016_quoted_reserved_words_keep_the_coprocess_program(self):
+        bodies = ('src -delete', 'src -exec rm -rf {} +')
+        with tempfile.TemporaryDirectory() as root:
+            for executor in ('claude', 'codex'):
+                for role in ('resolve', 'rereview'):
+                    policy = self.rev014_grant(role, executor)
+                    for args in bodies:
+                        for command in self.rev016_commands('find', args):
+                            with self.subTest(executor=executor, role=role, command=command):
+                                segments = sp.parse_command(command, None).segments
+                                self.assertTrue(any(segment.words[:1] == ['find'] for segment in segments), segments)
+                                self.assertIn('find', str(sp.protected_reason('Bash', {'command': command},
+                                                                              policy, root)))
+                                self.assertFalse(sp.check(command, policy, cwd=root).allowed)
+                                self.assertIsNone(cp.refused_operation([command], policy,
+                                    grants.ConsentBroker('owner/repo', platform='linux'), executor, root))
+
+    @posix_shell
+    def test_rev016_bash_baseline_and_real_hook_allow_and_deny(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root, 'marker')
+            # `find` is a Bash function writing only to this fixture.
+            stub = 'find() { printf executed > ' + str(marker) + '; }; '
+            path = Path(root, 'policy.json')
+            for command in self.rev016_commands('find', 'src -delete'):
+                with self.subTest(command=command):
+                    marker.unlink(missing_ok=True)
+                    baseline = subprocess.run(['bash', '--noprofile', '--norc', '-c', stub + command + '\nwait'],
+                        cwd=root, capture_output=True, text=True, timeout=10,
+                        env={**os.environ, 'BASH_ENV': '/dev/null'})
+                    self.assertEqual(0, baseline.returncode, baseline.stderr)
+                    self.assertEqual('executed', marker.read_text())
+                    for role in ('resolve', 'rereview'):
+                        for body, allowed in ((command, False), (command.replace('find', 'printf'), True)):
+                            policy = self.rev014_grant(role, 'claude')
+                            if allowed:
+                                policy, _ = self.approved(sp.StagePolicy(role), body, cwd=root)
+                            path.write_text(policy.to_json(), encoding='utf-8')
+                            completed = subprocess.run([sys.executable, str(Path(sp.__file__)), 'hook', str(path)],
+                                input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': body}, 'cwd': root}),
+                                capture_output=True, text=True, timeout=10)
+                            self.assertEqual(0, completed.returncode, completed.stderr)
+                            self.assertEqual(allowed, completed.stdout == '', completed.stdout)
+                            if not allowed:
+                                self.assertIn('[layer=toolkit_hook]', completed.stdout)
+
+    def test_rev016_unquoted_reserved_words_still_name_the_coprocess(self):
+        for command in ('coproc worker if true; then printf ok; fi; wait',
+                        'coproc worker { printf ok; }; wait', 'coproc worker [[ -n x ]]; wait',
+                        'coproc wor\\\nker case a in a) printf ok ;; esac; wait'):
+            with self.subTest(command=command):
+                programs = [segment.words[:1] for segment in sp.parse_command(command, None).segments]
+                self.assertNotIn(['worker'], programs)
+        # A line continuation is not quoting: `i\<newline>f` is the reserved word.
+        self.assertNotIn(['worker'], [segment.words[:1] for segment in
+                                      sp.parse_command('coproc worker i\\\nf true; then :; fi', None).segments])
+        # Empty quoted words are words; a `#` that starts a word is a comment.
+        self.assertEqual([['printf', '', 'x']], [segment.words for segment in
+                                                 sp.parse_command('printf "" x; # git push', None).segments])
+
+    @posix_shell
+    def test_rev016_quoted_words_keep_redirect_and_tilde_meaning(self):
+        segments = lambda command: sp.parse_command(command, None).segments
+        # A quoted digit is an argument; the redirection is stdout.
+        for command in ('printf "2">f; true', 'printf \\2>f; true', 'printf 2"">f; true'):
+            with self.subTest(command=command):
+                self.assertEqual((['printf', '2'], [('1', '>', 'f')]),
+                                 (segments(command)[0].words, segments(command)[0].redirects))
+        # An unquoted digit is the descriptor, not an argument.
+        self.assertEqual(['printf'], segments('printf 2>f; true')[0].words)
+        # `""~` is a literal tilde; a bare `~` is still $HOME.
+        self.assertEqual(['cat', '~/x'], segments('cat ""~/x; true')[0].words)
+        self.assertEqual(['cat', str(Path.home() / 'x')], segments('cat ~/x; true')[0].words)
+        # An empty redirect target is consumed, so the next program keeps its guard.
+        with tempfile.TemporaryDirectory() as root:
+            marker = Path(root, 'marker')
+            for command in ('printf x > ""; git push --force origin main',
+                            "printf x > ''; git push --force origin main"):
+                with self.subTest(command=command):
+                    marker.unlink(missing_ok=True)
+                    baseline = subprocess.run(['bash', '--noprofile', '--norc', '-c',
+                        'git() { printf executed > ' + str(marker) + '; }; ' + command],
+                        cwd=root, capture_output=True, text=True, timeout=10,
+                        env={**os.environ, 'BASH_ENV': '/dev/null'})
+                    self.assertEqual(0, baseline.returncode, baseline.stderr)
+                    self.assertEqual('executed', marker.read_text())
+                    self.assertIn(['git', 'push', '--force', 'origin', 'main'],
+                                  [segment.words for segment in segments(command)])
+                    for executor in ('claude', 'codex'):
+                        for role in ('resolve', 'rereview'):
+                            policy = self.rev014_grant(role, executor)
+                            # `> ""` is itself refused by the redirect guard; the
+                            # separate `git push` segment keeps its own guard.
+                            self.assertIsNotNone(sp.protected_reason('Bash', {'command': command}, policy, root))
+                            self.assertIn('git', str(sp.protected_reason(
+                                'Bash', {'command': 'git push --force origin main'}, policy, root)).lower())
+                            self.assertFalse(sp.check(command, policy, cwd=root).allowed)
+
     @posix_shell
     def test_rev012_extglob_data_and_negated_subshells_are_distinct(self):
         policy = sp.StagePolicy("resolve")

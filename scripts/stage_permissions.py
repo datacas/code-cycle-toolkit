@@ -825,35 +825,52 @@ def _shell_expansion_end(source: str, start: int, depth: int, substitutions: lis
     raise PolicyError("unterminated shell expansion")
 
 
-def _peel_command_headers(words: list[str], before_subshell: bool = False) -> list[str]:
+def _peel_command_headers(words: list[str], before_subshell: bool = False,
+                          quoted: list[bool] | None = None) -> list[str]:
     """The words of a segment once its leading reserved-word headers are gone.
 
     Peel headers together, repeatedly: e.g. `time coproc`, `function f {`, or
     `coproc NAME {` (REV-015). Only a leading header changes command position;
     the same words in printf/echo arguments stay data. `before_subshell` says
-    that a `(` ends the segment, as in `coproc NAME ( … )`.
+    that a `(` ends the segment, as in `coproc NAME ( … )`. `quoted[i]` says
+    that `words[i]` had quoting: Bash recognises reserved words only when
+    unquoted, so `coproc find "if" src` is the simple command `find` (REV-016).
+    Peeling a quoted *leading* word stays conservative, because it only
+    exposes more words to the guards.
     """
+    flags = list(quoted) if quoted is not None and len(quoted) == len(words) else [False] * len(words)
     while words:
+        before = len(words)
+        words = _peel_one_header(words, before_subshell, flags)
+        if len(words) == before:
+            break
+        flags = flags[before - len(words):]
+    return words
+
+
+def _peel_one_header(words: list[str], before_subshell: bool, quoted: list[bool]) -> list[str]:
+    if words:
         if words[0] in {"if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"}:
-            words = words[1:]
-        elif words[0] == "time":
+            return words[1:]
+        if words[0] == "time":
             words = words[1:]
             if words[:1] == ["-p"]:
                 words = words[1:]
             if words[:1] == ["--"]:
                 words = words[1:]
-        elif words[0] == "function" and len(words) > 1:
-            words = words[2:]
-        elif words[0] in {"for", "select"} and words[2:3] == ["{"]:
-            words = words[3:]
-        elif words[0] == "coproc":
+            return words
+        if words[0] == "function" and len(words) > 1:
+            return words[2:]
+        if words[0] in {"for", "select"} and words[2:3] == ["{"]:
+            return words[3:]
+        if words[0] == "coproc":
             # A name is optional only before a compound command. For a simple
-            # command `coproc git push`, git is the executable.
-            named = ((len(words) > 2 and words[2] in {"{", "[[", "if", "while", "until", "for", "select", "case"})
+            # command `coproc git push`, git is the executable, and so is find
+            # in `coproc find "if" src` because a quoted word is never reserved.
+            named = ((len(words) > 2 and not quoted[2]
+                      and words[2] in {"{", "[[", "if", "while", "until", "for", "select", "case"})
                      or (before_subshell and len(words) == 2))
-            words = words[2:] if named else words[1:]
-        else:
-            break
+            return words[2:] if named else words[1:]
     return words
 
 
@@ -863,6 +880,11 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
     result: list[ParsedCommand] = []
     word: list[str] = []
     words: list[str] = []
+    # Whether each word of `words` had quoting (REV-016). Bash decides
+    # reserved words and comments before quote removal, so `"if"` is not `if`,
+    # `""` is an empty argument and `""#` is not a comment.
+    quoted_words: list[bool] = []
+    word_quoted = False
     redirects: list[tuple[str, str, str | None]] = []
     pending: str | None = None
     quote: str | None = None
@@ -871,24 +893,26 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
     segment_start = 0
 
     def finish_word():
-        nonlocal word, pending
-        if not word:
+        nonlocal word, pending, word_quoted
+        if not word and not word_quoted:
             return
         value = "".join(word)
-        word = []
+        was_quoted = word_quoted
+        word, word_quoted = [], False
         if pending:
             redirects.append(("1", pending, value))
             pending = None
         else:
             words.append(value)
+            quoted_words.append(was_quoted)
 
     def finish_segment(before_subshell: bool = False):
-        nonlocal words, redirects, segment_start
+        nonlocal words, quoted_words, redirects, segment_start
         finish_word()
-        words = _peel_command_headers(words, before_subshell)
+        words = _peel_command_headers(words, before_subshell, quoted_words)
         if words or redirects:
             result.append(ParsedCommand(words=words, redirects=redirects))
-        words, redirects = [], []
+        words, quoted_words, redirects = [], [], []
         segment_start = i + 1
 
     while i < len(source):
@@ -899,6 +923,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             # A backslash-newline is a line continuation: bash removes both.
             if source[i + 1] != "\n":
                 word.append(source[i + 1])
+                word_quoted = True
             i += 2
             continue
         if char == "$" and quote is None and source.startswith("$'", i):
@@ -908,6 +933,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             while end < len(source) and source[end] != "'":
                 end += 2 if source[end] == "\\" else 1
             word.append(_ansi_c(source[i + 2:min(end, len(source))]))
+            word_quoted = True
             i = end + 1
             continue
         if char == "$" and quote is None and source.startswith('$"', i):
@@ -916,10 +942,12 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             continue
         if char == "'" and quote != '"':
             quote = None if quote == "'" else "'"
+            word_quoted = True
             i += 1
             continue
         if char == '"' and quote != "'":
             quote = None if quote == '"' else '"'
+            word_quoted = True
             i += 1
             continue
         if quote == "'":
@@ -992,7 +1020,7 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             extglob_depth += (1 if char == "(" else -1 if char == ")" else 0)
         elif quote is None and char in " \t":
             finish_word()
-        elif quote is None and char == "#" and not word:
+        elif quote is None and char == "#" and not word and not word_quoted:
             end = source.find("\n", i)
             i = len(source) if end < 0 else end
             continue
@@ -1017,8 +1045,10 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
             i += 2
             continue
         elif quote is None and char in "<>":
-            descriptor = "".join(word) if word and "".join(word).isdecimal() else "1"
-            if word and "".join(word).isdecimal():
+            # A quoted `"2">x` is the argument 2 and a stdout redirection.
+            numbered = bool(word) and not word_quoted and "".join(word).isdecimal()
+            descriptor = "".join(word) if numbered else "1"
+            if numbered:
                 word = []
             finish_word()
             duplication = re.match(r"([<>])&([0-9]+|-)", source[i:])
@@ -1032,7 +1062,8 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
                 i += 1
         elif quote is None and char in "|&;\n()":
             finish_segment(before_subshell=char == "(")
-        elif char == "~" and not word and quote is None:
+        elif char == "~" and not word and not word_quoted and quote is None:
+            # `""~` does not start with an unquoted `~`: bash keeps it literal.
             # Only a bare `~` names $HOME. `~user`, `~+`, `~-` and `~N` keep
             # their prefix so the guards resolve what bash reads (REV-009).
             # Braces expand first (`~{,}/x` is `~/x`): expanding `~` keeps
@@ -3282,6 +3313,9 @@ def _shell_identity(parsed: ParsedCommand, policy: Any, cwd: str | None) -> str:
         operands += [word for index, word in enumerate(words) if index and words[index - 1] not in {"-c", "-e", "--eval"}]
         operands += [target for _, _, target in segment.redirects if target is not None]
         for operand in operands:
+            if not operand:
+                # An empty quoted word names no path; `Path(cwd) / ""` is cwd.
+                continue
             candidate = str(Path(cwd or ".") / operand)
             if not (os.path.isabs(operand) or operand.startswith(("./", "../"))
                     or "/" in operand or Path(candidate).exists()):

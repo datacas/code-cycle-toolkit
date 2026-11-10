@@ -252,7 +252,15 @@ body command retains its own guards even without a `case` clause. Executable
 headers are removed repeatedly before segment guards run: `function NAME`,
 `coproc` (with a name before a compound body), `time` and negation cannot hide
 the first body program (REV-015). Bare `coproc CMD`, `time CMD` and `! CMD`
-also use shell consent even without another shell operator. The same header
+also use shell consent even without another shell operator. As in Bash, a
+word that carries any quoting is never a reserved word: in
+`coproc find "if" src -delete`, `find` stays the program with its guards,
+because `"if"`, `\if`, `i""f` or `$'if'` are arguments, not the start of a
+compound body. An empty quoted word (`""`) is still an argument or redirect
+target, a `#` after a quoted prefix (`""#`) does not start a comment, `""~`
+is a literal tilde rather than `$HOME`, and a quoted digit before a
+redirection (`"2">f`) is an argument with a stdout redirection (REV-016). A
+backslash-newline is not quoting. The same header
 rule decides whether `!(` after those headers is negation followed by a
 subshell rather than an extglob operand. Header words in argument position
 remain data. Brace loop bodies require the separator that
