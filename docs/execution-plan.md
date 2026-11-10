@@ -162,7 +162,9 @@ Schema 25 stores append-only revisions in `cycle_execution_plans` in the history
 database. The version-1 metadata projection removes prompts, criterion prose,
 reasoning, commands and output. Commands become SHA-256 bindings; criteria become
 stable `AC-n` identities. Check histories retain HEAD, results, closed cause
-tokens and evidence fingerprints. Canonical JSON uses sorted keys, compact
+tokens and evidence fingerprints; the raw reported `attempts` kept as
+`attempts_normalized` and any evidence entry that is not an object are not
+persisted. Canonical JSON uses sorted keys, compact
 separators and ASCII escaping; its SHA-256 is `digest`. Every stage receives
 `plan_id`, `revision` and `digest` for its schema-2 receipt. A receipt supplements
 the existing attempt, head and `REV-*` contracts; it grants no execution rights.
