@@ -122,6 +122,25 @@ class VerificationDecisionsTests(unittest.TestCase):
         self.assertEqual(restored.verification.results[-1].cause, "time_limit")
         self.assertEqual(restored.verification.results[-1].evidence[0]["limit_seconds"], 600)
 
+    def test_projection_ignores_prose_evidence_entries(self):
+        entry = {"command": self.check.command, "exit_code": 1, "executed": 1}
+        payload = {"verification": {"results": [
+            {"id": "x", "evidence": ["reviewer prose", entry, 3]},
+            {"id": "y", "evidence": "plain text"}]}}
+        projected = plan_projection(SimpleNamespace(to_dict=lambda: payload))
+        results = projected["plan"]["verification"]["results"]
+        self.assertEqual(len(results[0]["evidence"]), 1)
+        self.assertEqual(results[0]["evidence"][0]["exit_code"], 1)
+        self.assertEqual(results[1]["evidence"], [])
+
+    def test_projection_drops_raw_normalized_attempts(self):
+        raw = {"type": "array", "value": [{"command": "pytest", "evidence": "raw output"}]}
+        payload = {"verification": {"results": [{"id": "x", "attempts": [{"note": "n"}],
+                                                 "attempts_normalized": raw}]}}
+        result = plan_projection(SimpleNamespace(to_dict=lambda: payload)
+                                 )["plan"]["verification"]["results"][0]
+        self.assertEqual((result["attempts"], result["attempts_normalized"]), ([], {}))
+
     def test_terminal_status_is_non_successful_and_serializable(self):
         self.assertEqual(telemetry.SCHEMA_VERSION, 29)
         self.assertEqual(cycle_status._result_icon("VERIFICATION_INCOMPLETE"), "⚠️")

@@ -278,12 +278,19 @@ def plan_projection(plan: ExecutionPlan) -> dict[str, Any]:
             conclusion = value.get("verification_conclusion")
             return ({"verification_conclusion": conclusion} if conclusion in {
                 "verified", "verified_with_reservations", "not_verified", "failed"} else {})
-        if key in {"attempts", "review"}:
+        if key in {"attempts", "attempts_normalized", "review"}:
+            # attempts_normalized keeps the raw reported attempts, with their
+            # prose and output; the projection never carries either.
             return [] if key == "attempts" else {}
         if key == "evidence":
+            # Only structured entries carry projectable fields; a prose entry
+            # (a reviewer may report evidence as plain strings) has none.
+            if not isinstance(value, (list, tuple)):
+                return []
             return [{k: clean(v, k) for k, v in item.items()
                      if k in {"command", "level", "exit_code", "executed", "test_sha256",
-                              "output_sha256", "context_sha256", "limit_seconds"}} for item in value]
+                              "output_sha256", "context_sha256", "limit_seconds"}}
+                    for item in value if isinstance(item, dict)]
         if isinstance(value, dict):
             return {k: clean(v, k) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
