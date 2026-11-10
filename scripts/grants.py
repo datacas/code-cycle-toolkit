@@ -108,9 +108,23 @@ def consent_role(role: str | None) -> str | None:
     return "review" if role in NO_GLOBAL_ROLES else role
 
 
-def command_options(role: str) -> list[str]:
+def command_options(role: str, *, unique_path: str | None = None) -> list[str]:
+    """The scopes offered for an exact operation.
+
+    An operation naming a path unique to one dispatch or session can never
+    match again, so only this cycle is offered; a pattern grant stays
+    available as an edited answer (#439 AC-14).
+    """
+    if unique_path:
+        return ["this cycle", "deny"]
     return [option for option in COMMAND_OPTIONS
             if option != "forever" or role not in NO_GLOBAL_ROLES]
+
+
+def unique_path(op: dict[str, Any] | None) -> str | None:
+    """The dispatch- or session-unique path an exact operation names, if any."""
+    from stage_permissions import dispatch_unique_path
+    return dispatch_unique_path(op)
 
 
 def identifier(op: dict[str, Any]) -> str:
@@ -276,7 +290,8 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
 
 #: The placeholder shapes a stored Bash word may take (#398).
 _WORD_SHAPES = ({"tmpdir"}, {"checkout"}, {"env", "tmpdir"}, {"env", "checkout"},
-                {"option", "tmpdir"}, {"option", "checkout"})
+                {"option", "tmpdir"}, {"option", "checkout"}, {"tool_results"},
+                {"env", "tool_results"}, {"option", "tool_results"})
 
 
 def _valid_word(word: Any) -> bool:
@@ -342,15 +357,21 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     compound = ("Compound pattern: all segments of matching shell source are authorized. "
                 if op.get("compound") else "")
     regex_note = f" Regex: {regex[:80]}." if regex else ""
+    unique = unique_path(op)
+    # Said before the generic text, so the 600-character cut never drops it.
+    scope_note = (f" Offered for this cycle or as a pattern grant only: {unique[-60:]} is unique "
+                  "to one dispatch or session, so a repository or forever grant could never "
+                  "match again." if unique else "")
     return {"id": question_id,
-            "prompt": (f"{role}: {compound}{command[:140]}.{detail} {warned}"
+            "prompt": (f"{role}: {compound}{command[:140]}.{detail}{scope_note} {warned}"
                        "Pattern grants never bypass Git, credential or redirect guards. "
                        "Interpreter internals require external isolation. "
                        f"{regex_note} {skip}"
                        f"Outside table: {reason[:40]}. Risk: {scope.risks[:60]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
                        "Protected commands receive no pattern authorization.")[:600],
-            "options": command_options(str((grant.operation or {}).get("role", role))),
+            "options": command_options(str((grant.operation or {}).get("role", role)),
+                                       unique_path=unique),
             "recommended": None,
             "blocks": [f"grant:{grant.id}"]}
 
@@ -659,6 +680,8 @@ class PermissionRequest:
                 "pros": "finish the requested operation",
                 "cons": "extra user-level access for the selected scope",
                 "global_never_covers": sorted(NO_GLOBAL_ROLES),
+                **({"dispatch_unique_path": unique_path(op), "offered_scope": "cycle or pattern grant"}
+                   if unique_path(op) else {}),
                 **({"warnings": compose_warnings(op)} if compose_warnings(op) else {}),
                 **({"check": op["check"],
                     "alternative": "skip; the check is recorded unverified and the cycle continues"}
@@ -852,6 +875,12 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        unique = unique_path(grant.operation) if answer in {ALLOW_PERSISTENT, ALLOW_GLOBAL} else None
+        if unique:
+            # Kept for this cycle, where it can still match; never refused (#439 AC-14).
+            self.notes.append(f"{grant.id}: {answer} kept for this cycle only; {unique} is "
+                              "unique to one dispatch or session and could never match again")
+            answer = ALLOW_CYCLE
         if answer == ALLOW_GLOBAL:
             if grant.operation and grant.operation.get("role") in NO_GLOBAL_ROLES:
                 raise GrantError(

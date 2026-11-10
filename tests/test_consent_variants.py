@@ -1360,6 +1360,170 @@ class ConsentVariantsTests(unittest.TestCase):
         self.assertIn("#439", audit)
         self.assertIn("#455", (root / "docs/ROADMAP_V2.md").read_text(encoding="utf-8"))
 
+    # --- AC-13 / AC-14: the session's tool-results directory (REV-017, REV-018)
+
+    def sessions(self, home):
+        """Two Claude sessions of one review project, each with a saved output."""
+        project = Path(home, ".claude", "projects", "-tmp-code-cycle-review-abc123")
+        files = {}
+        for session in ("11111111-aaaa", "22222222-bbbb"):
+            results = project / session / "tool-results"
+            results.mkdir(parents=True)
+            (project / f"{session}.jsonl").write_text("", encoding="utf-8")
+            files[session] = results / f"out-{session[:4]}.txt"
+            files[session].write_text("line\n", encoding="utf-8")
+        return project, files
+
+    def run_hook(self, policy, command, cwd, project, session):
+        path = Path(cwd, "policy.json")
+        path.write_text(policy.to_json(), encoding="utf-8")
+        event = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd,
+                 "session_id": session, "transcript_path": str(project / f"{session}.jsonl")}
+        completed = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
+                                   input=json.dumps(event), capture_output=True, text=True)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        return completed.stdout
+
+    def marker(self, output, name):
+        tag = f"COMMAND_PERMISSION_{name}="
+
+        def texts(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for item in value.values():
+                    yield from texts(item)
+        reason = next(text for text in texts(json.loads(output)) if tag in text)
+        value, _ = json.JSONDecoder().raw_decode(reason[reason.rfind(tag) + len(tag):])
+        return value
+
+    def test_ac13_session_tool_results_directory_comes_only_from_the_host_event(self):
+        transcript = "/srv/agent/.claude/projects/-tmp-x/abc-1.jsonl"
+        self.assertEqual(str(Path("/srv/agent/.claude/projects/-tmp-x/abc-1/tool-results")),
+                         sp.session_tool_results({"session_id": "abc-1", "transcript_path": transcript}))
+        for event in ({"session_id": "other", "transcript_path": transcript},
+                      {"session_id": "abc-1", "transcript_path": "projects/abc-1.jsonl"},
+                      {"session_id": "../abc-1", "transcript_path": "/p/../abc-1.jsonl"},
+                      {"session_id": "abc-1"}, None):
+            with self.subTest(event=event):
+                self.assertIsNone(sp.session_tool_results(event))
+
+    @posix_shell
+    def test_ac13_own_session_reads_ask_nothing_and_another_session_still_asks(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as root:
+            project, files = self.sessions(home)
+            outside = Path(home, "outside.txt")
+            outside.write_text("secret\n", encoding="utf-8")
+            (files["11111111-aaaa"].parent / "link.txt").symlink_to(outside)
+            for role in ("resolve", "rereview"):
+                # Two dispatches of the same stage: new $TMPDIR and new session each.
+                for own, other in (("11111111-aaaa", "22222222-bbbb"), ("22222222-bbbb", "11111111-aaaa")):
+                    scratch = Path(root, f"tmp-{own[:4]}")
+                    scratch.mkdir(exist_ok=True)
+                    policy = sp.StagePolicy(role, tmpdir=str(scratch))
+                    for command in (f'grep -c "" {files[own]}', f"grep -n -E 'li.e' {files[own]}",
+                                    f"wc -l {files[own]}", f"cat {files[own].parent}/../tool-results/{files[own].name}"):
+                        with self.subTest(role=role, session=own, command=command):
+                            self.assertEqual("", self.run_hook(policy, command, root, project, own))
+                    command = f'grep -c "" {files[other]}'
+                    with self.subTest(role=role, session=own, other=other):
+                        output = self.run_hook(policy, command, root, project, own)
+                        self.assertIn("reading outside the stage workspace needs operation consent", output)
+                        self.assertIn("[layer=toolkit_hook]", output)
+                    with self.subTest(role=role, symlink="escape"):
+                        link = files["11111111-aaaa"].parent / "link.txt"
+                        output = self.run_hook(policy, f"cat {link}", root, project, "11111111-aaaa")
+                        self.assertIn("reading outside the stage workspace", output)
+
+    @posix_shell
+    def test_ac13_ac14_grant_from_an_earlier_dispatch_matches_the_later_session(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as root:
+            project, files = self.sessions(home)
+            first, second = Path(root, "tmp-first"), Path(root, "tmp-second")
+            first.mkdir()
+            second.mkdir()
+            store = grants.ConsentStore(Path(home) / "consents.json")
+            for template in ('grep -n line {file} | head -n 5', 'wc -l {file} > {tmp}/check.log'):
+                for role in ("resolve", "rereview"):
+                    with self.subTest(template=template, role=role):
+                        policy = sp.StagePolicy(role, tmpdir=str(first))
+                        command = template.format(file=files["11111111-aaaa"], tmp=first)
+                        output = self.run_hook(policy, command, root, project, "11111111-aaaa")
+                        self.assertIn("[layer=toolkit_hook]", output)
+                        refusal = {"tool": "Bash", "input": {"command": command}, "tmpdir": str(first),
+                                   "operation": self.marker(output, "OPERATION"),
+                                   "tool_results": self.marker(output, "TOOL_RESULTS")}
+                        self.assertIn(sp.TOOL_RESULTS_OPERAND, sp.normalized_command(refusal["operation"]))
+                        broker = grants.ConsentBroker("owner/repo", store=store, platform="linux")
+                        request = cp.refused_operation([refusal], policy, broker, "claude", root)
+                        self.assertIsNotNone(request)
+                        self.assertEqual(self.marker(output, "ID"), request["resource"])
+                        grant = broker.operations[request["resource"]]
+                        asked = grants.question(grant, grant.scopes[0], role=role, blocker=request)
+                        self.assertIn("this repository", asked["options"])
+                        self.assertEqual("persistent", broker.apply_answer(grant, grant.scopes[0], "persistent"))
+                        later = replace(sp.StagePolicy(role, tmpdir=str(second)),
+                                        command_permissions=grants.ConsentBroker(
+                                            "owner/repo", store=store, platform="linux").command_entries("claude", role))
+                        command = template.format(file=files["22222222-bbbb"], tmp=second)
+                        self.assertEqual("", self.run_hook(later, command, root, project, "22222222-bbbb"))
+                        # The earlier session's file is another session's directory now.
+                        command = template.format(file=files["11111111-aaaa"], tmp=second)
+                        self.assertIn("[layer=toolkit_hook]",
+                                      self.run_hook(later, command, root, project, "22222222-bbbb"))
+
+    @posix_shell
+    def test_ac14_dispatch_unique_operands_are_offered_this_cycle_only(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as root:
+            project, files = self.sessions(home)
+            current = Path(root, "code-cycle-tmp-current")
+            current.mkdir()
+            unique = (f"cat {files['22222222-bbbb']}",
+                      "cat /tmp/code-cycle-tmp-old123/claude-1000/report.md",
+                      "ls /tmp/code-cycle-review-zz9/scripts/",
+                      "python3 -c 'print(1)' /tmp/code-cycle-tmp-old123/x")
+            ordinary = ("cat /outside/api/contract.json", "ls /srv/shared/data/")
+            for role in ("resolve", "rereview"):
+                policy = replace(sp.StagePolicy(role, tmpdir=str(current)),
+                                 tool_results=str(files["11111111-aaaa"].parent))
+                for command in (*unique, *ordinary):
+                    with self.subTest(role=role, command=command):
+                        store = grants.ConsentStore(Path(home) / f"consents-{role}.json")
+                        broker = grants.ConsentBroker("owner/repo", store=store, platform="linux")
+                        request = cp.refused_operation([command], policy, broker, "claude", root)
+                        self.assertIsNotNone(request)
+                        grant = broker.operations[request["resource"]]
+                        asked = grants.question(grant, grant.scopes[0], role=role, blocker=request)
+                        if command in unique:
+                            self.assertEqual(["this cycle", "deny"], asked["options"])
+                            self.assertIn("unique to one dispatch or session", asked["prompt"])
+                            self.assertIn("could never match again", asked["prompt"])
+                            self.assertIn("dispatch_unique_path",
+                                          grants.PermissionRequest(grant, grant.scopes[0], role, asked, request).record())
+                            # A stored answer is kept for this cycle, never refused.
+                            for answer in ("persistent", "forever"):
+                                self.assertEqual("cycle", broker.apply_answer(grant, grant.scopes[0], answer))
+                            self.assertEqual([], store.list("owner/repo"))
+                            self.assertEqual([], store.list("*"))
+                            self.assertTrue(any("kept for this cycle only" in note for note in broker.notes))
+                        else:
+                            self.assertIn("this repository", asked["options"])
+                            self.assertNotIn("unique to one dispatch", asked["prompt"])
+            # The current dispatch's $TMPDIR and session directory are placeholders, so matchable.
+            policy = replace(sp.StagePolicy("resolve", tmpdir=str(current)),
+                             tool_results=str(files["11111111-aaaa"].parent))
+            for command in (f"python3 -c 'print(1)' {files['11111111-aaaa']}",
+                            f"python3 -c 'print(1)' {current}/report.md"):
+                with self.subTest(command=command):
+                    self.assertIsNone(sp.dispatch_unique_path(sp.operation("Bash", {"command": command}, policy, root)))
+
+    def test_ac13_prompt_note_tells_the_reviewer_how_to_read_large_outputs(self):
+        for role in ("review", "rereview", "resolve"):
+            note = sp.prompt_note(sp.StagePolicy(role))
+            self.assertIn("Read large outputs in smaller pieces", note)
+            self.assertIn("$TMPDIR", note)
+            self.assertIn("tool-results", note)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,8 @@ from execution_plan import completion_statuses
 from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, make_pattern_grant, GrantError, from_entry, refusal_question,
                     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
 from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
-                               consent_role, split_environment, same_operation, configured_check_id)
+                               consent_role, split_environment, same_operation, configured_check_id,
+                               TOOL_RESULT_OUTPUT)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -99,6 +100,12 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
             value = raw[len(prefix):]
             if "tmpdir" in pattern:
                 return temporary(value, pattern["tmpdir"])
+            if "tool_results" in pattern:
+                # The session's own saved output, verified by the hook (#439 AC-13).
+                results = getattr(policy, "tool_results", None)
+                return (pattern["tool_results"] == TOOL_RESULT_OUTPUT and bool(results)
+                        and Path(value).is_absolute() and Path(value).is_relative_to(results)
+                        and Path(value) != Path(results) and ".." not in Path(value).parts)
             return "checkout" in pattern and checkout(value, pattern["checkout"])
         _, command_words = split_environment(words)
         program = Path(command_words[0]).name if command_words else ""
@@ -154,7 +161,9 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         if not isinstance(tool, str) or (tool == "Bash" and not isinstance(data.get("command"), str)):
             continue
-        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        results = event.get("tool_results")
+        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir,
+                                  tool_results=results if isinstance(results, str) else None)
         if tool == "Bash" and check(data["command"], observed_policy, cwd=cwd).needs_docker:
             # The docker_host socket permission is asked first, on its own (#398);
             # an exact-command consent never stands in for it.

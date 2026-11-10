@@ -3199,7 +3199,8 @@ class ClaudeAdapter(NativeAdapter):
                         if refusal is not None:
                             for marker, key in (("TMPDIR", "tmpdir"), ("OPERATION", "operation"),
                                                 ("RULE", "rule"), ("ID", "operation_id"),
-                                                ("INTENT", "intent")):
+                                                ("INTENT", "intent"),
+                                                ("TOOL_RESULTS", "tool_results")):
                                 tag = f"COMMAND_PERMISSION_{marker}="
                                 # The hook appends its markers last; text before
                                 # them may quote agent-controlled command text.

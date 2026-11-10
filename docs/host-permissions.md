@@ -174,6 +174,30 @@ dispatch's directory stays literal. A grant created in an earlier dispatch
 therefore matches the corresponding path in a later one; reusing an old
 absolute path does not gain this normalization. Inline code stays opaque.
 
+Claude Code saves a large tool output under the session's own tool-results
+directory, `~/.claude/projects/<project-dir>/<session_id>/tool-results/`, which
+is not under `$TMPDIR` (#439 AC-13). The hook takes that directory only from
+the host's hook event (`session_id` and a `transcript_path` named
+`<session_id>.jsonl`), never from the agent or the stored policy. A read-table
+command (`grep`, `cat`, `wc`, …) under it is allowed like a read under `$TMPDIR`,
+with no question. Any other operation names such an operand
+`<TOOL_RESULTS>/<OUTPUT>` (`{"tool_results": "<OUTPUT>"}` in a stored
+operation): each saved output has a fresh random name, so a grant given in an
+earlier dispatch of the same stage matches the output of the current session
+in a later one. Membership uses real paths after resolving symlinks and `..`;
+another session's directory stays literal and still asks. The hook reports the
+directory it used as `COMMAND_PERMISSION_TOOL_RESULTS`. The stage prompt tells
+the agent to read large outputs in smaller pieces or to write them under the
+supplied `$TMPDIR`.
+
+An exact operation that still names a path unique to one dispatch or session
+after this normalization (another session's tool-results directory, another
+dispatch's `code-cycle-tmp-*` directory or a `code-cycle-review-*` clone) can
+never match again (#439 AC-14). Its question offers only **this cycle / deny**
+and says why; a pattern grant stays available as an edited answer. A
+`persistent` or `forever` answer for such an operation is kept for this cycle
+only and noted, never refused and never saved for the repository.
+
 An agent can include `command_pattern_proposals` in its stage result. Each
 proposal has `command` (the exact observed refused command), `pattern` (a
 regular expression), `proposer`, `justification`, and non-empty `positive`
@@ -546,7 +570,9 @@ denied GitHub credential-store read, use the
 
 Operations outside the table, reads outside the worktree and forbidden edits
 enter the existing `ConsentStore` flow. The runtime asks one question at a time
-with the exact options **this cycle / this repository / forever / deny**.
+with the exact options **this cycle / this repository / forever / deny**
+(**this cycle / deny** for an operation naming a dispatch- or session-unique
+path, see [Reusable command consent](#reusable-command-consent-439)).
 Unknown and risky operations are questions too. The record includes the full
 command or edit target, stage role, reason, exact matching pattern, risk, pros,
 cons and alternative. Until answered, an essential request is a

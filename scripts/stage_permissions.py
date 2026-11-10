@@ -209,6 +209,9 @@ class StagePolicy:
     command_permissions: tuple[dict[str, Any], ...] = ()
     #: Exact read-only evidence files supplied by the runtime, outside the checkout.
     evidence_paths: tuple[str, ...] = ()
+    #: The current Claude session's own tool-results directory (#439 AC-13).
+    #: The hook sets it from the event Claude Code sends; the runtime never does.
+    tool_results: str | None = None
 
     @property
     def triage_validator_path(self) -> str:
@@ -1136,6 +1139,88 @@ def inside_tmpdir(path: str, tmpdir: str | None) -> bool:
     return target != root and root in target.parents
 
 
+#: A Claude Code session identifier as it appears in its transcript name.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+#: How a stored operation spells an operand under the session's tool-results
+#: directory. Claude Code names each saved output with a fresh random
+#: identifier, so the whole operand is the placeholder (#439 AC-13).
+TOOL_RESULT_OUTPUT = "<OUTPUT>"
+TOOL_RESULTS_OPERAND = "<TOOL_RESULTS>/" + TOOL_RESULT_OUTPUT
+
+
+def session_tool_results(event: Any) -> str | None:
+    """The current session's own tool-results directory, from Claude Code's event.
+
+    Claude Code saves a large tool output under
+    `<projects>/<project-dir>/<session_id>/tool-results/`, beside the session
+    transcript `<projects>/<project-dir>/<session_id>.jsonl`. Both values come
+    from the host's hook event, never from the agent; any other shape names
+    no directory, and another session's directory is never this one.
+    """
+    if not isinstance(event, dict):
+        return None
+    session, transcript = event.get("session_id"), event.get("transcript_path")
+    if not (isinstance(session, str) and isinstance(transcript, str)
+            and _SESSION_ID.fullmatch(session) and os.path.isabs(transcript)):
+        return None
+    path = Path(transcript)
+    if path.name != session + ".jsonl":
+        return None
+    return str(path.parent / session / "tool-results")
+
+
+def inside_tool_results(path: str, policy: Any) -> bool:
+    """Whether `path` really lies in the current session's tool-results directory.
+
+    The same membership rule as `$TMPDIR`: symlinks and `..` are resolved
+    first, so neither leads into it from elsewhere or out of it.
+    """
+    return inside_tmpdir(path, getattr(policy, "tool_results", None))
+
+
+#: Directories created once per dispatch or per session: a review clone, a
+#: dispatch's `$TMPDIR`, and a Claude session's tool-results directory. A
+#: literal path under one of them can never occur again (#439 AC-14).
+_DISPATCH_UNIQUE_PATH = re.compile(
+    r"/(?:[^\s\"'<>|&;()/]+/)*?(?:code-cycle-(?:tmp|review)-[A-Za-z0-9_]+"
+    r"|\.claude/projects/[^\s\"'<>|&;()/]+/[^\s\"'<>|&;()/]+/tool-results)"
+    r"(?=$|[/\s\"'<>|&;)])")
+
+
+def dispatch_unique_path(op: Any) -> str | None:
+    """A literal path in an exact operation that no later dispatch can repeat.
+
+    The current `$TMPDIR` and the current session's tool-results directory are
+    placeholders already; what remains under such a directory belongs to one
+    dispatch or one session, so a repository or forever grant for it would
+    never match again. A configured check ignores its environment prefixes
+    when it matches, so they do not count here. Pattern grants never apply.
+    """
+    if not isinstance(op, dict) or op.get("version") != 1:
+        return None
+    pattern = op.get("pattern")
+    if not isinstance(pattern, dict):
+        return None
+    if op.get("tool") != "Bash":
+        target = pattern.get("target")
+        texts = [target] if isinstance(target, str) else []
+    else:
+        words = pattern.get("words")
+        if op.get("check") and isinstance(words, list):
+            pattern = {**pattern, "words": [word for word in words if not (
+                isinstance(word, dict) and "env" in word
+                or isinstance(word, str) and _ENV_ASSIGNMENT.match(word))]}
+        try:
+            texts = [normalized_command({**op, "pattern": pattern})]
+        except (KeyError, TypeError, AttributeError):
+            return None
+    for text in texts:
+        found = _DISPATCH_UNIQUE_PATH.search(text.replace("\\", "/"))
+        if found:
+            return found.group(0)
+    return None
+
+
 # --- the table ---------------------------------------------------------------
 
 def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
@@ -1373,8 +1458,10 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             evidence = {Path(path).resolve() for path in policy.evidence_paths}
             for operand in read_operands(words):
                 path = (root / os.path.expanduser(operand)).resolve()
+                # The session's own saved outputs are read like `$TMPDIR` (#439 AC-13).
                 if (path != root and root not in path.parents and path not in evidence
-                        and not inside_tmpdir(str(path), policy.tmpdir)):
+                        and not inside_tmpdir(str(path), policy.tmpdir)
+                        and not inside_tool_results(str(path), policy)):
                     raise PolicyError("reading outside the stage workspace needs operation consent")
         return
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
@@ -2703,7 +2790,9 @@ def prompt_note(policy: StagePolicy) -> str:
         "remains. Explicit project tool, command and integration choices take "
         "precedence over the built-in table; a table warning is informational "
         "only. Write multiline temporary helpers with the native file-write "
-        "tools, then publish using --body-file."
+        "tools, then publish using --body-file. Read large outputs in smaller "
+        "pieces, or write them under the supplied $TMPDIR; a read under this "
+        "session's own tool-results directory is allowed like one under $TMPDIR."
         + tmpdir_note
     )
 
@@ -3027,6 +3116,8 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
     try:
         policy = StagePolicy.from_json(Path(arguments[0]).read_text(encoding="utf-8"))
         event = json.loads(stdin.read())
+        # Only the host's event names the session; a stored policy never does.
+        policy = replace(policy, tool_results=session_tool_results(event))
         tool = event.get("tool_name")
         if tool in FILE_EDIT_TOOLS and not policy.active:
             return 0
@@ -3072,7 +3163,8 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
                                    f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
                                    f"COMMAND_PERMISSION_RULE={json.dumps(rule)} "
                                    f"COMMAND_PERMISSION_ID={json.dumps(operation_id)} "
-                                   f"COMMAND_PERMISSION_INTENT={json.dumps(intent)}"),
+                                   f"COMMAND_PERMISSION_INTENT={json.dumps(intent)} "
+                                   f"COMMAND_PERMISSION_TOOL_RESULTS={json.dumps(policy.tool_results)}"),
               file=stdout)
     return 0
 
@@ -3280,6 +3372,8 @@ def _relative_value(value: str, policy: Any, root: Path | None) -> dict[str, str
         return None
     if _tmp_operand(value, policy.tmpdir):
         return {"tmpdir": _tmp_relative(value, policy)}
+    if inside_tool_results(value, policy):
+        return {"tool_results": TOOL_RESULT_OUTPUT}
     if root is not None:
         try:
             resolved = Path(value).resolve()
@@ -3320,9 +3414,12 @@ def _shell_identity(parsed: ParsedCommand, policy: Any, cwd: str | None) -> str:
             if not (os.path.isabs(operand) or operand.startswith(("./", "../"))
                     or "/" in operand or Path(candidate).exists()):
                 continue
-            if not _tmp_operand(candidate, policy.tmpdir):
+            if _tmp_operand(candidate, policy.tmpdir):
+                replacement = "<TMPDIR>/" + _tmp_relative(candidate, policy)
+            elif inside_tool_results(candidate, policy):
+                replacement = TOOL_RESULTS_OPERAND
+            else:
                 continue
-            replacement = "<TMPDIR>/" + _tmp_relative(candidate, policy)
             # Replace a complete operand, never a substring of opaque code.
             forms = [operand]
             if policy.tmpdir and operand.startswith(policy.tmpdir + "/"):
@@ -3627,6 +3724,10 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             inline_code = index > 0 and command_words[index - 1] in {"-c", "-e", "--eval", "--execute"}
             if index and path_operand and not word.startswith("-") and not inline_code and _tmp_operand(candidate, policy.tmpdir):
                 normalized.append({"tmpdir": _tmp_relative(candidate, policy)})
+            elif (index and path_operand and not word.startswith("-") and not inline_code
+                  and inside_tool_results(candidate, policy)):
+                # A saved output of the current session (#439 AC-13).
+                normalized.append({"tool_results": TOOL_RESULT_OUTPUT})
             elif index and docker and (placeholder := _relative_value(word, policy, root)):
                 normalized.append(placeholder)
             elif (index and word.startswith("-") and "=" in word
@@ -3733,6 +3834,7 @@ def normalized_command(op: dict[str, Any]) -> str:
     for word in pattern.get("words", []):
         if isinstance(word, dict):
             value = ("<TMPDIR>/" + word["tmpdir"] if "tmpdir" in word
+                     else "<TOOL_RESULTS>/" + word["tool_results"] if "tool_results" in word
                      else "<CHECKOUT>/" + word["checkout"])
             prefix = word.get("env", word.get("option"))
             words.append((prefix + "=" if prefix else "") + value)
