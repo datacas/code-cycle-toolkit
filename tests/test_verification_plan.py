@@ -417,9 +417,21 @@ class ResultTests(unittest.TestCase):
             self.assertIn(type(value).__name__, message)
             self.assertIn(expected, message)
 
-    def test_v2_missing_required_check_field_names_missing_value_and_format(self):
+    def test_v2_frozen_check_left_without_identity_fields_takes_them_from_the_plan(self):
+        # A report naming a frozen check and only how it ended is that check (#450).
         plan = vp.VerificationPlan(criteria(), (check(),))
         entry = report()
+        for field in ("command", "executor", "profile", "context", "required"):
+            del entry[field]
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD, plan=plan)
+        [reported] = normalized["checks"]
+        self.assertEqual(check().command, reported["command"])
+        self.assertEqual(plan.checks, updated.checks)
+
+    def test_v2_missing_required_check_field_names_missing_value_and_format(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(id="another-check")
         del entry["command"]
         with self.assertRaises(vp.VerificationError) as caught:
             vp.normalize_tests({"version": 2, "conclusion": "not_verified",

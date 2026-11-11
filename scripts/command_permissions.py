@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from execution_plan import completion_statuses
-from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, from_entry, refusal_question,
+from grants import (COMMAND_OPTIONS, SensitiveGrant, identifier, make_grant, make_pattern_grant, GrantError, from_entry, refusal_question,
                     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, denial_context, granted_context)
 from stage_permissions import (operation, matching_answer, protected_reason, credential_reason, parse_command,
-                               consent_role, split_environment, same_operation, configured_check_id)
+                               consent_role, split_environment, same_operation, configured_check_id,
+                               TOOL_RESULT_OUTPUT, is_session_tool_results)
 
 
 #: Top-level keys only the runtime writes into a stage's result, after the agent
@@ -99,6 +100,12 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
             value = raw[len(prefix):]
             if "tmpdir" in pattern:
                 return temporary(value, pattern["tmpdir"])
+            if "tool_results" in pattern:
+                # The session's own saved output, verified by the hook (#439 AC-13).
+                results = getattr(policy, "tool_results", None)
+                return (pattern["tool_results"] == TOOL_RESULT_OUTPUT and bool(results)
+                        and Path(value).is_absolute() and Path(value).is_relative_to(results)
+                        and Path(value) != Path(results) and ".." not in Path(value).parts)
             return "checkout" in pattern and checkout(value, pattern["checkout"])
         _, command_words = split_environment(words)
         program = Path(command_words[0]).name if command_words else ""
@@ -107,8 +114,6 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
             if raw == pattern:
                 continue
             if not isinstance(pattern, dict):
-                return False
-            if set(pattern) == {"tmpdir"} and not (data_read or program == "docker"):
                 return False
             if not (index or "env" in pattern) or not placeholder(raw, pattern):
                 return False
@@ -141,6 +146,19 @@ def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str
                 "warnings": list(compose.get("warnings") or [])} if compose else {})}
 
 
+def _observed_policy(policy: Any, event: dict[str, Any]) -> Any:
+    """The policy as the hook saw it: its `$TMPDIR` and session tool-results directory.
+
+    The tool-results value must have the shape Claude Code gives it,
+    `…/<project-dir>/<session_id>/tool-results`; anything else is ignored, so a
+    printed marker cannot name another directory (#439 AC-13).
+    """
+    results = event.get("tool_results")
+    if not is_session_tool_results(results):
+        results = None
+    return replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir, tool_results=results)
+
+
 def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                       cwd: str | None = None) -> dict[str, Any] | None:
     """Turn runtime-observed refusals into a request; never authorize from prose."""
@@ -156,7 +174,7 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         if not isinstance(tool, str) or (tool == "Bash" and not isinstance(data.get("command"), str)):
             continue
-        observed_policy = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        observed_policy = _observed_policy(policy, event)
         if tool == "Bash" and check(data["command"], observed_policy, cwd=cwd).needs_docker:
             # The docker_host socket permission is asked first, on its own (#398);
             # an exact-command consent never stands in for it.
@@ -183,9 +201,44 @@ def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
         if guard is not None:
             continue
         grant = make_grant(op, executor, broker.platform)
+        proposal = event.get("pattern_proposal")
+        if isinstance(proposal, dict) and tool == "Bash":
+            try:
+                grant = make_pattern_grant(
+                    proposal["pattern"], policy.role, executor, broker.platform,
+                    proposer=proposal["proposer"], justification=proposal["justification"],
+                    positive=proposal["positive"], negative=proposal["negative"],
+                    compound=proposal.get("compound", False))
+                from grants import pattern_covers_operation
+                if not pattern_covers_operation(grant.operation or {}, op):
+                    raise GrantError("proposed pattern does not cover the refused command")
+            except (GrantError, KeyError, TypeError) as error:
+                broker.notes.append(f"pattern rejected: {error}")
+                grant = make_grant(op, executor, broker.platform)
         broker.operations[grant.id] = grant
         command = command if tool == "Bash" else f"{tool} {op['pattern']['target']}"
-        return request_record(grant, command, reason)
+        request = request_record(grant, command, reason)
+        if grant.operation != op:
+            request["refused_operation"] = op
+        from stage_permissions import command_parts
+        configured = None
+        if tool == "Bash":
+            parsed = parse_command(command, observed_policy.tmpdir)
+            _, words = command_parts(parsed.words)
+            for candidate in (policy.test_command, *policy.verify_prefixes):
+                if not candidate:
+                    continue
+                _, expected = command_parts(parse_command(candidate, None).words)
+                if words and expected and words[0] == expected[0]:
+                    configured = candidate
+                    break
+        if configured:
+            request["configured_command"] = configured
+        from stage_permissions import unresolved_directory
+        if tool == "Bash" and unresolved_directory(command, observed_policy, cwd):
+            # The hook cannot see where relative operands point (#439 REV-006).
+            request["unresolved_directory"] = True
+        return request
     return None
 
 
@@ -415,7 +468,7 @@ def denial_records(denials: object, policy: Any, executor: str,
         tool, data = event.get("tool", "Bash"), event.get("input", {})
         if not isinstance(tool, str) or not isinstance(data, dict):
             continue
-        observed = replace(policy, tmpdir=event.get("tmpdir") or policy.tmpdir)
+        observed = _observed_policy(policy, event)
         target = None
         if tool == "Bash":
             if not isinstance(data.get("command"), str):
@@ -438,6 +491,8 @@ def denial_records(denials: object, policy: Any, executor: str,
         identity = event.get("operation_id") or denial_operation_id(requested, command)
         records.setdefault((identity, command), {
             "tool": tool, "command": command, "stage": policy.role, "reason": reason,
+            "layer": event.get("layer") or ("toolkit_hook" if event.get("rule") else
+                                             f"{executor}_permission"),
             "rule": rule or "executor_permission_layer", "operation": identity,
             "target": target if isinstance(target, str) else None,
             "intent": event.get("intent") if isinstance(event.get("intent"), dict) else None,
@@ -775,8 +830,9 @@ def codex_compose_consent(policy: Any, broker: Any, executor: str, role: str,
         try:
             op = operation("Bash", {"command": command}, policy, cwd)
         except (ValueError, OSError, TypeError) as error:
-            context.append(f"Declared Compose check `{command}` could not be identified ({error}). "
-                           "Do not run it; record it unverified with that cause.")
+            context.append(f"Declared Compose check `{command}` could not be identified by the "
+                           f"runtime ({error}), so no consent was asked and none is recorded. "
+                           "Run it as declared if the project needs it and report what happened.")
             try:
                 check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
             except ValueError:
@@ -852,18 +908,11 @@ def stored_check_denials(policy: Any, executor: str, platform: str, cwd: str | N
     for command in dict.fromkeys(policy.verification_commands):
         try:
             op = operation("Bash", {"command": command}, policy, cwd)
-        except (ValueError, OSError, TypeError) as error:
-            # Its identity, and so any stored denial of it, cannot be read now;
-            # the hook refuses such a run too. It stays unverified, never passed.
-            try:
-                check_id = configured_check_id(list(parse_command(command, policy.tmpdir).words), policy)
-            except ValueError:
-                check_id = None
-            if check_id and check_id not in seen:
-                outcomes.append({"grant": None, "command": command, "answer": "unidentified",
-                                 "essential": False, "checks": [], "check": check_id,
-                                 "error": str(error), "source": "identity unavailable"})
-                seen.add(check_id)
+        except (ValueError, OSError, TypeError):
+            # Its identity cannot be read now, so no stored denial can be matched
+            # to it: that is the toolkit's limit, not a person's decision, and
+            # it never declines the check (#450). If the agent ran it, its own
+            # evidence counts; if not, the plan leaves it unverified.
             continue
         if not op.get("check") or op["check"] in seen:
             continue

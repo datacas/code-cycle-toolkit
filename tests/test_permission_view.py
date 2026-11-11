@@ -430,7 +430,7 @@ class StageAndWorktreeTests(PermissionViewCase):
         self.assertIn(command, sp.prompt_note(policy))
         self.assertIn(f"Bash({command}:*)", sp.allowed_tool_patterns(policy))
         bare = self.policy(checkout_branch=None)
-        self.assertNotIn("permissions", sp.prompt_note(bare))
+        self.assertNotIn("cycle_journal.py", sp.prompt_note(bare))
 
     def test_the_policy_round_trips_through_the_hook_file(self):
         policy = self.policy()

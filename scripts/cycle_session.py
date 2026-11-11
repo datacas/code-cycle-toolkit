@@ -293,6 +293,9 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         if answer in self._CHECK_ALLOWS:
             self.state.declined_checks.pop(check, None)
             return
+        if answer == "unidentified":
+            # The runtime could not read the command's identity: nobody declined it.
+            return
         if answer in {None, "pending"} and not outcome.get("executor_hook"):
             # A refusal still unanswered is asked before the stage reruns, and
             # an unanswered question stops the cycle as permission_required.

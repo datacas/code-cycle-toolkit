@@ -766,9 +766,13 @@ class StageDispatch:
                 if isinstance(rejected, str):
                     reason = self.rejected_report_reason(
                         role, rejected, reported.payload or {}, change_request_id)
-                    self.report.note(f"  verification  {reason}")
-                    return reported, self.stop(reason, "BLOCKED", reported=reported,
-                                               stop_reason="verification_unverified")
+                    # A report the runtime cannot read is no reason to stop (#450):
+                    # its checks stay not_verified, which the verification barrier
+                    # asks about at the end, and the cycle goes on.
+                    self.report.note(f"  verification  {reason}; its checks stay not_verified "
+                                     "and the cycle continues")
+                    if self.report.stage_details:
+                        self.report.stage_details[-1].warnings.append(reason)
             try:
                 self.record_plan_stage(role, reported, outcome, test_payload)
             except ValueError as error:

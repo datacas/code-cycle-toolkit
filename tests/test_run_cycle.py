@@ -740,8 +740,22 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         self.assertIn("received str", notes[0])
         self.assertIn("expected an array", notes[0])
         self.assertIn("published head (reported-unverified): " + "a" * 40, notes[0])
-        self.assertEqual(report.status, "BLOCKED")
-        self.assertEqual(report.stop_reason, "verification_unverified")
+        # An unreadable report never stops the cycle by itself (#450).
+        self.assertNotEqual(report.status, "BLOCKED")
+        self.assertIn("the cycle continues", notes[0])
+
+    def test_an_unidentified_check_is_not_recorded_as_declined(self):
+        # The runtime could not read the command: nobody declined it (#450).
+        from cycle_session import CycleSession
+        session = object.__new__(CycleSession)
+        session.state = type("State", (), {"declined_checks": {}})()
+        session.note_declined_check({"check": "verify:docker compose run x", "grant": None,
+                                     "command": "docker compose run x", "answer": "unidentified"},
+                                    "a" * 40)
+        self.assertEqual({}, session.state.declined_checks)
+        session.note_declined_check({"check": "verify:y", "grant": "command_1", "command": "y",
+                                     "answer": "deny"}, "a" * 40)
+        self.assertEqual(["verify:y"], list(session.state.declined_checks))
 
     def test_null_tests_payload_preserves_previous_outcome(self):
         payload = {"status": "IMPLEMENTED", "tests": None}
@@ -816,11 +830,12 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     ci_policy="strict",
                     ci_checks=checks, code_host="github",
                     work_item_provider="github", work_item_repository="owner/api")
-                self.assertEqual("BLOCKED", report.status, report.explain())
-                self.assertEqual("verification_unverified", report.stop_reason)
-                self.assertIn("published head (reported-unverified): " + "a" * 40,
-                              report.stopped_because)
-                self.assertEqual([role], [stage.role for stage in report.stages])
+                # The rejected report is noted, never a stop of its own (#450).
+                self.assertNotEqual("BLOCKED", report.status, report.explain())
+                notes = [line for _, line in report.notes if "report rejected" in line]
+                self.assertEqual(1, len(notes), report.notes)
+                self.assertIn("published head (reported-unverified): " + "a" * 40, notes[0])
+                self.assertEqual(role, report.stages[0].role)
 
     def test_pre_dispatch_identity_stop_names_check_and_fields(self):
         import cycle_history as ch

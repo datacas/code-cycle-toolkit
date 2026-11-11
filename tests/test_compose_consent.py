@@ -159,11 +159,11 @@ class FirstConsentTests(ComposeConsentCase):
                 self.assertIsNotNone(other_request)
                 self.assertNotEqual(request["resource"], other_request["resource"])
 
-    def test_ac6_only_unparseable_shell_syntax_stays_refused(self):
+    def test_ac6_shell_syntax_requests_its_own_whole_operation_consent(self):
         for command in (CHECK + "; rm -rf /", CHECK + " $(id)", CHECK + " | tee x"):
             with self.subTest(command=command):
                 self.assertFalse(sp.check(command, self.policy(), cwd=str(self.clone)).allowed)
-                self.assertIsNone(self.request(command)[0])
+                self.assertIsNotNone(self.request(command)[0])
 
     def test_ac8_hook_round_trip_first_authorization_reuse_and_revocation(self):
         path = self.root / "policy.json"
@@ -563,15 +563,14 @@ class StoredDenialTests(ComposeConsentCase):
         self.assertEqual(spoken, cp.add_stored_denials(spoken, allow_policy, "claude", "linux",
                                                        str(self.clone)))
 
-    def test_a_check_whose_identity_cannot_be_read_stays_unverified(self):
+    def test_a_check_whose_identity_cannot_be_read_is_not_declined(self):
         request, broker = self.request()
         self.answer(request, broker, "deny")
         policy = replace(self.policy(), command_permissions=broker.command_entries("claude", "review"))
         (self.clone / "docker-compose-local.yml").unlink()
         spoken = 'ORCHESTRATION_RESULT\n{"status": "APPROVED"}\nEND_ORCHESTRATION_RESULT'
-        added = cp.add_stored_denials(spoken, policy, "claude", "linux", str(self.clone))
-        [outcome] = cp._result_block(added)[2]["permission_outcomes"]
-        self.assertEqual(("unidentified", "verify:" + CHECK), (outcome["answer"], outcome["check"]))
+        # Nobody declined it: the toolkit cannot read it, so it records no denial (#450).
+        self.assertEqual(spoken, cp.add_stored_denials(spoken, policy, "claude", "linux", str(self.clone)))
 
 
 class CodexTests(ComposeConsentCase):

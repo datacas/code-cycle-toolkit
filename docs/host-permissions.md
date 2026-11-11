@@ -91,8 +91,9 @@ for consent. See [Configuration → Allowed commands](configuration.md#allowed-c
 
 The hook validates arguments, not only the program, and it is fail-closed:
 
-- one simple command per call; chaining (`&&`, `;`, `|`), substitutions, other
-  variable expansions, globs and control characters are refused;
+- simple literal commands use the table. Chaining (`&&`, `;`, `|`), heredocs,
+  substitutions, other expansions and globs use shell-operation consent,
+  with every visible segment checked against the concrete guards (#439);
 - `$TMPDIR` is the only expansion, and only when it is the dispatch's own
   runtime directory (`<parent>/code-cycle-tmp-*`). A path given to
   `--body-file`, `git … --output` or an output redirection (`>`, `>>`, `2>`)
@@ -143,8 +144,230 @@ The hook validates arguments, not only the program, and it is fail-closed:
   `SSH_ASKPASS*` and `SSH_*COMMAND` prefixes on `git` or `gh`, in any letter
   case, are refused: they redirect the program, or choose a program it starts,
   where the guards cannot see it. A command whose program the runtime cannot
-  identify, after an append-style `NAME+=value` prefix, after a prefix before
-  `rtk`, or after a nested `rtk`, stays refused and is never a consent question.
+  identify after an append-style `NAME+=value` prefix or nested `rtk` retains
+  its guard. Ordinary assignments before or after one `rtk` wrapper are
+  recognized.
+
+### Reusable command consent (#439)
+
+An exact grant for a configured check also covers ordinary `NAME=value`
+prefixes, one leading `rtk` (optionally `proxy`), and output redirects into the
+current `$TMPDIR`, in combination. The underlying configured argv must stay
+the same: a verify prefix may still have its configured extra arguments, but
+a grant does not cover different arguments. Other scripts, the underlying
+runner and names in `_GUARD_DEFEATING_ENV` or `_RESOLVER_UNSAFE_ENV` (including
+`DOCKER_CONFIG`) are different operations. A variant using the same underlying
+runner names the exact configured command in its consent question; unrelated
+commands do not. Run checks as written, without prefixes or
+redirects, to avoid unnecessary questions.
+
+For a regex, shell-source or configured-check grant the generated Claude
+`--allowedTools` rule uses `Bash(*)` because its prefix grammar cannot express
+these families. The mandatory hook still validates every concrete command;
+the broad host allow never bypasses a guard or authorizes another operation.
+User-defined host deny rules and external isolation remain in force.
+
+All path operands under the current dispatch's `$TMPDIR` become placeholders,
+including relative paths resolved against the command's working directory.
+Membership uses real paths after resolving symlinks and `..`. Another
+dispatch's directory stays literal. A grant created in an earlier dispatch
+therefore matches the corresponding path in a later one; reusing an old
+absolute path does not gain this normalization. Inline code stays opaque.
+
+Claude Code saves a large tool output under the session's own tool-results
+directory, `~/.claude/projects/<project-dir>/<session_id>/tool-results/`, which
+is not under `$TMPDIR` (#439 AC-13). The hook takes that directory only from
+the host's hook event (`session_id` and a `transcript_path` named
+`<session_id>.jsonl`), never from the agent or the stored policy. A read-table
+command (`grep`, `cat`, `wc`, …) under it is allowed like a read under `$TMPDIR`,
+with no question. Any other operation names such an operand
+`<TOOL_RESULTS>/<OUTPUT>` (`{"tool_results": "<OUTPUT>"}` in a stored
+operation): each saved output has a fresh random name, so a grant given in an
+earlier dispatch of the same stage matches the output of the current session
+in a later one; the question says that the placeholder matches any saved
+output of the current session. Membership uses real paths after resolving
+symlinks, `..` and a bare `~`; a tool-results directory that is itself a
+symlink covers nothing, and another session's directory stays literal and
+still asks. The hook reports the directory it used as
+`COMMAND_PERMISSION_TOOL_RESULTS`; the runtime accepts that marker only in the
+`…/projects/<project-dir>/<session_id>/tool-results` shape. The stage prompt tells
+the agent to read large outputs in smaller pieces or to write them under the
+supplied `$TMPDIR`.
+
+An exact operation that still names a path unique to one dispatch or session
+after this normalization (another session's tool-results directory, another
+dispatch's `code-cycle-tmp-*` directory or a `code-cycle-review-*` clone) can
+never match again (#439 AC-14). Its question offers only **this cycle / deny**
+and says why; a pattern grant stays available as an edited answer. A
+`persistent` or `forever` answer for such an operation is kept for this cycle
+only and noted, never refused and never saved for the repository.
+
+An agent can include `command_pattern_proposals` in its stage result. Each
+proposal has `command` (the exact observed refused command), `pattern` (a
+regular expression), `proposer`, `justification`, and non-empty `positive`
+and `negative` arrays of normalized example commands. This is a proposal,
+never authorization. The consent record displays the complete regex, examples,
+justification, role, risks and executor scope. The user chooses this cycle,
+this repository, forever, or deny. A global grant never applies to review or
+rereview. The user can edit a pattern through the prompt callback answer:
+`{"answer":"persistent","pattern":"...","positive":["..."],"negative":["..."]}`.
+An edited pattern must pass the same validation and cover the refused normalized
+operation. Invalid edits and unavailable scopes (including `forever` for review)
+show the reason and ask again without saving a grant. EOF leaves the original
+request pending. Widening requires a new approval. The terminal prompt accepts
+this JSON answer too.
+
+Matching is `re.fullmatch` against program and arguments joined with single
+spaces; temporary operands are `<TMPDIR>/relative/path`. Redirects append
+their fd, operator and normalized destination. Compound shell source preserves
+its exact quoting and delimiters, so a grant for a simple segment never
+authorizes a pipeline or another segment. A pattern can intentionally cover
+interpreters and compound source. To authorize compound source, the proposal or
+edited answer must include `"compound":true`; this opt-in is stored in the
+grant's operation and the question explicitly says that it authorizes every
+segment of matching shell source. Existing pattern entries without this field
+cover simple commands only. There is no program denylist for patterns.
+The question warns that shell and interpreter internals require external
+isolation. Each visible segment, including command and process substitutions,
+retains the Git, publication, credential and redirect guards. A matching
+pattern grants nothing for a protected command, including a forbidden push,
+a credential-store read or an output redirect outside `$TMPDIR`. Static
+credential guards account for `cd` options and directory-stack changes from
+`pushd`/`popd` (including `-n`), also when run through `builtin` or
+`command`, and `env -C`/`--chdir` in any spelling `env` accepts (combined
+short options such as `-vC` or `-uNAME -C`, abbreviations such as `--c=`, and
+a `-C` or `--c…` anywhere inside an `env -S` value, which counts as
+unresolved), also when `env` runs behind any other program word, such as
+`command`, `nice`, `timeout -s KILL 5`, `sudo -u root` or `xargs`; only
+programs that print or search their arguments (`echo`, `printf`, `grep`,
+`egrep`, `fgrep`, `rg`) are exempt. Tilde prefixes resolve as bash
+reads them: `~` and `~/…` name the home directory, `~user/…` that user's home
+directory, and `~+/…` the segment's working directory. The parser removes
+backslash-newline continuations, also inside a `$` expansion (`$HO\` newline
+`ME`), decodes ANSI-C `$'…'` quoting exactly as bash does (octal, `\x`, `\u`,
+`\U`, `\cX`, ending at the first NUL) and reads locale `$"…"` quoting as a
+double-quoted string before the guards compare a word.
+They compare glob and brace operands, the
+value of a `name=value` word and an attached short-option value such as
+`-C~/.ssh` to the protected stores without reading them. Globs match one path
+component at a time, as bash expands them: `*` never crosses a `/`, a bracket
+expression matches one character, and a leading `*` or `?` does not match a
+dotfile unless decoded words name `dotglob` or `GLOBIGNORE`, or the inherited
+`BASHOPTS` or `GLOBIGNORE` enables it. Decoded `nocaseglob` and inherited
+`BASHOPTS=nocaseglob` make glob comparisons case-insensitive. Extglob operands
+(`@(...)`, `+(...)`, `!(...)`, `*(...)`, `?(...)`) stay one operand during
+analysis, including spaces and shell-looking alternatives; their components
+conservatively match any name, while substitutions inside them are still
+guarded separately. At command position `!(...)` also retains its possible
+negation/subshell interpretation. Nested `${…}` and `$[…]` expansions have
+their own delimiters: parentheses inside them never consume a later command
+into the extglob operand (REV-013). Their nested command substitutions retain
+the segment guards. Inside a command or process substitution, a `case`
+clause recognised at command position is tracked to its `esac`: the `)` that
+ends a pattern, with or without its optional `(`, and the `;;`, `;&` and `;;&`
+terminators never end the substitution, so the commands of each clause are
+separate segments with their own guards (REV-014). Function-body headers
+(`f()`, `function f`, `function f()`, including Bash's non-POSIX names such
+as `f-x` and `f/x`), `coproc` with an optional name and
+`time` option prefixes retain command position. Loop bodies introduced by `do`
+after `for ((…))`, `for NAME` or `select NAME`, or by `{` after an arithmetic
+`for`, also retain command position without an intervening separator. The loop
+header must itself start at command position, and an arithmetic header ends at
+its matching parentheses rather than spanning earlier argument data. Argument
+words such as `echo for x do case` remain data. The `do` after a positional
+`for` or `select` header also starts a new executable segment, so its first
+body command retains its own guards even without a `case` clause. Executable
+headers are removed repeatedly before segment guards run: `function NAME`,
+`coproc` (with a name before a compound body), `time` and negation cannot hide
+the first body program (REV-015). Bare `coproc CMD`, `time CMD` and `! CMD`
+also use shell consent even without another shell operator. As in Bash, a
+word that carries any quoting is never a reserved word: in
+`coproc find "if" src -delete`, `find` stays the program with its guards,
+because `"if"`, `\if`, `i""f` or `$'if'` are arguments, not the start of a
+compound body. An empty quoted word (`""`) is still an argument or redirect
+target, a `#` after a quoted prefix (`""#`) does not start a comment, `""~`
+is a literal tilde rather than `$HOME`, and a quoted digit before a
+redirection (`"2">f`) is an argument with a stdout redirection (REV-016). A
+backslash-newline is not quoting. The same header
+rule decides whether `!(` after those headers is negation followed by a
+subshell rather than an extglob operand. Header words in argument position
+remain data. Brace loop bodies require the separator that
+the installed Bash accepts; regression baselines distinguish those executable
+forms from the conservatively analysed single-line `for NAME {` spelling.
+Keywords split by
+backslash-newline are recognised without changing the original source offsets
+or quoted data. A `case` word in argument position is data. The regression
+baseline executes supported forms in disposable Bash; conservative parser
+coverage of `time -p case` and `time -- case` does not claim those forms run
+on Bash versions that reject them. Unterminated extglobs or nested expansions fail closed
+instead of accepting a partial analysis. Extglob directory targets are unresolved,
+including targets of `env -C`. A `..` after a glob, inside braces, or a
+brace alternative holding `/` or `~` may lead to any directory. Glob
+characters in the working directory itself are literal. Since a directory
+change may fail, be conditional or run in a subshell, analysis retains earlier
+possible working directories when checking relative paths. A guard that fails
+unexpectedly refuses.
+
+A directory change the hook cannot resolve is a `cd`/`pushd`/`env -C` target
+with a variable, substitution or glob, a `pushd`/`popd` without a known stack,
+any relative target while `CDPATH` is set in the environment or named in
+decoded words, a bare `cd`, `~` or home target when decoded words name `HOME`
+other than as an expansion (`HOME=`, `read HOME`, `printf -v HOME`) or uses a
+builtin that may assign a quoted or computed name (`declare`, `export`, `read`,
+`printf`, …), `cd -` when it names `OLDPWD`, a `~-`, `~N`, `~+N` or `~-N`
+prefix (the previous directory or a directory-stack entry) on any operand or
+target, `~+` when the source may assign `PWD` in the same way as `HOME`,
+and anything after `eval`, `source`, `.`,
+`trap` or `alias` (also through `builtin` or `command`). The unknown directory
+may be any directory. Settings are derived after continuation removal, quote
+joining and ANSI-C decoding, including environment prefixes. An assigning
+builtin may change any of `HOME`, `PWD`, `OLDPWD`, `CDPATH`, `GLOBIGNORE` or
+`BASHOPTS`; computed names retain this conservative fallback. A computed
+`shopt`/`set` option may enable either glob mode. These cases can therefore
+refuse a credential-like operand even when the actual setting is unrelated;
+the PA-28 limitation applies. After an unresolved change a relative operand (or `name=value` value,
+or redirect target) receives no grant when it may spell the rest of a store's
+path from a parent (such as `auth.json`, `.codex/*`, `.ssh/x` or `*`), when it
+names a store's parent below the home directory (`.codex`, `.claude`,
+`.config`), when its last part looks like a key file at any depth (`id_*`,
+`*_rsa`, `*_ed25519`, `*_key`, `*.pem`, `*.key`, `known_hosts`,
+`authorized_keys`, `credentials`, or a glob with at least two literal
+characters that may match one, such as `*rsa`), when it is a bare wildcard,
+brace, `config` or `hosts.yml` that stands alone or below a part that may name
+a store directory (`*`, `config`, `.s?h/*`) or directly below a leading
+`cache` (`cache/*`, but not `build/cache/*`), or when it holds a token cache
+(`sso/cache`, `cli/cache`). What follows a `..` may start anywhere. Use an
+explicit absolute path so the guard can inspect it. Every other operand, such
+as `tests/cli/test_main.py` or `build/*`, gets the ordinary consent question,
+which warns that the directory cannot be resolved; the refusal request carries
+`"unresolved_directory": true`. This name check is a static best effort that
+judges each word by its spelling alone. An operand that is itself a variable or
+substitution, a directory-wide operand such as `.`, or a store subdirectory
+named on its own (`sso`) gets the question rather than a refusal, and external
+isolation still denies the stores. A subcommand word that is also a store file
+name, such as `config` in `git config`, a glob such as `build/*/*`, or an
+unusual glob that may match a key name (`lib/*ts`) is still refused; use an
+explicit absolute directory instead of the unresolved one.
+
+Validation rejects an empty, invalid or empty-matching regex, nested
+repetitions, repeated alternatives, backreferences and lookarounds. Patterns
+are limited to 1024 characters and commands to 4096. Positive examples must
+match and negative examples must not match before saving. Matching runs in a
+separate process with a 500 ms budget to bound regex backtracking. A failed
+match grants nothing; ordinary exact-command consent remains available.
+
+Pattern grants use `ConsentStore` schema 2 alongside existing exact grants;
+old schema 1 and 2 entries stay readable without a user migration. The store
+records proposer, justification, examples, user approval and observed completed
+commands. List and revoke them with the same `consent_control.py` selectors
+used for exact grants. Cycle, repository and global records retain their own
+revocation history.
+
+Hook refusal messages carry `[layer=toolkit_hook]`. The journal records the
+layer separately from the rule, including Claude permission-layer and Codex
+sandbox refusals. An unlabelled refusal comes from the host permission layer;
+the prompt note explains this split. A toolkit grant does not grant host or OS
+access. Those real limits remain visible in verification results.
 
 The hook is registered with `"onFailure": "block"` (Claude Code 2.1.295 or
 later). Without it a `PreToolUse` hook that fails or reaches its 60-second
@@ -351,7 +574,9 @@ denied GitHub credential-store read, use the
 
 Operations outside the table, reads outside the worktree and forbidden edits
 enter the existing `ConsentStore` flow. The runtime asks one question at a time
-with the exact options **this cycle / this repository / forever / deny**.
+with the exact options **this cycle / this repository / forever / deny**
+(**this cycle / deny** for an operation naming a dispatch- or session-unique
+path, see [Reusable command consent](#reusable-command-consent-439)).
 Unknown and risky operations are questions too. The record includes the full
 command or edit target, stage role, reason, exact matching pattern, risk, pros,
 cons and alternative. Until answered, an essential request is a
@@ -360,15 +585,17 @@ lacking an answer.
 
 An operation ID is `command_<sha256>`, computed from its structured pattern and
 stage role; `review` and `rereview` share one role key, and a stored `rereview`
-decision still matches. Matching is exact except for verified per-dispatch
-paths: TMPDIR operands of the read tools, the values of environment prefixes
+decision still matches. Exact grants use the configured-check variant rule
+above, or otherwise exact matching except for verified per-dispatch
+paths: TMPDIR operands of every program, the values of environment prefixes
 that lie in TMPDIR or the checkout, and Docker arguments that do. Membership is
 checked after resolving symlinks and `..`. A Docker operation also carries its
 directory relative to the checkout, a Compose one the digest and warnings of its
 effective configuration, and a configured check its check identity
 ([Declared Docker checks](verification.md#declared-docker-checks-and-declined-checks)).
-Interpreter code, Git destinations, sensitive paths, flags and actions are never
-generalized.
+Exact grants preserve interpreter code, Git destinations, sensitive paths,
+flags and actions. Separately approved regex grants match the normalized
+command family described above and retain the same concrete guards.
 An allow applies to matching operations in later dispatches and retries of the
 selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
 ID; **this repository** persists across issues and resumed runs; **forever**
