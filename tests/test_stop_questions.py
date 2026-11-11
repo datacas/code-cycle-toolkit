@@ -42,6 +42,12 @@ class ShapeTests(unittest.TestCase):
                 self.assertTrue(sq.questions_errors([question(
                     options=options, recommended=None)]))
 
+    def test_invalid_options_do_not_add_a_recommendation_error(self) -> None:
+        self.assertEqual(
+            ["`questions[0]`.options must be 2 to 4 distinct texts"],
+            sq.questions_errors([question(options=["only one"],
+                                          recommended="only one")]))
+
     def test_the_recommendation_is_the_first_option(self) -> None:
         problems = sq.questions_errors([question(recommended="The printed report")])
         self.assertEqual(["`questions[0]`.recommended must be null or the first option"],
