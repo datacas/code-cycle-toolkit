@@ -84,6 +84,14 @@ A delegated stage returns its questions as a `questions` list in its structured 
 
 `recommended` is `null` or the first option; `blocks` names what the answer settles, and in an issue-review result only its own `IR-NNN` and `IU-NNN` identifiers. `stop_questions.questions_errors` is the executable definition, and the validator checks the shared section's example against it. Answers go back to the resumed stage as explicit input; an edit to the work item is shown and applied only after confirmation.
 
+When an otherwise valid `issue_review` result has malformed questions, the
+runtime retries that role once on the same target with the original status,
+findings, questions and validator messages as immutable context. The retry may
+return only corrected questions; the runtime keeps the first status and
+findings. It records bounded question evidence in `stage_result` journal rows
+under `component = questions_retry`. A malformed retry stops with the first
+validation error, and other roles keep their existing question handling.
+
 ## The loop
 
 Native cycles select stages from the current execution plan. Resolution remains

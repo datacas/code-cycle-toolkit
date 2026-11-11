@@ -80,7 +80,8 @@ def questions_errors(questions: object, known: frozenset[str] | None = None) -> 
                             "distinct texts")
             options = None
         recommended = question.get("recommended")
-        if recommended is not None and (options is None or recommended != options[0]):
+        if (recommended is not None and options is not None
+                and recommended != options[0]):
             problems.append(f"{where}.recommended must be null or the first option")
         blocks = question.get("blocks")
         if (not isinstance(blocks, list) or not blocks
