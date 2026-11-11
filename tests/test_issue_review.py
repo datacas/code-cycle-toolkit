@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -27,6 +28,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import executors as ex  # noqa: E402
 import issue_review as ir  # noqa: E402
+import cycle_journal as cj  # noqa: E402
+import cycle_dispatch as cd  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import telemetry as tm  # noqa: E402
@@ -331,6 +334,7 @@ class Answering(Talker):
         self.readiness = list(readiness or [])
         self.review = review
         self.permissions: list[tuple] = []
+        self.targets = []
 
     def spoken(self, task: str) -> str:
         if "cc-issue-review" in task:
@@ -341,6 +345,7 @@ class Answering(Talker):
         return self.review
 
     def dispatch(self, target, task, **kw):
+        self.targets.append(target)
         self.permissions.append((kw.get("writes"), kw.get("publishes"),
                                  kw.get("publication_permissions")))
         return super().dispatch(target, task, **kw)
@@ -474,6 +479,81 @@ class DriverTests(RunCycleTestCase):
                 report = self.cycle([body])
                 self.assertFalse(self.implemented())
                 self.assertEqual("stage_not_completed", report.stop_reason)
+
+    def test_malformed_questions_retry_once_on_the_same_target_and_keep_first_findings(self) -> None:
+        invalid = result("NEEDS_REFINEMENT", questions=[question(
+            prompt="A question that needs correction.",
+            options=["x" * 201, "The printed report"], recommended="x" * 201)])
+        corrected = {"questions": [question(prompt="A corrected question.")]}
+
+        report = self.cycle([spoken(invalid), spoken(corrected)])
+
+        self.assertEqual(2, len(self.claude.targets))
+        self.assertEqual(self.claude.targets[0], self.claude.targets[1])
+        self.assertFalse(self.implemented())
+        self.assertEqual("needs_refinement", report.stop_reason)
+        self.assertEqual("NEEDS_REFINEMENT", report.readiness.status)
+        self.assertEqual(["IR-001"], [item["id"] for item in report.readiness.findings])
+        retry_task = self.claude.dispatched[1]
+        self.assertIn("immutable input data", retry_task)
+        self.assertIn("invalid_questions", retry_task)
+
+        rows = [row for row in cj.events(self.store.path, "owner/api", task_id="API-7")
+                if row["kind"] == "stage_result" and row["component"] == "questions_retry"]
+        self.assertEqual(1, len(rows))
+        detail = json.loads(rows[0]["detail"])
+        self.assertEqual("Q-001", detail["id"])
+        self.assertEqual("A question that needs correction.", detail["text"])
+        self.assertTrue(rows[0]["correlation"]["first_attempt"])
+        self.assertTrue(rows[0]["correlation"]["retry_attempt"])
+        self.assertIn("stage_seq", rows[0]["correlation"])
+
+    def test_malformed_retry_stops_with_first_error_and_records_both_attempts(self) -> None:
+        invalid = result("NEEDS_REFINEMENT", questions=[question(
+            options=["x" * 201, "The printed report"], recommended="x" * 201)])
+        still_invalid = {"questions": [question(options=["only one"], recommended="only one")]}
+
+        report = self.cycle([spoken(invalid), spoken(still_invalid)])
+
+        self.assertFalse(self.implemented())
+        self.assertEqual("stage_not_completed", report.stop_reason)
+        self.assertEqual(("`questions[0]`.options must be 2 to 4 distinct texts",),
+                         report.readiness.problems)
+        rows = [row for row in cj.events(self.store.path, "owner/api", task_id="API-7")
+                if row["kind"] == "stage_result" and row["component"] == "questions_retry"]
+        self.assertEqual(2, len(rows))
+        self.assertTrue(all(row["correlation"].get("first_attempt") for row in rows))
+        self.assertTrue(all(row["correlation"].get("retry_attempt") for row in rows))
+        self.assertEqual(1, len({row["correlation"]["stage_seq"] for row in rows}))
+
+    def test_question_journal_evidence_hashes_full_text_and_stays_bounded(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.rows = []
+
+            def record(self, kind, **fields):
+                self.rows.append((kind, fields))
+                return True
+
+        lengths = (599, 600, 601, 5000)
+        questions = [question(id=f"Q-{index:03d}", prompt="x" * length)
+                     for index, length in enumerate(lengths, start=1)]
+        messages = [f"`questions[{index}]`.prompt is invalid" for index in range(len(questions))]
+        journal = Recorder()
+
+        cd.StageDispatch._question_evidence(
+            questions, messages, attempt_id="attempt-first", retry_attempt_id="attempt-retry",
+            stage_seq=2, journal=journal)
+
+        self.assertEqual(len(lengths), len(journal.rows))
+        for (_, fields), length in zip(journal.rows, lengths):
+            detail = fields["detail"]
+            self.assertLessEqual(len(detail), cj.TEXT_LIMIT)
+            evidence = json.loads(detail)
+            self.assertEqual(length, evidence["original_length"])
+            self.assertEqual(hashlib.sha256(("x" * length).encode()).hexdigest(), evidence["sha256"])
+            self.assertEqual(length > len(evidence["text"]), evidence["truncated"])
+            self.assertLessEqual(len(evidence["text"]), cj.TEXT_LIMIT)
 
     def test_a_ready_for_another_work_item_stops_before_implementation(self) -> None:
         """REV-001, through the runtime: the cycle asked about API-7."""

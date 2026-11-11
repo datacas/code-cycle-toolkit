@@ -645,6 +645,19 @@ class CycleRecorder:
             run.workspace_policy, **run.dispatch_kwargs,
         )
         decision = self._route(run, eligible, signals)
+        if run.role != "resolve" and run.target_override is not None:
+            override = run.target_override
+            if not self._dispatchable(override.executor, eligible):
+                decision = replace(
+                    decision, target=None, blocked=True,
+                    reasons=decision.reasons + ("the pinned retry target is no longer available",),
+                )
+            else:
+                decision = replace(
+                    decision, target=override, blocked=False,
+                    used_fallback=run.target_override_used_fallback,
+                    reasons=decision.reasons + ("retry pinned to the previous stage target",),
+                )
         if run.role == "resolve" and not decision.blocked and decision.target is not None:
             decision = self._resolve_target(run, decision, decision.target, eligible)
         if run.fallback_decision is not None:
