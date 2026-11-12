@@ -660,12 +660,17 @@ Under `parallel`:
 
 Before a resolution that follows `CHANGES_REQUESTED`, run the gate with
 `--once` for the head the review judged: on `CI_FAILED`, tell the resolution
-that SHA and count beside the findings. A resumed change request reuses a
-clean review only when its latest trusted receipt is a clean `review` or
-`rereview` of its current head and its published findings block nothing; then
-only the gate runs. Anything else, an unreadable receipt included, reviews the
-current head. The gate never writes to the code host, and only the review stage
-writes the receipt of a clean review.
+that SHA and count beside the findings. A resumed change request reuses a clean
+review only when its latest trusted receipt is a completed `review` or
+`rereview` of its current head and its published findings block nothing; under
+`parallel`, only the gate runs next. Before any runtime-initiated review or
+rereview, compare the current head with the latest valid, trusted, completed
+review receipt. On the same head, send a clean parallel review directly to the
+CI gate; otherwise record `no_progress` with the SHA and duplicate dispatch and
+stop. Failed or interrupted reviews do not count as completed. An explicit
+`--from review` or `--from rereview` may review an unchanged head. When the
+head differs, review the current head. The gate never writes to the code host,
+and only the review stage writes the receipt of a clean review.
 
 ## Workflow
 
@@ -746,6 +751,12 @@ writes the receipt of a clean review.
    to the CI gate as *CI policy* describes. If it returns
    `CHANGES_REQUESTED`, begin an iteration with `cc-resolve-comments`. Stop on
    `BLOCKED` or `FAILED`.
+   Before a runtime-initiated review or rereview, compare the current head with
+   the latest valid, trusted, completed review receipt. On the same head, send
+   a clean parallel review directly to the CI gate; otherwise record
+   `no_progress` with the SHA and duplicate dispatch and stop. Failed or
+   interrupted reviews do not count as completed. An explicit `--from review`
+   or `--from rereview` may review an unchanged head.
 8. For each iteration, pass the previous structured result to
    `cc-resolve-comments`, then pass its result to `cc-rereview`, each on the
    target routed for its role.

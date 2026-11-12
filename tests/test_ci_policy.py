@@ -844,6 +844,58 @@ class ResumeTests(ParallelTestCase):
         self.assertTrue(closing["review_reused"])
         self.assertEqual(gate.CI_PASSED, closing["final_ci_status"])
 
+    def test_runtime_continuation_sends_a_clean_same_head_review_to_the_ci_gate(self) -> None:
+        self.stages()
+        self.clean_history()
+        self.github.set_checks(HEAD, PASSED)
+
+        report = self.parallel(continue_work=True,
+                               published_change_request=lambda: "4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual([], self.dispatched("review"))
+        self.assertEqual([], self.dispatched("rereview"))
+        closing = self.closing()
+        self.assertTrue(closing["review_reused"])
+        self.assertEqual(gate.CI_PASSED, closing["final_ci_status"])
+
+    def test_runtime_continuation_records_no_progress_for_a_completed_same_head_review(self) -> None:
+        self.stages()
+        self.clean_history(status="CHANGES_REQUESTED")
+
+        report = self.parallel(continue_work=True,
+                               published_change_request=lambda: "4")
+
+        self.assertEqual("no_progress", report.stop_reason)
+        self.assertEqual(rc.UNRESOLVED_END, report.status)
+        self.assertIn(HEAD, report.stopped_because)
+        self.assertIn("duplicate review dispatch", report.stopped_because)
+        self.assertEqual([], self.dispatched("review"))
+        self.assertEqual([], self.dispatched("rereview"))
+
+    def test_failed_same_head_review_receipt_does_not_seed_no_progress(self) -> None:
+        self.stages()
+        self.clean_history(status="FAILED")
+        self.github.set_checks(HEAD, PASSED)
+
+        report = self.parallel(continue_work=True,
+                               published_change_request=lambda: "4")
+
+        self.assertEqual(rc.APPROVED_END, report.status)
+        self.assertEqual(1, len(self.dispatched("review")))
+        self.assertFalse(self.closing()["review_reused"])
+
+    def test_automatic_rereview_resume_stops_on_a_completed_same_head_receipt(self) -> None:
+        self.stages()
+        self.clean_history(status="CHANGES_REQUESTED")
+
+        report = self.resume(automatic_resume=True)
+
+        self.assertEqual("no_progress", report.stop_reason)
+        self.assertIn(HEAD, report.stopped_because)
+        self.assertIn("duplicate rereview dispatch", report.stopped_because)
+        self.assertEqual([], self.dispatched("rereview"))
+
     def test_a_timeout_can_be_resumed_again(self) -> None:
         self.stages()
         self.clean_history()

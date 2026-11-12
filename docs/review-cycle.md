@@ -193,6 +193,18 @@ flowchart LR
 
 Under `parallel` a review never turns a check's state into a finding; the CI gate does. A review that finds something blocking reports `CHANGES_REQUESTED`, and resolution starts at once, whatever the checks are doing. Under `strict` no gate waits for the checks, so a review that reports `REVIEW_PASSED_AWAITING_CI` stops the cycle as a stage that did not complete.
 
+**Order under `parallel`:** complete and validate the review receipt first, then
+run the CI gate once for that reviewed SHA. A clean `APPROVED` or
+`REVIEW_PASSED_AWAITING_CI` goes directly to the gate; do not dispatch another
+review because CI changed state. Before any runtime-initiated review or
+rereview, compare the current head with the latest valid, trusted, completed
+review receipt. If it is the same head, reuse a clean review for the CI gate or
+record a `no_progress` stop naming the head and duplicate dispatch. A failed or
+interrupted review is not completed and does not seed this guard. An explicit
+`--from review` or `--from rereview` may review the same head. When the local
+verification barrier still has pending checks, its ordering and observability
+remain the separate concern tracked by #399.
+
 ### The CI gate
 
 `scripts/ci_gate.py` is the cycle's only wait on checks. `run_cycle.py` calls it after a clean review, and both orchestrators run its command line. No stage and no model polls: the implementation and the reviews read the checks once and return.
