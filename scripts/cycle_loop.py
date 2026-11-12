@@ -30,7 +30,7 @@ class ControlState(str, Enum):
 _SUCCESSORS = {
     ControlState.START: {"issue_review", "implement", "review", "resolve", "rereview", "ci"},
     ControlState.ISSUE_REVIEW: {"issue_review", "implement"},
-    ControlState.IMPLEMENT: {"implement", "review"},
+    ControlState.IMPLEMENT: {"implement", "review", "ci"},
     ControlState.REVIEW: {"review", "resolve", "ci"},
     ControlState.RESOLVE: {"resolve", "rereview"},
     ControlState.REREVIEW: {"rereview", "resolve", "ci"},
@@ -206,7 +206,22 @@ class StageLoop:
                 return stopped
             if manual is not None:
                 return self.close_manual(manual, reported)
-        if ((self.parallel or self.plan_managed) and (self.start_from == "rereview" or self.verification_resume)
+        if (self.start_from == "implement" and self.continue_work and not self.local_only
+                and (self.code_host or self.policy_code_host) == "github"):
+            # A runtime-started review first checks the latest completed review
+            # receipt. A clean parallel receipt goes straight to the CI gate;
+            # another completed review of this head is a recorded no-progress
+            # stop. Explicit --from review|rereview keeps its review override.
+            clean, stopped = self.reusable_review(stop_on_repeat=True)
+            if stopped is not None:
+                return stopped
+        if (self.automatic_resume and not self.local_only
+                and (self.code_host or self.policy_code_host) == "github"):
+            clean, stopped = self.reusable_review(stop_on_repeat=True)
+            if stopped is not None:
+                return stopped
+        elif ((self.parallel or self.plan_managed)
+                and (self.start_from == "rereview" or self.verification_resume)
                 and not (self.plan_managed and self.plan_partial)):
             clean, stopped = self.reusable_review()
             if stopped is not None:

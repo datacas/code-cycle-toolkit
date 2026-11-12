@@ -2369,6 +2369,7 @@ def run_cycle(
     verbose: bool = False,
     progress_interval: float = 60,
     start_from: str = "implement",
+    automatic_resume: bool = False,
     change_request_id: str | None = None,
     issue_review: IssueReviewMode | str = IssueReviewMode.AUTO,
     continue_work: bool = False,

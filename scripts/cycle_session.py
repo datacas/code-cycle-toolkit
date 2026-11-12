@@ -62,6 +62,7 @@ class CycleSession(PlanRuntime, StageDispatch, PublicationHistory, ReviewGate, S
         self.verbose = options["verbose"]
         self.progress_interval = options["progress_interval"]
         self.start_from = options["start_from"]
+        self.automatic_resume = options.get("automatic_resume", False)
         self.state.change_request_id = options["change_request_id"]
         self.issue_review = options["issue_review"]
         self.continue_work = options["continue_work"]
