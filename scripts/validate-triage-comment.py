@@ -19,7 +19,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         body = args.comment.read_text(encoding="utf-8")
-        review_contract.validate_triage_comment(body)
+        review_contract.validate_staged_triage_comment(body)
     except (OSError, review_contract.ContractError) as error:
         print(f"{args.comment}: {error}", file=sys.stderr)
         return 1

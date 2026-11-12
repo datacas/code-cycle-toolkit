@@ -346,9 +346,11 @@ and test. Unchanged findings share one count line, and unchanged sections use
 one line such as `Security: no change` or are omitted. Keep the visible portion,
 through the line before the first `<details>`, at or below 1,200 characters.
 The staged-comment validator enforces the budget in
-`scripts/review_contract.py`; a regression test checks both accepted and
-over-budget comments. Shorten optional summary text to fit while retaining one
-line per changed finding.
+`scripts/review_contract.py`; history recovery checks the machine-readable
+contract without applying this limit to comments published under older
+layouts. A regression test checks an accepted staged comment, an over-budget
+staged comment, and a longer legacy comment. Shorten optional summary text to
+fit while retaining one line per changed finding.
 
 Put earlier run lines, stage receipts, full per-finding history, verification
 tables, environment details, and supporting evidence in one collapsed

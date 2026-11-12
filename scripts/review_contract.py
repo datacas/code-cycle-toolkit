@@ -574,19 +574,23 @@ def parse_comment(text: str) -> ReviewRecord:
 
 
 def validate_triage_comment(text: str) -> None:
-    """Validate every machine-readable contract line in a staged comment.
+    """Validate machine-readable contract lines in a triage comment history.
 
     That includes each `<!-- code-cycle-stage … -->` receipt (#438): a receipt
-    the contract rejects never reaches the change request, where it would stay
-    for the life of the comment.
+    that fails the contract cannot be recovered reliably from comment history.
     """
-    validate_visible_comment_budget(text)
     parse_comment(text)
     _, problems = read_stage_evidence(text)
     if problems:
         raise ContractError(
             "; ".join(f"stage receipt of attempt {problem.attempt_id or '<unreadable>'}: "
                       f"{problem.reason}" for problem in problems))
+
+
+def validate_staged_triage_comment(text: str) -> None:
+    """Validate a new triage comment before publication, including its budget."""
+    validate_triage_comment(text)
+    validate_visible_comment_budget(text)
 
 
 def validate_visible_comment_budget(text: str) -> None:
