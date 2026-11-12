@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 SCHEMA_VERSION = 2
+VISIBLE_COMMENT_CHARACTER_BUDGET = 1200
 
 SEPARATOR = "·"
 ARROW = "→"
@@ -579,12 +580,23 @@ def validate_triage_comment(text: str) -> None:
     the contract rejects never reaches the change request, where it would stay
     for the life of the comment.
     """
+    validate_visible_comment_budget(text)
     parse_comment(text)
     _, problems = read_stage_evidence(text)
     if problems:
         raise ContractError(
             "; ".join(f"stage receipt of attempt {problem.attempt_id or '<unreadable>'}: "
                       f"{problem.reason}" for problem in problems))
+
+
+def validate_visible_comment_budget(text: str) -> None:
+    """Reject staged comments whose visible round summary exceeds its budget."""
+    visible_part = text.split("<details>", 1)[0].rstrip()
+    if len(visible_part) > VISIBLE_COMMENT_CHARACTER_BUDGET:
+        raise ContractError(
+            f"visible comment is {len(visible_part)} characters; limit is "
+            f"{VISIBLE_COMMENT_CHARACTER_BUDGET}"
+        )
 
 
 def merge_disposition(previous: str | None, incoming: str) -> str:

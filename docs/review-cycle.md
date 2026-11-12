@@ -339,19 +339,25 @@ Other tokens that never translate: the functional statuses (`APPROVED`, `REVIEW_
 
 ## Round-delta comment layout
 
-Resolve and rereview comments show the latest run line and only the findings
-whose status, disposition, or evidence changed during that round. Each changed
-finding gets one visible line for its cause, fix, and test. Unchanged findings
-share one count line, and unchanged sections use one line such as
-`Security: no change` or are omitted. Keep the visible portion at or below
-1,200 characters.
+Resolve, rereview, and initial-review comments show the latest run line and
+only the findings whose status, disposition, or evidence changed during that
+round. Each changed finding gets one concise visible line for its cause, fix,
+and test. Unchanged findings share one count line, and unchanged sections use
+one line such as `Security: no change` or are omitted. Keep the visible portion,
+through the line before the first `<details>`, at or below 1,200 characters.
+The staged-comment validator enforces the budget in
+`scripts/review_contract.py`; a regression test checks both accepted and
+over-budget comments. Shorten optional summary text to fit while retaining one
+line per changed finding.
 
 Put earlier run lines, stage receipts, full per-finding history, verification
 tables, environment details, and supporting evidence in one collapsed
-`<details>` block. Initial review comments use the same layout: the latest run
-line, a short scope and finding-count summary, and the verdict stay visible;
-finding headers and detailed review evidence remain in the collapsed block.
-The raw comment body retains every receipt, run line, finding ID, status, and
+`<details>` block. Initial-review comments use the same layout: the latest run
+line, scope and finding-count summary, one-line summaries for changed findings,
+and verdict stay visible; finding headers and detailed review evidence remain
+in the collapsed block. When enabled, the `ORCHESTRATION_RESULT` may use a
+separate collapsed `<details>` block alongside the history block. The raw
+comment body retains every receipt, run line, finding ID, status, and
 disposition. Recovery parses that raw body, including content inside
 `<details>`, so collapsing the history changes its presentation without
 changing the machine-readable record.

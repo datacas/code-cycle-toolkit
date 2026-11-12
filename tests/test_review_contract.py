@@ -1048,8 +1048,6 @@ class CommentRunHistoryTests(unittest.TestCase):
 
 
 class RoundDeltaCommentTests(unittest.TestCase):
-    visible_character_budget = 1200
-
     def test_round_delta_layout_is_in_every_template_and_the_owning_docs(self) -> None:
         paths = [
             ROOT / "skills/cc-resolve-comments/SKILL.md",
@@ -1120,7 +1118,7 @@ class RoundDeltaCommentTests(unittest.TestCase):
         self.assertEqual([5, 5], [receipt["revision"] for receipt in receipts])
         self.assertEqual([], problems)
 
-    def test_visible_round_delta_stays_within_the_documented_budget(self) -> None:
+    def test_visible_round_delta_budget_is_checked_by_the_comment_contract(self) -> None:
         comment = "\n".join([
             _triage(1),
             "RESOLVED · 1 finding changed",
@@ -1132,9 +1130,11 @@ class RoundDeltaCommentTests(unittest.TestCase):
             "Full verification and finding history.",
             "</details>",
         ])
-        visible_part = comment.split("<details>", 1)[0].rstrip()
 
-        self.assertLessEqual(len(visible_part), self.visible_character_budget)
+        contract.validate_visible_comment_budget(comment)
+        too_long = "x" * (contract.VISIBLE_COMMENT_CHARACTER_BUDGET + 1)
+        with self.assertRaisesRegex(contract.ContractError, "visible comment"):
+            contract.validate_visible_comment_budget(too_long)
 
 
 if __name__ == "__main__":
