@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 SCHEMA_VERSION = 2
+VISIBLE_COMMENT_CHARACTER_BUDGET = 1200
 
 SEPARATOR = "·"
 ARROW = "→"
@@ -573,11 +574,10 @@ def parse_comment(text: str) -> ReviewRecord:
 
 
 def validate_triage_comment(text: str) -> None:
-    """Validate every machine-readable contract line in a staged comment.
+    """Validate machine-readable contract lines in a triage comment history.
 
     That includes each `<!-- code-cycle-stage … -->` receipt (#438): a receipt
-    the contract rejects never reaches the change request, where it would stay
-    for the life of the comment.
+    that fails the contract cannot be recovered reliably from comment history.
     """
     parse_comment(text)
     _, problems = read_stage_evidence(text)
@@ -585,6 +585,22 @@ def validate_triage_comment(text: str) -> None:
         raise ContractError(
             "; ".join(f"stage receipt of attempt {problem.attempt_id or '<unreadable>'}: "
                       f"{problem.reason}" for problem in problems))
+
+
+def validate_staged_triage_comment(text: str) -> None:
+    """Validate a new triage comment before publication, including its budget."""
+    validate_triage_comment(text)
+    validate_visible_comment_budget(text)
+
+
+def validate_visible_comment_budget(text: str) -> None:
+    """Reject staged comments whose visible round summary exceeds its budget."""
+    visible_part = text.split("<details>", 1)[0].rstrip()
+    if len(visible_part) > VISIBLE_COMMENT_CHARACTER_BUDGET:
+        raise ContractError(
+            f"visible comment is {len(visible_part)} characters; limit is "
+            f"{VISIBLE_COMMENT_CHARACTER_BUDGET}"
+        )
 
 
 def merge_disposition(previous: str | None, incoming: str) -> str:

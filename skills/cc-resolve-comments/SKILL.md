@@ -393,6 +393,23 @@ findings with one ID, whether they appear in one trusted comment or across the
 trusted history. Allocate new IDs after the highest historical numeric ID,
 never after the latest comment alone.
 
+Keep the published comment readable as a round summary while preserving every
+machine-readable line in its raw body. Show only the latest review or triage run
+line above the fold; place earlier run lines, stage receipts, the verification
+table, environment details, and full per-finding history inside one collapsed
+`<details>` block. The visible summary contains only findings whose status,
+disposition, or evidence changed in this round. Give each changed finding one
+concise line with its cause, fix, and test. Collapse all unchanged findings into
+one count line, and reduce any unchanged section to one line such as
+`Security: no change` or omit it. Keep the visible part, from its first line
+through the line before the first `<details>`, at or below 1,200 characters.
+Shorten optional summary text to fit while retaining one line per changed
+finding. The staged-comment validator checks this budget before publication.
+The history block and, when enabled, the separate collapsed
+`ORCHESTRATION_RESULT` block may both appear in the raw comment. Keep receipt
+JSON, finding headers, IDs, and dispositions intact there so history recovery
+continues to parse them.
+
 A review run line opens each published review and identifies the run that
 produced the findings below it:
 
@@ -816,10 +833,21 @@ plus the `ORCHESTRATION_RESULT` block collapsed inside a `<details>` element,
 preserving the individual human thread replies, and give every finding it reports the
 header contract from *The change-request comment is the machine-readable record*.
 
-That summary carries the triage run line for this run, every review run line
-already present, and the frozen disposition of every finding. The dispositions
-were recorded before the first edit; publishing them again here changes none of
-them.
+Keep the latest triage run line and the round summary visible. Show only
+findings whose status, disposition, or evidence changed in this round, each on
+one line with cause, fix, and test; collapse unchanged findings into one count
+line. Put earlier run lines, stage receipts, the verification table, environment
+details, and full per-finding history in one collapsed `<details>` block.
+Reduce unchanged sections to one line such as `Security: no change`, or omit
+them. Keep the visible part, from its first line through the line before
+`<details>`, at or below 1,200 characters. Preserve all finding headers and
+receipt JSON in the raw body for runtime recovery.
+
+The raw summary carries the triage run line for this run, every review run line
+already present, and the frozen disposition of every finding. Only the latest
+triage run line is visible; put the earlier review run lines and complete
+finding records in the history block. The dispositions were recorded before
+the first edit; publishing them again here changes none of them.
 
 When it is included, collapse it so the comment stays readable for a human, who
 is its primary audience. Keep the two delimiters on their own lines and put no
