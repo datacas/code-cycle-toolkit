@@ -33,6 +33,7 @@
     "review-cycle-documentation": {
       "paths": ["docs/review-cycle.md", "docs/dependency-preparation.md", "docs/host-permissions.md"],
       "tests": [
+        "test_review_contract.RoundDeltaCommentTests.test_round_delta_layout_is_in_every_template_and_the_owning_docs",
         "test_security_gate.ConfigurationTests.test_review_cycle_page_links_the_minimum_instead_of_copying_it",
         "test_credential_read_guidance.CredentialReadGuidanceTests"
       ]

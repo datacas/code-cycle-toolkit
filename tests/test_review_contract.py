@@ -1050,6 +1050,23 @@ class CommentRunHistoryTests(unittest.TestCase):
 class RoundDeltaCommentTests(unittest.TestCase):
     visible_character_budget = 1200
 
+    def test_round_delta_layout_is_in_every_template_and_the_owning_docs(self) -> None:
+        paths = [
+            ROOT / "skills/cc-resolve-comments/SKILL.md",
+            ROOT / "skills/cc-rereview/SKILL.md",
+            ROOT / "skills/cc-initial-review/SKILL.md",
+            ROOT / "docs/review-cycle.md",
+        ]
+        for path in paths:
+            with self.subTest(path=path.name):
+                content = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertIn("latest", content)
+                self.assertIn("run line", content)
+                self.assertIn("cause, fix, and test", content)
+                self.assertIn("count line", content)
+                self.assertIn("<details>", content)
+                self.assertIn("at or below 1,200 characters", content)
+
     def test_multi_round_collapsed_history_keeps_receipts_and_findings_parseable(self) -> None:
         review_receipt = receipt_line(
             "attempt-review", stage="review", status="CHANGES_REQUESTED",
