@@ -193,15 +193,18 @@ flowchart LR
 
 Under `parallel` a review never turns a check's state into a finding; the CI gate does. A review that finds something blocking reports `CHANGES_REQUESTED`, and resolution starts at once, whatever the checks are doing. Under `strict` no gate waits for the checks, so a review that reports `REVIEW_PASSED_AWAITING_CI` stops the cycle as a stage that did not complete.
 
+Before any runtime-initiated review or rereview, compare the current head with
+the latest valid, trusted, completed review receipt. If it is the same head,
+record a `no_progress` stop naming the head and duplicate dispatch. A later
+resolution receipt permits the automatic rereview that verifies that
+resolution. An explicit `--from review` or `--from rereview` may review the
+same head.
+
 **Order under `parallel`:** complete and validate the review receipt first, then
 run the CI gate once for that reviewed SHA. A clean `APPROVED` or
 `REVIEW_PASSED_AWAITING_CI` goes directly to the gate; do not dispatch another
-review because CI changed state. Before any runtime-initiated review or
-rereview, compare the current head with the latest valid, trusted, completed
-review receipt. If it is the same head, reuse a clean review for the CI gate or
-record a `no_progress` stop naming the head and duplicate dispatch. A failed or
-interrupted review is not completed and does not seed this guard. An explicit
-`--from review` or `--from rereview` may review the same head. When the local
+review because CI changed state. A failed or interrupted review is not
+completed and does not seed the guard. When the local
 verification barrier still has pending checks, its ordering and observability
 remain the separate concern tracked by #399.
 
@@ -483,8 +486,9 @@ Before the loop, an [issue review](#issue-review-before-implementation) can stop
 An ordinary comment-only resolution leaves HEAD unchanged, so the native loop
 stops with `no_progress` before another review can judge its claims. Publishing
 `not_applicable` after triaging a finding `incorrect` does not bypass that guard
-or remove the reviewed blocks. A person must decide how to continue; no survival
-is counted without a subsequent readable review rejection.
+or remove the reviewed blocks. A later automatic resume recognizes the
+resolution receipt as progress and dispatches the rereview that can judge its
+claims; no survival is counted without a subsequent readable review rejection.
 
 | Sequence | Why not |
 |---|---|

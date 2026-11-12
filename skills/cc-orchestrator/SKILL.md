@@ -667,9 +667,10 @@ review only when its latest trusted receipt is a completed `review` or
 rereview, compare the current head with the latest valid, trusted, completed
 review receipt. On the same head, send a clean parallel review directly to the
 CI gate; otherwise record `no_progress` with the SHA and duplicate dispatch and
-stop. Failed or interrupted reviews do not count as completed. An explicit
-`--from review` or `--from rereview` may review an unchanged head. When the
-head differs, review the current head. The gate never writes to the code host,
+stop. Failed or interrupted reviews do not count as completed. A later
+resolution receipt permits the automatic rereview that verifies that
+resolution. An explicit `--from review` or `--from rereview` may review an
+unchanged head. When the head differs, review the current head. The gate never writes to the code host,
 and only the review stage writes the receipt of a clean review.
 
 ## Workflow
@@ -755,8 +756,9 @@ and only the review stage writes the receipt of a clean review.
    the latest valid, trusted, completed review receipt. On the same head, send
    a clean parallel review directly to the CI gate; otherwise record
    `no_progress` with the SHA and duplicate dispatch and stop. Failed or
-   interrupted reviews do not count as completed. An explicit `--from review`
-   or `--from rereview` may review an unchanged head.
+   interrupted reviews do not count as completed. A later resolution receipt
+   permits the automatic rereview that verifies that resolution. An explicit
+   `--from review` or `--from rereview` may review an unchanged head.
 8. For each iteration, pass the previous structured result to
    `cc-resolve-comments`, then pass its result to `cc-rereview`, each on the
    target routed for its role.

@@ -68,12 +68,20 @@ class CredentialReadGuidanceTests(unittest.TestCase):
         for phrase in (
             "complete and validate the review receipt first",
             "run the CI gate once for that reviewed SHA",
-            "record a `no_progress` stop",
             "A failed or interrupted review is not completed",
-            "An explicit `--from review` or `--from rereview`",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, order)
+
+    def test_runtime_review_guard_and_resolution_resume_are_documented(self) -> None:
+        docs = (ROOT / "docs/review-cycle.md").read_text()
+        guard = " ".join(docs.split("Before any runtime-initiated review", 1)[1]
+                          .split("**Order under `parallel`:**", 1)[0].split())
+
+        self.assertIn("latest valid, trusted, completed review receipt", guard)
+        self.assertIn("record a `no_progress` stop", guard)
+        self.assertIn("A later resolution receipt permits the automatic rereview", guard)
+        self.assertIn("An explicit `--from review` or `--from rereview`", guard)
 
     def test_all_three_skills_name_signal_and_order_user_remedies(self) -> None:
         for path in SKILLS:

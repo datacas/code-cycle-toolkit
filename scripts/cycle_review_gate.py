@@ -247,7 +247,7 @@ class ReviewGate:
                     f"{latest_review['head_sha'][:12]} from its receipt; no review dispatched")
                 return (latest_review["stage"], latest_review["status"],
                         latest_review["head_sha"], {latest_review["attempt_id"]}), None
-            if stop_on_repeat:
+            if stop_on_repeat and latest is latest_review:
                 dispatch = "review" if self.start_from in {"implement", "review"} else "rereview"
                 reason = (
                     f"a runtime {latest_review['stage']} already completed for unchanged "
