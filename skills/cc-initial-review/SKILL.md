@@ -353,6 +353,19 @@ findings with one ID, whether they appear in one trusted comment or across the
 trusted history. Allocate new IDs after the highest historical numeric ID,
 never after the latest comment alone.
 
+Keep the published comment readable as a round summary while preserving every
+machine-readable line in its raw body. Show only the latest review or triage run
+line above the fold; place earlier run lines, stage receipts, the verification
+table, environment details, and full per-finding history inside one collapsed
+`<details>` block. The visible summary contains only findings whose status,
+disposition, or evidence changed in this round. Give each changed finding one
+line with its cause, fix, and test. Collapse all unchanged findings into one
+count line, and reduce any unchanged section to one line such as `Security: no
+change` or omit it. Keep the visible part, from its first line through the line
+before `<details>`, at or below 1,200 characters. Keep receipt JSON, finding
+headers, IDs, and dispositions intact inside the raw comment so history
+recovery continues to parse them.
+
 A review run line opens each published review and identifies the run that
 produced the findings below it:
 
@@ -663,18 +676,18 @@ posting another.
 
 Always publish one comment on the change request containing:
 
-- the review run line for this execution;
-- executive summary and reviewed scope;
-- findings ordered by severity;
-- security triage and security-audit result;
-- commands or flows executed and observed results;
-- unverified items with reasons;
-- CI and expected gate states;
-- residual risks;
-- the unambiguous project review verdict;
+- the latest review run line, executive summary, reviewed scope, finding count,
+  and project verdict in the visible part;
+- every finding header and its detailed evidence, security triage and
+  security-audit result, commands or flows, unverified items, CI state, and
+  residual risks inside one collapsed `<details>` block;
 - the `ORCHESTRATION_RESULT` block, collapsed inside a `<details>` element —
   **only when that block is enabled** and it is not going to the response
   instead (see *Where the block goes*).
+
+Keep the visible part at or below 1,200 characters. Keep all finding headers,
+receipt JSON, and other machine-readable data in the raw body, even when it is
+inside the collapsed block.
 
 Publish every finding with the header contract from *The change-request comment is the
 machine-readable record*.

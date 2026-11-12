@@ -1047,5 +1047,78 @@ class CommentRunHistoryTests(unittest.TestCase):
                 self.assertIn(message, str(caught.exception))
 
 
+class RoundDeltaCommentTests(unittest.TestCase):
+    visible_character_budget = 1200
+
+    def test_multi_round_collapsed_history_keeps_receipts_and_findings_parseable(self) -> None:
+        review_receipt = receipt_line(
+            "attempt-review", stage="review", status="CHANGES_REQUESTED",
+            finding_outcomes=[{"id": "REV-001", "status": "open"}],
+            plan_id="plan-cycle-test", revision=5, digest="a" * 64,
+        )
+        resolve_receipt = receipt_line(
+            "attempt-resolve", stage="resolve", status="RESOLVED",
+            finding_outcomes=[{"id": "REV-001", "status": "resolved"}],
+            plan_id="plan-cycle-test", revision=5, digest="a" * 64,
+        )
+        first = "\n".join([
+            _review(1),
+            "#### [REV-001] · high · open · - · blocks:yes — Validate input",
+            review_receipt,
+        ])
+        latest = "\n".join([
+            _triage(1),
+            "REV-001: cause: missing validation; fix: validate input; test: regression passes",
+            "REV-002: unchanged; regression check passes",
+            "<details>",
+            "<summary>Full round history</summary>",
+            _review(1),
+            "#### [REV-001] · high · open · - · blocks:yes — Validate input",
+            "#### [REV-002] · medium · open · valid · blocks:no — Clarify output",
+            "#### [REV-001] · high · resolved · valid · blocks:yes — Validate input",
+            resolve_receipt,
+            "Verification table and environment details.",
+            "</details>",
+        ])
+        comments = [
+            contract.ProviderComment("review-bot", first, id="review-1"),
+            contract.ProviderComment("review-bot", latest, id="resolve-1"),
+        ]
+
+        history = contract.comment_run_history(
+            comments, trusted_authors={"review-bot"})
+        findings = contract.recover_comment_history(
+            comments, trusted_authors={"review-bot"})
+        receipts, problems = contract.read_stage_evidence("\n".join([first, latest]))
+
+        self.assertEqual(["review", "resolution"],
+                         [run.kind for run in history])
+        self.assertEqual("resolved", history[-1].statuses["REV-001"])
+        finding = findings.finding("REV-001")
+        assert finding is not None
+        self.assertEqual("resolved", finding.status)
+        self.assertEqual("valid", finding.disposition)
+        self.assertEqual(["attempt-review", "attempt-resolve"],
+                         [receipt["attempt_id"] for receipt in receipts])
+        self.assertEqual([5, 5], [receipt["revision"] for receipt in receipts])
+        self.assertEqual([], problems)
+
+    def test_visible_round_delta_stays_within_the_documented_budget(self) -> None:
+        comment = "\n".join([
+            _triage(1),
+            "RESOLVED · 1 finding changed",
+            "REV-001: cause: missing validation; fix: validate input; test: regression passes",
+            "REV-002–016: unchanged, regression check passes",
+            "Security: no change",
+            "CI: pending on the published head",
+            "<details>",
+            "Full verification and finding history.",
+            "</details>",
+        ])
+        visible_part = comment.split("<details>", 1)[0].rstrip()
+
+        self.assertLessEqual(len(visible_part), self.visible_character_budget)
+
+
 if __name__ == "__main__":
     unittest.main()

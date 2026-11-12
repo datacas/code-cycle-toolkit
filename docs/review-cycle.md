@@ -337,6 +337,25 @@ A skill that republishes a comment keeps every run line it didn't write.
 
 Other tokens that never translate: the functional statuses (`APPROVED`, `REVIEW_PASSED_AWAITING_CI`, `CHANGES_REQUESTED`, `RESOLVED`, `PARTIALLY_RESOLVED`, `BLOCKED`, `FAILED`, `READY_FOR_MANUAL_MERGE`, `HUMAN_INTERVENTION`), the CI gate results (`CI_PASSED`, `CI_FAILED`, …), and every JSON key.
 
+## Round-delta comment layout
+
+Resolve and rereview comments show the latest run line and only the findings
+whose status, disposition, or evidence changed during that round. Each changed
+finding gets one visible line for its cause, fix, and test. Unchanged findings
+share one count line, and unchanged sections use one line such as
+`Security: no change` or are omitted. Keep the visible portion at or below
+1,200 characters.
+
+Put earlier run lines, stage receipts, full per-finding history, verification
+tables, environment details, and supporting evidence in one collapsed
+`<details>` block. Initial review comments use the same layout: the latest run
+line, a short scope and finding-count summary, and the verdict stay visible;
+finding headers and detailed review evidence remain in the collapsed block.
+The raw comment body retains every receipt, run line, finding ID, status, and
+disposition. Recovery parses that raw body, including content inside
+`<details>`, so collapsing the history changes its presentation without
+changing the machine-readable record.
+
 ## Trusted authors
 
 Later rounds recover findings from the PR's comment history, and a comment can be written by anyone. So recovery only folds in comments from logins listed in `review.trusted_authors`:
