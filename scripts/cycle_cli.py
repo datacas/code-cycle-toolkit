@@ -301,6 +301,7 @@ def main(api: Any, argv: list[str] | None = None) -> int:
                 ),
                 jev=jev,
                 start_from=args.start_from,
+                automatic_resume=resumed is not None,
                 change_request_id=args.change_request,
                 issue_review=issue_review,
                 continue_work=args.continue_work,

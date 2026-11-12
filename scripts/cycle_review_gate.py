@@ -191,7 +191,7 @@ class ReviewGate:
             status=self.api.ci_gate.CI_MERGEABILITY_UNKNOWN, head_sha=head, pr_head_sha=head,
             reason="GitHub could not determine whether the change request is mergeable")
 
-    def reusable_review(self: Any):
+    def reusable_review(self: Any, *, stop_on_repeat: bool = False):
         """The clean review a resumed change request already has, when it holds.
 
         The receipt on the change request is the record: when the latest
@@ -226,6 +226,36 @@ class ReviewGate:
             self.report.note(f"  resume   no clean review reused: {self.api.readable(str(error), 200)}")
             return None, None
         latest = receipts[-1] if receipts else None
+        completed_reviews = [receipt for receipt in receipts
+                             if receipt["stage"] in {"review", "rereview"}
+                             and self.api.completes(receipt["stage"], receipt["status"],
+                                                    self.ci_policy)]
+        latest_review = completed_reviews[-1] if completed_reviews else None
+        if latest_review is not None and latest_review["head_sha"] == pull.head_sha:
+            clean_is_latest = (
+                self.parallel
+                and latest is latest_review
+                and latest_review["status"] in self.api.CLEAN_REVIEW_STATUSES
+                and self.api.receipt_provenance(latest_review) == self.api.RUNTIME_PROVENANCE
+                and not any(finding.status == "open" and finding.blocks_approval
+                            for finding in published.findings)
+            )
+            if clean_is_latest:
+                self.recorder.review_reused = True
+                self.report.note(
+                    f"  resume   reused the clean {latest_review['stage']} of "
+                    f"{latest_review['head_sha'][:12]} from its receipt; no review dispatched")
+                return (latest_review["stage"], latest_review["status"],
+                        latest_review["head_sha"], {latest_review["attempt_id"]}), None
+            if stop_on_repeat and latest is latest_review:
+                dispatch = "review" if self.start_from in {"implement", "review"} else "rereview"
+                reason = (
+                    f"a runtime {latest_review['stage']} already completed for unchanged "
+                    f"head {pull.head_sha}; duplicate {dispatch} dispatch "
+                    "stopped as no progress"
+                )
+                return None, self.stop(reason, self.api.UNRESOLVED_END,
+                                       stop_reason="no_progress")
         # A manual rereview is never reused for being clean and trusted; only
         # `manual_review` accepts one, on its own conditions.
         if (latest is None or latest["stage"] not in {"review", "rereview"}

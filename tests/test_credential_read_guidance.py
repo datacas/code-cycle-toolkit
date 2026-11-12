@@ -59,6 +59,30 @@ class CredentialReadGuidanceTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(anchor, (ROOT / path).read_text())
 
+    def test_parallel_review_receipt_precedes_the_ci_gate_and_no_progress_guard_is_documented(self) -> None:
+        docs = (ROOT / "docs/review-cycle.md").read_text()
+        order = " ".join(docs.split("**Order under `parallel`:**", 1)[1].split())
+        gate = docs.index("### The CI gate")
+
+        self.assertLess(docs.index("**Order under `parallel`:**"), gate)
+        for phrase in (
+            "complete and validate the review receipt first",
+            "run the CI gate once for that reviewed SHA",
+            "A failed or interrupted review is not completed",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, order)
+
+    def test_runtime_review_guard_and_resolution_resume_are_documented(self) -> None:
+        docs = (ROOT / "docs/review-cycle.md").read_text()
+        guard = " ".join(docs.split("Before any runtime-initiated review", 1)[1]
+                          .split("**Order under `parallel`:**", 1)[0].split())
+
+        self.assertIn("latest valid, trusted, completed review receipt", guard)
+        self.assertIn("record a `no_progress` stop", guard)
+        self.assertIn("A later resolution receipt permits the automatic rereview", guard)
+        self.assertIn("An explicit `--from review` or `--from rereview`", guard)
+
     def test_all_three_skills_name_signal_and_order_user_remedies(self) -> None:
         for path in SKILLS:
             with self.subTest(path=path):
