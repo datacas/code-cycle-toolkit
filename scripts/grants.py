@@ -763,6 +763,33 @@ class ConsentBroker:
                     entries.append({"operation": op, "decision": "deny" if answer == DENY else "allow"})
         return tuple(entries)
 
+    def prepare_answers(self, executor: str, role: str) -> None:
+        """Resolve resume answers before the selected executor is dispatched."""
+        expected_role = consent_role(role)
+        for grant_id in self.answers:
+            if grant_id in GRANTS:
+                continue
+            grant = self.registry.get(grant_id)
+            if grant is None:
+                note = f"{grant_id}: resume grant cannot apply; no matching grant is registered"
+            elif (grant_id not in GRANTS and grant.operation is not None
+                  and consent_role(grant.operation["role"]) != expected_role):
+                note = (f"{grant_id}: resume grant cannot apply to {role}; it was created for "
+                        f"{grant.operation['role']}")
+            else:
+                scope = grant.scope_for(executor, self.platform)
+                if scope is None:
+                    note = f"{grant_id}: resume grant cannot apply; no scope for {executor}/{self.platform}"
+                else:
+                    try:
+                        self._resolve(grant, scope)
+                    except GrantError as error:
+                        note = f"{grant_id}: resume grant cannot apply; {error}"
+                    else:
+                        continue
+            if note not in self.notes:
+                self.notes.append(note)
+
     def record_executions(self, commands: list[str], executor: str, policy: Any,
                           cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:
         from stage_permissions import operation, protected_reason

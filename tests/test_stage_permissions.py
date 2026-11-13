@@ -66,7 +66,6 @@ class PolicyTestCase(unittest.TestCase):
         self.assertFalse(decision.allowed, f"{command!r} was allowed")
         return decision
 
-
 class ParserTests(PolicyTestCase):
     def test_one_simple_command_with_quotes_parses_into_literal_words(self) -> None:
         parsed = sp.parse_command("""git log --format='%H %s' "a b" c\\ d""", None)
@@ -111,6 +110,16 @@ class ParserTests(PolicyTestCase):
 
 
 class ReadOnlyShellTests(PolicyTestCase):
+    def test_review_stages_can_hash_only_runtime_supplied_evidence(self) -> None:
+        evidence = Path(self.directory.name).parent / "runtime-evidence.diff"
+        evidence.write_text("diff --git a/a b/a\n", encoding="utf-8")
+        policy = self.policy("rereview", evidence_paths=(str(evidence),))
+
+        self.allowed(f"sha256sum {evidence}", policy)
+        self.denied(f"sha256sum {evidence.parent / 'unrelated.diff'}", policy)
+        self.denied("sha256sum /etc/passwd", policy)
+        self.denied("git push origin main", policy)
+
     def test_the_closed_read_only_set_is_available_to_every_stage(self) -> None:
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             policy = self.policy(role)

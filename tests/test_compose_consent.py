@@ -126,6 +126,31 @@ class ComposeConsentCase(unittest.TestCase):
 
 
 class FirstConsentTests(ComposeConsentCase):
+    def test_ac1_resume_grant_is_in_the_first_rereview_policy(self):
+        original = self.broker()
+        request, _ = self.request(policy=self.policy("rereview"), broker=original)
+        grant = self.answer(request, original)
+
+        resumed = self.broker(answers={grant.id: "persistent"})
+        resumed.prepare_answers("claude", "rereview")
+        policy = replace(self.policy("rereview"),
+                         command_permissions=resumed.command_entries("claude", "rereview"))
+
+        self.assertTrue(sp.check(CHECK, policy, cwd=str(self.clone)).allowed)
+        self.assertNotIn("permission_required", " ".join(resumed.notes))
+
+    def test_ac2_inapplicable_resume_grant_is_explained_before_policy_creation(self):
+        original = self.broker()
+        request, _ = self.request(policy=self.policy("rereview"), broker=original)
+        grant = self.answer(request, original)
+
+        resumed = self.broker(answers={grant.id: "persistent"})
+        resumed.prepare_answers("claude", "implement")
+
+        self.assertTrue(any("cannot apply to implement" in note for note in resumed.notes))
+        self.assertFalse(any(entry["operation"] == grant.operation
+                             for entry in resumed.command_entries("claude", "implement")))
+
     def test_ac1_declared_compose_check_asks_instead_of_an_unconditional_deny(self):
         decision = sp.check(CHECK, self.policy(), cwd=str(self.clone))
         self.assertFalse(decision.allowed)

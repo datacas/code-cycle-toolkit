@@ -3164,7 +3164,8 @@ class ClaudeAdapter(NativeAdapter):
                     if tool == "Bash":
                         add(tool_input.get("command"))
                     if tool == "Bash" or tool in sp.FILE_EDIT_TOOLS:
-                        command_refusals.append({"tool": tool, "input": tool_input})
+                        command_refusals.append({"tool": tool, "input": tool_input,
+                                                 "layer": "claude_permission"})
                     target = (tool_input.get("command") or tool_input.get("file_path")
                               or tool_input.get("notebook_path") or tool_input.get("url"))
                     entry: dict[str, object] = {"tool": str(tool or "unknown")[:80],

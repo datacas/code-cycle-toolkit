@@ -602,6 +602,12 @@ ID; **this repository** persists across issues and resumed runs; **forever**
 persists globally for writing and issue-review roles. Different stage roles
 require their own decisions. An answer can be supplied on resume as
 `--grant command_<sha256>=cycle|persistent|forever|deny`.
+On resume, each supplied grant is checked against the selected executor and
+stage role and applied to that dispatch's permission policy before the agent
+starts. A grant ID that is unknown or cannot cover that executor or role is
+reported with its reason before the dispatch. A denial recorded by Claude's
+permission layer enters the same consent flow as a hook refusal; without an
+answer, the stage stops as `permission_required` with the exact operation.
 A global grant never covers `review` or `rereview`, because those stages judge
 untrusted changes in any repository: their questions offer only **this cycle /
 this repository / deny**, a `forever` answer for them is refused, and a stored
@@ -616,6 +622,10 @@ operation stops the cycle with `HUMAN_INTERVENTION` and the named decision. A
 configured check is never essential: an unanswered one is still asked, and a
 denied one is recorded `unverified` while the cycle continues to
 `VERIFICATION_INCOMPLETE`.
+Review stages may use read-only tools such as `sha256sum` on the exact runtime
+evidence files supplied to that dispatch. Other reads remain subject to the
+existing workspace and credential-path checks, and Git and publication
+operations keep their dedicated guards.
 An accessory inspection does not stop completed work; a stage reporting
 `BLOCKED` can supply `completed_status` and completion references, which still
 pass the normal publication/effect guards. Agent prose is not completion

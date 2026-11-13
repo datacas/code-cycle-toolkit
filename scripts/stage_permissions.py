@@ -74,7 +74,7 @@ def credential_read_denials(*, publishes: bool = False,
         for target in (root / store[2:],) if target.exists()))
 
 #: Read-only shell tools every stage may use, and nothing else from the shell.
-READ_SHELL = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "find", "jq",
+READ_SHELL = frozenset({"ls", "cat", "head", "tail", "wc", "grep", "find", "jq", "sha256sum",
                         "sed", "date", "ps"})
 #: `sed` is the one read tool whose first barrier is narrower than the program:
 #: the hook accepts a `sed` that starts with one of these options, and the

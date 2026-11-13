@@ -54,7 +54,7 @@ from executors import (
 from harness import build_harness_snapshot
 from grants import (
     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, PENDING, ConsentBroker, GRANTS,
-    denial_context, granted_context,
+    consent_role, denial_context, granted_context,
 )
 from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,
@@ -918,6 +918,8 @@ class CycleRecorder:
         """The grants and denials this attempt runs with, stated to the agent."""
         executor = attempt.target.executor
         consent = self.consent
+        if consent is not None:
+            consent.prepare_answers(executor, run.role)
         granted = consent.granted(executor) if consent is not None else ()
         # This dispatch already ran with these denials; rerunning it with
         # the same denial context cannot change its outcome.
@@ -925,10 +927,17 @@ class CycleRecorder:
                                  if consent is not None else frozenset())
         context = ""
         if consent is not None:
+            grant_notes = [note for note in consent.notes if note.startswith(tuple(consent.answers))]
+            if grant_notes:
+                context += "\n\nResume grant preflight:\n" + "\n".join(grant_notes)
             for grant_id in granted:
-                scope = consent.registry[grant_id].scope_for(executor, consent.platform)
+                grant = consent.registry[grant_id]
+                if (grant_id not in GRANTS and grant.operation is not None
+                        and consent_role(grant.operation["role"]) != consent_role(run.role)):
+                    continue
+                scope = grant.scope_for(executor, consent.platform)
                 if scope is not None:
-                    context += "\n\n" + granted_context(consent.registry[grant_id], scope)
+                    context += "\n\n" + granted_context(grant, scope)
             context += "\n\n" + "\n".join(
                 denial_context(consent.registry[grant_id]) for grant_id in consent.denied_ids)
             if run.dispatch_kwargs.get("command_policy") is not None:
@@ -1205,8 +1214,10 @@ class CycleRecorder:
                 result = replace(result, agent_output=spoken)
                 # A configured check is never essential, yet an unanswered one
                 # is still asked before it is left unverified (#398).
-                ask = (refused is not None and refused.get("check") and not denied
-                       and refused["resource"] not in self.consent.granted_ids)
+                ask = (refused is not None and not denied
+                       and refused["resource"] not in self.consent.granted_ids
+                       and (refused.get("check") or (
+                           record.get("layer") == "claude_permission" and essential)))
                 # A refusal that can never be granted is no request to ask for:
                 # it is recorded and classified, and the stage stands as reported.
                 if (essential or ask) and command_blocker is None and refused is not None:
