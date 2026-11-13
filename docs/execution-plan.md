@@ -146,8 +146,19 @@ The verification contract contains:
 `extend_verification()` returns a new owning revision and preserves result
 history. `VerificationPlan.extend()` freezes command, executor, profile,
 context and provenance, allows additions/promotions, and retains omitted
-entries. `record()` appends results; `current()` invalidates an old HEAD without
-deleting history. `cap()` never raises the reported conclusion: required fail
+entries. `record()` appends results with a binding to the frozen identity,
+configuration digest and provenance. `current()` chooses the latest executed
+`pass` or `fail` matching that binding and HEAD. Later permission stops, omitted
+checks and time limits without execution cannot supersede executed evidence.
+A later executed failure supersedes a pass; a subsequent executed pass supersedes
+that failure. With no executed evidence, the latest matching unexecuted attempt
+is effective. Legacy results without a binding belong to their owning immutable
+check. `selection()` exposes the chosen history index and reason; normalized
+reports carry this selection and the full check history. Results from other
+heads or bindings remain in history but cannot satisfy the current check.
+An unexecuted report also preserves the prior executed conclusion; deterministic
+caps still apply when a head, configuration or obligation changes.
+`cap()` never raises the reported conclusion: required fail
 caps at `failed`; required unverified, unavailable criteria or an unlinked
 criterion cap at `not_verified`. Code-host CI never substitutes for these
 results in #290.
@@ -180,9 +191,24 @@ provenance. The projection's normalized `provenance` and `reason` are not part
 of a check's identity, so a restored check is not a conflict with its original
 description. See [Verification](verification.md) for identity fields and the
 diagnostics that name a conflicting check. Without recoverable local history the
-runtime replans with `partial` provenance and accepts no prior check as passed.
-This is partial recovery, not a fully verified continuation. Analysis such as
+runtime stops explicitly naming the missing frozen checks and results, rather
+than re-freezing a configured check as `runtime/runtime`. An interrupt before
+recovery writes no empty replacement. Recovery also looks past legacy empty
+revisions to the last stored verification plan; corrupt revisions stop recovery.
+Repeated resumes retain the recovered identity and append-only results.
+Completed stage states are retained when the policy and HEAD still match.
+Analysis such as
 #127 can read this metadata without reading prompts.
+
+The existing verification-only resume path dispatches `cc-verify` in an isolated
+clone of the current HEAD. It selects only pending required checks, groups them
+by frozen executor/profile and pins each dispatch to that identity. An unavailable
+frozen target remains unverified; another target cannot supply its evidence.
+The verifier cannot implement, resolve, commit or publish. The runtime checks
+the clone and original checkout for changes and records returned evidence against
+the frozen checks and exact HEAD. Already executed checks are not rerun by this
+path. Existing verification decisions and changed-condition retries still apply;
+`accept` records no execution evidence.
 
 The work-item journal may retain redacted command proposals, separately from
 the metadata-only history projection. A resume can use a proposal to recover a

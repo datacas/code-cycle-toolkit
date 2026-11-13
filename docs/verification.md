@@ -323,11 +323,17 @@ pass. See [Execution plan](execution-plan.md) for persistence and receipt identi
 
 Resume with `--from rereview --pr <n>`. When the current HEAD, recoverable plan
 and trusted receipt agree on a verification stop, the runtime dispatches only
-`cc-verify`, once, in a detached disposable clone without remotes. It passes only
-pending required checks and retains passing results. It does not dispatch the
+`cc-verify` in a detached disposable clone without remotes, with one dispatch per
+frozen executor/profile. It passes only
+pending required checks, grouped and pinned by frozen executor/profile, and
+retains passing results. It does not dispatch the
 rereview agent or republish a stage comment. A still-unavailable environment
 stops again without a retry loop. A moved HEAD, changed criteria, unbound command
-hash or unrecoverable plan takes ordinary reconciliation instead. This does not
+hash takes ordinary reconciliation instead. Missing frozen verification history
+stops with a diagnostic naming the missing checks and results; it never re-freezes
+their identity. An interrupt before recovery leaves the stored plan untouched,
+and legacy empty interrupt revisions do not hide earlier recoverable evidence.
+This does not
 add a CLI start point or change `START_ORDER`/`CYCLE_STARTS`.
 
 A manual check, whose command is `manual:<name>` (letters, digits, `.`, `_` and
@@ -357,8 +363,13 @@ its report cannot overwrite the frozen check or record evidence for it.
 When a resume cannot bind every stored command, for example because a proposed
 command is no longer authorized, the commands that today's policy authorizes are
 still bound and the others stay inert fingerprints. Every check, obligation and
-earlier result is kept; the plan is recorded as `partial` and each check is
-marked `unverified` on the current HEAD. An agent cannot bind a fingerprint by
+earlier result is kept; the plan is recorded as `partial` and each check gets
+an unexecuted recovery attempt on the current HEAD. The effective result is the
+latest executed `pass` or `fail` matching the HEAD, frozen identity, configuration
+and provenance. Unexecuted attempts never supersede executed evidence, and a
+later executed failure always supersedes a pass. The full append-only history
+and the selected entry's index and reason remain available in normalized reports.
+An agent cannot bind a fingerprint by
 reporting the command it hides: only today's authorization can, so such a report
 is rejected like any other identity change. Existing unverified local checks
 stay unverified until evidence for the current HEAD exists; CI never supplies it.

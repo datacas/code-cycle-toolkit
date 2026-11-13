@@ -131,6 +131,46 @@ class PlanTests(unittest.TestCase):
     def plan(self):
         return vp.VerificationPlan(criteria()).extend((check(),))
 
+    def test_executed_evidence_survives_unexecuted_attempts(self):
+        for states in (("pass", "unverified", "unverified"),
+                       ("pass", "fail", "unverified"),
+                       ("fail", "pass", "unverified")):
+            plan = self.plan()
+            for state in states:
+                plan = plan.record(result(state))
+            expected = next(state for state in reversed(states) if state != "unverified")
+            self.assertEqual(plan.current("check-1", HEAD), expected)
+            self.assertEqual(len(plan.results), len(states))
+
+    def test_binding_refuses_other_identity_configuration_and_provenance(self):
+        plan = self.plan().record(result())
+        for field, value in (("command", "python3 -m unittest other"),
+                             ("executor", "claude"), ("profile", "cheap_coder"),
+                             ("context", "other"), ("level", "boundary"),
+                             ("provenance", "other")):
+            changed = replace(plan, checks=(replace(check(), **{field: value}),))
+            self.assertEqual(changed.current("check-1", HEAD), "unverified", field)
+        changed = replace(plan, criteria=replace(plan.criteria, content_sha256="c" * 64))
+        self.assertEqual(changed.current("check-1", HEAD), "unverified")
+        self.assertEqual(plan.current("check-1", OTHER), "unverified")
+
+    def test_legacy_results_acquire_the_original_binding_before_revision(self):
+        legacy = self.plan().to_dict()
+        legacy["results"] = [result().to_dict()]
+        restored = vp.VerificationPlan.from_dict(legacy)
+        self.assertEqual(restored.current("check-1", HEAD), "pass")
+        changed = replace(restored, checks=(replace(check(), executor="claude"),))
+        self.assertEqual(changed.current("check-1", HEAD), "unverified")
+
+    def test_normalized_report_explains_selection_and_keeps_attempts(self):
+        plan = self.plan().record(result())
+        normalized, updated = vp.normalize_tests({"version": 2, "conclusion": "verified",
+            "checks": [report("unverified")]}, HEAD, plan=plan)
+        self.assertEqual(normalized["checks"][0]["result"], "pass")
+        self.assertEqual(normalized["checks"][0]["selection"]["index"], 0)
+        self.assertEqual(len(normalized["checks"][0]["history"]), 2)
+        self.assertEqual(updated.results[-1].result, "unverified")
+
     def test_freeze_allows_addition_promotion_but_never_rewrite_or_demotion(self):
         plan = self.plan()
         for changed in (check(required=False), check(command="true"), check(executor="claude"),
@@ -245,7 +285,8 @@ class ResultTests(unittest.TestCase):
         tests, updated = vp.normalize_tests(
             {"version": 2, "conclusion": "verified", "checks": []}, HEAD, plan=plan)
         self.assertEqual(tests["conclusion"], "failed")
-        self.assertEqual(updated.results, plan.results)
+        self.assertEqual(updated.results[:-1], plan.results)
+        self.assertEqual(updated.results[-1].result, "unverified")
 
     def test_invalid_followup_never_raises_failed_agent_or_frozen_conclusion(self):
         for plan, conclusion in ((None, "failed"), (
