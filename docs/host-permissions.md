@@ -623,9 +623,12 @@ configured check is never essential: an unanswered one is still asked, and a
 denied one is recorded `unverified` while the cycle continues to
 `VERIFICATION_INCOMPLETE`.
 Review stages may use read-only tools such as `sha256sum` on the exact runtime
-evidence files supplied to that dispatch. Other reads remain subject to the
-existing workspace and credential-path checks, and Git and publication
-operations keep their dedicated guards.
+evidence files supplied to that dispatch. It accepts file operands only and
+rejects checksum-list and other option forms. A resume grant that cannot apply
+to the selected executor and role is reported with its reason before that
+dispatch; grants for a later role do not produce an earlier-stage warning.
+Other reads remain subject to the existing workspace and credential-path
+checks, and Git and publication operations keep their dedicated guards.
 An accessory inspection does not stop completed work; a stage reporting
 `BLOCKED` can supply `completed_status` and completion references, which still
 pass the normal publication/effect guards. Agent prose is not completion

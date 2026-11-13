@@ -772,10 +772,11 @@ class ConsentBroker:
             grant = self.registry.get(grant_id)
             if grant is None:
                 note = f"{grant_id}: resume grant cannot apply; no matching grant is registered"
-            elif (grant_id not in GRANTS and grant.operation is not None
+            elif (grant.operation is not None
                   and consent_role(grant.operation["role"]) != expected_role):
-                note = (f"{grant_id}: resume grant cannot apply to {role}; it was created for "
-                        f"{grant.operation['role']}")
+                # A grant for a later stage is still applicable to that stage;
+                # do not report it as unusable while an earlier role runs.
+                continue
             else:
                 scope = grant.scope_for(executor, self.platform)
                 if scope is None:

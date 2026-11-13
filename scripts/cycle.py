@@ -31,6 +31,7 @@ availability untouched, so the question stays visible.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
 import sqlite3
@@ -919,7 +920,11 @@ class CycleRecorder:
         executor = attempt.target.executor
         consent = self.consent
         if consent is not None:
+            previous_notes = set(consent.notes)
             consent.prepare_answers(executor, run.role)
+            for note in consent.notes:
+                if note not in previous_notes and note.startswith(tuple(consent.answers)):
+                    print(f"Resume grant preflight: {note}", file=sys.stderr)
         granted = consent.granted(executor) if consent is not None else ()
         # This dispatch already ran with these denials; rerunning it with
         # the same denial context cannot change its outcome.

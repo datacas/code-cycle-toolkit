@@ -360,6 +360,7 @@ def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
     parsed = ParsedCommand()
     word: list[str] = []
     started = quoted = False
+    windows_path = False
     pending: tuple[str, str] | None = None
     i, n = 0, len(command)
 
@@ -376,7 +377,7 @@ def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
         raise PolicyError("only $TMPDIR may be expanded")
 
     def finish() -> None:
-        nonlocal word, started, quoted, pending
+        nonlocal word, started, quoted, pending, windows_path
         if not started:
             return
         text = "".join(word)
@@ -385,7 +386,7 @@ def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
             pending = None
         else:
             parsed.words.append(text)
-        word, started, quoted = [], False, False
+        word, started, quoted, windows_path = [], False, False, False
 
     while i < n:
         char = command[i]
@@ -409,7 +410,13 @@ def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
                 if inner == '"':
                     i += 1
                     break
-                if inner == "\\" and i + 1 < n and command[i + 1] in '$`"\\':
+                if (inner == "\\" and os.name == "nt"
+                        and (windows_path or re.fullmatch(r"[A-Za-z]:", "".join(word)))):
+                    windows_path = True
+                    word.append(inner)
+                    i += 1
+                elif (inner == "\\" and i + 1 < n
+                        and command[i + 1] in '$`"\\'):
                     word.append(command[i + 1])
                     i += 2
                 elif inner == "$":
@@ -421,11 +428,20 @@ def _parse_simple(command: str, tmpdir: str | None) -> ParsedCommand:
                     word.append(inner)
                     i += 1
         elif char == "\\":
-            if i + 1 >= n:
+            if (os.name == "nt"
+                    and (windows_path or re.fullmatch(r"[A-Za-z]:", "".join(word)))):
+                # Keep separators in drive-rooted Windows paths so the path
+                # guard sees C:\\Temp\\outside rather than C:Tempoutside.
+                windows_path = True
+                word.append(char)
+                started = True
+                i += 1
+            elif i + 1 >= n:
                 raise PolicyError("trailing backslash")
-            word.append(command[i + 1])
-            started = quoted = True
-            i += 2
+            else:
+                word.append(command[i + 1])
+                started = quoted = True
+                i += 2
         elif char == "$":
             value, i = expand(i)
             word.append(value)
@@ -1458,6 +1474,16 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if words == expected or (not exact and words[:len(expected)] == expected):
             return
     program = words[0]
+    if program == "sha256sum":
+        if policy.role not in REVIEW_ROLES:
+            raise PolicyError("sha256sum is available only in review stages")
+        operands = words[1:]
+        if not operands or any(word.startswith("-") for word in operands):
+            raise PolicyError("sha256sum accepts evidence file paths only; options are not allowed")
+        evidence = {Path(path).resolve() for path in policy.evidence_paths}
+        if any(Path(path).resolve() not in evidence for path in operands):
+            raise PolicyError("sha256sum may read only runtime-supplied evidence files")
+        return
     if program == "printenv":
         if policy.tmpdir and words == ["printenv", "TMPDIR"] and not parsed.redirects:
             return
