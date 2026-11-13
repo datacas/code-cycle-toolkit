@@ -329,9 +329,12 @@ pending required checks, grouped and pinned by frozen executor/profile, and
 retains passing results. It does not dispatch the
 rereview agent or republish a stage comment. A still-unavailable environment
 stops again without a retry loop. A moved HEAD, changed criteria, unbound command
-hash takes ordinary reconciliation instead. Missing frozen verification history
-stops with a diagnostic naming the missing checks and results; it never re-freezes
-their identity. An interrupt before recovery leaves the stored plan untouched,
+hash takes ordinary reconciliation instead. When stored plan revisions exist
+for the work item and change request, missing frozen verification history stops
+with a diagnostic naming the missing checks and results; it never re-freezes
+their identity. A first-ever `--from review`, `--from resolve` or `--from rereview`
+with no matching stored plan creates a fresh plan with `partial` provenance from
+the current criteria and reuses no evidence. An interrupt before recovery leaves the stored plan untouched,
 and legacy empty interrupt revisions do not hide earlier recoverable evidence.
 This does not
 add a CLI start point or change `START_ORDER`/`CYCLE_STARTS`.

@@ -190,9 +190,13 @@ fingerprints, and every check, obligation and result is kept under `partial`
 provenance. The projection's normalized `provenance` and `reason` are not part
 of a check's identity, so a restored check is not a conflict with its original
 description. See [Verification](verification.md) for identity fields and the
-diagnostics that name a conflicting check. Without recoverable local history the
-runtime stops explicitly naming the missing frozen checks and results, rather
-than re-freezing a configured check as `runtime/runtime`. An interrupt before
+diagnostics that name a conflicting check. When local revisions exist for this
+work item and change request but their frozen verification plan cannot be
+recovered, the runtime stops explicitly naming the missing checks and results,
+rather than re-freezing a configured check as `runtime/runtime`. With no matching
+stored plan at all, a first-ever `--from review`, `--from resolve` or
+`--from rereview` takes the fresh-plan path with `partial` provenance and reads
+the current criteria; it reuses no earlier evidence. An interrupt before
 recovery writes no empty replacement. Recovery also looks past legacy empty
 revisions to the last stored verification plan; corrupt revisions stop recovery.
 Repeated resumes retain the recovered identity and append-only results.

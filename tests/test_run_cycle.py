@@ -292,25 +292,63 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                 self.assertEqual(recovered.results[0].evidence, original.evidence)
 
     def test_491_missing_frozen_plan_stops_without_refreezing(self):
+        import cycle_history as ch
         for command in (None, "python3 -m unittest discover -s tests"):
             with self.subTest(command=command):
+                store = ch.CycleHistoryStore(self.store.path)
+                store.save_plan(replace(self.plan(start="rereview"), plan_id=f"missing-{bool(command)}"),
+                    cycle_id="missing-verification",
+                    change_request_id="4", provenance="stopped", stop_reason="interrupted")
+                before = store.latest_plan("owner/api", "API-7", "4")
                 report = self.run_cycle(Talker("codex"), Talker("claude"), start_from="rereview",
                     change_request_id="4", execution_plan=self.plan(start="rereview"),
                     allowed_test_command=command)
                 self.assertEqual(report.status, "BLOCKED")
                 self.assertIn("no persisted checks and results", report.stopped_because)
                 self.assertFalse(report.stages)
+                self.assertEqual(store.latest_plan("owner/api", "API-7", "4"), before)
 
-    def persist_empty_verification(self, plan):
-        """Policy tests resume a real frozen plan even without configured checks."""
+    def test_491_first_start_without_history_dispatches_requested_stage(self):
         import cycle_history as ch
-        import verification_plan as vp
-        plan = replace(plan, plan_id=f"fixture-{len(self.store.rows('owner/api'))}",
-            verification=vp.VerificationPlan(
-            vp.Criteria("github", "b" * 64, "evaluable", ("works",))))
-        ch.CycleHistoryStore(self.store.path).save_plan(plan, cycle_id="fixture",
+        for start in ("review", "resolve", "rereview"):
+            for command in (None, "python3 -m unittest discover -s tests"):
+                with self.subTest(start=start, command=command):
+                    telemetry = tm.Telemetry(self.home / f"{start}-{bool(command)}.sqlite")
+                    store = ch.CycleHistoryStore(telemetry.path)
+                    # Unrelated work must not turn a fresh start into recovery.
+                    store.save_plan(replace(self.plan(start=start), work_item="OTHER-1", plan_id="other-task"),
+                        cycle_id="other-task", change_request_id="4", provenance="initial")
+                    store.save_plan(replace(self.plan(start=start), plan_id="other-pr"), cycle_id="other-pr",
+                        change_request_id="5", provenance="initial")
+                    self.assertIsNone(store.latest_plan("owner/api", "API-7", "4"))
+                    report = self.run_cycle(Talker("codex", block("BLOCKED", head_sha="a" * 40)),
+                        Talker("claude", block("BLOCKED", head_sha="a" * 40)),
+                        telemetry=telemetry, start_from=start, change_request_id="4",
+                        execution_plan=self.plan(start=start), allowed_test_command=command,
+                        work_item_provider="github", work_item_repository="owner/api")
+                    self.assertEqual([stage.role for stage in report.stages], [start], report.stopped_because)
+                    record = store.latest_plan("owner/api", "API-7", "4")
+                    self.assertIsNotNone(record)
+                    recovered = ch.restore_plan(record, (command,) if command else ())
+                    self.assertIsNotNone(recovered.verification)
+
+    def test_491_corrupt_stored_plan_stops_without_refreezing(self):
+        from contextlib import closing
+        import sqlite3
+        import cycle_history as ch
+        store = ch.CycleHistoryStore(self.store.path)
+        store.save_plan(self.plan(start="review"), cycle_id="corrupt-plan",
             change_request_id="4", provenance="initial")
-        return plan
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            connection.execute("UPDATE cycle_execution_plans SET digest=?", ("0" * 64,))
+            connection.commit()
+        report = self.run_cycle(Talker("codex"), Talker("claude"), start_from="review",
+            change_request_id="4", execution_plan=self.plan(start="review"))
+        self.assertEqual(report.status, "BLOCKED")
+        self.assertIn("execution plan digest mismatch", report.stopped_because)
+        self.assertFalse(report.stages)
+        with self.assertRaisesRegex(ch.HistoryError, "digest mismatch"):
+            store.latest_plan("owner/api", "API-7", "4")
 
     def test_cli_boundary_prints_full_plan_and_refuses_withdrawn_review(self):
         argv = [sys.executable, str(ROOT / "scripts" / "run_cycle.py"), "--no-config",
@@ -337,7 +375,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                                    "blocks_approval": True}])
                 report = self.run_cycle(Talker("codex", block("RESOLVED", head_sha="a" * 40)),
                     Talker("claude", review), start_from="review", change_request_id="4",
-                    execution_plan=self.persist_empty_verification(self.plan(profile, "review")))
+                    execution_plan=self.plan(profile, "review"))
                 self.assertEqual([stage.role for stage in report.stages], ["review", "resolve"])
                 self.assertEqual(report.stop_reason, "no_progress")
                 self.assertFalse(report.approved)
@@ -397,8 +435,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             with self.subTest(fields=fields):
                 report = self.run_cycle(Talker("codex"), Talker("claude", block(
                     "APPROVED", head_sha="a" * 40, **fields)), start_from="review",
-                    change_request_id="4", execution_plan=self.persist_empty_verification(
-                        self.plan("full", "review")))
+                    change_request_id="4", execution_plan=self.plan("full", "review"))
                 self.assertEqual(report.stop_reason, "verification_unverified")
                 self.assertIn("security audit was omitted", report.stopped_because)
 

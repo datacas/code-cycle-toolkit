@@ -149,6 +149,9 @@ class PlanRuntime:
                 record = self.plan_store.latest_plan(
                     self.repo_id, self.task_id, self.state.change_request_id,
                     require_verification=self.plan_managed or bool(self.allowed_test_command))
+                if record is None and self.plan_store.latest_plan(
+                        self.repo_id, self.task_id, self.state.change_request_id) is not None:
+                    raise HistoryError("cannot restore frozen verification plan: no persisted checks and results for this work item and change request")
             except (HistoryError, ValueError, TypeError) as error:
                 raise HistoryError(f"cannot restore frozen execution plan: {error}") from error
         if record is not None:
@@ -222,8 +225,6 @@ class PlanRuntime:
                         raise HistoryError("cannot restore frozen verification plan: missing checks and results")
         elif self.start_from in self.api.RESUMES:
             self.plan_partial = True
-            if self.plan_managed:
-                raise HistoryError("cannot restore frozen verification plan: no persisted checks and results for this work item and change request")
         if (self.state.verification_plan is None and self.policy_provider is not None
                 and (self.start_from == "implement" or self.plan_managed)):
             criteria = (self.criteria_reader or self.api.verification_contract.read_criteria)(
