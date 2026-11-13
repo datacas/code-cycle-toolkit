@@ -222,6 +222,96 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         return ep.build_plan(resolved, repository="owner/api", work_item="API-7",
                              start_from=start, change_request="4" if start != "implement" else None)
 
+    def test_491_resolve_permission_stops_interrupt_and_repeated_resumes(self):
+        import cycle_history as ch
+        import cycle_session
+        import verification_plan as vp
+        fixture = self.home / "evidence-checkout"
+        fixture.mkdir(parents=True)
+        repo = change_repository(fixture)
+        head = git(repo, "rev-parse", "HEAD").decode().strip()
+        command = "python3 -m unittest discover -s tests"
+        spec = replace(vp.configured_check(command, "codex", "cheap_coder"), criteria=("AC-1",))
+        criteria = vp.parse_criteria("github", "## Acceptance criteria\n- Fixture behaviour works")
+        plan = vp.VerificationPlan(criteria, (spec,)).record(vp.CheckResult(spec.id, head,
+            "pass", ({"command": command, "exit_code": 0, "executed": 2602},)))
+        original = plan.results[0]
+        store = ch.CycleHistoryStore(self.store.path)
+        stored = replace(self.plan(start="rereview"), plan_id="plan-491", head_sha=head,
+            verification=plan, metadata={"verification_conclusion": "verified"})
+        store.save_plan(stored, cycle_id="resolve-491", change_request_id="4", provenance="stopped")
+        kwargs = dict(start_from="rereview", change_request_id="4", cwd=str(repo),
+            execution_plan=self.plan(start="rereview"), allowed_test_command=command,
+            work_item_provider="github", work_item_repository="owner/api")
+        from types import SimpleNamespace
+        kwargs["ci_checks"] = SimpleNamespace(pull=lambda *_: rc.ci_gate.PullState(
+            "OPEN", head, "main", "task", True, "clean"))
+        for _ in range(3):
+            stopped = self.run_cycle(Talker("codex"), Talker("claude", block("BLOCKED",
+                head_sha=head, tests={"version": 2, "conclusion": "not_verified", "checks": [
+                    {**spec.to_dict(), "head_sha": head, "result": "unverified",
+                     "cause": "permission_required"}]})), **kwargs)
+            self.assertFalse(stopped.approved)
+        # Reproduce the legacy empty revision written by an interrupted resume.
+        record = store.latest_plan("owner/api", "API-7", "4")
+        latest = ch.restore_plan(record, (command,))
+        self.assertEqual(latest.metadata["verification_conclusion"], "verified")
+        store.save_plan(replace(latest, plan_id="empty-interrupt", verification=None),
+            cycle_id="interrupt-491", change_request_id="4", provenance="stopped", stop_reason="interrupted")
+        def comments(*_args):
+            rows = self.store.rows("owner/api")
+            approved = {(row["payload"].get("cycle_id"), row["payload"].get("stage_seq"))
+                        for row in rows if row["role"] == "rereview" and row["status"] == "APPROVED"
+                        and row["payload"].get("record_kind") == "verdict"}
+            return [contract.ProviderComment(author="reviewer", id=str(row["id"]),
+                body=contract.format_stage_evidence({"schema": 2, "repo": "owner/api",
+                    "change_request_id": "4", "stage": "rereview",
+                    "attempt_id": row["payload"]["dispatch_attempt_id"],
+                    "head_sha": head, "status": "APPROVED", "finding_outcomes": []}))
+                for row in rows
+                if row["role"] == "rereview" and row["payload"].get("record_kind") == "dispatch"
+                and (row["payload"].get("cycle_id"), row["payload"].get("stage_seq")) in approved]
+        kwargs["comment_reader"] = comments
+        with mock.patch.object(cycle_session.CycleSession, "prepare_plan",
+                               side_effect=cycle.CycleInterrupted("SIGTERM")):
+            interrupted = self.run_cycle(Talker("codex"), Talker("claude"), **kwargs)
+        self.assertEqual(interrupted.stop_reason, "interrupted")
+        with mock.patch.object(cycle_session.CycleSession, "gate", return_value=("approved", None)):
+            for _ in range(3):
+                clean = self.run_cycle(Talker("codex"), Talker("claude", block("APPROVED",
+                    head_sha=head, reviewed_head_sha=head, blocking_findings=[],
+                    verified_findings=[], new_findings=[], security_audit_ran=True)), **kwargs)
+                self.assertTrue(clean.approved, clean.stopped_because)
+                record = store.latest_plan("owner/api", "API-7", "4")
+                recovered = ch.restore_plan(record, (command,)).verification
+                self.assertEqual(record["plan_id"], "plan-491")
+                self.assertEqual(recovered.checks[0].executor, "codex")
+                self.assertEqual(recovered.checks[0].profile, "cheap_coder")
+                self.assertEqual(recovered.current(spec.id, head), "pass")
+                self.assertEqual(len(recovered.results), 4)
+                self.assertEqual(recovered.results[0].evidence, original.evidence)
+
+    def test_491_missing_frozen_plan_stops_without_refreezing(self):
+        for command in (None, "python3 -m unittest discover -s tests"):
+            with self.subTest(command=command):
+                report = self.run_cycle(Talker("codex"), Talker("claude"), start_from="rereview",
+                    change_request_id="4", execution_plan=self.plan(start="rereview"),
+                    allowed_test_command=command)
+                self.assertEqual(report.status, "BLOCKED")
+                self.assertIn("no persisted checks and results", report.stopped_because)
+                self.assertFalse(report.stages)
+
+    def persist_empty_verification(self, plan):
+        """Policy tests resume a real frozen plan even without configured checks."""
+        import cycle_history as ch
+        import verification_plan as vp
+        plan = replace(plan, plan_id=f"fixture-{len(self.store.rows('owner/api'))}",
+            verification=vp.VerificationPlan(
+            vp.Criteria("github", "b" * 64, "evaluable", ("works",))))
+        ch.CycleHistoryStore(self.store.path).save_plan(plan, cycle_id="fixture",
+            change_request_id="4", provenance="initial")
+        return plan
+
     def test_cli_boundary_prints_full_plan_and_refuses_withdrawn_review(self):
         argv = [sys.executable, str(ROOT / "scripts" / "run_cycle.py"), "--no-config",
                 "--repo", "owner/api", "--task", "API-7", "--execution-profile", "full",
@@ -247,7 +337,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                                    "blocks_approval": True}])
                 report = self.run_cycle(Talker("codex", block("RESOLVED", head_sha="a" * 40)),
                     Talker("claude", review), start_from="review", change_request_id="4",
-                    execution_plan=self.plan(profile, "review"))
+                    execution_plan=self.persist_empty_verification(self.plan(profile, "review")))
                 self.assertEqual([stage.role for stage in report.stages], ["review", "resolve"])
                 self.assertEqual(report.stop_reason, "no_progress")
                 self.assertFalse(report.approved)
@@ -307,7 +397,8 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             with self.subTest(fields=fields):
                 report = self.run_cycle(Talker("codex"), Talker("claude", block(
                     "APPROVED", head_sha="a" * 40, **fields)), start_from="review",
-                    change_request_id="4", execution_plan=self.plan("full", "review"))
+                    change_request_id="4", execution_plan=self.persist_empty_verification(
+                        self.plan("full", "review")))
                 self.assertEqual(report.stop_reason, "verification_unverified")
                 self.assertIn("security audit was omitted", report.stopped_because)
 
@@ -899,6 +990,9 @@ class NativeExecutionPlanTests(RunCycleTestCase):
     def test_verification_only_resume_uses_disposable_clone_and_only_pending_checks(self):
         self.verification_resume_fixture("pass")
 
+    def test_verification_only_groups_checks_by_frozen_profile(self):
+        self.verification_resume_fixture("pass", groups=True)
+
     def test_verification_only_unavailable_environment_stops_once(self):
         self.verification_resume_fixture("unverified")
 
@@ -918,7 +1012,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         self.verification_resume_fixture("pass", policy_change=True)
 
     def verification_resume_fixture(self, result, tamper=False, policy_change=False,
-                                    objective="merge_ready", accept=False, ci_failed=False):
+                                    objective="merge_ready", accept=False, ci_failed=False, groups=False):
         import cycle_history as ch
         import cycle_session
         import verification_plan as vp
@@ -928,12 +1022,15 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         repo = change_repository(fixture)
         head = git(repo, "rev-parse", "HEAD").decode().strip()
         commands = ("python3 -m unittest tests.first", "python3 -m unittest tests.pending")
-        specs = tuple(vp.Check(f"check-{i}", command, "codex", "cheap_coder", "project", True,
+        if groups:
+            commands += ("python3 -m unittest tests.another",)
+        specs = tuple(vp.Check(f"check-{i}", command, "codex", "deep_coder" if i == 2 else "cheap_coder", "project", True,
                      criteria=("AC-1",)) for i, command in enumerate(commands))
         verification = vp.VerificationPlan(vp.Criteria("github", "b" * 64, "evaluable", ("works",)), specs)
         verification = verification.record(vp.CheckResult("check-0", head, "pass", ({
             "command": commands[0], "exit_code": 0, "executed": 1},)))
-        verification = verification.record(vp.CheckResult("check-1", head, "unverified", cause="environment"))
+        for spec in specs[1:]:
+            verification = verification.record(vp.CheckResult(spec.id, head, "unverified", cause="environment"))
         old = replace(self.plan(objective=objective), plan_id="plan-resume", head_sha=head,
                       verification=verification)
         receipt = ch.CycleHistoryStore(self.store.path).save_plan(old, cycle_id="cycle-before",
@@ -952,7 +1049,13 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, inner.name, target,
                         agent_output=block("BLOCKED"), model_resolved=target.model, process_exited=True)
                 self.assertNotIn(commands[0], task)
-                self.assertIn(commands[1], task)
+                pending = specs[1] if commands[1] in task else specs[2]
+                self.assertIn(pending.command, task)
+                for other in specs[1:]:
+                    if other != pending:
+                        self.assertNotIn(other.command, task)
+                self.assertEqual(target.executor, "codex")
+                self.assertIn(f"profile `{pending.profile}`", task)
                 self.assertNotEqual(Path(kw["cwd"]), repo)
                 self.assertEqual(git(Path(kw["cwd"]), "rev-parse", "HEAD").decode().strip(), head)
                 self.assertEqual(git(Path(kw["cwd"]), "remote"), b"")
@@ -960,9 +1063,9 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                     tracked = git(Path(kw["cwd"]), "ls-files").decode().splitlines()[0]
                     (Path(kw["cwd"]) / tracked).write_text("changed by verifier\n")
                 spoken = "VERIFICATION_RESULT\n" + json.dumps({"version": 2, "head_sha": head,
-                    "conclusion": "verified", "checks": [{**specs[1].to_dict(),
+                    "conclusion": "verified", "checks": [{**pending.to_dict(),
                         "reason": "runtime", "provenance": "runtime", "head_sha": head, "result": result,
-                        "cause": "environment", "evidence": [{"command": commands[1], "exit_code": 0,
+                        "cause": "environment", "evidence": [{"command": pending.command, "exit_code": 0,
                             "executed": 1}] if result == "pass" else []}]}) + "\nEND_VERIFICATION_RESULT"
                 return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, inner.name, target,
                     agent_output=spoken, model_resolved=target.model, process_exited=True)
@@ -971,9 +1074,10 @@ class NativeExecutionPlanTests(RunCycleTestCase):
         if result == "pass" or tamper:
             # A relevant condition changed since this check was stopped: one retry.
             from cycle_journal import Journal
-            Journal(self.store.path, "owner/api", "API-7", "cycle-before").record(
-                "decision_asked", component="verification", decision_key="verification:old",
-                correlation={"head_sha": head, "check": specs[1].id})
+            for spec in specs[1:]:
+                Journal(self.store.path, "owner/api", "API-7", "cycle-before").record(
+                    "decision_asked", component="verification", decision_key="verification:old:" + spec.id,
+                    correlation={"head_sha": head, "check": spec.id})
         gated = (("failed", SimpleNamespace(status="failed", head_sha=head)) if ci_failed
                  else ("approved", None))
         with mock.patch.object(cycle_session.CycleSession, "gate", return_value=gated) as gate:
@@ -997,7 +1101,8 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             self.assertEqual([stage.role for stage in report.stages], ["rereview"])
             self.assertFalse(report.approved)
             return
-        self.assertEqual([stage.role for stage in report.stages], ["verify"] if result == "pass" or tamper else [])
+        self.assertEqual([stage.role for stage in report.stages], ["verify"] * (2 if groups else 1)
+                         if result == "pass" or tamper else [])
         if ci_failed:
             # A not_verified acceptance never hides a real CI failure.
             gate.assert_called_once()
@@ -1020,7 +1125,7 @@ class NativeExecutionPlanTests(RunCycleTestCase):
             gate.assert_not_called()
         if result == "unverified" or tamper:
             self.assertEqual(report.stop_reason, "verification_unverified")
-        self.assertEqual(len(seen), 1 if result == "pass" or tamper else 0)
+        self.assertEqual(len(seen), (2 if groups else 1) if result == "pass" or tamper else 0)
         if seen:
             self.assertFalse(Path(seen[0][1]["cwd"]).exists())
             self.assertFalse(seen[0][1]["publishes"])

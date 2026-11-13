@@ -106,6 +106,11 @@ class PlanRuntime:
                 self.issue_review_fields["issue_review"] = "dispatched"
 
     def save_plan(self: Any, provenance: str = "observed", stop_reason=None) -> None:
+        if ((self.start_from in self.api.RESUMES or self.continue_work)
+                and self.state.verification_plan is None):
+            # An interrupt before recovery must not supersede durable evidence
+            # with a fresh empty plan. Leave the last good revision untouched.
+            return
         if self.state.verification_plan is not None:
             conclusion = self.state.verification_plan.cap(self.plan_conclusion or "verified", self.plan_head or "")
             self.execution_plan = replace(self.execution_plan, stages=tuple(
@@ -142,9 +147,10 @@ class PlanRuntime:
         if self.start_from in self.api.RESUMES or self.continue_work:
             try:
                 record = self.plan_store.latest_plan(
-                    self.repo_id, self.task_id, self.state.change_request_id)
-            except (HistoryError, ValueError, TypeError):
-                self.plan_partial = True
+                    self.repo_id, self.task_id, self.state.change_request_id,
+                    require_verification=self.plan_managed or bool(self.allowed_test_command))
+            except (HistoryError, ValueError, TypeError) as error:
+                raise HistoryError(f"cannot restore frozen execution plan: {error}") from error
         if record is not None:
             commands: tuple[str, ...] = ()
             try:
@@ -172,6 +178,12 @@ class PlanRuntime:
                 self.execution_plan = replace(self.execution_plan,
                     plan_id=recovered.plan_id, revision=recovered.revision,
                     verification=recovered.verification)
+                if same_policy and record["head_sha"] == self.plan_head:
+                    self.execution_plan = replace(self.execution_plan, stages=tuple(
+                        replace(stage, state=recovered.stage(stage.stage_id).state,
+                                conclusion=recovered.stage(stage.stage_id).conclusion)
+                        if stage.selected and recovered.stage(stage.stage_id).selected else stage
+                        for stage in self.execution_plan.stages))
                 self.state.verification_plan = recovered.verification
                 self.plan_conclusion = recovered.metadata.get("verification_conclusion")
                 self.verification_resume = (
@@ -197,13 +209,21 @@ class PlanRuntime:
                         retained = None
                     self.state.verification_plan = retained.verification if retained is not None else None
                     if retained is not None and retained.verification is not None:
+                        self.execution_plan = replace(self.execution_plan,
+                            plan_id=retained.plan_id, revision=retained.revision,
+                            verification=retained.verification)
+                        self.plan_conclusion = retained.metadata.get("verification_conclusion") or "not_verified"
                         verification = retained.verification
                         for check in retained.verification.checks:
                             verification = verification.record(
                                 CheckResult(check.id, self.plan_head, "unverified", cause="unverified"))
                         self.state.verification_plan = verification
+                    else:
+                        raise HistoryError("cannot restore frozen verification plan: missing checks and results")
         elif self.start_from in self.api.RESUMES:
             self.plan_partial = True
+            if self.plan_managed:
+                raise HistoryError("cannot restore frozen verification plan: no persisted checks and results for this work item and change request")
         if (self.state.verification_plan is None and self.policy_provider is not None
                 and (self.start_from == "implement" or self.plan_managed)):
             criteria = (self.criteria_reader or self.api.verification_contract.read_criteria)(
@@ -361,7 +381,14 @@ class PlanRuntime:
             self.plan_head = head
         conclusion = self.api._legacy_tests(test_payload).get("verification")
         if conclusion is not None:
-            self.plan_conclusion = conclusion
+            tests = (test_payload or {}).get("tests") or {}
+            unexecuted = tests.get("version") == 2 and not tests.get("evidence")
+            # A conservative report from a stopped attempt is not a new
+            # executed judgement. Keep the previous conclusion; current check
+            # states still cap it for changed heads, failures and missing work.
+            if not (unexecuted and conclusion == "not_verified"
+                    and self.plan_conclusion in {"verified", "verified_with_reservations"}):
+                self.plan_conclusion = conclusion
         stage = self.execution_plan.stage(role)
         # Functional outcomes remain separate from transport completion.
         stages = tuple(replace(item, state=ExecutionState.COMPLETED,
@@ -499,12 +526,13 @@ class PlanRuntime:
         self.save_plan()
         return self.verification_barrier()
 
-    def verify_pending(self: Any):
-        """A single isolated cc-verify dispatch; no publication or review loop."""
+    def verify_pending(self: Any, *, continuing: bool = False):
+        """Isolated verification per frozen identity; no publication or review loop."""
         from executors import DisposableWorkspace, _git_output
-        stopped = self.verification_barrier()
-        if stopped is not None or (self.report.pending_verification and not self.verification_retry):
-            return stopped
+        if not continuing:
+            stopped = self.verification_barrier()
+            if stopped is not None or (self.report.pending_verification and not self.verification_retry):
+                return stopped
         plan = self.state.verification_plan
         pending = [check for check in plan.checks if check.required
                    and plan.current(check.id, self.plan_head) == "unverified"] if plan else []
@@ -516,6 +544,10 @@ class PlanRuntime:
         pending = [check for check in pending if not is_manual_command(check.command)]
         if not pending:
             return self.verification_barrier()
+        # One dispatch owns one frozen identity. Further groups run only after
+        # their predecessors have recorded evidence and the barrier permits it.
+        identity = (pending[0].executor, pending[0].profile)
+        pending = [check for check in pending if (check.executor, check.profile) == identity]
         source = self.cwd
         if not source or self.api._git_line(source, ["rev-parse", "HEAD"], 30) != self.plan_head:
             return self.stop("verification resume HEAD changed", stop_reason="head_moved")
@@ -538,7 +570,7 @@ class PlanRuntime:
                 "command_policy": replace(self.stage_policy("verify", self.state.change_request_id),
                     test_command=None, verify_prefixes=tuple(check.command for check in pending))}
             self.control.move("verify")
-            outcome = self.recorder.stage("verify", instruction, **kwargs)
+            outcome = self.recorder.stage("verify", instruction, frozen_identity=identity, **kwargs)
             self.report.stages.append(outcome)
             self.report.stage_details.append(self.api.StageReportDetails(
                 self.recorder.iteration, None))
@@ -569,8 +601,9 @@ class PlanRuntime:
             if (_git_output(source, "status", "--porcelain", "--untracked-files=all") != source_status
                     or _git_output(source, "rev-parse", "--symbolic-full-name", "HEAD") != source_branch):
                 raise VerificationError("source workspace changed during verification")
-            tests, self.state.verification_plan = self.api.verification_contract.normalize_tests(
+            tests, updated = self.api.verification_contract.normalize_tests(
                 result, self.plan_head, plan=plan)
+            self.state.verification_plan = updated
             self.plan_conclusion = tests["conclusion"]
             self.recorder.record_verdict("verify", "READY" if tests["passed"] else "BLOCKED",
                 **self.api._legacy_tests({"tests": tests}))
@@ -579,6 +612,12 @@ class PlanRuntime:
             self.journal.record("stage_result", role="verify", component="execution_plan",
                 status=self.report.stage_details[-1].status, correlation={"head_sha": self.plan_head})
             self.save_plan()
+            remaining = [check for check in updated.checks if check.required
+                         and not is_manual_command(check.command)
+                         and (check.executor, check.profile) != identity
+                         and updated.current(check.id, self.plan_head) == "unverified"]
+            if remaining and all(updated.current(check.id, self.plan_head) == "pass" for check in pending):
+                return self.verify_pending(continuing=True)
             return self.verification_barrier()
         except (OSError, ValueError, RuntimeError, self.api.subprocess.SubprocessError) as error:
             return self.stop(f"pending verification is unverified: {error}",

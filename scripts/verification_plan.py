@@ -305,6 +305,7 @@ class CheckResult:
     cause: str = ""
     attempts: tuple[Mapping[str, Any], ...] = ()
     attempts_normalized: Mapping[str, Any] | None = None
+    binding: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = {**asdict(self), "evidence": [dict(v) for v in self.evidence],
@@ -333,7 +334,7 @@ class CheckResult:
         return cls(_required(item, "id", "a non-empty string"),
                    _required(item, "head_sha", "a full SHA or null for unverified results"),
                    _required(item, "result", "pass, fail, or unverified"),
-                   evidence, cause, attempts, normalized)
+                   evidence, cause, attempts, normalized, item.get("binding"))
 
     def validate(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -347,6 +348,8 @@ class CheckResult:
             raise _invalid_field("result", self.result, "pass, fail, or unverified")
         if not isinstance(self.cause, str):
             raise _invalid_field("cause", self.cause, "omitted or text")
+        if self.binding is not None and not isinstance(self.binding, Mapping):
+            raise _invalid_field("binding", self.binding, "an identity object or null")
         if any(not isinstance(v, Mapping) for v in self.evidence):
             raise _invalid_field("evidence", self.evidence, "an array of objects")
         if any(not isinstance(v, Mapping) for v in self.attempts):
@@ -379,6 +382,15 @@ class VerificationPlan:
     criteria: Criteria
     checks: tuple[Check, ...] = ()
     results: tuple[CheckResult, ...] = ()  # append-only history, including stale HEADs
+
+    def __post_init__(self) -> None:
+        # Legacy records carry no binding. Attribute them once to their owning
+        # frozen check/configuration, before any later revision can change it.
+        ids = {check.id for check in self.checks}
+        object.__setattr__(self, "results", tuple(
+            replace(result, binding=self.binding(result.id))
+            if result.binding is None and result.id in ids else result
+            for result in self.results))
 
     @property
     def criterion_ids(self) -> set[str]:
@@ -439,10 +451,27 @@ class VerificationPlan:
         plan.validate()
         return plan
 
+    def binding(self, check_id: str) -> dict[str, Any]:
+        check = next(check for check in self.checks if check.id == check_id)
+        return {**{name: getattr(check, name) for name in (*IDENTITY_FIELDS, "provenance")},
+                "configuration": self.criteria.content_sha256}
+
+    def selection(self, check_id: str, head_sha: str) -> dict[str, Any]:
+        """Explain the effective entry without changing append-only history."""
+        binding = self.binding(check_id)
+        candidates = [(index, result) for index, result in enumerate(self.results)
+                      if result.id == check_id and result.head_sha == head_sha
+                      and result.binding is not None and dict(result.binding) == binding]
+        executed = [(index, result) for index, result in candidates
+                    if result.result in {"pass", "fail"}]
+        chosen = (executed or candidates)[-1] if candidates else None
+        return {"result": chosen[1].result if chosen else "unverified",
+                "index": chosen[0] if chosen else None,
+                "reason": "latest executed result" if executed else
+                          "latest unexecuted attempt" if chosen else "no matching evidence"}
+
     def current(self, check_id: str, head_sha: str) -> str:
-        latest = next((result for result in reversed(self.results)
-                       if result.id == check_id and result.head_sha == head_sha), None)
-        return latest.result if latest is not None else "unverified"
+        return self.selection(check_id, head_sha)["result"]
 
     def cap(self, conclusion: str, head_sha: str) -> str:
         """Deterministic caps never raise the agent's conclusion."""
@@ -611,7 +640,7 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             evidence_view.extend({**item, "command": check.command, "level": check.level}
                                  for item in result.evidence)
     for check in plan.checks:
-        if not any(result.id == check.id for result in plan.results):
+        if check.id not in seen:
             plan = plan.record(CheckResult(check.id, head_sha, "unverified",
                                            cause="check has no execution result"))
     conclusion = plan.cap(tests.get("conclusion", "not_verified"), head_sha)
@@ -619,8 +648,11 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
                   "passed": conclusion in {"verified", "verified_with_reservations"},
                   "evidence": evidence_view,
                   "criteria": plan.criteria.to_dict(),
-                  "checks": [{**check.to_dict(), **next(
-                      result.to_dict() for result in reversed(plan.results) if result.id == check.id)}
+                  "checks": [{**check.to_dict(), **(plan.results[selected["index"]].to_dict()
+                      if (selected := plan.selection(check.id, head_sha))["index"] is not None else
+                      CheckResult(check.id, head_sha, "unverified", cause="no matching evidence").to_dict()),
+                      "selection": selected,
+                      "history": [result.to_dict() for result in plan.results if result.id == check.id]}
                       for check in plan.checks]}
     # An unexecuted required check still records not_verified; ran:false is not
     # allowed to suppress deterministic caps in telemetry.
