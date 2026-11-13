@@ -1434,6 +1434,35 @@ class PermissionConsentTests(RunCycleTestCase):
         kw.setdefault("store", grants.ConsentStore(self.home / "consents.json"))
         return grants.ConsentBroker("owner/api", platform="linux", **kw)
 
+    def test_claude_permission_denial_without_a_grant_stops_with_a_question(self) -> None:
+        command = "python3 -m pip install sample-package"
+
+        class Refusing(Talker):
+            def dispatch(self, target, task, **kw):
+                self.dispatched.append(task)
+                spoken = block("BLOCKED", summary="Claude denied the command")
+                return ex.DispatchResult(
+                    ex.DispatchOutcome.SUCCEEDED, self.name, target,
+                    model_resolved=target.model, artifacts={
+                        "stdout": spoken,
+                        "command_refusals": [{"tool": "Bash", "input": {"command": command},
+                                              "layer": "claude_permission"}],
+                        "permission_denials": [command],
+                    }, agent_output=spoken,
+                )
+
+        profiles = router.load_profiles({"code_cycle": {"profiles": {
+            "cheap_coder": {"primary": "claude:anthropic/claude-sonnet-5 high"},
+            "reviewer": {"primary": "codex:openai/gpt-6-luna high"},
+        }}})
+        report = self.run_cycle(Refusing("claude"), Talker("codex"), profiles=profiles,
+                                consent=self.broker())
+
+        self.assertEqual("permission_required", report.stop_reason)
+        question = report.decisions_record()["questions"][0]
+        self.assertIn(command, question["prompt"])
+        self.assertIn("this cycle", question["options"])
+
     def test_without_an_answer_the_cycle_stops_and_asks_without_widening(self) -> None:
         implementer, reviewer = NeedsDocker(), Talker("claude")
         consent = self.broker()

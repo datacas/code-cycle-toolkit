@@ -66,8 +66,18 @@ class PolicyTestCase(unittest.TestCase):
         self.assertFalse(decision.allowed, f"{command!r} was allowed")
         return decision
 
-
 class ParserTests(PolicyTestCase):
+    def test_windows_drive_paths_keep_backslashes_for_read_path_validation(self) -> None:
+        separator = chr(92)
+        path = "C:" + separator + separator.join(
+            ("Users", "runner", "AppData", "Local", "Temp", "unrelated.diff"))
+        with patch.object(sp.os, "name", "nt"):
+            parsed = sp.parse_command(f"sha256sum {path}", None)
+            quoted = sp.parse_command(f'sha256sum "{path}"', None)
+
+        self.assertEqual(["sha256sum", path], parsed.words)
+        self.assertEqual(["sha256sum", path], quoted.words)
+
     def test_one_simple_command_with_quotes_parses_into_literal_words(self) -> None:
         parsed = sp.parse_command("""git log --format='%H %s' "a b" c\\ d""", None)
         self.assertEqual(["git", "log", "--format=%H %s", "a b", "c d"], parsed.words)
@@ -111,6 +121,18 @@ class ParserTests(PolicyTestCase):
 
 
 class ReadOnlyShellTests(PolicyTestCase):
+    def test_review_stages_can_hash_only_runtime_supplied_evidence(self) -> None:
+        evidence = Path(self.directory.name).parent / "runtime-evidence.diff"
+        evidence.write_text("diff --git a/a b/a\n", encoding="utf-8")
+        policy = self.policy("rereview", evidence_paths=(str(evidence),))
+
+        self.allowed(f"sha256sum {evidence}", policy)
+        self.denied(f"sha256sum {evidence.parent / 'unrelated.diff'}", policy)
+        self.denied("sha256sum /etc/passwd", policy)
+        self.denied(f"sha256sum -c {evidence}", policy)
+        self.denied(f"sha256sum {evidence}", self.policy("implement", evidence_paths=(str(evidence),)))
+        self.denied("git push origin main", policy)
+
     def test_the_closed_read_only_set_is_available_to_every_stage(self) -> None:
         for role in ("implement", "resolve", "review", "rereview", "issue_review"):
             policy = self.policy(role)
@@ -953,6 +975,8 @@ class AllowedToolsTests(PolicyTestCase):
                     continue  # need arguments the prefix cannot carry
                 if "sed" in words:
                     continue  # a script and a file; InspectionToolTests covers the openings
+                if words[-1] == "sha256sum":
+                    continue  # arguments must be runtime evidence files; covered above
                 non_completable = {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",
                                    "mv", "view", "diff", "checks", "create", "list"}
                 if words[-1] in non_completable and words[0:2] != ["gh", "issue"]:

@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import command_permissions as cp
 import executors as ex
+import cycle
 import grants
 import stage_permissions as sp
 
@@ -126,6 +127,62 @@ class ComposeConsentCase(unittest.TestCase):
 
 
 class FirstConsentTests(ComposeConsentCase):
+    def test_ac1_resume_grant_is_in_the_first_rereview_policy(self):
+        original = self.broker()
+        request, _ = self.request(policy=self.policy("rereview"), broker=original)
+        grant = original.grant_for(request)
+        assert grant is not None
+
+        resumed = self.broker(answers={grant.id: "persistent"})
+        # Model the operation recovered from cycle history; the user's --grant
+        # answer itself is not written to the consent store before dispatch.
+        resumed.operations[grant.id] = grant
+        run = type("Run", (), {"role": "rereview", "dispatch_kwargs": {
+            "command_policy": self.policy("rereview")}})()
+        attempt = type("Attempt", (), {"target": type("Target", (), {
+            "executor": "claude"})(), "denied_before": frozenset()})()
+        recorder = object.__new__(cycle.CycleRecorder)
+        recorder.consent = resumed
+
+        cycle.CycleRecorder._permission_context(recorder, run, attempt)
+        policy = run.dispatch_kwargs["command_policy"]
+        self.assertTrue(sp.check(CHECK, policy, cwd=str(self.clone)).allowed)
+        self.assertNotIn("permission_required", " ".join(resumed.notes))
+
+    def test_ac2_inapplicable_resume_grant_is_explained_before_policy_creation(self):
+        original = self.broker()
+        request, _ = self.request(policy=self.policy("rereview"), broker=original)
+        grant = self.answer(request, original)
+
+        resumed = self.broker(answers={grant.id: "persistent"})
+        resumed.prepare_answers("claude", "implement")
+
+        self.assertEqual([], resumed.notes)
+        self.assertFalse(any(entry["operation"] == grant.operation
+                             for entry in resumed.command_entries("claude", "implement")))
+
+    def test_ac2_inapplicable_grant_is_reported_before_its_dispatch(self):
+        original = self.broker()
+        request, _ = self.request(policy=self.policy("rereview"), broker=original)
+        grant = original.grant_for(request)
+        assert grant is not None
+
+        resumed = self.broker(answers={grant.id: "persistent"})
+        resumed.operations[grant.id] = grant
+        run = type("Run", (), {"role": "rereview", "dispatch_kwargs": {
+            "command_policy": self.policy("rereview")}})()
+        attempt = type("Attempt", (), {"target": type("Target", (), {
+            "executor": "codex"})(), "denied_before": frozenset()})()
+        recorder = object.__new__(cycle.CycleRecorder)
+        recorder.consent = resumed
+        output = io.StringIO()
+
+        with patch("sys.stderr", output):
+            cycle.CycleRecorder._permission_context(recorder, run, attempt)
+
+        self.assertIn(f"{grant.id}: resume grant cannot apply; no scope for codex/linux",
+                      output.getvalue())
+
     def test_ac1_declared_compose_check_asks_instead_of_an_unconditional_deny(self):
         decision = sp.check(CHECK, self.policy(), cwd=str(self.clone))
         self.assertFalse(decision.allowed)
