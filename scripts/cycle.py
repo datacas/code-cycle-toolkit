@@ -949,9 +949,6 @@ class CycleRecorder:
                 context += "\n\nResume grant preflight:\n" + "\n".join(grant_notes)
             for grant_id in granted:
                 grant = consent.registry[grant_id]
-                if (grant_id not in GRANTS and grant.operation is not None
-                        and consent_role(grant.operation["role"]) != consent_role(run.role)):
-                    continue
                 scope = grant.scope_for(executor, consent.platform)
                 if scope is not None:
                     context += "\n\n" + granted_context(grant, scope)

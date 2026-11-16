@@ -372,6 +372,7 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
                        "session, whose content may be untrusted.")
     return {"id": question_id,
             "prompt": (f"{role}: {compound}{command[:140]}.{scope_note}{detail[:120]} {warned}"
+                       "The answer holds in every stage role. "
                        "Pattern grants never bypass Git, credential or redirect guards. "
                        "Interpreter internals require external isolation. "
                        f"{regex_note} {skip}"
@@ -487,13 +488,18 @@ class ConsentStore:
             raise GrantError(f"{self.path}: malformed revocation history")
         return payload
 
-    def load(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope) -> str | None:
-        """`allow`, `deny`, or None (UNKNOWN), for this exact scope only."""
+    def load(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope, *,
+             allow_global: bool = True) -> str | None:
+        """`allow`, `deny`, or None (UNKNOWN), for this exact scope only.
+
+        A stage that never receives global grants (`review`, `rereview`) passes
+        `allow_global=False`: the decision is then read from the repository only.
+        """
         payload = self._read()
         entries = (payload["repos"].get(repo_id) or {}).get(grant.id, {})
         entry = entries.get(grant.fingerprint(scope)) if isinstance(entries, dict) else None
         operation = getattr(grant, "operation", None)
-        if (entry is None and operation and not repo_id.startswith("cycle:")
+        if (entry is None and operation and allow_global and not repo_id.startswith("cycle:")
                 and operation.get("role") not in NO_GLOBAL_ROLES):
             entry = (payload["repos"].get("*") or {}).get(grant.id, {}).get(grant.fingerprint(scope))
         if (not isinstance(entry, dict)
@@ -567,10 +573,26 @@ class ConsentStore:
         entry = entries.pop(grant.fingerprint(scope), None)
         if entry is None:
             return False
+        revoked_at = datetime.now(timezone.utc).isoformat()
         payload.setdefault("revocations", []).append({
-            "repo": repo_id, "grant": grant.id, **entry,
-            "revoked_at": datetime.now(timezone.utc).isoformat(),
+            "repo": repo_id, "grant": grant.id, **entry, "revoked_at": revoked_at,
         })
+        # A decision holds in every role (#500): an entry stored under another
+        # role for the same operation is the same decision, so it goes too.
+        operation = getattr(grant, "operation", None)
+        if operation:
+            same = {**operation, "role": None}
+            for other_id, others in list((payload["repos"].get(repo_id) or {}).items()):
+                if other_id == grant.id or not isinstance(others, dict):
+                    continue
+                for key, other in list(others.items()):
+                    stored = other.get("operation") if isinstance(other, dict) else None
+                    if (isinstance(stored, dict) and {**stored, "role": None} == same
+                            and other.get("executor") == entry.get("executor")
+                            and other.get("platform") == entry.get("platform")):
+                        others.pop(key)
+                        payload["revocations"].append({
+                            "repo": repo_id, "grant": other_id, **other, "revoked_at": revoked_at})
         self._write(payload)
         return True
 
@@ -753,30 +775,30 @@ class ConsentBroker:
         return {**GRANTS, **self.operations}
 
     def command_entries(self, executor: str, role: str) -> tuple[dict[str, Any], ...]:
+        """The decisions in force for a stage, whatever role each was given in (#500).
+
+        Identity is the operation or pattern itself, never the role that was
+        asked. The one exception stays: a global grant never reaches a reviewer.
+        """
         entries = []
+        allow_global = role not in NO_GLOBAL_ROLES
         for grant in self.registry.values():
             op = getattr(grant, "operation", None)
             scope = grant.scope_for(executor, self.platform)
-            if op and consent_role(op["role"]) == consent_role(role) and scope is not None:
-                answer, _ = self._resolve(grant, scope)
+            if op and scope is not None:
+                answer, _ = self._resolve(grant, scope, allow_global=allow_global)
                 if answer is not None:
                     entries.append({"operation": op, "decision": "deny" if answer == DENY else "allow"})
         return tuple(entries)
 
     def prepare_answers(self, executor: str, role: str) -> None:
         """Resolve resume answers before the selected executor is dispatched."""
-        expected_role = consent_role(role)
         for grant_id in self.answers:
             if grant_id in GRANTS:
                 continue
             grant = self.registry.get(grant_id)
             if grant is None:
                 note = f"{grant_id}: resume grant cannot apply; no matching grant is registered"
-            elif (grant.operation is not None
-                  and consent_role(grant.operation["role"]) != expected_role):
-                # A grant for a later stage is still applicable to that stage;
-                # do not report it as unusable while an earlier role runs.
-                continue
             else:
                 scope = grant.scope_for(executor, self.platform)
                 if scope is None:
@@ -812,7 +834,6 @@ class ConsentBroker:
                     stored = grant.operation or {}
                     scope = grant.scope_for(executor, self.platform)
                     if (stored.get("version") != 2 or scope is None
-                            or consent_role(stored.get("role")) != consent_role(policy.role)
                             or not pattern_covers_operation(stored, op)):
                         continue
                     for repo in (self.cycle_scope, self.repo_id, "*"):
@@ -856,7 +877,8 @@ class ConsentBroker:
         self.granted_ids, self.denied_ids = granted, denied
         return tuple(sorted(granted))
 
-    def _resolve(self, grant: SensitiveGrant, scope: GrantScope) -> tuple[str | None, str | None]:
+    def _resolve(self, grant: SensitiveGrant, scope: GrantScope, *,
+                 allow_global: bool = True) -> tuple[str | None, str | None]:
         key = grant.fingerprint(scope)
         if grant.id in self.answers and key not in self._consumed_answers:
             answer = self.answers[grant.id]
@@ -888,7 +910,7 @@ class ConsentBroker:
                 return (ALLOW_CYCLE if stored == "allow" else DENY), "cycle"
         if self.store is not None:
             try:
-                stored = self.store.load(self.repo_id, grant, scope)
+                stored = self.store.load(self.repo_id, grant, scope, allow_global=allow_global)
             except GrantError as error:
                 self.notes.append(f"{error}; no stored authorization applied")
                 return None, None

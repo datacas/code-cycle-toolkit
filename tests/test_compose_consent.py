@@ -149,7 +149,9 @@ class FirstConsentTests(ComposeConsentCase):
         self.assertTrue(sp.check(CHECK, policy, cwd=str(self.clone)).allowed)
         self.assertNotIn("permission_required", " ".join(resumed.notes))
 
-    def test_ac2_inapplicable_resume_grant_is_explained_before_policy_creation(self):
+    def test_ac2_resume_grant_applies_in_every_role_before_policy_creation(self):
+        # #500: an approval holds in every role, so a grant answered for a later
+        # stage is not set aside while an earlier role runs.
         original = self.broker()
         request, _ = self.request(policy=self.policy("rereview"), broker=original)
         grant = self.answer(request, original)
@@ -157,9 +159,9 @@ class FirstConsentTests(ComposeConsentCase):
         resumed = self.broker(answers={grant.id: "persistent"})
         resumed.prepare_answers("claude", "implement")
 
-        self.assertEqual([], resumed.notes)
-        self.assertFalse(any(entry["operation"] == grant.operation
-                             for entry in resumed.command_entries("claude", "implement")))
+        self.assertFalse(any("cannot apply" in note for note in resumed.notes))
+        self.assertTrue(any(entry["operation"] == grant.operation
+                            for entry in resumed.command_entries("claude", "implement")))
 
     def test_ac2_inapplicable_grant_is_reported_before_its_dispatch(self):
         original = self.broker()
@@ -342,6 +344,96 @@ class IdentityTests(ComposeConsentCase):
         (self.clone / "docker-compose-local.yml").unlink()
         self.assertFalse(sp.check(CHECK, self.policy(), cwd=str(self.clone)).allowed)
         self.assertIsNone(self.request()[0])
+
+
+class AllRolesConsentTests(ComposeConsentCase):
+    """An approval holds in every stage role (#500)."""
+
+    ROLES = ("implement", "resolve", "review", "rereview", "verify")
+
+    def given(self, role, answer="persistent", command=CHECK):
+        request, broker = self.request(command, self.policy(role))
+        grant = self.answer(request, broker, answer)
+        return grant, broker
+
+    def test_an_answer_given_in_one_role_lets_every_other_role_run_the_command(self):
+        for given in ("review", "resolve", "implement"):
+            with self.subTest(given=given):
+                self.store = grants.ConsentStore(self.root / f"consents-{given}.json")
+                _, broker = self.given(given)
+                for role in self.ROLES:
+                    self.assertTrue(self.allowed(policy=self.policy(role), broker=broker, role=role),
+                                    f"{given} -> {role}")
+
+    def test_the_answer_for_this_cycle_holds_in_every_role_too(self):
+        _, broker = self.given("review", "cycle")
+        for role in self.ROLES:
+            self.assertTrue(self.allowed(policy=self.policy(role), broker=broker, role=role), role)
+
+    def test_a_denial_in_one_role_keeps_the_check_denied_in_the_others(self):
+        _, broker = self.given("resolve", "deny")
+        for role in self.ROLES:
+            policy = replace(self.policy(role), command_permissions=broker.command_entries("claude", role))
+            decision = sp.check(CHECK, policy, cwd=str(self.clone))
+            self.assertFalse(decision.allowed, role)
+            self.assertEqual("user_denial", decision.rule, role)
+
+    def test_another_command_or_configuration_still_asks_in_every_role(self):
+        _, broker = self.given("review")
+        other = CHECK + " --extra"
+        changed = self.make_clone("clone-changed", {**CLEAN, "services": {"backend-test": {
+            "image": "python:3.12", "privileged": True}}})
+        for role in self.ROLES:
+            policy = self.policy(role)
+            self.assertFalse(self.allowed(other, policy, broker, role=role), role)
+            self.assertFalse(self.allowed(CHECK, policy, broker, cwd=changed, role=role), role)
+
+    def test_a_global_answer_never_reaches_a_reviewer_but_reaches_the_writers(self):
+        self.given("resolve", "forever")
+        fresh = self.broker()
+        for role in ("implement", "resolve", "verify"):
+            self.assertTrue(self.allowed(policy=self.policy(role), broker=fresh, role=role), role)
+        for role in ("review", "rereview"):
+            self.assertFalse(self.allowed(policy=self.policy(role), broker=fresh, role=role), role)
+
+    def test_a_decision_stored_before_the_change_with_any_role_still_matches(self):
+        request, broker = self.request(CHECK, self.policy("resolve"))
+        self.answer(request, broker)
+        for role in self.ROLES:
+            self.assertTrue(self.allowed(policy=self.policy(role), broker=self.broker(), role=role), role)
+
+    def test_a_pattern_grant_applies_in_every_role(self):
+        pattern = grants.make_pattern_grant(
+            r"docker compose -f docker-compose-local\.yml run --rm backend-test pytest .*", "review",
+            "claude", "linux", proposer="agent", justification="declared check",
+            positive=[CHECK + " -x"], negative=["docker compose run --rm other pytest"])
+        broker = self.broker()
+        broker.apply_answer(pattern, pattern.scope_for("claude", "linux"), "persistent")
+        command = CHECK + " -x"
+        for role in self.ROLES:
+            self.assertTrue(self.allowed(command, self.policy(role), broker, role=role), role)
+
+    def test_revoking_the_grant_removes_it_for_every_role(self):
+        grant, broker = self.given("review")
+        broker.store.revoke(broker.repo_id, grant, grant.scope_for("claude", "linux"))
+        for role in self.ROLES:
+            self.assertFalse(self.allowed(policy=self.policy(role), broker=self.broker(), role=role), role)
+
+    def test_revoking_removes_an_entry_stored_under_another_role_too(self):
+        first, broker = self.given("review")
+        # An entry written before this change, when each role kept its own.
+        second = grants.make_grant({**first.operation, "role": "resolve"}, "claude", "linux")
+        self.assertNotEqual(first.id, second.id)
+        broker.apply_answer(second, second.scope_for("claude", "linux"), "persistent")
+        broker.store.revoke(broker.repo_id, first, first.scope_for("claude", "linux"))
+        for role in self.ROLES:
+            self.assertFalse(self.allowed(policy=self.policy(role), broker=self.broker(), role=role), role)
+
+    def test_the_question_says_the_answer_holds_for_every_role(self):
+        request, broker = self.request(CHECK, self.policy("resolve"))
+        grant = broker.grant_for(request)
+        prompt = grants.question(grant, grant.scope_for("claude", "linux"), role="resolve")["prompt"]
+        self.assertIn("every stage role", prompt)
 
 
 class SocketAndContinuationTests(ComposeConsentCase):
