@@ -31,12 +31,12 @@ repeating. When a change alters behaviour, update the page that owns that topic.
 
 `Validate package` has two required checks, `Skills, manifests, and Bash
 installer` and `PowerShell installer`, and a pull request cannot merge while
-either is missing. So neither is ever skipped by a path filter. Instead each job,
-and each of the four Windows test shards, classifies the change first with
-`scripts/fast_path.py`, comparing a pull request with its merge base and a push
-with `before..after`. A change that touches only the allowlist below reports both
-checks green after a scan and a few mapped tests; anything else runs everything
-as before.
+either is missing. So neither is ever skipped by a path filter. Instead a cheap
+hosted `classify` job, and each job and each of the four Windows test shards,
+classify the change first with `scripts/fast_path.py`, comparing a pull request
+with its merge base and a push with `before..after`. A change that touches only
+the allowlist below reports both checks green after a scan and a few mapped
+tests; anything else runs everything as before.
 
 **The allowlist** is exactly these paths:
 
@@ -56,7 +56,11 @@ also runs in full, because `release.yml` cuts a release from those headings.
 **The fast path** runs the privacy and metadata-sidecar scan
 (`python3 scripts/validate-package.py --scan-only`, the same scan the full
 validator runs) and the tests mapped to the changed files. The Windows shards
-skip their other tests but still finish successfully. The job summary says
+skip their other tests but still finish successfully. When no mapped test
+applies, `classify` lets the Windows jobs be skipped altogether, so a docs-only
+change does not queue for a Windows runner: `PowerShell installer` reports as
+skipped, which satisfies the required check, and the scan it would have run is
+the one `Skills, manifests, and Bash installer` already runs. The job summary says
 whether a job was `SKIPPED_NON_CODE` or `TESTS_PASSED`, which validations ran and
 which were skipped, and which paths caused a full run. Runner queueing is outside
 this repository's control; the fast path covers the jobs' own work.

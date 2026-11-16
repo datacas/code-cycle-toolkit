@@ -22,6 +22,30 @@ env:
     cc-profile-config cc-host-permissions
 
 jobs:
+  classify:
+    name: Classify the change
+    # One cheap hosted job decides whether the Windows jobs are needed, so a
+    # non-code change never waits for a Windows runner just to learn that it
+    # has nothing to run. Hosted runners are safe for any pull request.
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+      tests: ${{ steps.classify.outputs.tests }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify the change
+        # An unset output is not `fast`: a failing step runs the Windows jobs.
+        id: classify
+        continue-on-error: true
+        run: python3 scripts/fast_path.py classify
+        env:
+          FAST_PATH_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FAST_PATH_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+
   validate:
     name: Skills, manifests, and Bash installer
     # Pull requests from any other repository run on GitHub-hosted runners;
@@ -220,6 +244,10 @@ jobs:
   windows-test-shards:
     name: Windows test shard (${{ matrix.shard }})
     runs-on: windows-latest
+    needs: classify
+    # Skipped on the fast path unless a mapped test applies. A job skipped by a
+    # job-level `if` satisfies a required check; an unset mode is not `fast`.
+    if: ${{ needs.classify.outputs.mode != 'fast' || needs.classify.outputs.tests != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -266,8 +294,10 @@ jobs:
   powershell-installer:
     name: PowerShell installer
     runs-on: windows-latest
-    needs: windows-test-shards
-    if: ${{ always() }}
+    needs: [classify, windows-test-shards]
+    # On the fast path its only work is the scan `validate` already runs, so it
+    # is skipped. Otherwise it still aggregates the shards, even when one failed.
+    if: ${{ always() && needs.classify.outputs.mode != 'fast' }}
     steps:
       - name: Require all Windows test shards to pass
         if: ${{ always() && needs.windows-test-shards.result != 'success' }}
