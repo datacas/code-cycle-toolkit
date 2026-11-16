@@ -950,7 +950,9 @@ class StageDispatch:
                             outcome.result.executor if outcome.result else "unknown",
                             outcome.decision.profile if outcome.decision else "unknown"),))
                 test_payload, self.state.verification_plan = self.api._normalize_test_payload(
-                    test_payload, self.state.verification_plan)
+                    test_payload, self.state.verification_plan,
+                    dispatched_executor=(outcome.result.executor if outcome.result else "unknown"),
+                    dispatched_profile=(outcome.decision.profile if outcome.decision else "unknown"))
                 rejected = (test_payload.get("tests") or {}).get("rejected")
                 if isinstance(rejected, str):
                     reason = self.rejected_report_reason(
