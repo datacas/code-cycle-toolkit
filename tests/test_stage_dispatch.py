@@ -608,6 +608,8 @@ class ClaudePolicyTests(DispatchTestCase):
                          artifacts["permission_denials"])
         self.assertEqual(["Bash", "Write", "Bash"],
                          [item["tool"] for item in artifacts["claude_permission_denials"]])
+        self.assertTrue(any(item.get("layer") == "claude_permission"
+                            for item in artifacts["command_refusals"]))
         self.assertEqual("/x", artifacts["claude_permission_denials"][1]["command"])
         self.assertEqual({}, ex.ClaudeAdapter().extra_artifacts('{"type": "result"}'))
 
