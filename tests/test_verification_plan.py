@@ -470,6 +470,59 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(check().command, reported["command"])
         self.assertEqual(plan.checks, updated.checks)
 
+    def test_stage_dispatch_identity_overrides_reported_executor_and_profile(self):
+        frozen = check(profile="cheap_coder")
+        plan = vp.VerificationPlan(criteria(), (frozen,))
+        entry = {**report(executor="claude", profile="runtime"),
+                 "head_sha": HEAD, "result": "pass",
+                 "evidence": [{"exit_code": 0, "executed": 7}]}
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD,
+            plan=plan, dispatched_executor="codex", dispatched_profile="cheap_coder")
+        [recorded] = normalized["checks"]
+        self.assertEqual((recorded["executor"], recorded["profile"]), ("codex", "cheap_coder"))
+        self.assertEqual(updated.current(frozen.id, HEAD), "pass")
+        self.assertEqual(recorded["dispatch"]["reported_executor_mismatch"],
+                         {"expected": "codex", "observed": "claude"})
+        self.assertEqual(recorded["dispatch"]["reported_profile_mismatch"],
+                         {"expected": "cheap_coder", "observed": "runtime"})
+
+    def test_runtime_dispatch_mismatch_keeps_evidence_and_other_check_results(self):
+        frozen = check(profile="cheap_coder")
+        other = check(id="other", executor="claude", profile="cheap_coder")
+        plan = vp.VerificationPlan(criteria(), (frozen, other))
+        entries = [
+            {**report(executor="runtime", profile="runtime"), "head_sha": HEAD,
+             "result": "pass", "evidence": [{"exit_code": 0, "executed": 7}]},
+            {**report(id="other", profile="cheap_coder"), "head_sha": HEAD,
+             "result": "pass", "evidence": [{"exit_code": 0, "executed": 3}]},
+        ]
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": entries}, HEAD,
+            plan=plan, dispatched_executor="claude", dispatched_profile="cheap_coder")
+        by_id = {item["id"]: item for item in normalized["checks"]}
+        self.assertEqual(updated.current(frozen.id, HEAD), "unverified")
+        self.assertEqual(updated.current(other.id, HEAD), "pass")
+        self.assertEqual(by_id[frozen.id]["evidence"][0]["executed"], 7)
+        self.assertEqual(by_id[frozen.id]["dispatch"]["executor_mismatch"],
+                         {"expected": "codex", "observed": "claude"})
+        self.assertIn("executor expected codex, dispatched claude", by_id[frozen.id]["cause"])
+
+    def test_profile_dispatch_mismatch_is_recorded_without_downgrading_evidence(self):
+        frozen = check(profile="deep_coder")
+        plan = vp.VerificationPlan(criteria(), (frozen,))
+        entry = {**report(profile="deep_coder"), "head_sha": HEAD,
+                 "result": "pass", "evidence": [{"exit_code": 0, "executed": 4}]}
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD,
+            plan=plan, dispatched_executor="codex", dispatched_profile="cheap_coder")
+        [recorded] = normalized["checks"]
+        self.assertEqual((recorded["executor"], recorded["profile"]), ("codex", "deep_coder"))
+        self.assertEqual(recorded["result"], "pass")
+        self.assertEqual(updated.current(frozen.id, HEAD), "pass")
+        self.assertEqual(recorded["dispatch"]["profile_mismatch"],
+                         {"expected": "deep_coder", "observed": "cheap_coder"})
+
     def test_v2_missing_required_check_field_names_missing_value_and_format(self):
         plan = vp.VerificationPlan(criteria(), (check(),))
         entry = report(id="another-check")
