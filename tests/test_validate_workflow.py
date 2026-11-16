@@ -118,8 +118,10 @@ class ValidateWorkflowTests(unittest.TestCase):
             r"(?ms)^  powershell-installer:\n"
             r"    name: PowerShell installer\n"
             r"    runs-on: windows-latest\n"
-            r"    needs: windows-test-shards\n"
-            r"    if: \$\{\{ always\(\) \}\}.*?^      - name: Require all Windows test shards to pass",
+            r"    needs: \[classify, windows-test-shards\]\n"
+            r"(?:    #.*\n)+"
+            r"    if: \$\{\{ always\(\) && needs\.classify\.outputs\.mode != 'fast' \}\}"
+            r".*?^      - name: Require all Windows test shards to pass",
         )
         self.assertNotIn("pytest-xdist", workflow)
         self.assertNotIn("pytest -n", workflow)
@@ -128,6 +130,29 @@ class ValidateWorkflowTests(unittest.TestCase):
             r"(?m)^        if: \$\{\{ always\(\) && "
             r"needs\.windows-test-shards\.result != 'success' \}\}$",
         )
+
+    def test_windows_jobs_wait_for_a_cheap_hosted_classification(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            workflow,
+            r"(?ms)^  classify:\n    name: Classify the change\n(?:    #.*\n)+"
+            r"    runs-on: ubuntu-latest\n    outputs:\n"
+            r"      mode: \$\{\{ steps\.classify\.outputs\.mode \}\}\n"
+            r"      tests: \$\{\{ steps\.classify\.outputs\.tests \}\}\n",
+        )
+        steps = self.job_steps("classify")
+        self.assertIn("continue-on-error: true", steps["Classify the change"])
+        self.assertIn("scripts/fast_path.py classify", steps["Classify the change"])
+        self.assertIn("fetch-depth: 0", steps["Check out repository"])
+        # Fail closed: the shards skip only on an explicit `fast` with no mapped test.
+        self.assertRegex(
+            workflow,
+            r"(?ms)^  windows-test-shards:\n.*?^    needs: classify\n(?:    #.*\n)+"
+            r"    if: \$\{\{ needs\.classify\.outputs\.mode != 'fast' "
+            r"\|\| needs\.classify\.outputs\.tests != '' \}\}\n",
+        )
+        self.assertNotIn("== 'full'", workflow)
 
     def job_steps(self, job: str) -> dict[str, str]:
         workflow = WORKFLOW.read_text(encoding="utf-8")

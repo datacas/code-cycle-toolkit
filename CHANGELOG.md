@@ -72,6 +72,12 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- CI: a documentation-only pull request no longer queues for a Windows runner.
+  A hosted `classify` job decides first; on the fast path with no mapped test
+  the Windows shards and `PowerShell installer` are skipped (a skipped job
+  satisfies the required check), and an unset classification still runs them in
+  full (#495).
+
 - **Non-code changes finish the required checks fast (#236).** `Validate
   package` classifies a change with `scripts/fast_path.py`. A pull request or
   push that touches only `.code-cycle.yml`, root Markdown other than the README,
