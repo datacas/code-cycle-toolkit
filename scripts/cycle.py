@@ -71,6 +71,7 @@ from router import (
     Target,
     TaskSignals,
     escalation_selector,
+    frozen_target,
     models_from_profiles,
     stage_fallback,
     route,
@@ -254,6 +255,7 @@ class _StageRun:
     change: ChangeSignals | None
     parent_attempt_id: str | None = None
     parent_executor: str | None = None
+    frozen_identity: tuple[str, str] | None = None
     #: The decision the next attempt runs under, when this one chose it.
     fallback_decision: RoutingDecision | None = None
     #: Why the previous attempt was rerouted, carried into the next one's row.
@@ -500,6 +502,7 @@ class CycleRecorder:
         self.on_dispatch_started: Callable[[], None] | None = None
 
     def stage(self, role: str, task: str, *, escalated: bool = False,
+              frozen_identity: tuple[str, str] | None = None,
               effort_override: str | None = None, target_override: Target | None = None,
               target_override_used_fallback: bool = False,
               resolve_escalated: bool = False,
@@ -530,6 +533,7 @@ class CycleRecorder:
             escalation_finding_ids=escalation_finding_ids,
             dispatch_kwargs=dispatch_kwargs,
         )
+        run.frozen_identity = frozen_identity
         # A primary, its fallback, and one rerun after a permission answer.
         for number in range(3):
             attempt = self._route_attempt(run, number)
@@ -664,6 +668,14 @@ class CycleRecorder:
             decision = run.fallback_decision
         decision = self._check_codex_effort(run, decision, eligible, signals)
         decision, eligible = self._check_codex_git_metadata(run, decision, eligible, signals)
+        if run.frozen_identity is not None:
+            executor, profile_name = run.frozen_identity
+            pinned, fallback = frozen_target(executor, profile_name, self.profiles)
+            available = pinned is not None and self._dispatchable(executor, eligible)
+            decision = replace(decision, profile=profile_name,
+                target=pinned if available else None, blocked=not available,
+                used_fallback=fallback,
+                reasons=decision.reasons + (f"verification frozen to {executor}/{profile_name}",))
         if number == 0:
             run.first = (decision, signals)
         attempt = _Attempt(number=number, signals=signals, eligible=eligible,

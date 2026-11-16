@@ -367,19 +367,21 @@ class CycleHistoryStore:
             connection.commit()
         return {"plan_id": plan.plan_id, "revision": plan.revision, "digest": digest}
 
-    def latest_plan(self, repo_id: str, task_id: str, change_request_id: str | None) -> dict[str, Any] | None:
+    def latest_plan(self, repo_id: str, task_id: str, change_request_id: str | None, *,
+                    require_verification: bool = False) -> dict[str, Any] | None:
         with closing(self._connect()) as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 "SELECT * FROM cycle_execution_plans WHERE repo_id=? AND task_id=? "
-                "AND change_request_id IS ? ORDER BY sequence DESC LIMIT 1",
-                (repo_id, task_id, change_request_id)).fetchone()
-        if row is None:
-            return None
-        value = dict(row)
-        value["payload"] = json.loads(value["payload"])
-        if plan_digest(value["payload"]) != value["digest"]:
-            raise HistoryError("execution plan digest mismatch")
-        return value
+                "AND change_request_id IS ? ORDER BY sequence DESC",
+                (repo_id, task_id, change_request_id)).fetchall()
+        for row in rows:
+            value = dict(row)
+            value["payload"] = json.loads(value["payload"])
+            if plan_digest(value["payload"]) != value["digest"]:
+                raise HistoryError("execution plan digest mismatch")
+            if not require_verification or value["payload"]["plan"].get("verification") is not None:
+                return value
+        return None
 
     def has_plan_receipt(self, repo_id: str, receipt: dict[str, Any]) -> bool:
         with closing(self._connect()) as connection:
