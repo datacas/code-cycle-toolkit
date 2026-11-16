@@ -259,17 +259,20 @@ leaves out part of its identity (`command`, `executor`, `profile`, `context`,
 `required`, `level`, `criteria`) is the same check: the runtime takes the missing
 fields from the frozen one. For stage reports, executor and profile values are
 also compared with the dispatch record maintained by the runtime. The stored
-check always keeps its frozen executor/profile; agent-reported values cannot
-replace them. The result's `dispatch` records the runtime dispatch and any
-`executor_mismatch` or `profile_mismatch` between that dispatch and the frozen
-identity. It records an agent claim that differs as
-`reported_executor_mismatch` or `reported_profile_mismatch`. A report claim
-alone does not invalidate evidence when the runtime confirms the frozen
-identity. A real runtime mismatch, or missing dispatch provenance, keeps that
-check `not_verified` while retaining its evidence and naming the expected and
-observed values. The runtime evaluates each check independently, so a mismatch
-does not erase other checks in the same report. Other identity fields that the
-report supplies still have to match.
+check keeps its concrete frozen executor/profile; agent-reported values cannot
+replace them. A `runtime` placeholder has no concrete identity yet, so the
+runtime binds it to the trusted dispatch before storing the check. The result's
+`dispatch` records that dispatch and any `executor_mismatch` or
+`profile_mismatch` with expected and observed values. It records a differing
+agent claim separately as `reported_executor_mismatch` or
+`reported_profile_mismatch`. A report claim alone does not invalidate evidence
+when runtime provenance confirms the frozen identity. A concrete executor
+mismatch, or missing executor provenance for an unbound placeholder, keeps that
+check `not_verified` while retaining its evidence. A profile-only difference
+is recorded but does not invalidate a passing result. The runtime evaluates
+each check independently, so a mismatch does not erase other checks in the
+same report. Other identity fields that the report supplies still have to
+match.
 A tests block the runtime cannot read at all never ends the cycle `BLOCKED`:
 the stage's report is accepted, a note and a warning name the field, its checks
 stay `not_verified`, and the verification barrier asks about them at the end like

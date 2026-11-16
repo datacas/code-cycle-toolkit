@@ -586,8 +586,14 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         if dispatch_known:
             reported_executor = entry.get("executor")
             reported_profile = entry.get("profile")
-            expected_executor = frozen.executor if frozen is not None else dispatched_executor
-            expected_profile = frozen.profile if frozen is not None else dispatched_profile
+            executor_unbound = frozen is not None and frozen.executor == "runtime"
+            profile_unbound = frozen is not None and frozen.profile == "runtime"
+            expected_executor = (
+                dispatched_executor if executor_unbound and dispatched_executor not in {None, "unknown"}
+                else frozen.executor if frozen is not None else dispatched_executor)
+            expected_profile = (
+                dispatched_profile if profile_unbound and dispatched_profile not in {None, "unknown"}
+                else frozen.profile if frozen is not None else dispatched_profile)
             dispatch_record: dict[str, Any] = {
                 "source": "runtime",
                 "executor": dispatched_executor,
@@ -602,24 +608,38 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
                     "expected": expected_profile, "observed": reported_profile}
             dispatch_record.update(reported_mismatches)
             dispatch_mismatches = {}
-            if frozen is not None and dispatched_executor != frozen.executor:
+            if executor_unbound and dispatched_executor in {None, "unknown"}:
+                dispatch_mismatches["executor_mismatch"] = {
+                    "expected": "known runtime executor", "observed": dispatched_executor}
+            elif frozen is not None and not executor_unbound and dispatched_executor != frozen.executor:
                 dispatch_mismatches["executor_mismatch"] = {
                     "expected": frozen.executor, "observed": dispatched_executor}
             elif frozen is None and dispatched_executor in {None, "unknown"}:
                 dispatch_mismatches["executor_mismatch"] = {
                     "expected": "known runtime executor", "observed": dispatched_executor}
-            if frozen is not None and dispatched_profile != frozen.profile:
-                dispatch_mismatches["profile_mismatch"] = {
+            if frozen is not None and not profile_unbound and dispatched_profile != frozen.profile:
+                # Profile provenance is useful evidence, but profile-only
+                # differences do not invalidate a passing check.
+                dispatch_record["profile_mismatch"] = {
                     "expected": frozen.profile, "observed": dispatched_profile}
+            elif profile_unbound and dispatched_profile in {None, "unknown"}:
+                dispatch_record["profile_mismatch"] = {
+                    "expected": "known runtime profile", "observed": dispatched_profile}
             elif frozen is None and dispatched_profile in {None, "unknown"}:
-                dispatch_mismatches["profile_mismatch"] = {
+                dispatch_record["profile_mismatch"] = {
                     "expected": "known runtime profile", "observed": dispatched_profile}
             dispatch_record.update(dispatch_mismatches)
-            # The runtime owns dispatch provenance. Preserve a frozen identity,
-            # or use the actual dispatch for a newly proposed check.
+            # A runtime placeholder has no prior identity; bind it once to the
+            # trusted dispatch. Concrete frozen identities remain authoritative.
             entry["executor"] = expected_executor
             entry["profile"] = expected_profile
             entry["dispatch"] = dispatch_record
+            if frozen is not None and (executor_unbound or profile_unbound):
+                frozen = replace(frozen, executor=expected_executor, profile=expected_profile)
+                plan = replace(
+                    plan,
+                    checks=tuple(frozen if item.id == frozen.id else item for item in plan.checks),
+                )
             if dispatch_mismatches:
                 details = ", ".join(
                     f"{field.removesuffix('_mismatch')} expected {item['expected']}, dispatched {item['observed']}"

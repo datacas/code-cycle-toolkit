@@ -769,8 +769,9 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                 results = tuple((item["id"], item["head_sha"], item["result"])
                                 for item in verification["results"])
                 self.assertEqual(results[:len(history[-1])], history[-1])
-                self.assertIn(("configured-test", head, "unverified"), results)
-                self.assertIn(("family-unit", head, "unverified"), results)
+                expected_result = "unverified" if start == "rereview" else "pass"
+                self.assertIn(("configured-test", head, expected_result), results)
+                self.assertIn(("family-unit", head, expected_result), results)
                 configured_result = next(item for item in verification["results"]
                                          if item["id"] == "configured-test"
                                          and item["head_sha"] == head)
@@ -778,9 +779,16 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                                    if item["id"] == "family-unit"
                                    and item["head_sha"] == head)
                 self.assertEqual(configured_result["dispatch"]["source"], "runtime")
-                self.assertIn("executor_mismatch", configured_result["dispatch"])
+                if start == "rereview":
+                    self.assertIn("executor_mismatch", configured_result["dispatch"])
+                else:
+                    self.assertNotIn("executor_mismatch", configured_result["dispatch"])
+                configured_check = next(item for item in verification["checks"]
+                                       if item["id"] == "configured-test")
+                self.assertEqual(configured_check["executor"], "codex")
                 self.assertEqual(configured_result["evidence"][0]["executed"], 2)
                 self.assertIn("profile_mismatch", unit_result["dispatch"])
+                self.assertEqual(unit_result["result"], expected_result)
                 self.assertEqual(unit_result["evidence"][0]["executed"], 2)
                 history.append(results)
                 restored = vp.VerificationPlan.from_dict({**verification, "criteria": criteria.to_dict()})

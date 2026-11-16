@@ -508,6 +508,21 @@ class ResultTests(unittest.TestCase):
                          {"expected": "codex", "observed": "claude"})
         self.assertIn("executor expected codex, dispatched claude", by_id[frozen.id]["cause"])
 
+    def test_profile_dispatch_mismatch_is_recorded_without_downgrading_evidence(self):
+        frozen = check(profile="deep_coder")
+        plan = vp.VerificationPlan(criteria(), (frozen,))
+        entry = {**report(profile="deep_coder"), "head_sha": HEAD,
+                 "result": "pass", "evidence": [{"exit_code": 0, "executed": 4}]}
+        normalized, updated = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD,
+            plan=plan, dispatched_executor="codex", dispatched_profile="cheap_coder")
+        [recorded] = normalized["checks"]
+        self.assertEqual((recorded["executor"], recorded["profile"]), ("codex", "deep_coder"))
+        self.assertEqual(recorded["result"], "pass")
+        self.assertEqual(updated.current(frozen.id, HEAD), "pass")
+        self.assertEqual(recorded["dispatch"]["profile_mismatch"],
+                         {"expected": "deep_coder", "observed": "cheap_coder"})
+
     def test_v2_missing_required_check_field_names_missing_value_and_format(self):
         plan = vp.VerificationPlan(criteria(), (check(),))
         entry = report(id="another-check")
