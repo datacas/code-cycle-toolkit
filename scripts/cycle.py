@@ -1613,7 +1613,8 @@ class CycleRecorder:
                                            "layer": record.get("layer"),
                                            "operation": record.get("operation"),
                                            "stage": record.get("stage")})
-                if self.consent is not None and self.consent.prompt is None:
+                if (self.consent is not None and self.consent.prompt is None
+                        and record.get("class") != "unverifiable_check"):
                     # No human channel (`--detach`, no terminal): the refusal is a
                     # denial that grants nothing, and the question it would have
                     # raised is asked afterwards from the decisions record (#464).

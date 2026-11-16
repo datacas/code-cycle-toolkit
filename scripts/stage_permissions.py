@@ -31,6 +31,7 @@ directory outside the agent's workspace and temporary directory.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import fnmatch
 import itertools
@@ -148,6 +149,12 @@ DENY_ADVICE = ("Do not bypass this refusal. The runtime asks this cycle / this r
                "permission_effects with essential and check_ids. Skip accessory operations; "
                "affected checks stay not_verified. An unanswered request is permission_required.")
 EDIT_DENY_ADVICE = DENY_ADVICE
+UNRESOLVED_COMPOSE_ADVICE = (
+    "This check cannot be identified in this checkout, so no permission can be asked for it and "
+    "nothing here is waiting for an answer. Do not retry variants of it. Record it not_verified "
+    "with this cause, say what would fix it (update the branch with the base branch if the Compose "
+    "file is missing, create the missing env file from its template) and continue the stage's "
+    "other work.")
 
 
 class PolicyError(ValueError):
@@ -1300,6 +1307,9 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                 and matching_answer("Bash", {"command": command}, policy, cwd) == "allow"
                 and protected_reason("Bash", {"command": command}, policy, cwd) is None):
             return Decision(True, "allowed by exact operation consent")
+        unresolved = _unresolved_compose(command, policy, cwd)
+        if unresolved:
+            return Decision(False, unresolved, rule="compose_unresolved")
         reason = str(error)
         patterns = [entry.get("operation", {}).get("pattern", {}).get("regex")
                     for entry in policy.command_permissions if entry.get("operation", {}).get("version") == 2]
@@ -1314,6 +1324,30 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
         return Decision(False, f"the command could not be validated ({type(error).__name__})",
                         rule="validation_error")
     return Decision(True, "allowed by the stage command table")
+
+
+def _unresolved_compose(command: str, policy: StagePolicy, cwd: str | None) -> str | None:
+    """Why a `docker compose` command cannot be identified, or None when it can.
+
+    The table refuses `compose run`, and the answer is an exact consent question.
+    That question needs the effective configuration; when `docker compose config`
+    fails (a Compose file or `env_file` missing from this checkout) the command has
+    no identity, so no answer could ever be stored. The cause is the answer, not the table.
+    """
+    if not policy.docker or policy.static_only:
+        return None
+    try:
+        words = list(parse_command(command, policy.tmpdir).words)
+        _, command_words = command_parts(words)
+        if _program(command_words[0]) != "docker" or command_words[1:2] != ["compose"]:
+            return None
+        with compose_resolution_cache():
+            operation("Bash", {"command": command}, policy, cwd)
+    except PolicyError as error:
+        return str(error)
+    except Exception:
+        return None
+    return None
 
 
 def _is_verification_command(command, policy: StagePolicy) -> bool:
@@ -3201,6 +3235,8 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         # Every denial is recorded with the rule that applied and an operation
         # identifier, including an operation that can never be granted (#364).
         rule = decision.rule or ("edit_rule" if editing else "command_table")
+        if rule == "compose_unresolved":
+            advice = UNRESOLVED_COMPOSE_ADVICE
         operation_id = denial_operation_id(requested_operation, command)
         intent = None if editing else pr_edit_intent(command, policy)
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
@@ -3529,6 +3565,24 @@ COMPOSE_RESOLUTION_BUDGET_SECONDS = 20
 #: never caches: it must see a configuration changed during a run.
 _RESOLUTIONS: dict[Any, Any] | None = None
 
+
+@contextlib.contextmanager
+def compose_resolution_cache():
+    """Resolve a Compose configuration once while one decision is being made.
+
+    The hook sets the same cache for its whole invocation; callers outside it
+    (the runtime reading a stage's refusals) open this one so that naming an
+    unresolved configuration does not repeat `docker compose config`.
+    """
+    global _RESOLUTIONS
+    previous = _RESOLUTIONS
+    if previous is None:
+        _RESOLUTIONS = {}
+    try:
+        yield
+    finally:
+        _RESOLUTIONS = previous
+
 #: Effective Compose settings the consent question and the evidence disclose.
 _HOST_NAMESPACES = ("network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup")
 
@@ -3676,6 +3730,23 @@ def _run_bounded(arguments: list[str], cwd: str | None, env: dict[str, str],
     return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
 
 
+def _compose_failure_cause(stderr: object, env: dict[str, str], cwd: str | None,
+                           root: Path | None, tmpdir: str | None) -> str:
+    """The reason `docker compose config` gave, without warnings, paths or secrets.
+
+    The last line that is not a warning names what failed: a missing Compose
+    file, a missing `env_file`, an invalid service. The clone and `$TMPDIR`
+    locations become placeholders and interpolated environment values `<env:NAME>`.
+    """
+    if not isinstance(stderr, str):
+        return ""
+    lines = [line.strip() for line in stderr.splitlines()
+             if line.strip() and "level=warning" not in line and "variable is not set" not in line]
+    if not lines:
+        return ""
+    return _redacted([_location_free(lines[-1], {}, cwd, root, tmpdir)], env)[0]
+
+
 def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None,
                            root: Path | None, tmpdir: str | None) -> dict[str, Any]:
     """Both resolution attempts share one budget well under the hook's timeout.
@@ -3686,6 +3757,7 @@ def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None
     """
     deadline = time.monotonic() + COMPOSE_RESOLUTION_BUDGET_SECONDS
     completed = None
+    cause = ""
     for arguments in ([*base, "--format", "json"], base):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -3701,6 +3773,8 @@ def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None
             raise PolicyError("the effective Compose configuration could not be resolved "
                               f"({type(error).__name__}); the runtime cannot identify this run") from error
         if completed.returncode != 0:
+            # Both attempts fail for the same reason; keep the first one given.
+            cause = cause or _compose_failure_cause(completed.stderr, env, cwd, root, tmpdir)
             continue
         try:
             config = json.loads(completed.stdout)
@@ -3721,8 +3795,8 @@ def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None
                           f"{COMPOSE_RESOLUTION_BUDGET_SECONDS} seconds; the runtime cannot "
                           "identify this run and refuses it")
     raise PolicyError("the effective Compose configuration could not be resolved "
-                      f"(docker compose config exited {completed.returncode}); "
-                      "the runtime cannot identify this run")
+                      f"(docker compose config exited {completed.returncode}"
+                      f"{': ' + cause if cause else ''}); the runtime cannot identify this run")
 
 
 #: Replaced in tests; the hook calls it to identify a Compose run.

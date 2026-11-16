@@ -568,6 +568,17 @@ and Docker socket mounts. After consent the toolkit refuses none of them. When
 the configuration cannot be resolved at all, the run cannot be identified and
 stays refused, like shell syntax the hook cannot parse.
 
+That refusal names its observed cause instead of the table: `docker compose
+config` failed because the Compose file is missing from the checkout (a branch
+that predates the commit that added it) or an `env_file` that Git ignores, such
+as `.env`, is not in a clean clone or worktree (#493). Docker would fail the same
+way without the toolkit. No question is asked, because an operation without an
+identity can never be granted or stored, and the stage is not stopped: the
+refusal is classified `unverifiable_check`, the check stays `unverified` with that
+cause, and the hook tells the stage to record it so and not to retry variants. To
+verify it, update the branch with the base branch or create the missing file from
+its template, then resume.
+
 Claude's hook recomputes the configuration before each run, so a configuration
 changed after consent is refused and asked again. A residual window remains
 between that check and Compose reading its files. Codex has no command hook: the

@@ -1157,6 +1157,21 @@ class ReconciledCycleTests(RunCycleTestCase):
         explained = report.journal_explanation["decisions"]
         self.assertTrue(any(item["component"] == "unattended_denial" for item in explained))
 
+    def test_493_an_unresolvable_compose_check_leaves_no_pending_question(self):
+        # No identity means no grant: the refusal names its cause and the check
+        # stays unverified, instead of an unanswerable pending decision.
+        command = "docker compose -f docker-compose-local.yml run --rm backend-test npm run lint"
+        report, claude = self.cycle([{"tool": "Bash", "input": {"command": command},
+                                      "rule": "compose_unresolved", "operation_id": "refused_compose"}],
+                                    published(), completed=None,
+                                    work_units=[{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
+                                    tests={"ran": True, "passed": True, "checks": []})
+        self.assertEqual([], self.pending_denials(report))
+        self.assertNotEqual("permission_required", report.stop_reason)
+        classified = self.journal(report, "denial_classification")
+        self.assertEqual({"unverifiable_check"}, {row["status"] for row in classified})
+        self.assertEqual({"compose_unresolved"}, {row["correlation"]["rule"] for row in classified})
+
     def test_464_an_attended_run_asks_and_leaves_no_unattended_denial(self):
         asked = []
 
