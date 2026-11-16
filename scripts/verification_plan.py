@@ -306,6 +306,7 @@ class CheckResult:
     attempts: tuple[Mapping[str, Any], ...] = ()
     attempts_normalized: Mapping[str, Any] | None = None
     binding: Mapping[str, Any] | None = None
+    dispatch: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = {**asdict(self), "evidence": [dict(v) for v in self.evidence],
@@ -314,6 +315,10 @@ class CheckResult:
             del data["attempts_normalized"]
         else:
             data["attempts_normalized"] = dict(self.attempts_normalized)
+        if self.dispatch is None:
+            del data["dispatch"]
+        else:
+            data["dispatch"] = dict(self.dispatch)
         return data
 
     @classmethod
@@ -334,7 +339,8 @@ class CheckResult:
         return cls(_required(item, "id", "a non-empty string"),
                    _required(item, "head_sha", "a full SHA or null for unverified results"),
                    _required(item, "result", "pass, fail, or unverified"),
-                   evidence, cause, attempts, normalized, item.get("binding"))
+                   evidence, cause, attempts, normalized, item.get("binding"),
+                   item.get("dispatch"))
 
     def validate(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -350,6 +356,8 @@ class CheckResult:
             raise _invalid_field("cause", self.cause, "omitted or text")
         if self.binding is not None and not isinstance(self.binding, Mapping):
             raise _invalid_field("binding", self.binding, "an identity object or null")
+        if self.dispatch is not None and not isinstance(self.dispatch, Mapping):
+            raise _invalid_field("dispatch", self.dispatch, "a runtime dispatch record or null")
         if any(not isinstance(v, Mapping) for v in self.evidence):
             raise _invalid_field("evidence", self.evidence, "an array of objects")
         if any(not isinstance(v, Mapping) for v in self.attempts):
@@ -513,7 +521,10 @@ def configured_check(command: str, executor: str, profile: str) -> Check:
 
 
 def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
-                    plan: VerificationPlan | None = None) -> tuple[dict[str, Any], VerificationPlan | None]:
+                    plan: VerificationPlan | None = None,
+                    dispatched_executor: str | None = None,
+                    dispatched_profile: str | None = None
+                    ) -> tuple[dict[str, Any], VerificationPlan | None]:
     """Normalize v2 (or the one-release v1 adapter) against runtime obligations.
 
     The normalized evidence is only a compatibility view for telemetry consumers;
@@ -569,6 +580,52 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             raise _invalid_field(f"checks[{index}]", entry, "a check object")
+        entry = dict(entry)
+        frozen = next((item for item in plan.checks if item.id == entry.get("id")), None)
+        dispatch_known = dispatched_executor is not None or dispatched_profile is not None
+        if dispatch_known:
+            reported_executor = entry.get("executor")
+            reported_profile = entry.get("profile")
+            expected_executor = frozen.executor if frozen is not None else dispatched_executor
+            expected_profile = frozen.profile if frozen is not None else dispatched_profile
+            dispatch_record: dict[str, Any] = {
+                "source": "runtime",
+                "executor": dispatched_executor,
+                "profile": dispatched_profile,
+            }
+            reported_mismatches = {}
+            if reported_executor is not None and reported_executor != expected_executor:
+                reported_mismatches["reported_executor_mismatch"] = {
+                    "expected": expected_executor, "observed": reported_executor}
+            if reported_profile is not None and reported_profile != expected_profile:
+                reported_mismatches["reported_profile_mismatch"] = {
+                    "expected": expected_profile, "observed": reported_profile}
+            dispatch_record.update(reported_mismatches)
+            dispatch_mismatches = {}
+            if frozen is not None and dispatched_executor != frozen.executor:
+                dispatch_mismatches["executor_mismatch"] = {
+                    "expected": frozen.executor, "observed": dispatched_executor}
+            elif frozen is None and dispatched_executor in {None, "unknown"}:
+                dispatch_mismatches["executor_mismatch"] = {
+                    "expected": "known runtime executor", "observed": dispatched_executor}
+            if frozen is not None and dispatched_profile != frozen.profile:
+                dispatch_mismatches["profile_mismatch"] = {
+                    "expected": frozen.profile, "observed": dispatched_profile}
+            elif frozen is None and dispatched_profile in {None, "unknown"}:
+                dispatch_mismatches["profile_mismatch"] = {
+                    "expected": "known runtime profile", "observed": dispatched_profile}
+            dispatch_record.update(dispatch_mismatches)
+            # The runtime owns dispatch provenance. Preserve a frozen identity,
+            # or use the actual dispatch for a newly proposed check.
+            entry["executor"] = expected_executor
+            entry["profile"] = expected_profile
+            entry["dispatch"] = dispatch_record
+            if dispatch_mismatches:
+                details = ", ".join(
+                    f"{field.removesuffix('_mismatch')} expected {item['expected']}, dispatched {item['observed']}"
+                    for field, item in dispatch_mismatches.items())
+                entry["result"] = "unverified"
+                entry["cause"] = "runtime dispatch mismatch: " + details
         try:
             check = Check.from_dict(_with_frozen_identity(entry, plan))
         except (VerificationError, KeyError, TypeError, ValueError) as error:
@@ -584,6 +641,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
             check = replace(check, required=True)
         check.validate(plan.criterion_ids)
         plan = plan.extend((check,))
+        if dispatch_known:
+            entry["binding"] = plan.binding(check.id)
         history = entry.get("history", [])
         if not isinstance(history, list):
             raise _invalid_field(f"checks[{index}].history", history, "an array of prior check results")
@@ -612,7 +671,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         if cause is None:
             cause = ""
         result = CheckResult(check.id, entry.get("head_sha"), entry.get("result", ""),
-                             evidence, cause, attempts, attempts_normalized)
+                             evidence, cause, attempts, attempts_normalized,
+                             entry.get("binding"), entry.get("dispatch"))
         if not isinstance(result.result, str) or result.result not in {"pass", "fail", "unverified"}:
             raise _invalid_field(f"checks[{check.id}].result", entry.get("result", _MISSING),
                                  "pass, fail, or unverified")

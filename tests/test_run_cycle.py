@@ -769,8 +769,19 @@ class NativeExecutionPlanTests(RunCycleTestCase):
                 results = tuple((item["id"], item["head_sha"], item["result"])
                                 for item in verification["results"])
                 self.assertEqual(results[:len(history[-1])], history[-1])
-                self.assertIn(("configured-test", head, "pass"), results)
-                self.assertIn(("family-unit", head, "pass"), results)
+                self.assertIn(("configured-test", head, "unverified"), results)
+                self.assertIn(("family-unit", head, "unverified"), results)
+                configured_result = next(item for item in verification["results"]
+                                         if item["id"] == "configured-test"
+                                         and item["head_sha"] == head)
+                unit_result = next(item for item in verification["results"]
+                                   if item["id"] == "family-unit"
+                                   and item["head_sha"] == head)
+                self.assertEqual(configured_result["dispatch"]["source"], "runtime")
+                self.assertIn("executor_mismatch", configured_result["dispatch"])
+                self.assertEqual(configured_result["evidence"][0]["executed"], 2)
+                self.assertIn("profile_mismatch", unit_result["dispatch"])
+                self.assertEqual(unit_result["evidence"][0]["executed"], 2)
                 history.append(results)
                 restored = vp.VerificationPlan.from_dict({**verification, "criteria": criteria.to_dict()})
                 # A new HEAD keeps history but needs fresh evidence of its own;

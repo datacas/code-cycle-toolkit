@@ -257,7 +257,19 @@ a string) is rejected with the field, the received type and the expected shape.
 A report that names a frozen check (`configured-test`, `verify:<command>`) and
 leaves out part of its identity (`command`, `executor`, `profile`, `context`,
 `required`, `level`, `criteria`) is the same check: the runtime takes the missing
-fields from the frozen one. A field the report does give still has to match.
+fields from the frozen one. For stage reports, executor and profile values are
+also compared with the dispatch record maintained by the runtime. The stored
+check always keeps its frozen executor/profile; agent-reported values cannot
+replace them. The result's `dispatch` records the runtime dispatch and any
+`executor_mismatch` or `profile_mismatch` between that dispatch and the frozen
+identity. It records an agent claim that differs as
+`reported_executor_mismatch` or `reported_profile_mismatch`. A report claim
+alone does not invalidate evidence when the runtime confirms the frozen
+identity. A real runtime mismatch, or missing dispatch provenance, keeps that
+check `not_verified` while retaining its evidence and naming the expected and
+observed values. The runtime evaluates each check independently, so a mismatch
+does not erase other checks in the same report. Other identity fields that the
+report supplies still have to match.
 A tests block the runtime cannot read at all never ends the cycle `BLOCKED`:
 the stage's report is accepted, a note and a warning name the field, its checks
 stay `not_verified`, and the verification barrier asks about them at the end like
