@@ -143,6 +143,18 @@ All notable changes to this project are documented here. This project follows
 
 ### Fixed
 
+- A declared Docker Compose check whose configuration cannot be resolved (a
+  Compose file missing from the checkout, or an ignored `env_file` such as
+  `.env` missing from a clean clone or worktree) is no longer refused as "outside
+  the table; needs exact operation consent". That message hid the cause and
+  recorded a question under a `refused_<hash>` id that could never be answered or
+  stored, so every retry was refused again and the stage ended
+  `not_reconciled`. The refusal now names the `docker compose config` error with
+  the clone path and secrets redacted, the hook tells the stage to record the
+  check `not_verified` and not retry variants, no pending question is created,
+  and the denial is classified `unverifiable_check`, which does not stop the
+  stage. A resolvable command keeps the #398 consent flow unchanged (#493).
+
 - **A reroute stops on a publication only when the cycle's own account made it
   (#268).** Reconciliation compares the pull requests, comments and reviews
   that the authenticated code-host account created or edited, by identity and

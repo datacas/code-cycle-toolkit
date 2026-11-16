@@ -436,6 +436,79 @@ class AllRolesConsentTests(ComposeConsentCase):
         self.assertIn("every stage role", prompt)
 
 
+class UnresolvedConfigurationTests(ComposeConsentCase):
+    """A declared check whose Compose configuration cannot be resolved (#493)."""
+
+    def hook_denial(self, policy=None):
+        path = self.root / "policy.json"
+        path.write_text((policy or self.policy()).to_json(), encoding="utf-8")
+        output = io.StringIO()
+        sp.hook_main([str(path)], io.StringIO(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": CHECK}, "cwd": str(self.clone)})), output)
+        return json.loads(output.getvalue())["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_a_missing_compose_file_is_named_and_is_not_a_consent_question(self):
+        (self.clone / "docker-compose-local.yml").unlink()
+        decision = sp.check(CHECK, self.policy(), cwd=str(self.clone))
+        self.assertFalse(decision.allowed)
+        self.assertEqual("compose_unresolved", decision.rule)
+        self.assertIn("could not be resolved", decision.reason)
+        self.assertIn("no such file", decision.reason)
+        self.assertNotIn("outside the table", decision.reason)
+        self.assertNotIn("exact operation consent", decision.reason)
+        self.assertIsNone(self.request()[0])
+
+    def test_a_missing_env_file_names_the_file_without_the_checkout_path(self):
+        self.compose.side_effect = lambda arguments, cwd, env, timeout: subprocess.CompletedProcess(
+            arguments, 1, "", 'time="x" level=warning msg="The \\"A\\" variable is not set."\n'
+            f"env file {cwd}/.env not found: stat {cwd}/.env: no such file or directory")
+        reason = sp.check(CHECK, self.policy(), cwd=str(self.clone)).reason
+        self.assertIn(".env not found", reason)
+        self.assertNotIn("variable is not set", reason)
+        self.assertNotIn(str(self.clone), reason)
+
+    def test_the_resolver_reason_never_carries_an_interpolated_secret(self):
+        secret = "s3cr3t-token-value"
+        self.compose.side_effect = lambda arguments, cwd, env, timeout: subprocess.CompletedProcess(
+            arguments, 1, "", f"invalid volume {secret}")
+        with patch.dict(os.environ, {"REGISTRY_TOKEN": secret}):
+            reason = sp.check(CHECK, self.policy(), cwd=str(self.clone)).reason
+        self.assertNotIn(secret, reason)
+
+    def test_the_hook_denial_names_the_cause_and_tells_the_stage_not_to_retry_variants(self):
+        (self.clone / "docker-compose-local.yml").unlink()
+        reason = self.hook_denial()
+        self.assertIn("could not be resolved", reason)
+        self.assertIn("COMMAND_PERMISSION_RULE=\"compose_unresolved\"", reason)
+        self.assertIn("not_verified", reason)
+        self.assertNotIn("exact operation consent", reason)
+
+    def test_a_resolvable_command_keeps_the_consent_question(self):
+        decision = sp.check(CHECK, self.policy(), cwd=str(self.clone))
+        self.assertEqual("command_table", decision.rule)
+        self.assertIn("exact operation consent", decision.reason)
+        self.assertIsNotNone(self.request()[0])
+
+    def test_the_refusal_is_classified_unverifiable_and_never_blocks_a_stage(self):
+        (self.clone / "docker-compose-local.yml").unlink()
+        records = cp.denial_records([CHECK], self.policy(), "claude", str(self.clone))
+        self.assertEqual("compose_unresolved", records[0]["rule"])
+        cp.classify_denials(records, {}, mandatory=lambda command: True)
+        self.assertEqual(cp.UNVERIFIABLE_CHECK, records[0]["class"])
+        self.assertIn(cp.UNVERIFIABLE_CHECK, cp.RECONCILABLE_DENIALS)
+        self.assertIn("unverified", records[0]["why"])
+
+    def test_a_reconciled_blocked_stage_keeps_the_check_unverified(self):
+        (self.clone / "docker-compose-local.yml").unlink()
+        records = cp.denial_records([CHECK], self.policy("resolve"), "claude", str(self.clone))
+        cp.classify_denials(records, {}, mandatory=lambda command: True)
+        payload = {"status": "BLOCKED", "completed_status": "RESOLVED", "head_sha": "a" * 40,
+                   "tests": {"ran": True, "checks": [{"command": CHECK, "required": True,
+                                                       "result": "not_verified"}]}}
+        cp._reconcile_blocked(payload, "resolve", frozenset({"RESOLVED"}), records, None)
+        self.assertNotIn("denial:", payload["reconciliation"]["reason"])
+
+
 class SocketAndContinuationTests(ComposeConsentCase):
     def test_ac5_socket_permission_is_separate_and_asked_first(self):
         ungranted = self.policy(docker=False)

@@ -162,6 +162,13 @@ def _observed_policy(policy: Any, event: dict[str, Any]) -> Any:
 def refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                       cwd: str | None = None) -> dict[str, Any] | None:
     """Turn runtime-observed refusals into a request; never authorize from prose."""
+    from stage_permissions import compose_resolution_cache
+    with compose_resolution_cache():
+        return _refused_operation(denials, policy, broker, executor, cwd)
+
+
+def _refused_operation(denials: object, policy: Any, broker: Any, executor: str,
+                       cwd: str | None = None) -> dict[str, Any] | None:
     from stage_permissions import check, check_file_edit
     events: list[Any] = denials if isinstance(denials, list) else []
     for event in events:
@@ -257,12 +264,13 @@ AUXILIARY_DENIAL = "auxiliary_denial"
 REDUNDANT_OPERATION = "redundant_operation"
 ESSENTIAL_PERMISSION = "essential_permission"
 ENVIRONMENT_BLOCKER = "environment_blocker"
+UNVERIFIABLE_CHECK = "unverifiable_check"
 UNKNOWN_DENIAL = "unknown"
 DENIAL_CLASSES = (AUXILIARY_DENIAL, REDUNDANT_OPERATION, ESSENTIAL_PERMISSION,
                   ENVIRONMENT_BLOCKER, UNKNOWN_DENIAL)
 #: Only these two let a stage that reported `BLOCKED` be reconciled. `unknown`
 #: is neither assumed essential nor assumed auxiliary: it prevents completion.
-RECONCILABLE_DENIALS = frozenset({AUXILIARY_DENIAL, REDUNDANT_OPERATION})
+RECONCILABLE_DENIALS = frozenset({AUXILIARY_DENIAL, REDUNDANT_OPERATION, UNVERIFIABLE_CHECK})
 #: The roles whose publication the runtime can verify against the code host.
 PUBLISHING_ROLES = frozenset({"implement", "resolve"})
 
@@ -452,6 +460,13 @@ def publication_agrees(publication: dict[str, Any] | None,
 
 def denial_records(denials: object, policy: Any, executor: str,
                    cwd: str | None = None) -> list[dict[str, Any]]:
+    from stage_permissions import compose_resolution_cache
+    with compose_resolution_cache():
+        return _denial_records(denials, policy, executor, cwd)
+
+
+def _denial_records(denials: object, policy: Any, executor: str,
+                    cwd: str | None = None) -> list[dict[str, Any]]:
     """One record for every refusal the stage met, grantable or not (#364).
 
     Each carries the command, the stage, the reason, the rule and an operation
@@ -511,6 +526,12 @@ def classify_denial(record: dict[str, Any], payload: dict[str, Any] | None, *,
     """
     payload = payload if isinstance(payload, dict) else {}
     command = record["command"]
+    if record.get("rule") == "compose_unresolved":
+        # No identity, so no question and no grant: the check cannot run as
+        # configured in this checkout. It stays unverified with its cause and
+        # never stops the stage (#493, #450).
+        return UNVERIFIABLE_CHECK, ("the Compose configuration could not be resolved, so the "
+                                    "check stays unverified")
     blocker = payload.get("environment_blocker")
     if (any(same_command(command, item) for item in environment)
             or (isinstance(blocker, dict) and same_command(command, blocker.get("command")))):
