@@ -2737,6 +2737,9 @@ CODE_WORK_STATUSES = frozenset({"IMPLEMENTED", "RESOLVED", "PARTIALLY_RESOLVED"}
 def _normalize_test_payload(
     payload: dict[str, Any] | None,
     plan: verification_contract.VerificationPlan | None = None,
+    *,
+    dispatched_executor: str | None = None,
+    dispatched_profile: str | None = None,
 ) -> tuple[dict[str, Any], verification_contract.VerificationPlan | None]:
     payload = dict(payload or {})
     tests = payload.get("tests")
@@ -2755,7 +2758,9 @@ def _normalize_test_payload(
         return payload, plan
     try:
         normalized, updated = verification_contract.normalize_tests(
-            tests, payload.get("head_sha", ""), plan=plan)
+            tests, payload.get("head_sha", ""), plan=plan,
+            dispatched_executor=dispatched_executor,
+            dispatched_profile=dispatched_profile)
     except Exception as error:
         # Invalid version/identity/evidence is insufficient verification, not
         # an executed test failure and never an exception escaping the driver.
