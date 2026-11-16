@@ -218,6 +218,16 @@ def stage_fallback(decision: RoutingDecision, profiles: dict | None = None) -> T
     """Resolve the same profile's fallback without rediscovering configuration."""
     return (profiles or load_profiles())[decision.profile].fallback
 
+
+def frozen_target(executor: str, profile_name: str,
+                  profiles: dict[str, Profile] | None = None) -> tuple[Target | None, bool]:
+    """Resolve a check's owning target from the caller's profiles or defaults."""
+    profile = (profiles or load_profiles()).get(profile_name)
+    if profile is None:
+        return None, False
+    target = next((target for target in profile.targets() if target.executor == executor), None)
+    return target, target is not None and target != profile.primary
+
 # Relative cost per profile, same unit as CostEstimate.
 PROFILE_COST = {
     "cheap_tool": 0.1,
