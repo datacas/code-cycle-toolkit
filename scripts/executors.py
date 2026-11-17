@@ -157,7 +157,9 @@ def _paths_overlap(first: str, second: str) -> bool:
 @contextmanager
 def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                            *, writes: bool, publishes: bool, cwd: str,
-                           command_policy: StagePolicy | None = None):
+                           command_policy: StagePolicy | None = None,
+                           docker_host: bool = False,
+                           docker_buildx_fallback: bool = False):
     """Give every native dispatch isolated scratch space outside its checkout."""
     try:
         code, root = _git_read(cwd, "rev-parse", "--show-toplevel")
@@ -181,6 +183,11 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
             raise ExecutorError("dispatch temporary directory overlaps the checkout")
         worker_env = gh_environment(environment)
         worker_env["TMPDIR"] = scratch
+        if docker_host:
+            worker_env["DOCKER_CONFIG"] = (os.environ.get("DOCKER_CONFIG")
+                                             or str(Path.home() / ".docker"))
+            if docker_buildx_fallback and not os.environ.get("BUILDX_CONFIG"):
+                worker_env["BUILDX_CONFIG"] = str(Path(scratch) / "buildx")
         worker_argv = list(argv)
         if adapter.name == "codex":
             profile = next((option.split("=", 1)[1].strip('"')
@@ -216,6 +223,10 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                 "-c", f'shell_environment_policy.set.GH_NO_UPDATE_NOTIFIER={json.dumps(worker_env["GH_NO_UPDATE_NOTIFIER"])}',
                 "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}',
             ]
+            if docker_host:
+                options += ["-c", f'shell_environment_policy.set.DOCKER_CONFIG={json.dumps(worker_env["DOCKER_CONFIG"])}']
+                if worker_env.get("BUILDX_CONFIG"):
+                    options += ["-c", f'shell_environment_policy.set.BUILDX_CONFIG={json.dumps(worker_env["BUILDX_CONFIG"])}']
             worker_argv[-1:-1] = options
         with adapter.policy_files(worker_argv, command_policy, scratch=scratch,
                                   cwd=cwd) as policed_argv:
@@ -654,14 +665,22 @@ def _run_sandbox_probe(argv: list[str], *, cwd: str | None = None, timeout: int 
 def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                        network_domains: tuple[str, ...] = (), path: str | None = None,
                        runner=None) -> dict:
-    """Check Docker from the granted executor sandbox before a stage relies on it."""
+    """Check Docker access and Buildx state writes in the granted sandbox."""
     argv: list[str]
     probe_directory = None
     temporary_settings = None
     probe_scratch = None
+    docker_config = os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")
+    docker_config_path = Path(docker_config).expanduser()
+    if not docker_config_path.is_absolute():
+        docker_config_path = Path(cwd) / docker_config_path
+    docker_config_path = docker_config_path.resolve()
+    docker_env = os.environ.copy()
+    docker_env["DOCKER_CONFIG"] = str(docker_config_path)
+    probe_result = None
     if adapter.name == "codex":
         if native.nested_codex():
-            return {"status": "not_verified", "command": "codex sandbox -- docker version",
+            return {"status": "not_verified", "command": "codex sandbox -- docker build",
                     "executor": adapter.name,
                     "error": "known nested Codex limitation (#268); no sandbox probe was launched"}
         if publishes:
@@ -681,19 +700,28 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
             domains = ",".join(f'{json.dumps(host)}="allow"'
                                 for host in domains_to_allow)
             argv += ["-c", f"permissions.{profile}.network.domains={{{domains}}}"]
-        argv += ["--", "docker", "version"]
+        argv += ["-c", f"shell_environment_policy.set.DOCKER_CONFIG={json.dumps(str(docker_config_path))}"]
+        if os.environ.get("BUILDX_CONFIG"):
+            argv += ["-c", f"shell_environment_policy.set.BUILDX_CONFIG={json.dumps(os.environ['BUILDX_CONFIG'])}"]
+        argv += ["--", "docker"]
     elif adapter.name == "claude":
         executable = shutil.which("srt", path=path)
         if executable is None:
-            return {"status": "not_verified", "command": "srt docker version",
+            return {"status": "not_verified", "command": "srt docker build",
                     "error": "srt is unavailable; Docker reachability was not checked"}
-        try:
-            probe_directory = Path(tempfile.mkdtemp(
-                prefix="code-cycle-docker-probe-", dir=tempfile.gettempdir()))
-            probe_scratch = probe_directory / "scratch"
+    else:
+        return {"status": "not_verified", "command": "docker build",
+                "error": f"{adapter.name} has no Docker sandbox probe"}
+
+    try:
+        probe_directory = Path(tempfile.mkdtemp(
+            prefix="code-cycle-docker-probe-", dir=tempfile.gettempdir()))
+        probe_scratch = probe_directory / "context"
+        probe_scratch.mkdir()
+        (probe_scratch / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        if adapter.name == "claude":
             temporary_settings = probe_directory / "settings.json"
-            probe_scratch.mkdir()
-            writable = [cwd, str(probe_scratch)]
+            writable = [cwd, str(probe_directory), str(docker_config_path)]
             if writes and Path(cwd).is_dir():
                 git_directories = []
                 for option in ("--git-common-dir", "--git-dir"):
@@ -702,7 +730,8 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
                         git_directories.append(str((Path(cwd) / path_value).resolve()))
                 writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
             sandbox = sp.review_sandbox_settings(
-                tuple(writable), network_domains, docker_host=True, publishes=publishes)["sandbox"]
+                tuple(dict.fromkeys(writable)), network_domains,
+                docker_host=True, publishes=publishes)["sandbox"]
             network = dict(sandbox["network"])
             network.setdefault("deniedDomains", [])
             filesystem = dict(sandbox["filesystem"])
@@ -711,40 +740,95 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
             settings = {"network": network, "filesystem": filesystem}
             temporary_settings.write_text(json.dumps(settings), encoding="utf-8")
             temporary_settings.chmod(0o600)
-            argv = [executable, "--settings", str(temporary_settings),
-                    "--", "docker", "version"]
-        except OSError as error:
-            if probe_directory is not None:
-                shutil.rmtree(probe_directory, ignore_errors=True)
-            return {"status": "not_verified", "command": "srt docker version",
-                    "error": f"could not prepare the Claude sandbox probe ({type(error).__name__})"}
-    else:
-        return {"status": "not_verified", "command": "docker version",
-                "error": f"{adapter.name} has no Docker sandbox probe"}
-
-    try:
+            argv = [shutil.which("srt", path=path) or "srt", "--settings",
+                    str(temporary_settings), "--", "docker"]
+        tag = f"code-cycle-probe:{probe_directory.name.rsplit('-', 1)[-1]}"
+        build = [*argv, "build", "--quiet", "--tag", tag, str(probe_scratch)]
+        if adapter.name == "codex":
+            rule = f"permissions.{profile}.filesystem="
+            entries = [f'{json.dumps(str(probe_scratch))}="read"']
+            if docker_config_path.is_dir():
+                entries.append(f'{json.dumps(str(docker_config_path))}="write"')
+            config = next((i for i, option in enumerate(build)
+                           if option.startswith(rule)), None)
+            if config is None:
+                separator = build.index("--")
+                build[separator:separator] = ["-c", f"{rule}{{{','.join(entries)}}}"]
+            else:
+                table = build[config][len(rule):]
+                build[config] = f"{rule}{table[:-1]},{','.join(entries)}}}"
         result = (runner or _run_sandbox_probe)(
-            argv, cwd=cwd, capture_output=True, text=True, timeout=30,
-            stdin=subprocess.DEVNULL,
+            build, cwd=cwd, env=docker_env, capture_output=True, text=True,
+            timeout=60, stdin=subprocess.DEVNULL,
         )
+        # Docker may report socket failures as permission errors too. Retry only
+        # when the output points to Buildx's state directory or a filesystem denial.
+        initial_stdout = result.stdout or ""
+        initial_stderr = result.stderr or ""
+        state_output = (initial_stderr + initial_stdout).lower()
+        state_error = (("buildx" in state_output or ".docker" in state_output
+                        or "builder last activity" in state_output)
+                       and ("read-only" in state_output or "permission denied" in state_output))
+        fallback_used = False
+        if (result.returncode and state_error and not os.environ.get("BUILDX_CONFIG")):
+            fallback = str(probe_directory / "buildx")
+            Path(fallback).mkdir()
+            retry_env = dict(docker_env, BUILDX_CONFIG=fallback)
+            retry_argv = list(build)
+            if adapter.name == "codex":
+                rule = f"permissions.{profile}.filesystem="
+                config = next((i for i, option in enumerate(retry_argv)
+                               if option.startswith(rule)), None)
+                entry = f'{json.dumps(fallback)}="write"'
+                if config is None:
+                    separator = retry_argv.index("--")
+                    retry_argv[separator:separator] = ["-c", f"{rule}{{{entry}}}"]
+                else:
+                    table = retry_argv[config][len(rule):]
+                    retry_argv[config] = f"{rule}{table[:-1]},{entry}}}"
+                separator = retry_argv.index("--")
+                retry_argv[separator:separator] = [
+                    "-c", f"shell_environment_policy.set.BUILDX_CONFIG={json.dumps(fallback)}"]
+            result = (runner or _run_sandbox_probe)(
+                retry_argv, cwd=cwd, env=retry_env, capture_output=True, text=True,
+                timeout=60, stdin=subprocess.DEVNULL,
+            )
+            fallback_used = result.returncode == 0
+            probe_result = {"fallback": "BUILDX_CONFIG", "path": "<dispatch TMPDIR>/buildx",
+                            "status": "verified" if fallback_used else "not_verified",
+                            "error": failure_excerpt(initial_stderr or initial_stdout, 1000)}
+        if result.returncode == 0:
+            try:
+                cleanup = [*argv, "image", "rm", "--force", tag]
+                (runner or _run_sandbox_probe)(
+                    cleanup, cwd=cwd, env=docker_env, capture_output=True,
+                    text=True, timeout=30, stdin=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
         stdout = failure_excerpt(result.stdout or "", 1000)
         stderr = failure_excerpt(result.stderr or "", 1000)
+        error = (stderr or stdout or f"probe exited {result.returncode}")
+        if result.returncode and probe_result and not fallback_used:
+            error = (f"Buildx state write failed: {probe_result['error']}; "
+                     f"fallback failed: {error}")
         return {
             "status": "verified" if result.returncode == 0 else "not_verified",
-            "command": "docker version",
+            "command": "docker build --quiet --tag <probe> <scratch-context>",
             "executor": adapter.name,
             "exit_code": result.returncode,
             "stdout": stdout,
             "stderr": stderr,
-            **({"error": stderr or stdout or f"probe exited {result.returncode}"}
-               if result.returncode else {}),
+            "state_directory": str(docker_config_path),
+            "state_fallback": probe_result,
+            **({"error": error} if result.returncode else {}),
         }
     except subprocess.TimeoutExpired as error:
-        return {"status": "not_verified", "command": "docker version",
+        return {"status": "not_verified", "command": "docker build --quiet --tag <probe> <scratch-context>",
                 "executor": adapter.name,
-                "error": f"sandbox probe timed out after {error.timeout or 30} seconds"}
+                "error": f"sandbox probe timed out after {error.timeout or 60} seconds"}
     except (OSError, subprocess.SubprocessError) as error:
-        return {"status": "not_verified", "command": "docker version",
+        return {"status": "not_verified", "command": "docker build --quiet --tag <probe> <scratch-context>",
                 "executor": adapter.name,
                 "error": f"sandbox probe could not run ({type(error).__name__}: {error})"}
     finally:
@@ -1377,12 +1461,13 @@ class NativeAdapter(Adapter):
             pass
         docker_granted = ("docker_host" in sandbox_grants
                           or bool(command_policy is not None and command_policy.docker))
+        docker_buildx_fallback = False
         if docker_granted:
             native_preflight = policy_note.get("native_sandbox_preflight", {})
             if ((command_policy is not None and command_policy.static_only)
                     or native_preflight.get("status") == "unverified"):
                 docker_probe = {
-                    "status": "not_verified", "command": "docker version",
+                    "status": "not_verified", "command": "docker build --quiet --tag <probe> <scratch-context>",
                     "executor": self.name,
                     "error": "the stage's effective native sandbox could not be reproduced; "
                              "Docker reachability was not checked",
@@ -1397,6 +1482,8 @@ class NativeAdapter(Adapter):
                     path=prerequisite_path, runner=docker_probe_runner,
                 )
             policy_note["docker_host_probe"] = docker_probe
+            docker_buildx_fallback = ((docker_probe.get("state_fallback") or {}).get("status")
+                                      == "verified")
             if docker_probe.get("status") != "verified":
                 task += (
                     "\n\nDocker grant sandbox probe (runtime evidence): "
@@ -1550,6 +1637,8 @@ class NativeAdapter(Adapter):
             with _native_review_scratch(
                 self, argv, environment, writes=writes, publishes=publishes,
                 cwd=worker_cwd,
+                docker_host=docker_granted,
+                docker_buildx_fallback=docker_buildx_fallback,
                 # A Claude stage under an inactive table still gets the minimal
                 # foreground hook (#276); other executors get nothing.
                 command_policy=(command_policy if self.name == "claude" else policy),
@@ -2246,6 +2335,23 @@ class CodexAdapter(NativeAdapter):
         elif denied:
             table = argv[existing][len(rule):]
             argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
+        if "docker_host" in sandbox_grants:
+            docker_config = os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")
+            docker_config_path = Path(docker_config).expanduser()
+            if not docker_config_path.is_absolute() and cwd:
+                docker_config_path = Path(cwd) / docker_config_path
+            docker_config_path = docker_config_path.resolve()
+            if docker_config_path.is_dir():
+                entry = f'{json.dumps(str(docker_config_path))}="write"'
+                existing = next((i for i, option in enumerate(argv)
+                                 if option.startswith(rule)), None)
+                if existing is None:
+                    argv += ["-c", f"{rule}{{{entry}}}"]
+                else:
+                    table = argv[existing][len(rule):]
+                    if entry not in table:
+                        separator = "," if table[1:-1].strip() else ""
+                        argv[existing] = f"{rule}{table[:-1]}{separator}{entry}}}"
         if ignore_rules:
             # Execpolicy rules load only from configuration layers, with no
             # per-run option, so a stage does not inherit the user's

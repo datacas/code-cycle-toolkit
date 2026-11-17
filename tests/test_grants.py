@@ -24,6 +24,10 @@ class GrantRegistryTests(unittest.TestCase):
         self.assertIsNotNone(LINUX)
         self.assertIn("every local Unix socket", LINUX.effective)
         self.assertIn("not only Docker's", LINUX.effective)
+        self.assertIn("DOCKER_CONFIG", LINUX.effective)
+        self.assertIn("~/.docker", LINUX.effective)
+        self.assertIn("credential-helper configuration", LINUX.effective)
+        self.assertIn("persist after the dispatch", LINUX.risks)
         self.assertIn("root", LINUX.risks)
 
     def test_a_scope_exists_only_where_it_was_verified(self) -> None:
@@ -46,6 +50,9 @@ class GrantRegistryTests(unittest.TestCase):
         # #398: the grant text says what the hook does now, and that it is dispatch-wide.
         self.assertIn("separate exact-command consent for compose run", claude.effective)
         self.assertIn("for the whole dispatch", claude.effective)
+        self.assertIn("DOCKER_CONFIG", claude.effective)
+        self.assertIn("~/.docker", claude.effective)
+        self.assertIn("persist after the dispatch", claude.risks)
         self.assertIn("root", claude.risks)
         self.assertIn("indirectly", claude.risks)
         self.assertTrue(claude.isolated_per_dispatch)
