@@ -281,9 +281,19 @@ def isolation_probe(kind: str, *, runner, path: str | None = None) -> tuple[bool
                 target.write_text("synthetic credential probe")
                 credential_files.append(target)
             credential_denials = list(sp.credential_read_denials(home=home))
-        with socket.socket() as listener:
+        listener = None
+        try:
+            listener = socket.socket()
             listener.bind(("127.0.0.1", 0))
             listener.listen()
+        except OSError as error:
+            if listener is not None:
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+            return False, f"{kind} isolation probe unavailable: {error}"
+        with listener:
             script = (
                 "import pathlib,socket,sys\n"
                 f"pathlib.Path({str(allowed / 'ok')!r}).write_text('ok')\n"

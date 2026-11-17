@@ -83,7 +83,11 @@ make a concrete check fail or become unverified.
 Presence alone does not prove isolation. Claude stages needing confined Bash
 verification run a fixed host-owned probe of allowed writes, denied reads and
 writes, and denied local network access. Preparation separately probes `srt`.
-These probes run no repository code. If the required Bash boundary cannot
+These probes run no repository code. If the environment denies creation or
+binding of the probe's localhost listener, the probe records the operating
+system error as unavailable isolation (`not_verified`); the stage continues
+with that evidence instead of raising a dispatch traceback. This does not
+establish that isolation passed. If the required Bash boundary cannot
 start, the command hook removes verification and arbitrary-code grants; the
 stage continues source work with checks recorded as `not_verified`. Reviews
 retain the disposable clone and publication guards and cover static findings

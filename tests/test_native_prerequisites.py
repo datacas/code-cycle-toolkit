@@ -10,11 +10,12 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import socket
 import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import native_prerequisites as native
@@ -211,6 +212,25 @@ class RecoveryTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def require_local_listener(self):
+        listener = None
+        try:
+            listener = socket.socket()
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+        except OSError as error:
+            self.skipTest(f"local sockets denied: {error}")
+        finally:
+            if listener is not None:
+                listener.close()
+
+    def test_local_listener_failure_skips_with_os_cause(self):
+        with patch.object(socket, "socket", side_effect=PermissionError("Operation not permitted")):
+            with self.assertRaises(unittest.SkipTest) as skipped:
+                self.require_local_listener()
+
+        self.assertEqual("local sockets denied: Operation not permitted", str(skipped.exception))
+
     def test_host_tools_preserve_path_order(self):
         original = os.pathsep.join(("/venv/bin", "/local/bin", "/system/bin"))
         for outcome in ("reused", "available"):
@@ -220,6 +240,14 @@ class PreflightTests(unittest.TestCase):
                     for tool in ("srt", "rg")]))
         with patch.object(native.shutil, "which", side_effect=lambda tool, **kw: f"/system/bin/{tool}"):
             self.assertEqual(original, native.tool_path(original))
+
+    def test_socket_creation_failure_is_reported_as_unverified(self):
+        with patch("socket.socket", side_effect=PermissionError("Operation not permitted")):
+            ok, evidence = native.isolation_probe("srt", runner=Mock())
+
+        self.assertFalse(ok)
+        self.assertIn("unavailable", evidence)
+        self.assertIn("Operation not permitted", evidence)
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX")
     def test_host_rg_does_not_switch_verification_python_at_process_boundary(self):
@@ -280,6 +308,7 @@ class PreflightTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "the fake sandbox executable is POSIX")
     def test_srt_probe_gets_managed_rg_at_the_process_boundary(self):
+        self.require_local_listener()
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             tools = home / ".local/lib/code-cycle-tools"
@@ -304,6 +333,7 @@ class PreflightTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX")
     def test_selected_system_rg_is_not_shadowed_by_stale_managed_rg(self):
+        self.require_local_listener()
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             tools = home / ".local/lib/code-cycle-tools"
@@ -367,7 +397,8 @@ class PreflightTests(unittest.TestCase):
         with patch.object(native.shutil, "which", return_value="/tools/bwrap"):
             for runner in (Mock(return_value=subprocess.CompletedProcess([], 1, "", "namespace denied")),
                            Mock(side_effect=subprocess.TimeoutExpired("probe", 30))):
-                ok, evidence = native.isolation_probe("bwrap", runner=runner)
+                with patch.object(socket, "socket", return_value=MagicMock()):
+                    ok, evidence = native.isolation_probe("bwrap", runner=runner)
                 self.assertFalse(ok)
                 self.assertIn("probe", evidence)
                 argv = runner.call_args.args[0]
@@ -375,12 +406,14 @@ class PreflightTests(unittest.TestCase):
 
     def test_lying_probe_success_is_not_verified(self):
         with patch.object(native.shutil, "which", return_value="/tools/bwrap"):
-            ok, _ = native.isolation_probe("bwrap", runner=Mock(
-                return_value=subprocess.CompletedProcess([], 0, "", "")))
+            with patch.object(socket, "socket", return_value=MagicMock()):
+                ok, _ = native.isolation_probe("bwrap", runner=Mock(
+                    return_value=subprocess.CompletedProcess([], 0, "", "")))
         self.assertFalse(ok)
 
     @unittest.skipIf(os.name == "nt", "the fake sandbox executable is POSIX")
     def test_nonzero_real_process_boundary(self):
+        self.require_local_listener()
         with tempfile.TemporaryDirectory() as scratch:
             binary = Path(scratch) / "bwrap"
             binary.write_text("#!/bin/sh\necho 'bwrap: Creating new namespace failed' >&2\nexit 1\n")
