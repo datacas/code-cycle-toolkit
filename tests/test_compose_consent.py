@@ -487,6 +487,55 @@ class AllRolesConsentTests(ComposeConsentCase):
                 reasons = [item.get("reason") for item in self.store._read().get("revocations", [])]
                 self.assertTrue(any("superseded by a later" in str(reason) for reason in reasons))
 
+    def every_role_allows(self, broker, expected, label):
+        for role in self.ROLES:
+            self.assertEqual(expected, self.allowed(policy=self.policy(role), broker=broker, role=role),
+                             f"{label}: {role}")
+
+    def test_a_cycle_approval_beats_a_repository_denial_stored_under_another_role(self):
+        # The same-role path already does this: the cycle decision is read first.
+        grant, _ = self.given("resolve", "deny")
+        other = self.sibling(grant, "review")
+        scope = other.scope_for("claude", "linux")
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                broker = self.broker(cycle_id="c1", task_id="t1",
+                                     **({"answers": {other.id: "cycle"}} if resume else {}))
+                if resume:
+                    broker.operations[other.id] = other
+                    broker.asked = {other.fingerprint(scope)}
+                    broker.prepare_answers("claude", "review")
+                else:
+                    broker.apply_answer(other, scope, "cycle")
+                self.every_role_allows(broker, True, "this cycle")
+                # The repository denial stays for the next cycle.
+                self.every_role_allows(self.broker(cycle_id="c2", task_id="t1"), False, "next cycle")
+                self.every_role_allows(self.broker(), False, "no cycle")
+
+    def test_a_later_answer_replaces_a_run_only_decision_of_another_role(self):
+        grant, broker = self.given("resolve", "deny")
+        other = self.sibling(grant, "review")
+        scope, first = other.scope_for("claude", "linux"), grant.scope_for("claude", "linux")
+        for earlier, later, expected in (("deny", "persistent", True), ("persistent", "deny", False)):
+            with self.subTest(earlier=earlier, later=later):
+                self.store = grants.ConsentStore(self.root / f"run-only-{earlier}.json")
+                broker = self.broker()
+                broker.operations[grant.id] = grant
+                broker.apply_answer(grant, first, earlier, persist=False)
+                broker.apply_answer(other, scope, later)
+                self.every_role_allows(broker, expected, f"{earlier} then {later}")
+                self.every_role_allows(self.broker(), expected, f"{earlier} then {later}, fresh")
+
+    def test_a_denial_removes_a_cycle_approval_of_another_role(self):
+        grant, _ = self.given("resolve", "cycle")
+        broker = self.broker(cycle_id="c1", task_id="t1")
+        first = grant.scope_for("claude", "linux")
+        broker.apply_answer(grant, first, "cycle")
+        other = self.sibling(grant, "review")
+        broker.apply_answer(other, other.scope_for("claude", "linux"), "deny")
+        self.every_role_allows(broker, False, "same broker")
+        self.every_role_allows(self.broker(cycle_id="c1", task_id="t1"), False, "fresh broker")
+
     def test_revoking_the_grant_removes_it_for_every_role(self):
         grant, broker = self.given("review")
         broker.store.revoke(broker.repo_id, grant, grant.scope_for("claude", "linux"))

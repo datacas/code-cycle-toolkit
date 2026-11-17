@@ -603,8 +603,11 @@ persists globally for writing and issue-review roles. An allow or a deny applies
 in every stage role, whichever role was asked: the decision is the operation or
 pattern, and the question says so. The one boundary kept is that a global grant
 never reaches `review` or `rereview`. When decisions of different roles disagree
-about one operation, a denial wins whatever the order of the stored entries; a
-later answer replaces an opposite decision of another role, and the replaced
+about one operation, the narrower source wins (this run, then this cycle, then
+the repository) as it does for a single grant, so a cycle approval is honoured
+while the repository denial stays for later cycles; at equal precedence a denial
+wins whatever the order of the stored entries. A later answer replaces an
+opposite decision of another role, including a run-only one, and the replaced
 entry stays in the revocation audit trail with its reason. An answer can be supplied on resume as
 `--grant command_<sha256>=cycle|persistent|forever|deny`.
 On resume, each supplied grant is checked against the selected executor and

@@ -78,9 +78,10 @@ All notable changes to this project are documented here. This project follows
   asked up to three times per cycle. Matching ignores the role; entries stored
   with any role keep matching, resume grants apply in the first role that runs,
   and revoking one removes every stored copy of the decision. When decisions of
-  different roles disagree about one operation, a denial wins whatever the order
-  of the entries, and a later answer replaces an opposite one with an audit
-  record. The question says the answer holds in every role. A global (`forever`) grant still never reaches
+  different roles disagree about one operation, the narrower source wins (this
+  run, this cycle, then the repository), a denial wins a tie whatever the order
+  of the entries, and a later answer replaces an opposite one, run-only ones
+  included, with an audit record. The question says the answer holds in every role. A global (`forever`) grant still never reaches
   `review` or `rereview`, and the Git, `gh`, publication, credential and shell
   guards still run on every command.
 - CI: a documentation-only pull request no longer queues for a Windows runner.
