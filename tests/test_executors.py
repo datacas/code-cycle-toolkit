@@ -2834,6 +2834,26 @@ class NativeScratchTests(unittest.TestCase):
                         self.assertFalse(observed[0].exists())
         self.assertEqual("", git(self.repo, "status", "--porcelain"))
 
+    def test_claude_docker_grant_makes_config_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docker_config = Path(tmpdir) / "docker-config"
+            docker_config.mkdir()
+            adapter = ex.ClaudeAdapter()
+            for granted in (False, True):
+                runtime_policy = ex.sp.StagePolicy(role="implement", docker=granted)
+                with self.subTest(granted=granted):
+                    with patch.dict(os.environ, {"DOCKER_CONFIG": str(docker_config)}):
+                        with adapter.policy_files(
+                            ["claude", "--verbose", "-p", "work"], runtime_policy,
+                            scratch=tmpdir, cwd=str(self.repo),
+                        ) as argv:
+                            settings = json.loads(argv[argv.index("--settings") + 1])
+                    if not granted:
+                        self.assertNotIn("sandbox", settings)
+                        continue
+                    writable = settings["sandbox"]["filesystem"]["allowWrite"]
+                    self.assertEqual(granted, str(docker_config) in writable)
+
     def test_writing_profiles_preserve_git_rules_and_network_grants(self) -> None:
         for publishes in (False, True):
             adapter = ex.CodexAdapter()

@@ -3204,6 +3204,15 @@ class ClaudeAdapter(NativeAdapter):
             })
             if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
+                if runtime_policy.docker:
+                    docker_config = (os.environ.get("DOCKER_CONFIG")
+                                     or str(Path.home() / ".docker"))
+                    docker_config_path = Path(docker_config).expanduser()
+                    if not docker_config_path.is_absolute():
+                        docker_config_path = Path(cwd) / docker_config_path
+                    docker_config_path = docker_config_path.resolve()
+                    if docker_config_path.is_dir():
+                        writable.append(str(docker_config_path))
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []
                     for option in ("--git-common-dir", "--git-dir"):
