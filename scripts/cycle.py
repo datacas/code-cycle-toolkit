@@ -55,7 +55,7 @@ from executors import (
 from harness import build_harness_snapshot
 from grants import (
     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, PENDING, ConsentBroker, GRANTS,
-    consent_role, denial_context, granted_context,
+    denial_context, granted_context,
 )
 from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,

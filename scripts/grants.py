@@ -888,6 +888,11 @@ class ConsentBroker:
             # A dispatch-unique operation keeps a wider answer for this cycle (#439 AC-14).
             answer = self.apply_answer(grant, scope, answer, persist=persist)
             self._consumed_answers.add(key)
+            if answer == ALLOW_GLOBAL and not allow_global:
+                # A global answer is stored for the writers; a reviewer never gets it.
+                self.notes.append(f"{grant.id}={answer} does not reach this reviewer stage; "
+                                  "it applies to the writing stages")
+                return None, None
             if persist or answer == ALLOW_CYCLE:
                 return answer, "--grant"
             self.notes.append(f"{grant.id}={answer} kept for this run only on "

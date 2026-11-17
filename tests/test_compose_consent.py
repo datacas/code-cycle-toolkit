@@ -396,6 +396,24 @@ class AllRolesConsentTests(ComposeConsentCase):
         for role in ("review", "rereview"):
             self.assertFalse(self.allowed(policy=self.policy(role), broker=fresh, role=role), role)
 
+    def test_a_resume_forever_answer_never_reaches_a_reviewer_that_runs_first(self):
+        original = self.broker()
+        request, _ = self.request(CHECK, self.policy("resolve"), original)
+        grant = original.grant_for(request)
+        scope = grant.scope_for("claude", "linux")
+
+        resumed = self.broker(answers={grant.id: "forever"})
+        resumed.operations[grant.id] = grant
+        resumed.asked = {grant.fingerprint(scope)}
+        for role in ("review", "rereview"):
+            self.assertEqual((), resumed.command_entries("claude", role), role)
+        self.assertTrue(any("does not reach this reviewer" in note for note in resumed.notes))
+        # The answer is still kept for the writers, in this run and the next.
+        self.assertEqual(1, len(resumed.command_entries("claude", "implement")))
+        for role in ("implement", "resolve", "verify"):
+            self.assertTrue(self.allowed(policy=self.policy(role), broker=self.broker(), role=role), role)
+        self.assertFalse(self.allowed(policy=self.policy("review"), broker=self.broker(), role="review"))
+
     def test_a_decision_stored_before_the_change_with_any_role_still_matches(self):
         request, broker = self.request(CHECK, self.policy("resolve"))
         self.answer(request, broker)
