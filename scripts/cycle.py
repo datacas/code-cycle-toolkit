@@ -55,7 +55,7 @@ from executors import (
 from harness import build_harness_snapshot
 from grants import (
     ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY, PENDING, ConsentBroker, GRANTS,
-    consent_role, denial_context, granted_context,
+    denial_context, granted_context,
 )
 from environment_recovery import (
     ENVIRONMENT_RECOVERY_GUIDANCE, denied_docker_blocker, recovery_context, sandbox_blocker,
@@ -949,9 +949,6 @@ class CycleRecorder:
                 context += "\n\nResume grant preflight:\n" + "\n".join(grant_notes)
             for grant_id in granted:
                 grant = consent.registry[grant_id]
-                if (grant_id not in GRANTS and grant.operation is not None
-                        and consent_role(grant.operation["role"]) != consent_role(run.role)):
-                    continue
                 scope = grant.scope_for(executor, consent.platform)
                 if scope is not None:
                     context += "\n\n" + granted_context(grant, scope)

@@ -3901,7 +3901,7 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
 
 
 def same_operation(stored: Any, op: dict[str, Any]) -> bool:
-    """Exact equality, with a stored rereview decision read as a review one."""
+    """Exact equality of the operation, whatever role it was decided in (#500)."""
     if not isinstance(stored, dict):
         return False
     def ordinary(value):
@@ -3918,12 +3918,11 @@ def same_operation(stored: Any, op: dict[str, Any]) -> bool:
             return [word for word in words if not (
                 isinstance(word, dict) and "env" in word
                 or isinstance(word, str) and _ENV_ASSIGNMENT.match(word))]
-        return (consent_role(stored.get("role")) == consent_role(op.get("role"))
-                and stored.get("tool") == op.get("tool") == "Bash"
+        return (stored.get("tool") == op.get("tool") == "Bash"
                 and stored.get("compose") == op.get("compose")
                 and stored.get("pattern", {}).get("cwd") == op.get("pattern", {}).get("cwd")
                 and check_words(stored) == check_words(op))
-    return {**stored, "role": consent_role(stored.get("role"))} == op
+    return {**stored, "role": op.get("role")} == op
 
 
 def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None) -> str | None:
@@ -3933,21 +3932,27 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
         op = operation(tool, tool_input, policy, cwd)
     except (ValueError, OSError, TypeError):
         return None
-    for entry in policy.command_permissions:
-        if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}:
-            return entry["decision"]
+    # Decisions stored under different roles can disagree about one operation.
+    # A denial wins whatever the order of the entries, never an allow that
+    # happened to be loaded first (#500).
+    exact = {entry["decision"] for entry in policy.command_permissions
+             if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}}
+    if exact:
+        return "deny" if "deny" in exact else "allow"
     # Pattern authorization lifts table membership, never a concrete guard.
     patterns = [entry for entry in policy.command_permissions
                 if entry.get("operation", {}).get("version") == 2]
     if patterns and tool == "Bash" and protected_reason(tool, tool_input, policy, cwd) is None:
         from grants import pattern_covers_operation
+        covering = set()
         for entry in patterns:
             stored = entry.get("operation", {})
             if (stored.get("version") == 2 and stored.get("tool") == "Bash"
-                    and consent_role(stored.get("role")) == consent_role(policy.role)
                     and entry.get("decision") in {"allow", "deny"}
                     and pattern_covers_operation(stored, op)):
-                return entry["decision"]
+                covering.add(entry["decision"])
+        if covering:
+            return "deny" if "deny" in covering else "allow"
     return None
 
 

@@ -544,7 +544,7 @@ same environment prefixes and directory as the run) and the check identity
 and `$TMPDIR` are normalized, in the words, the values of environment prefixes
 and the resolved configuration; the prefixes themselves stay, so a command with
 `DOCKER_HOST`, `COMPOSE_FILE` or `LD_PRELOAD` is another command. Review and
-rereview share the identity. A change of any part asks again.
+rereview and every other stage role share the identity (#500). A change of any part asks again.
 
 The hook resolves the configuration on the host before anyone answers, so the
 command chooses nothing it executes: the hook always runs its own `docker` from

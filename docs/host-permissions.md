@@ -599,13 +599,21 @@ command family described above and retain the same concrete guards.
 An allow applies to matching operations in later dispatches and retries of the
 selected scope. **This cycle** is keyed by cycle ID and can be reloaded for that
 ID; **this repository** persists across issues and resumed runs; **forever**
-persists globally for writing and issue-review roles. Different stage roles
-require their own decisions. An answer can be supplied on resume as
+persists globally for writing and issue-review roles. An allow or a deny applies
+in every stage role, whichever role was asked: the decision is the operation or
+pattern, and the question says so. The one boundary kept is that a global grant
+never reaches `review` or `rereview`. When decisions of different roles disagree
+about one operation, the narrower source wins (this run, then this cycle, then
+the repository) as it does for a single grant, so a cycle approval is honoured
+while the repository denial stays for later cycles; at equal precedence a denial
+wins whatever the order of the stored entries. A later answer replaces an
+opposite decision of another role, including a run-only one, and the replaced
+entry stays in the revocation audit trail with its reason. An answer can be supplied on resume as
 `--grant command_<sha256>=cycle|persistent|forever|deny`.
 On resume, each supplied grant is checked against the selected executor and
-stage role and applied to that dispatch's permission policy before the agent
-starts. A grant ID that is unknown or cannot cover that executor or role is
-reported with its reason before the dispatch. A denial recorded by Claude's
+applied to that dispatch's permission policy before the agent starts, in
+whichever role runs first. A grant ID that is unknown or cannot cover that
+executor is reported with its reason before the dispatch. A denial recorded by Claude's
 permission layer enters the same consent flow as a hook refusal; without an
 answer, the stage stops as `permission_required` with the exact operation.
 A global grant never covers `review` or `rereview`, because those stages judge
