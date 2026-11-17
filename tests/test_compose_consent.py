@@ -431,6 +431,62 @@ class AllRolesConsentTests(ComposeConsentCase):
         for role in self.ROLES:
             self.assertTrue(self.allowed(command, self.policy(role), broker, role=role), role)
 
+    def sibling(self, grant, role):
+        """The same operation decided under another role, as an older store keeps it."""
+        return grants.make_grant({**grant.operation, "role": role}, "claude", "linux")
+
+    def legacy_store(self, first, second):
+        """Write two opposite decisions of one operation, bypassing supersession."""
+        entries = {}
+        for grant, decision in (first, second):
+            scope = grant.scope_for("claude", "linux")
+            entries.setdefault(grant.id, {})[grant.fingerprint(scope)] = {
+                "decision": decision, "fingerprint": grant.fingerprint(scope),
+                "executor": "claude", "platform": "linux", "decided_at": "2026-01-01T00:00:00+00:00",
+                "operation": grant.operation,
+                "user_approval": {"decision": decision, "source": "consent answer"},
+                "executed_commands": []}
+        payload = self.store._read()
+        payload["repos"]["owner/repo"] = entries
+        self.store._write(payload)
+
+    def test_a_denial_beats_an_older_allow_of_another_role_in_either_order(self):
+        grant, _ = self.given("resolve")
+        review = self.sibling(grant, "review")
+        for order in (((grant, "allow"), (review, "deny")), ((review, "deny"), (grant, "allow"))):
+            with self.subTest(order=[decision for _, decision in order]):
+                self.store = grants.ConsentStore(self.root / f"legacy-{order[0][1]}.json")
+                self.legacy_store(*order)
+                for role in self.ROLES:
+                    policy = replace(self.policy(role),
+                                     command_permissions=self.broker().command_entries("claude", role))
+                    decision = sp.check(CHECK, policy, cwd=str(self.clone))
+                    self.assertFalse(decision.allowed, role)
+                    self.assertEqual("user_denial", decision.rule, role)
+
+    def test_matching_does_not_depend_on_the_order_of_the_entries(self):
+        grant, broker = self.given("resolve")
+        operation = grant.operation
+        for decisions in (("allow", "deny"), ("deny", "allow")):
+            entries = tuple({"operation": {**operation, "role": role}, "decision": decision}
+                            for role, decision in zip(("resolve", "review"), decisions))
+            policy = replace(self.policy("review"), command_permissions=entries)
+            self.assertFalse(sp.check(CHECK, policy, cwd=str(self.clone)).allowed, decisions)
+
+    def test_the_later_decision_replaces_an_opposite_one_of_another_role(self):
+        for first, second in (("persistent", "deny"), ("deny", "persistent")):
+            with self.subTest(first=first, second=second):
+                self.store = grants.ConsentStore(self.root / f"later-{first}.json")
+                grant, broker = self.given("resolve", first)
+                other = self.sibling(grant, "review")
+                broker.apply_answer(other, other.scope_for("claude", "linux"), second)
+                expect = second != "deny"
+                for role in self.ROLES:
+                    self.assertEqual(expect, self.allowed(policy=self.policy(role),
+                                                          broker=self.broker(), role=role), role)
+                reasons = [item.get("reason") for item in self.store._read().get("revocations", [])]
+                self.assertTrue(any("superseded by a later" in str(reason) for reason in reasons))
+
     def test_revoking_the_grant_removes_it_for_every_role(self):
         grant, broker = self.given("review")
         broker.store.revoke(broker.repo_id, grant, grant.scope_for("claude", "linux"))

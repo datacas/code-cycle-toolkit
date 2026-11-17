@@ -3932,20 +3932,27 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
         op = operation(tool, tool_input, policy, cwd)
     except (ValueError, OSError, TypeError):
         return None
-    for entry in policy.command_permissions:
-        if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}:
-            return entry["decision"]
+    # Decisions stored under different roles can disagree about one operation.
+    # A denial wins whatever the order of the entries, never an allow that
+    # happened to be loaded first (#500).
+    exact = {entry["decision"] for entry in policy.command_permissions
+             if same_operation(entry.get("operation"), op) and entry.get("decision") in {"allow", "deny"}}
+    if exact:
+        return "deny" if "deny" in exact else "allow"
     # Pattern authorization lifts table membership, never a concrete guard.
     patterns = [entry for entry in policy.command_permissions
                 if entry.get("operation", {}).get("version") == 2]
     if patterns and tool == "Bash" and protected_reason(tool, tool_input, policy, cwd) is None:
         from grants import pattern_covers_operation
+        covering = set()
         for entry in patterns:
             stored = entry.get("operation", {})
             if (stored.get("version") == 2 and stored.get("tool") == "Bash"
                     and entry.get("decision") in {"allow", "deny"}
                     and pattern_covers_operation(stored, op)):
-                return entry["decision"]
+                covering.add(entry["decision"])
+        if covering:
+            return "deny" if "deny" in covering else "allow"
     return None
 
 

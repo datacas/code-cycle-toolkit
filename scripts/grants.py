@@ -581,20 +581,34 @@ class ConsentStore:
         # role for the same operation is the same decision, so it goes too.
         operation = getattr(grant, "operation", None)
         if operation:
-            same = {**operation, "role": None}
-            for other_id, others in list((payload["repos"].get(repo_id) or {}).items()):
-                if other_id == grant.id or not isinstance(others, dict):
-                    continue
-                for key, other in list(others.items()):
-                    stored = other.get("operation") if isinstance(other, dict) else None
-                    if (isinstance(stored, dict) and {**stored, "role": None} == same
-                            and other.get("executor") == entry.get("executor")
-                            and other.get("platform") == entry.get("platform")):
-                        others.pop(key)
-                        payload["revocations"].append({
-                            "repo": repo_id, "grant": other_id, **other, "revoked_at": revoked_at})
+            self._drop_equivalent(payload, repo_id, grant, operation, entry.get("executor"),
+                                  entry.get("platform"), lambda other: True,
+                                  revoked_at=revoked_at)
         self._write(payload)
         return True
+
+    @staticmethod
+    def _drop_equivalent(payload, repo_id, grant, operation, executor, platform, selected,
+                         *, reason=None, revoked_at=None) -> None:
+        """Remove the entries of other grants that decide the same operation.
+
+        Equivalent means equal apart from the role. Each removal stays in the
+        revocation audit trail.
+        """
+        revoked_at = revoked_at or datetime.now(timezone.utc).isoformat()
+        same = {**operation, "role": None}
+        for other_id, others in list((payload["repos"].get(repo_id) or {}).items()):
+            if other_id == grant.id or not isinstance(others, dict):
+                continue
+            for key, other in list(others.items()):
+                stored = other.get("operation") if isinstance(other, dict) else None
+                if (isinstance(stored, dict) and {**stored, "role": None} == same
+                        and other.get("executor") == executor
+                        and other.get("platform") == platform and selected(other)):
+                    others.pop(key)
+                    payload.setdefault("revocations", []).append({
+                        "repo": repo_id, "grant": other_id, **other, "revoked_at": revoked_at,
+                        **({"reason": reason} if reason else {})})
 
     def save(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope,
              decision: str) -> None:
@@ -611,6 +625,14 @@ class ConsentStore:
             "user_approval": {"decision": decision, "source": "consent answer"},
             "executed_commands": [],
         }
+        # The latest decision is the one in force: an opposite decision for the
+        # same operation stored under another role is superseded, and kept in
+        # the audit trail (#500).
+        operation = getattr(grant, "operation", None)
+        if operation:
+            self._drop_equivalent(payload, repo_id, grant, operation, scope.executor,
+                                  scope.platform, lambda other: other.get("decision") != decision,
+                                  reason=f"superseded by a later {decision} ({grant.id})")
         self._write(payload)
 
     def record_execution(self, repo_id: str, grant: SensitiveGrant, scope: GrantScope,
