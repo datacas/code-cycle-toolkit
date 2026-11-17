@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -492,6 +493,12 @@ class HeadMovedTests(ParallelTestCase):
         self.github.set_checks(HEAD, PENDING)
         self.github.set_checks(OTHER, PASSED)
 
+        worktree = git_repo(self)
+        origin = worktree.parent / "origin.git"
+        subprocess.run(["git", "init", "--bare", str(origin)], check=True,
+                       capture_output=True, text=True)
+        git(worktree, "remote", "add", "origin", str(origin))
+
         def push(now):
             self.github.head = OTHER
 
@@ -499,10 +506,10 @@ class HeadMovedTests(ParallelTestCase):
         with mock.patch.object(rc, "probe_change_request",
                                return_value=mock.Mock(head_sha=OTHER)), mock.patch.object(
                 rc, "synchronize_worktree", return_value=(HEAD, OTHER)) as sync:
-            report = self.parallel(cwd=str(ROOT))
+            report = self.parallel(cwd=str(worktree))
 
         self.assertTrue(sync.called, report.explain())
-        sync.assert_called_once_with("4", str(ROOT), target_head=OTHER)
+        sync.assert_called_once_with("4", str(worktree), target_head=OTHER)
         self.assertTrue(any(HEAD in line and OTHER in line for _, line in report.notes))
         sync_events = cj.events(self.store.path, "owner/api", task_id="API-7",
                                 kinds=("stage_result",))

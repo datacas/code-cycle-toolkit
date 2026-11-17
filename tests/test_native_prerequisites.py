@@ -221,6 +221,14 @@ class PreflightTests(unittest.TestCase):
         with patch.object(native.shutil, "which", side_effect=lambda tool, **kw: f"/system/bin/{tool}"):
             self.assertEqual(original, native.tool_path(original))
 
+    def test_socket_creation_failure_is_reported_as_unverified(self):
+        with patch("socket.socket", side_effect=PermissionError("Operation not permitted")):
+            ok, evidence = native.isolation_probe("srt", runner=Mock())
+
+        self.assertFalse(ok)
+        self.assertIn("unavailable", evidence)
+        self.assertIn("Operation not permitted", evidence)
+
     @unittest.skipIf(os.name == "nt", "the fake executables are POSIX")
     def test_host_rg_does_not_switch_verification_python_at_process_boundary(self):
         with tempfile.TemporaryDirectory() as temporary:
