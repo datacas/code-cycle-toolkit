@@ -402,10 +402,13 @@ DOCKER_HOST = SensitiveGrant(
             executor="codex", platform="linux",
             effective=("every local Unix socket the user can reach, not only "
                        "Docker's: also ssh-agent, D-Bus and any other local "
-                       "service socket. Codex on Linux cannot allow one socket alone"),
-            risks=("Docker acts as root on the host, and ssh-agent can sign "
-                   "with your keys. Network domains and read-only review "
-                   "checkouts stay as they are"),
+                       "service socket. Codex on Linux cannot allow one socket alone. "
+                       "The stage can also write Docker's configuration and persistent "
+                       "state under DOCKER_CONFIG (by default ~/.docker), including "
+                       "contexts, plugins and credential-helper configuration"),
+            risks=("Docker acts as root on the host, ssh-agent can sign with your keys, "
+                   "and Docker configuration/state writes persist after the dispatch. "
+                   "Network domains and read-only review checkouts stay as they are"),
             isolated_per_dispatch=True,
         ),
         GrantScope(
@@ -414,10 +417,14 @@ DOCKER_HOST = SensitiveGrant(
                        "D-Bus and other local service sockets, for the whole dispatch; "
                        "Claude's command hook permits docker compose up, down, ps, logs "
                        "and build, and asks a separate exact-command consent for "
-                       "compose run and every other Docker command"),
+                       "compose run and every other Docker command. The stage can also "
+                       "write Docker's configuration and persistent state under "
+                       "DOCKER_CONFIG (by default ~/.docker), including contexts, "
+                       "plugins and credential-helper configuration"),
             risks=("Access to the Docker daemon is in practice root on the host, and "
                    "ssh-agent can sign with your keys. A consented command that runs "
-                   "Docker indirectly reaches it without a per-operation check"),
+                   "Docker indirectly reaches it without a per-operation check. "
+                   "Docker configuration/state writes persist after the dispatch"),
             isolated_per_dispatch=True,
         ),
     ),

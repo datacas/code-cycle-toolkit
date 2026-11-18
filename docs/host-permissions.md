@@ -753,10 +753,21 @@ The stage report lists each refused command, read from Claude's
 [grant flow](routing.md) (`stop_reason=permission_required`,
 `--grant docker_host=…`). On Linux the Claude grant opens every reachable Unix
 socket for that dispatch, while the command table permits only the five listed
-Compose subcommands. The runtime probes `docker version` inside the sandbox;
-failure leaves Docker-dependent checks `not_verified` and independent work
-continues. `docker.host_socket_access: true` pre-authorizes both scopes. Docker
-access is in practice root on the host.
+Compose subcommands. The grant also permits writes to Docker's configured
+`DOCKER_CONFIG` directory (`~/.docker` by default), which may hold persistent
+contexts, plugins and credential-helper configuration. That scope is stated in
+the consent disclosure; a persistent decision made before this write was part
+of its scope is asked for acceptance again. Project-defined `DOCKER_CONFIG` and
+`BUILDX_CONFIG` values remain intact. The resolved path may not be the user's
+home directory or an ancestor of it; that configuration is refused so the
+grant cannot expose other files under `$HOME`. The runtime probes a tiny `docker build`
+inside the sandbox so it exercises Buildx state writes as well as socket
+reachability. When the executor cannot make Docker's state directory writable
+and Buildx reports a state-write failure, it retries with `BUILDX_CONFIG` in
+the dispatch `TMPDIR` and records the fallback. Other failures retain their
+actual error, leave Docker-dependent checks `not_verified` and let independent
+work continue. `docker.host_socket_access: true` pre-authorizes both scopes.
+Docker access is in practice root on the host.
 
 Codex rejections are not reported this way yet: how `codex exec` reports a
 command its sandbox or execpolicy refused has not been verified.

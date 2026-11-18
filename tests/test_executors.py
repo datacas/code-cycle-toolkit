@@ -2532,9 +2532,12 @@ class DockerHostProbeTests(unittest.TestCase):
             seen = {"settings_paths": []}
 
             def runner(argv, **kwargs):
-                seen["argv"] = argv
-                seen["cwd"] = kwargs["cwd"]
-                if adapter.name == "claude":
+                if "build" in argv:
+                    seen["argv"] = argv
+                    seen["cwd"] = kwargs["cwd"]
+                    seen["env"] = kwargs["env"]
+                    seen["has_dockerfile"] = (Path(argv[-1]) / "Dockerfile").is_file()
+                if adapter.name == "claude" and "build" in argv:
                     settings_path = Path(argv[argv.index("--settings") + 1])
                     seen["settings_paths"].append(settings_path)
                     seen["settings"] = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -2554,7 +2557,11 @@ class DockerHostProbeTests(unittest.TestCase):
                 self.assertEqual("/worktree", seen["cwd"])
                 self.assertIn(expected, " ".join(seen["argv"]) if adapter.name == "codex"
                               else str(seen["settings"]))
-                self.assertEqual(["--", "docker", "version"], seen["argv"][-3:])
+                self.assertIn("build", seen["argv"])
+                self.assertTrue(seen["has_dockerfile"])
+                self.assertEqual("docker build --quiet --tag <probe> <scratch-context>",
+                                 result["command"])
+                self.assertIn("DOCKER_CONFIG", seen["env"])
                 if adapter.name == "claude":
                     self.assertEqual(2, len(seen["settings_paths"]))
                     self.assertNotEqual(seen["settings_paths"][0], seen["settings_paths"][1])
@@ -2580,6 +2587,264 @@ class DockerHostProbeTests(unittest.TestCase):
                 self.assertEqual(1, result["exit_code"])
                 self.assertIn("permission denied", result["error"])
 
+    def test_probe_uses_buildx_fallback_only_for_docker_state_write_failures(self) -> None:
+        for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                if len(calls) == 1:
+                    return completed(returncode=1,
+                                     stderr="failed to update builder last activity time: "
+                                            "open ~/.docker/buildx/activity/.tmp: "
+                                            "read-only file system")
+                return completed()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch.dict(os.environ, {"TMPDIR": tmpdir}, clear=False):
+                    with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                        result = ex._docker_host_probe(
+                            adapter, cwd="/worktree", writes=True, publishes=False,
+                            runner=runner,
+                        )
+            with self.subTest(executor=adapter.name):
+                self.assertEqual("verified", result["status"])
+                self.assertEqual("BUILDX_CONFIG", result["state_fallback"]["fallback"])
+                self.assertIn("<dispatch TMPDIR>/buildx", result["state_fallback"]["path"])
+                self.assertIn("BUILDX_CONFIG", calls[1][1]["env"])
+
+    def test_codex_dispatch_only_adds_docker_state_access_with_the_grant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            docker_config = home / ".docker"
+            docker_config.mkdir(parents=True)
+            for grants in ((), ("docker_host",)):
+                seen = {}
+
+                def runner(argv, timeout=None, cwd=None, env=None):
+                    seen["argv"] = argv
+                    seen["env"] = env
+                    return completed()
+
+                with patch("executors.Path.home", return_value=home):
+                    with patch.dict(os.environ, {"TMPDIR": tmpdir}, clear=True):
+                        result = ex.CodexAdapter().dispatch(
+                            TARGET, "work", cwd=tmpdir, writes=True,
+                            sandbox_grants=grants, runner=runner,
+                        )
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+                profile = "code_cycle_write"
+                filesystem = next(option for option in seen["argv"]
+                                  if option.startswith(f"permissions.{profile}.filesystem="))
+                with self.subTest(grants=grants):
+                    if grants:
+                        self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', filesystem)
+                        self.assertNotIn("={,", filesystem)
+                        self.assertEqual(str(docker_config.resolve()), seen["env"]["DOCKER_CONFIG"])
+                        self.assertTrue(any("shell_environment_policy.set.DOCKER_CONFIG" in option
+                                            for option in seen["argv"]))
+                    else:
+                        self.assertNotIn(str(docker_config), filesystem)
+                        self.assertNotIn("DOCKER_CONFIG", seen["env"])
+                        self.assertFalse(any("shell_environment_policy.set.DOCKER_CONFIG" in option
+                                             for option in seen["argv"]))
+
+    def test_codex_docker_grant_preserves_project_state_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            docker_config = Path(tmpdir) / "project-docker"
+            buildx_config = Path(tmpdir) / "project-buildx"
+            docker_config.mkdir()
+            buildx_config.mkdir()
+            seen = {}
+
+            def runner(argv, timeout=None, cwd=None, env=None):
+                seen["argv"] = argv
+                seen["env"] = env
+                return completed()
+
+            with patch("executors.Path.home", return_value=home):
+                with patch.dict(os.environ, {
+                    "TMPDIR": tmpdir,
+                    "DOCKER_CONFIG": str(docker_config),
+                    "BUILDX_CONFIG": str(buildx_config),
+                }, clear=True):
+                    result = ex.CodexAdapter().dispatch(
+                        TARGET, "work", cwd=tmpdir, writes=True,
+                        sandbox_grants=("docker_host",), runner=runner,
+                    )
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(str(docker_config.resolve()), seen["env"]["DOCKER_CONFIG"])
+        self.assertEqual(str(buildx_config), seen["env"]["BUILDX_CONFIG"])
+        filesystem = next(option for option in seen["argv"]
+                          if option.startswith("permissions.code_cycle_write.filesystem="))
+        self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', filesystem)
+        self.assertNotIn(str(home / ".docker"), filesystem)
+        self.assertTrue(any(f"shell_environment_policy.set.BUILDX_CONFIG={json.dumps(str(buildx_config))}"
+                            in option for option in seen["argv"]))
+
+    def test_probe_keeps_build_failure_cause_when_buildx_fallback_fails(self) -> None:
+        calls = 0
+
+        def runner(argv, **kwargs):
+            nonlocal calls
+            calls += 1
+            return completed(returncode=1,
+                             stderr=("failed to update builder last activity time: "
+                                     "read-only file system" if calls == 1 else
+                                     "permission denied writing Buildx state"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"TMPDIR": tmpdir}, clear=False):
+                with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                    result = ex._docker_host_probe(
+                        ex.ClaudeAdapter(), cwd="/worktree", writes=True,
+                        publishes=False, runner=runner,
+                    )
+        self.assertEqual("not_verified", result["status"])
+        self.assertIn("read-only file system", result["error"])
+        self.assertIn("fallback failed", result["error"])
+        self.assertEqual("not_verified", result["state_fallback"]["status"])
+
+    def test_probe_keeps_a_project_buildx_config_on_state_write_failure(self) -> None:
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs)
+            return completed(returncode=1,
+                             stderr="failed to update builder last activity time: "
+                                    "read-only file system")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            configured = str(Path(tmpdir) / "project-buildx")
+            with patch.dict(os.environ, {"TMPDIR": tmpdir, "BUILDX_CONFIG": configured},
+                            clear=False):
+                with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                    result = ex._docker_host_probe(
+                        ex.ClaudeAdapter(), cwd="/worktree", writes=True,
+                        publishes=False, runner=runner,
+                    )
+        self.assertEqual("not_verified", result["status"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual(configured, calls[0]["env"]["BUILDX_CONFIG"])
+        self.assertIsNone(result["state_fallback"])
+
+    def test_docker_config_resolution_matches_dispatch_and_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            cwd = root / "worktree"
+            home.mkdir()
+            cwd.mkdir()
+            for configured, expected in (
+                ("~/docker-alt", home / "docker-alt"),
+                ("relative/docker-alt", cwd / "relative" / "docker-alt"),
+            ):
+                expected.mkdir(parents=True)
+                seen = {}
+
+                def dispatch_runner(argv, timeout=None, cwd=None, env=None):
+                    seen["dispatch_argv"] = argv
+                    seen["dispatch_env"] = env
+                    return completed()
+
+                def probe_runner(argv, **kwargs):
+                    if "build" in argv:
+                        seen["probe_argv"] = argv
+                        seen["probe_env"] = kwargs["env"]
+                    return completed()
+
+                with patch("executors.Path.home", return_value=home):
+                    with patch.dict(os.environ, {
+                        "TMPDIR": tmpdir,
+                        "HOME": str(home),
+                        "DOCKER_CONFIG": configured,
+                    }, clear=False):
+                        dispatched = ex.CodexAdapter().dispatch(
+                            TARGET, "work", cwd=str(cwd), writes=True,
+                            sandbox_grants=("docker_host",), runner=dispatch_runner,
+                        )
+                        probed = ex._docker_host_probe(
+                            ex.CodexAdapter(), cwd=str(cwd), writes=True,
+                            publishes=False, runner=probe_runner,
+                        )
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, dispatched.outcome)
+                self.assertEqual("verified", probed["status"])
+                self.assertEqual(str(expected.resolve()),
+                                 seen["dispatch_env"]["DOCKER_CONFIG"])
+                self.assertEqual(str(expected.resolve()), seen["probe_env"]["DOCKER_CONFIG"])
+                filesystem = next(option for option in seen["dispatch_argv"]
+                                  if option.startswith(
+                                      "permissions.code_cycle_write.filesystem="))
+                self.assertIn(f'{json.dumps(str(expected.resolve()))}="write"', filesystem)
+                self.assertIn(f'{json.dumps(str(expected.resolve()))}="write"',
+                              " ".join(seen["probe_argv"]))
+
+    def test_docker_config_cannot_grant_home_or_its_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            with patch("executors.Path.home", return_value=home):
+                for configured in (str(home), str(home.parent)):
+                    with patch.dict(os.environ, {"DOCKER_CONFIG": configured}, clear=False):
+                        with self.subTest(configured=configured):
+                            with self.assertRaisesRegex(
+                                ex.ExecutorError, "contains the user's home directory"
+                            ):
+                                ex._effective_docker_config_path(tmpdir)
+
+    def test_refused_docker_config_does_not_prevent_native_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+                launched = []
+
+                def runner(argv, timeout=None, cwd=None, env=None):
+                    launched.append((argv, env))
+                    return completed("{}")
+
+                policy = (ex.sp.StagePolicy(role="implement", docker=True)
+                          if adapter.name == "claude" else None)
+                dispatch_options = {
+                    "command_policy": policy,
+                    "docker_probe_runner": lambda *args, **kwargs: self.fail(
+                        "unsafe Docker state must be rejected before the probe"
+                    ),
+                }
+                if adapter.name == "codex":
+                    dispatch_options["sandbox_grants"] = ("docker_host",)
+                with patch("executors.Path.home", return_value=home):
+                    with patch.dict(os.environ, {
+                        "HOME": str(home),
+                        "DOCKER_CONFIG": str(home),
+                        "TMPDIR": tmpdir,
+                    }, clear=False):
+                        result = adapter.dispatch(
+                            TARGET, "work", cwd=tmpdir, writes=True,
+                            runner=runner, **dispatch_options,
+                        )
+
+                with self.subTest(executor=adapter.name):
+                    self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                    self.assertEqual(1, len(launched))
+                    self.assertEqual(str(home), launched[0][1].get("DOCKER_CONFIG"))
+                    if adapter.name == "codex":
+                        self.assertFalse(any(
+                            "permissions.code_cycle_write.filesystem=" in option
+                            and str(home) in option for option in launched[0][0]
+                        ))
+                        self.assertFalse(any(
+                            "shell_environment_policy.set.DOCKER_CONFIG" in option
+                            for option in launched[0][0]
+                        ))
+                    else:
+                        settings = json.loads(
+                            launched[0][0][launched[0][0].index("--settings") + 1]
+                        )
+                        self.assertNotIn(str(home), settings["sandbox"]["filesystem"]["allowWrite"])
+
     def test_missing_srt_is_reported_as_not_verified(self) -> None:
         with patch("executors.shutil.which", return_value=None):
             result = ex._docker_host_probe(
@@ -2588,6 +2853,30 @@ class DockerHostProbeTests(unittest.TestCase):
 
         self.assertEqual("not_verified", result["status"])
         self.assertIn("srt is unavailable", result["error"])
+
+    def test_claude_probe_does_not_grant_a_missing_docker_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            observed = {}
+
+            def runner(argv, **kwargs):
+                settings_path = argv[argv.index("--settings") + 1]
+                observed.update(json.loads(Path(settings_path).read_text(encoding="utf-8")))
+                return completed()
+
+            with patch("executors.Path.home", return_value=home):
+                with patch.dict(os.environ, {"TMPDIR": tmpdir}, clear=False):
+                    with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                        result = ex._docker_host_probe(
+                            ex.ClaudeAdapter(), cwd=tmpdir, writes=True,
+                            publishes=False, runner=runner,
+                        )
+
+        self.assertEqual("verified", result["status"])
+        self.assertNotIn(
+            str(home / ".docker"), observed["filesystem"]["allowWrite"]
+        )
 
     def test_nested_codex_cannot_claim_a_docker_probe(self) -> None:
         with patch("executors.native.nested_codex", return_value=True):
@@ -2683,6 +2972,26 @@ class NativeScratchTests(unittest.TestCase):
                         self.assertEqual(1, len(observed))
                         self.assertFalse(observed[0].exists())
         self.assertEqual("", git(self.repo, "status", "--porcelain"))
+
+    def test_claude_docker_grant_makes_config_writable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docker_config = Path(tmpdir) / "docker-config"
+            docker_config.mkdir()
+            adapter = ex.ClaudeAdapter()
+            for granted in (False, True):
+                runtime_policy = ex.sp.StagePolicy(role="implement", docker=granted)
+                with self.subTest(granted=granted):
+                    with patch.dict(os.environ, {"DOCKER_CONFIG": str(docker_config)}):
+                        with adapter.policy_files(
+                            ["claude", "--verbose", "-p", "work"], runtime_policy,
+                            scratch=tmpdir, cwd=str(self.repo),
+                        ) as argv:
+                            settings = json.loads(argv[argv.index("--settings") + 1])
+                    if not granted:
+                        self.assertNotIn("sandbox", settings)
+                        continue
+                    writable = settings["sandbox"]["filesystem"]["allowWrite"]
+                    self.assertEqual(granted, str(docker_config.resolve()) in writable)
 
     def test_writing_profiles_preserve_git_rules_and_network_grants(self) -> None:
         for publishes in (False, True):
@@ -3018,25 +3327,32 @@ class ReadOnlyVerificationTests(unittest.TestCase):
             self.assertEqual(1, len(observed))
             self.assertFalse(Path(observed[0]).exists())
 
-    def test_a_granted_publishing_review_keeps_its_scratch_grant(self) -> None:
-        """The socket grant is a network option; the scratch rule stays the only
-        filesystem override, so neither replaces the other."""
+    def test_a_granted_publishing_review_keeps_docker_state_and_scratch_grants(self) -> None:
+        """The socket and Docker state grants coexist with the scratch grant."""
         rule = "permissions.code_cycle_publish_read.filesystem="
         observed = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            docker_config = home / ".docker"
+            docker_config.mkdir(parents=True)
 
-        def capture(argv, timeout=None, cwd=None, env=None):
-            tables = [option for option in argv if option.startswith(rule)]
-            self.assertEqual(1, len(tables))
-            self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
-            self.assertEqual(1, tables[0].count('="write"'))
-            self.assertIn("permissions.code_cycle_publish_read.network."
-                          "dangerously_allow_all_unix_sockets=true", argv)
-            observed.append(env["TMPDIR"])
-            return completed("{}")
+            def capture(argv, timeout=None, cwd=None, env=None):
+                tables = [option for option in argv if option.startswith(rule)]
+                self.assertEqual(1, len(tables))
+                self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
+                self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', tables[0])
+                self.assertEqual(2, tables[0].count('="write"'))
+                self.assertIn("permissions.code_cycle_publish_read.network."
+                              "dangerously_allow_all_unix_sockets=true", argv)
+                observed.append(env["TMPDIR"])
+                return completed("{}")
 
-        result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
-                                           publishes=True, runner=capture,
-                                           sandbox_grants=("docker_host",))
+            with patch("executors.Path.home", return_value=home):
+                with patch.dict(os.environ, {"DOCKER_CONFIG": str(docker_config)}):
+                    result = ex.CodexAdapter().dispatch(
+                        self.CODEX, "review", cwd=str(self.repo), publishes=True,
+                        runner=capture, sandbox_grants=("docker_host",),
+                    )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
         self.assertEqual(1, len(observed))
