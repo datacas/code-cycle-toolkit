@@ -2730,6 +2730,70 @@ class DockerHostProbeTests(unittest.TestCase):
         self.assertEqual(configured, calls[0]["env"]["BUILDX_CONFIG"])
         self.assertIsNone(result["state_fallback"])
 
+    def test_docker_config_resolution_matches_dispatch_and_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            cwd = root / "worktree"
+            home.mkdir()
+            cwd.mkdir()
+            for configured, expected in (
+                ("~/docker-alt", home / "docker-alt"),
+                ("relative/docker-alt", cwd / "relative" / "docker-alt"),
+            ):
+                expected.mkdir(parents=True)
+                seen = {}
+
+                def dispatch_runner(argv, timeout=None, cwd=None, env=None):
+                    seen["dispatch_argv"] = argv
+                    seen["dispatch_env"] = env
+                    return completed()
+
+                def probe_runner(argv, **kwargs):
+                    if "build" in argv:
+                        seen["probe_argv"] = argv
+                        seen["probe_env"] = kwargs["env"]
+                    return completed()
+
+                with patch("executors.Path.home", return_value=home):
+                    with patch.dict(os.environ, {
+                        "TMPDIR": tmpdir,
+                        "HOME": str(home),
+                        "DOCKER_CONFIG": configured,
+                    }, clear=False):
+                        dispatched = ex.CodexAdapter().dispatch(
+                            TARGET, "work", cwd=str(cwd), writes=True,
+                            sandbox_grants=("docker_host",), runner=dispatch_runner,
+                        )
+                        probed = ex._docker_host_probe(
+                            ex.CodexAdapter(), cwd=str(cwd), writes=True,
+                            publishes=False, runner=probe_runner,
+                        )
+                self.assertEqual(ex.DispatchOutcome.SUCCEEDED, dispatched.outcome)
+                self.assertEqual("verified", probed["status"])
+                self.assertEqual(str(expected.resolve()),
+                                 seen["dispatch_env"]["DOCKER_CONFIG"])
+                self.assertEqual(str(expected.resolve()), seen["probe_env"]["DOCKER_CONFIG"])
+                filesystem = next(option for option in seen["dispatch_argv"]
+                                  if option.startswith(
+                                      "permissions.code_cycle_write.filesystem="))
+                self.assertIn(f'{json.dumps(str(expected.resolve()))}="write"', filesystem)
+                self.assertIn(f'{json.dumps(str(expected.resolve()))}="write"',
+                              " ".join(seen["probe_argv"]))
+
+    def test_docker_config_cannot_grant_home_or_its_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            with patch("executors.Path.home", return_value=home):
+                for configured in (str(home), str(home.parent)):
+                    with patch.dict(os.environ, {"DOCKER_CONFIG": configured}, clear=False):
+                        with self.subTest(configured=configured):
+                            with self.assertRaisesRegex(
+                                ex.ExecutorError, "contains the user's home directory"
+                            ):
+                                ex._effective_docker_config_path(tmpdir)
+
     def test_missing_srt_is_reported_as_not_verified(self) -> None:
         with patch("executors.shutil.which", return_value=None):
             result = ex._docker_host_probe(

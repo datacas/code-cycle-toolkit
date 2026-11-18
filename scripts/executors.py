@@ -154,6 +154,21 @@ def _paths_overlap(first: str, second: str) -> bool:
             or second_path in first_path.parents)
 
 
+def _effective_docker_config_path(cwd: str | None = None) -> Path:
+    """Resolve Docker state once and refuse grants that would expose the home tree."""
+    home = Path.home().resolve()
+    configured = os.environ.get("DOCKER_CONFIG") or str(home / ".docker")
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = Path(cwd or os.getcwd()) / path
+    path = path.resolve()
+    if path == home or path in home.parents:
+        raise ExecutorError(
+            "DOCKER_CONFIG resolves to a path that contains the user's home directory"
+        )
+    return path
+
+
 @contextmanager
 def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                            *, writes: bool, publishes: bool, cwd: str,
@@ -184,8 +199,7 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
         worker_env = gh_environment(environment)
         worker_env["TMPDIR"] = scratch
         if docker_host:
-            worker_env["DOCKER_CONFIG"] = (os.environ.get("DOCKER_CONFIG")
-                                             or str(Path.home() / ".docker"))
+            worker_env["DOCKER_CONFIG"] = str(_effective_docker_config_path(cwd))
             if docker_buildx_fallback and not os.environ.get("BUILDX_CONFIG"):
                 worker_env["BUILDX_CONFIG"] = str(Path(scratch) / "buildx")
         worker_argv = list(argv)
@@ -670,11 +684,11 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
     probe_directory = None
     temporary_settings = None
     probe_scratch = None
-    docker_config = os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")
-    docker_config_path = Path(docker_config).expanduser()
-    if not docker_config_path.is_absolute():
-        docker_config_path = Path(cwd) / docker_config_path
-    docker_config_path = docker_config_path.resolve()
+    try:
+        docker_config_path = _effective_docker_config_path(cwd)
+    except ExecutorError as error:
+        return {"status": "not_verified", "command": "docker build",
+                "executor": adapter.name, "error": str(error)}
     docker_env = os.environ.copy()
     docker_env["DOCKER_CONFIG"] = str(docker_config_path)
     probe_result = None
@@ -2336,11 +2350,7 @@ class CodexAdapter(NativeAdapter):
             table = argv[existing][len(rule):]
             argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
         if "docker_host" in sandbox_grants:
-            docker_config = os.environ.get("DOCKER_CONFIG") or str(Path.home() / ".docker")
-            docker_config_path = Path(docker_config).expanduser()
-            if not docker_config_path.is_absolute() and cwd:
-                docker_config_path = Path(cwd) / docker_config_path
-            docker_config_path = docker_config_path.resolve()
+            docker_config_path = _effective_docker_config_path(cwd)
             if docker_config_path.is_dir():
                 entry = f'{json.dumps(str(docker_config_path))}="write"'
                 existing = next((i for i, option in enumerate(argv)
@@ -3205,12 +3215,7 @@ class ClaudeAdapter(NativeAdapter):
             if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
                 if runtime_policy.docker:
-                    docker_config = (os.environ.get("DOCKER_CONFIG")
-                                     or str(Path.home() / ".docker"))
-                    docker_config_path = Path(docker_config).expanduser()
-                    if not docker_config_path.is_absolute():
-                        docker_config_path = Path(cwd) / docker_config_path
-                    docker_config_path = docker_config_path.resolve()
+                    docker_config_path = _effective_docker_config_path(cwd)
                     if docker_config_path.is_dir():
                         writable.append(str(docker_config_path))
                 if runtime_policy.role in sp.WRITING_ROLES:
