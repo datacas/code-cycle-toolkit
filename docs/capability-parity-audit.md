@@ -1,5 +1,86 @@
 # Agent capability parity audit
 
+## Broad dispatch-path handlers (#510)
+
+Inventory of every handler catching `Exception` or `OSError` (including tuple
+handlers) in the five dispatch-path files. Sites are identified by module and
+qualified function, so line shifts do not invalidate the inventory. Counts
+include nested handlers separately. Narrow exception handlers are outside this
+inventory. The original issue's count was provisional.
+
+`safe-to-swallow` means an optional hint or an explicit fallback; it never
+establishes successful verification. `report-with-cause` means the failure must
+retain a diagnostic. `degrade-to-not_verified` means coverage is incomplete;
+for the read-only publication guard this stops before dispatch with
+`publication_unverified`, under the existing role contract, rather than inventing
+a contract breach. This inventory adds no new permission or veto.
+
+| Module and qualified function | Handlers | Classification and reason |
+|---|---:|---|
+| `executors._native_review_scratch` | 1 | safe-to-swallow: falls back to cwd for scratch placement |
+| `executors._run.drain` | 1 | safe-to-swallow: display callbacks cannot interrupt the worker |
+| `executors._docker_host_probe` | 2 | safe-to-swallow: optional Docker-context discovery; degrade-to-not_verified: failed functional probe carries cause |
+| `executors._publication_preflight` | 1 | report-with-cause: transport or executable unavailable |
+| `executors.NativeAdapter.probe` | 1 | report-with-cause: unknown availability with version diagnostic |
+| `executors.NativeAdapter.dispatch` | 6 | safe-to-swallow: optional policy display, usage parsing and session metadata; degrade-to-not_verified: optional progress fingerprint; report-with-cause: dependency preparation and launch failures |
+| `executors.NativeAdapter.dispatch.observed_start` | 1 | safe-to-swallow: no start evidence leaves lifecycle unknown |
+| `executors.NativeAdapter._session_events` | 1 | safe-to-swallow: unreadable session events are not usage evidence |
+| `executors.CodexAdapter.unprotectable_git_paths` | 1 | report-with-cause: Git configuration cannot establish the sandbox boundary |
+| `executors.CodexAdapter.probe_git_metadata_write.cleanup_markers` | 1 | report-with-cause: cleanup failure propagates as failed probe |
+| `executors.CodexAdapter.probe_git_metadata_write` | 2 | report-with-cause: launch error; degrade-to-not_verified: unreadable marker cannot prove writes |
+| `executors.CodexAdapter.probe_review_confinement` | 1 | report-with-cause: unverified confinement, no execution through it |
+| `executors._inspect_remote_refs` | 1 | report-with-cause: stable credential-safe remote_refs_inspection_failed category; raw unexpected detail intentionally omitted |
+| `executors._verified_read_only_refs` | 2 | degrade-to-not_verified: redacted discovery/capture errors stop before dispatch; capture retries once |
+| `executors._verified_read_only` | 2 | report-with-cause: fingerprint unavailable, no successful read-only guarantee |
+| `executors._compare_read_only` | 1 | report-with-cause: post-stage verification unavailable |
+| `executors._remove_read_only_path` | 1 | report-with-cause: rethrows original cleanup error |
+| `executors._remove_workspace` | 1 | safe-to-swallow: cleanup retry succeeded; report-with-cause: leftover path reported if retry fails |
+| `executors._isolated_review_dispatch` | 3 | report-with-cause: setup and source-check failures; degrade-to-not_verified: unreadable clone is treated as changed, never accepted |
+| `executors.ClaudeAdapter.policy_files` | 2 | safe-to-swallow: Git discovery and optional policy file fallback |
+| `executors.ClaudeAdapter.auth_evidence` | 1 | report-with-cause: configuration unreadable, no authentication claim |
+| `executors.OrcaAdapter.dispatch` | 3 | report-with-cause: context preparation and dispatch errors |
+| `executors.OrcaAdapter.probe` | 1 | report-with-cause: unreadable runtime status |
+| `run_cycle.load_config` | 1 | report-with-cause: malformed or unreadable configuration |
+| `run_cycle.base_branch_of` | 1 | safe-to-swallow: optional discovery returns no inferred branch |
+| `run_cycle.code_host_of` | 1 | safe-to-swallow: optional discovery returns no inferred host |
+| `run_cycle.resolve_worktree_dir` | 1 | report-with-cause: unsafe/unresolvable workspace configuration |
+| `run_cycle.save_decisions` | 1 | safe-to-swallow: optional decision cache |
+| `run_cycle.resolve_delta_base` | 1 | safe-to-swallow: falls back to complete accumulated review |
+| `run_cycle.DiffArtifact.changed` | 1 | report-with-cause: missing evidence artifact is reported |
+| `run_cycle.write_diff_artifact` | 1 | safe-to-swallow: alternate diff acquisition, never fabricates evidence |
+| `run_cycle._git_line` | 1 | safe-to-swallow: optional metadata lookup returns absent; report-with-cause: strict recovery lookup preserves errors |
+| `run_cycle._clean_worktree` | 1 | degrade-to-not_verified: unreadable checkout is never assumed clean |
+| `run_cycle.synchronize_worktree.git` | 1 | report-with-cause: synchronization Git failure |
+| `run_cycle._selection_result` | 1 | report-with-cause: cannot select the authorized linked workspace |
+| `run_cycle._is_linked_worktree` | 1 | safe-to-swallow: discovery cannot assert linked state |
+| `run_cycle._linked_worktree_metadata` | 1 | safe-to-swallow: discovery cannot assert metadata |
+| `run_cycle.select_workspace` | 1 | report-with-cause: rollback and original setup failure |
+| `run_cycle.diff_directory` | 1 | safe-to-swallow: optional evidence directory unavailable |
+| `run_cycle.validate_local_only_cwd` | 1 | report-with-cause: linked-worktree marker unreadable |
+| `run_cycle.check_continuation.call` | 1 | report-with-cause: continuation Git query failure |
+| `run_cycle.continued_change_request.call` | 1 | safe-to-swallow: best-effort hint, continuation forbids duplicate PR |
+| `run_cycle.check_change_request.call` | 1 | report-with-cause: live PR validation failure |
+| `run_cycle.recovery_evidence.call` | 1 | report-with-cause: authoritative recovery evidence unavailable |
+| `run_cycle.read_change_request_comments` | 1 | report-with-cause: comments unavailable, no invented findings |
+| `run_cycle.probe_change_request` | 1 | report-with-cause: freshness unavailable |
+| `run_cycle._normalize_test_payload` | 2 | degrade-to-not_verified: invalid evidence and failed plan cap cannot establish verification |
+| `run_cycle._main_worktree_root` | 1 | safe-to-swallow: optional root discovery returns absent |
+| `cycle.CycleRecorder.__init__` | 1 | safe-to-swallow: quota persistence is optional |
+| `cycle.CycleRecorder._check_codex_effort` | 1 | safe-to-swallow: unavailable optional model catalog |
+| `cycle.CycleRecorder._match_handoff` | 1 | report-with-cause: handoff cannot be claimed on storage failure |
+| `cycle.CycleRecorder._effect_snapshot` | 1 | degrade-to-not_verified: absent snapshot supplies no effect evidence |
+| `cycle.CycleRecorder._claim_handoff` | 1 | report-with-cause: storage error propagated |
+| `cycle.CycleRecorder._find_blocker` | 1 | safe-to-swallow: optional publication evidence unavailable, no success inferred |
+| `cycle.CycleRecorder._record_quota_exhaustion` | 1 | safe-to-swallow: optional quota persistence |
+| `cycle.CycleRecorder._clear_quota` | 1 | safe-to-swallow: optional quota persistence |
+| `cycle.CycleRecorder._observe_shadow` | 1 | safe-to-swallow: shadow experiment cannot decide routing |
+| `cycle_dispatch.StageDispatch._question_evidence` | 1 | safe-to-swallow: optional question diagnostics |
+| `cycle_dispatch.StageDispatch.run` | 1 | safe-to-swallow: optional snapshot file, original snapshot preserved in memory |
+| `cycle_dispatch.StageDispatch.record_resume_point` | 1 | safe-to-swallow: optional resume point, manual resume remains |
+| `native_prerequisites.ensure` | 3 | safe-to-swallow: installed-bundle check falls back to preparation; report-with-cause: unexpected publication errors rethrow; degrade-to-not_verified: preparation errors recorded |
+| `native_prerequisites.executable` | 1 | safe-to-swallow: managed-bundle discovery falls back to PATH |
+| `native_prerequisites.isolation_probe` | 3 | degrade-to-not_verified: listener/runner errors reported; safe-to-swallow: listener cleanup cannot replace the original failure (#511) |
+
 [← Documentation index](README.md)
 
 Audit of every restriction the toolkit itself adds to a dispatched stage, done

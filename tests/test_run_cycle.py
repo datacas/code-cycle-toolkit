@@ -2274,8 +2274,7 @@ class FunctionalStopTests(RunCycleTestCase):
         self.assertNotIn("APPROVED", rendered_review)
 
     def test_an_unverifiable_read_only_checkout_blocks_and_is_recorded(self) -> None:
-        """Failing closed is a recorded BLOCKED, not an exception from the
-        store that ends the cycle without its row."""
+        """An unreadable audit retains its cause and a stage row without dispatch."""
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         reviewer = Talker("claude")
@@ -2283,10 +2282,11 @@ class FunctionalStopTests(RunCycleTestCase):
         report = self.run_cycle(Talker("codex"), reviewer, cwd=temporary.name)
 
         self.assertEqual([], reviewer.dispatched)
-        self.assertEqual("dispatch_failed", report.stop_reason)
+        self.assertEqual("publication_unverified", report.stop_reason)
         review = next(row for row in self.rows() if row["role"] == "review")
-        self.assertEqual("blocked", review["outcome"])
-        self.assertEqual("read_only_verification", review["missing_capability"])
+        self.assertEqual("failed", review["outcome"])
+        self.assertIsNone(review["missing_capability"])
+        self.assertIn("not a git repository", report.stopped_because)
 
 
     def test_a_diagnosed_duplicate_stops_before_review_with_its_reason(self) -> None:

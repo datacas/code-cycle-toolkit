@@ -217,9 +217,12 @@ class ExecutorFailureTests(unittest.TestCase):
                             on_dispatch_attempt=lambda: attempts.append("attempt"),
                             **{"writes": True, **kwargs},
                         )
-                    self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
-                    self.assertEqual(capability, result.missing_capability)
-                    self.assertEqual((ex.CAPABILITY_ERROR_CODES[capability], "not_started"),
+                    audit_unavailable = capability == "read_only_verification"
+                    self.assertEqual(ex.DispatchOutcome.FAILED if audit_unavailable
+                                     else ex.DispatchOutcome.BLOCKED, result.outcome)
+                    self.assertEqual(None if audit_unavailable else capability, result.missing_capability)
+                    self.assertEqual(("publication_unverified" if audit_unavailable
+                                      else ex.CAPABILITY_ERROR_CODES[capability], "not_started"),
                                      (result.failure_code, result.start_state))
                     launch.assert_not_called()
                     self.assertEqual([], attempts)

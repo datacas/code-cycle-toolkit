@@ -95,7 +95,7 @@ from execution_profiles import (
     repository_settings,
     resolve_execution,
 )
-from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup
+from cycle_journal import Journal, asked_scopes, cleanup as journal_cleanup, redact
 from cycle_history import (
     COMMENT_STAGES,
     REREAD_BACKOFF,
@@ -743,7 +743,7 @@ def resolve_worktree_dir(config: dict, repo_root: str | Path) -> Path:
         resolved = candidate.resolve()
     except (OSError, RuntimeError) as exc:
         raise CycleDriverError(
-            "code_cycle.worktree_dir could not be resolved safely"
+            f"code_cycle.worktree_dir could not be resolved safely: {redact(f'{type(exc).__name__}: {exc}')}"
         ) from exc
     try:
         relative = resolved.relative_to(root)
@@ -1409,15 +1409,19 @@ def write_diff_artifact(cwd: str | None, bases: tuple[str, ...] | None,
     return None
 
 
-def _git_line(cwd: str | None, args: list[str], timeout: int) -> str | None:
+def _git_line(cwd: str | None, args: list[str], timeout: int, *, strict: bool = False) -> str | None:
     try:
         completed = subprocess.run(
             ["git", *args], cwd=cwd, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout, check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        if strict:
+            raise CycleDriverError(f"Git query failed: {redact(f'{type(error).__name__}: {error}')} ") from None
         return None
     value = completed.stdout.strip()
+    if strict and completed.returncode:
+        raise CycleDriverError(f"Git query exited {completed.returncode}: {redact(completed.stderr or completed.stdout)}")
     return value if completed.returncode == 0 and value else None
 
 
@@ -1459,7 +1463,7 @@ def synchronize_worktree(change_request_id: str, cwd: str, *,
 
     current = git(["rev-parse", "--verify", "HEAD"]).stdout.strip()
     if not FULL_SHA.fullmatch(current):
-        raise CycleDriverError("worktree synchronization could not read the current HEAD")
+        raise CycleDriverError(f"worktree synchronization could not read the current HEAD: invalid SHA {redact(current)}")
     if target_head is not None:
         if not FULL_SHA.fullmatch(target_head):
             raise CycleDriverError("worktree synchronization received an invalid PR head SHA")
@@ -1474,7 +1478,7 @@ def synchronize_worktree(change_request_id: str, cwd: str, *,
     git(["fetch", "origin", f"+refs/pull/{number}/head:{ref}"])
     target = git(["rev-parse", "--verify", ref]).stdout.strip()
     if not FULL_SHA.fullmatch(target):
-        raise CycleDriverError("worktree synchronization could not read the fetched PR head")
+        raise CycleDriverError(f"worktree synchronization could not read the fetched PR head: invalid SHA {redact(target)}")
     if current == target:
         return None
 
@@ -1489,7 +1493,7 @@ def synchronize_worktree(change_request_id: str, cwd: str, *,
             f"change request head {target} is not a fast-forward from local HEAD {current}; no files were changed",
             "worktree_diverged")
     if ancestor.returncode:
-        raise CycleDriverError("worktree synchronization could not compare the two heads")
+        raise CycleDriverError(f"worktree synchronization could not compare the two heads: git exited {ancestor.returncode}: {redact(ancestor.stderr or ancestor.stdout)}")
 
     merged = git(["merge", "--ff-only", "--no-edit", target], check=False)
     if merged.returncode:
@@ -1988,7 +1992,7 @@ def check_change_request(repo_id: str, change_request_id: str, cwd: str | None,
         pull = json.loads(raw)
     except ValueError as error:
         raise CycleDriverError(
-            f"pull request {change_request_id} could not be read") from error
+            f"pull request {change_request_id} could not be read: {redact(f'{type(error).__name__}: {error}')} invalid JSON") from None
     state = str(pull.get("state") or "").upper()
     if state != "OPEN":
         raise CycleDriverError(
@@ -2101,18 +2105,18 @@ def recovery_evidence(repo_id: str, role: str, attempt_id: str, *,
         try:
             result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise CycleDriverError("recovery GitHub tooling unavailable or timed out") from error
+            raise CycleDriverError(f"recovery GitHub tooling unavailable or timed out: {redact(f'{type(error).__name__}: {error}')} ") from None
         if result.returncode:
-            raise CycleDriverError("recovery could not read GitHub evidence")
+            raise CycleDriverError(f"recovery could not read GitHub evidence: gh exited {result.returncode}: {redact(result.stderr or result.stdout)}")
         try:
             return json.loads(result.stdout)
         except ValueError as error:
             raise CycleDriverError("recovery received malformed GitHub evidence") from error
 
     if change_request_id is None:
-        branch = _git_line(cwd, ["branch", "--show-current"], 30)
+        branch = _git_line(cwd, ["branch", "--show-current"], 30, strict=True)
         if not branch:
-            raise CycleDriverError("recovery could not identify the working branch")
+            raise CycleDriverError("recovery could not identify the working branch: git branch --show-current returned no branch (detached HEAD)")
         pulls = call(["gh", "pr", "list", "--repo", repo_id, "--head", branch,
                       "--state", "open", "--json", "number"])
         if (not isinstance(pulls, list) or len(pulls) != 1
@@ -2193,11 +2197,11 @@ def read_change_request_comments(
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CycleDriverError(
             f"the comments of change request {change_request_id} could not be "
-            f"fetched: GitHub tooling unavailable or timed out") from error
+            f"fetched: GitHub tooling unavailable or timed out: {redact(f'{type(error).__name__}: {error}')} ") from None
     if result.returncode:
         raise CycleDriverError(
             f"the comments of change request {change_request_id} could not be "
-            f"fetched: gh exited {result.returncode}")
+            f"fetched: gh exited {result.returncode}: {redact(result.stderr or result.stdout)}")
     try:
         pages = json.loads(result.stdout)
     except ValueError as error:
@@ -2251,9 +2255,9 @@ def probe_change_request(
              "-F", f"number={change_request_id}"],
             cwd=cwd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise CycleDriverError(f"{what}: GitHub tooling unavailable or timed out") from error
+        raise CycleDriverError(f"{what}: GitHub tooling unavailable or timed out: {redact(f'{type(error).__name__}: {error}')} ") from None
     if result.returncode:
-        raise CycleDriverError(f"{what}: gh exited {result.returncode}")
+        raise CycleDriverError(f"{what}: gh exited {result.returncode}: {redact(result.stderr or result.stdout)}")
     try:
         pull = json.loads(result.stdout)["data"]["repository"]["pullRequest"]
         comments = pull["comments"]

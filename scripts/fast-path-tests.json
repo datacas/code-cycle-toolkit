@@ -40,7 +40,7 @@
     },
     "capability-parity-documentation": {
       "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md", "docs/ROADMAP_V2.md"],
-      "tests": ["test_capability_parity_audit", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract"]
+      "tests": ["test_capability_parity_audit", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract", "test_precheck_causes.PrecheckCauseTests.test_every_broad_handler_has_an_inventory_row"]
     },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],
