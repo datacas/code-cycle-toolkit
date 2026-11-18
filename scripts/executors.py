@@ -198,8 +198,17 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
             raise ExecutorError("dispatch temporary directory overlaps the checkout")
         worker_env = gh_environment(environment)
         worker_env["TMPDIR"] = scratch
+        docker_config_path = None
         if docker_host:
-            worker_env["DOCKER_CONFIG"] = str(_effective_docker_config_path(cwd))
+            try:
+                docker_config_path = _effective_docker_config_path(cwd)
+            except ExecutorError:
+                # An unsafe state path withholds only Docker's filesystem
+                # grant. Preserve the caller's environment and let the probe
+                # report the Docker check as not verified.
+                docker_config_path = None
+            if docker_config_path is not None:
+                worker_env["DOCKER_CONFIG"] = str(docker_config_path)
             if docker_buildx_fallback and not os.environ.get("BUILDX_CONFIG"):
                 worker_env["BUILDX_CONFIG"] = str(Path(scratch) / "buildx")
         worker_argv = list(argv)
@@ -237,7 +246,7 @@ def _native_review_scratch(adapter, argv: list[str], environment: dict | None,
                 "-c", f'shell_environment_policy.set.GH_NO_UPDATE_NOTIFIER={json.dumps(worker_env["GH_NO_UPDATE_NOTIFIER"])}',
                 "-c", f'shell_environment_policy.set.TMPDIR={json.dumps(scratch)}',
             ]
-            if docker_host:
+            if docker_host and docker_config_path is not None:
                 options += ["-c", f'shell_environment_policy.set.DOCKER_CONFIG={json.dumps(worker_env["DOCKER_CONFIG"])}']
                 if worker_env.get("BUILDX_CONFIG"):
                     options += ["-c", f'shell_environment_policy.set.BUILDX_CONFIG={json.dumps(worker_env["BUILDX_CONFIG"])}']
@@ -2350,8 +2359,11 @@ class CodexAdapter(NativeAdapter):
             table = argv[existing][len(rule):]
             argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
         if "docker_host" in sandbox_grants:
-            docker_config_path = _effective_docker_config_path(cwd)
-            if docker_config_path.is_dir():
+            try:
+                docker_config_path = _effective_docker_config_path(cwd)
+            except ExecutorError:
+                docker_config_path = None
+            if docker_config_path is not None and docker_config_path.is_dir():
                 entry = f'{json.dumps(str(docker_config_path))}="write"'
                 existing = next((i for i, option in enumerate(argv)
                                  if option.startswith(rule)), None)
@@ -3215,8 +3227,11 @@ class ClaudeAdapter(NativeAdapter):
             if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
                 if runtime_policy.docker:
-                    docker_config_path = _effective_docker_config_path(cwd)
-                    if docker_config_path.is_dir():
+                    try:
+                        docker_config_path = _effective_docker_config_path(cwd)
+                    except ExecutorError:
+                        docker_config_path = None
+                    if docker_config_path is not None and docker_config_path.is_dir():
                         writable.append(str(docker_config_path))
                 if runtime_policy.role in sp.WRITING_ROLES:
                     git_directories = []

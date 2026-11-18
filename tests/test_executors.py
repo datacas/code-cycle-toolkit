@@ -2794,6 +2794,57 @@ class DockerHostProbeTests(unittest.TestCase):
                             ):
                                 ex._effective_docker_config_path(tmpdir)
 
+    def test_refused_docker_config_does_not_prevent_native_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            for adapter in (ex.CodexAdapter(), ex.ClaudeAdapter()):
+                launched = []
+
+                def runner(argv, timeout=None, cwd=None, env=None):
+                    launched.append((argv, env))
+                    return completed("{}")
+
+                policy = (ex.sp.StagePolicy(role="implement", docker=True)
+                          if adapter.name == "claude" else None)
+                dispatch_options = {
+                    "command_policy": policy,
+                    "docker_probe_runner": lambda *args, **kwargs: self.fail(
+                        "unsafe Docker state must be rejected before the probe"
+                    ),
+                }
+                if adapter.name == "codex":
+                    dispatch_options["sandbox_grants"] = ("docker_host",)
+                with patch("executors.Path.home", return_value=home):
+                    with patch.dict(os.environ, {
+                        "HOME": str(home),
+                        "DOCKER_CONFIG": str(home),
+                        "TMPDIR": tmpdir,
+                    }, clear=False):
+                        result = adapter.dispatch(
+                            TARGET, "work", cwd=tmpdir, writes=True,
+                            runner=runner, **dispatch_options,
+                        )
+
+                with self.subTest(executor=adapter.name):
+                    self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+                    self.assertEqual(1, len(launched))
+                    self.assertEqual(str(home), launched[0][1].get("DOCKER_CONFIG"))
+                    if adapter.name == "codex":
+                        self.assertFalse(any(
+                            "permissions.code_cycle_write.filesystem=" in option
+                            and str(home) in option for option in launched[0][0]
+                        ))
+                        self.assertFalse(any(
+                            "shell_environment_policy.set.DOCKER_CONFIG" in option
+                            for option in launched[0][0]
+                        ))
+                    else:
+                        settings = json.loads(
+                            launched[0][0][launched[0][0].index("--settings") + 1]
+                        )
+                        self.assertNotIn(str(home), settings["sandbox"]["filesystem"]["allowWrite"])
+
     def test_missing_srt_is_reported_as_not_verified(self) -> None:
         with patch("executors.shutil.which", return_value=None):
             result = ex._docker_host_probe(
@@ -3256,21 +3307,28 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         """The socket and Docker state grants coexist with the scratch grant."""
         rule = "permissions.code_cycle_publish_read.filesystem="
         observed = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            docker_config = home / ".docker"
+            docker_config.mkdir(parents=True)
 
-        def capture(argv, timeout=None, cwd=None, env=None):
-            tables = [option for option in argv if option.startswith(rule)]
-            self.assertEqual(1, len(tables))
-            self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
-            self.assertIn(f'{json.dumps(str(Path.home() / ".docker"))}="write"', tables[0])
-            self.assertEqual(2, tables[0].count('="write"'))
-            self.assertIn("permissions.code_cycle_publish_read.network."
-                          "dangerously_allow_all_unix_sockets=true", argv)
-            observed.append(env["TMPDIR"])
-            return completed("{}")
+            def capture(argv, timeout=None, cwd=None, env=None):
+                tables = [option for option in argv if option.startswith(rule)]
+                self.assertEqual(1, len(tables))
+                self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
+                self.assertIn(f'{json.dumps(str(docker_config))}="write"', tables[0])
+                self.assertEqual(2, tables[0].count('="write"'))
+                self.assertIn("permissions.code_cycle_publish_read.network."
+                              "dangerously_allow_all_unix_sockets=true", argv)
+                observed.append(env["TMPDIR"])
+                return completed("{}")
 
-        result = ex.CodexAdapter().dispatch(self.CODEX, "review", cwd=str(self.repo),
-                                           publishes=True, runner=capture,
-                                           sandbox_grants=("docker_host",))
+            with patch("executors.Path.home", return_value=home):
+                with patch.dict(os.environ, {"DOCKER_CONFIG": str(docker_config)}):
+                    result = ex.CodexAdapter().dispatch(
+                        self.CODEX, "review", cwd=str(self.repo), publishes=True,
+                        runner=capture, sandbox_grants=("docker_host",),
+                    )
 
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
         self.assertEqual(1, len(observed))
