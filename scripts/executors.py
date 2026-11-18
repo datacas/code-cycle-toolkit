@@ -158,7 +158,14 @@ def _effective_docker_config_path(cwd: str | None = None) -> Path:
     """Resolve Docker state once and refuse grants that would expose the home tree."""
     home = Path.home().resolve()
     configured = os.environ.get("DOCKER_CONFIG") or str(home / ".docker")
-    path = Path(configured).expanduser()
+    if configured == "~":
+        path = home
+    elif configured.startswith(("~/", "~\\")):
+        path = home / configured[2:]
+    elif configured.startswith("~"):
+        path = Path(configured).expanduser()
+    else:
+        path = Path(configured)
     if not path.is_absolute():
         path = Path(cwd or os.getcwd()) / path
     path = path.resolve()
@@ -744,7 +751,9 @@ def _docker_host_probe(adapter, *, cwd: str, writes: bool, publishes: bool,
         (probe_scratch / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         if adapter.name == "claude":
             temporary_settings = probe_directory / "settings.json"
-            writable = [cwd, str(probe_directory), str(docker_config_path)]
+            writable = [cwd, str(probe_directory)]
+            if docker_config_path.is_dir():
+                writable.append(str(docker_config_path))
             if writes and Path(cwd).is_dir():
                 git_directories = []
                 for option in ("--git-common-dir", "--git-dir"):

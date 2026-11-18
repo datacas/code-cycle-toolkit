@@ -2638,9 +2638,9 @@ class DockerHostProbeTests(unittest.TestCase):
                                   if option.startswith(f"permissions.{profile}.filesystem="))
                 with self.subTest(grants=grants):
                     if grants:
-                        self.assertIn(f'{json.dumps(str(docker_config))}="write"', filesystem)
+                        self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', filesystem)
                         self.assertNotIn("={,", filesystem)
-                        self.assertEqual(str(docker_config), seen["env"]["DOCKER_CONFIG"])
+                        self.assertEqual(str(docker_config.resolve()), seen["env"]["DOCKER_CONFIG"])
                         self.assertTrue(any("shell_environment_policy.set.DOCKER_CONFIG" in option
                                             for option in seen["argv"]))
                     else:
@@ -2675,11 +2675,11 @@ class DockerHostProbeTests(unittest.TestCase):
                         sandbox_grants=("docker_host",), runner=runner,
                     )
         self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome)
-        self.assertEqual(str(docker_config), seen["env"]["DOCKER_CONFIG"])
+        self.assertEqual(str(docker_config.resolve()), seen["env"]["DOCKER_CONFIG"])
         self.assertEqual(str(buildx_config), seen["env"]["BUILDX_CONFIG"])
         filesystem = next(option for option in seen["argv"]
                           if option.startswith("permissions.code_cycle_write.filesystem="))
-        self.assertIn(f'{json.dumps(str(docker_config))}="write"', filesystem)
+        self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', filesystem)
         self.assertNotIn(str(home / ".docker"), filesystem)
         self.assertTrue(any(f"shell_environment_policy.set.BUILDX_CONFIG={json.dumps(str(buildx_config))}"
                             in option for option in seen["argv"]))
@@ -2854,6 +2854,30 @@ class DockerHostProbeTests(unittest.TestCase):
         self.assertEqual("not_verified", result["status"])
         self.assertIn("srt is unavailable", result["error"])
 
+    def test_claude_probe_does_not_grant_a_missing_docker_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            observed = {}
+
+            def runner(argv, **kwargs):
+                settings_path = argv[argv.index("--settings") + 1]
+                observed.update(json.loads(Path(settings_path).read_text(encoding="utf-8")))
+                return completed()
+
+            with patch("executors.Path.home", return_value=home):
+                with patch.dict(os.environ, {"TMPDIR": tmpdir}, clear=False):
+                    with patch("executors.shutil.which", return_value="/usr/bin/srt"):
+                        result = ex._docker_host_probe(
+                            ex.ClaudeAdapter(), cwd=tmpdir, writes=True,
+                            publishes=False, runner=runner,
+                        )
+
+        self.assertEqual("verified", result["status"])
+        self.assertNotIn(
+            str(home / ".docker"), observed["filesystem"]["allowWrite"]
+        )
+
     def test_nested_codex_cannot_claim_a_docker_probe(self) -> None:
         with patch("executors.native.nested_codex", return_value=True):
             result = ex._docker_host_probe(
@@ -2967,7 +2991,7 @@ class NativeScratchTests(unittest.TestCase):
                         self.assertNotIn("sandbox", settings)
                         continue
                     writable = settings["sandbox"]["filesystem"]["allowWrite"]
-                    self.assertEqual(granted, str(docker_config) in writable)
+                    self.assertEqual(granted, str(docker_config.resolve()) in writable)
 
     def test_writing_profiles_preserve_git_rules_and_network_grants(self) -> None:
         for publishes in (False, True):
@@ -3316,7 +3340,7 @@ class ReadOnlyVerificationTests(unittest.TestCase):
                 tables = [option for option in argv if option.startswith(rule)]
                 self.assertEqual(1, len(tables))
                 self.assertIn(f'{json.dumps(env["TMPDIR"])}="write"', tables[0])
-                self.assertIn(f'{json.dumps(str(docker_config))}="write"', tables[0])
+                self.assertIn(f'{json.dumps(str(docker_config.resolve()))}="write"', tables[0])
                 self.assertEqual(2, tables[0].count('="write"'))
                 self.assertIn("permissions.code_cycle_publish_read.network."
                               "dangerously_allow_all_unix_sockets=true", argv)
