@@ -30,6 +30,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 from urllib.parse import quote
+from cycle_journal import redact
 
 #: The only remote the audit reads.
 AUDITED_REMOTE = "origin"
@@ -93,9 +94,11 @@ class GitHubHostReader:
             done = self.run(command, cwd=self.cwd, capture_output=True, text=True,
                             timeout=self.timeout, check=False)
         except (OSError, subprocess.SubprocessError) as error:
-            raise AuditUnreadable("GitHub tooling unavailable or timed out") from error
+            detail = redact(f"{type(error).__name__}: {error}; stderr={getattr(error, 'stderr', None) or ''}")
+            raise AuditUnreadable(f"GitHub tooling unavailable or timed out: {detail}") from None
         if done.returncode:
-            raise AuditUnreadable(f"gh api {path.split('?')[0]} exited {done.returncode}")
+            detail = redact(done.stderr or done.stdout or "no diagnostic output")
+            raise AuditUnreadable(f"gh api {path.split('?')[0]} exited {done.returncode}: {detail}")
         try:
             return json.loads(done.stdout)
         except ValueError as error:
@@ -276,9 +279,11 @@ class PublicationAuditor:
                             encoding="utf-8", errors="replace", timeout=self.timeout,
                             check=False)
         except (OSError, subprocess.SubprocessError) as error:
-            raise AuditUnreadable(f"git {args[0]} could not run") from error
+            detail = redact(f"{type(error).__name__}: {error}; stderr={getattr(error, 'stderr', None) or ''}")
+            raise AuditUnreadable(f"git {args[0]} could not run: {detail}") from None
         if check and done.returncode:
-            raise AuditUnreadable(f"git {args[0]} exited {done.returncode}")
+            detail = redact(done.stderr or done.stdout or "no diagnostic output")
+            raise AuditUnreadable(f"git {args[0]} exited {done.returncode}: {detail}")
         return done.stdout
 
     def _status(self, *args: str) -> int:

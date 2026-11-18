@@ -1688,7 +1688,9 @@ class PermissionTests(unittest.TestCase):
             probes={"claude": ex.ProbeResult("claude", ex.Availability.READY, "test")},
         )
 
-        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertEqual("publication_unverified", result.failure_code)
+        self.assertEqual("not_started", result.start_state)
         self.assertNotIn("read_only_mode", result.artifacts)
 
     @unittest.skipUnless(hasattr(ex.os, "geteuid") and ex.os.geteuid() != 0,
@@ -3394,8 +3396,10 @@ class ReadOnlyVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as plain:
             result = self.dispatch("codex", "none", cwd=plain)
 
-        self.assertEqual(ex.DispatchOutcome.BLOCKED, result.outcome)
-        self.assertEqual("read_only_verification", result.missing_capability)
+        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
+        self.assertEqual("publication_unverified", result.failure_code)
+        self.assertEqual("not_started", result.start_state)
+        self.assertIn("not a git repository", result.detail)
         self.assertFalse(self.argv_file.exists())
 
     def test_an_unverifiable_checkout_after_the_stage_is_a_violation(self) -> None:

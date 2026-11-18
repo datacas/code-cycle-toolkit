@@ -45,6 +45,7 @@ import uuid
 from contextlib import contextmanager
 import remote_refs
 import publication_audit as pa
+from cycle_journal import redact
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -116,6 +117,22 @@ class DispatchOutcome(str, Enum):
 
 class ExecutorError(ValueError):
     """The dispatch layer was asked for something it must not do."""
+
+
+def _precheck_cause(error: Exception) -> str:
+    """Retain subprocess stderr as well as the exception's class and message."""
+    detail = f"{type(error).__name__}: {error}"
+    if isinstance(error, subprocess.SubprocessError):
+        detail += f"; stderr={getattr(error, 'stderr', None) or ''}; stdout={getattr(error, 'stdout', None) or ''}"
+    return redact(detail) or type(error).__name__
+
+
+class ReadOnlyAuditUnavailable(ExecutorError):
+    """A pre-dispatch audit could not establish coverage, not a breach."""
+
+    def __init__(self, detail: str, errors: list[str]):
+        super().__init__(detail)
+        self.evidence = {"status": "unverified", "errors": errors}
 
 
 class RemoteRefInspectionError(ExecutorError):
@@ -972,7 +989,7 @@ def _publication_preflight(cwd: str | None, *, check_transport: bool = True) -> 
             if pushed.returncode:
                 return False, f"remote rejected the publication preflight (exit {pushed.returncode})"
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"publication preflight could not complete ({type(exc).__name__})"
+        return False, f"publication preflight could not complete ({_precheck_cause(exc)})"
     return True, ("Git authentication and remote write access passed a no-change preflight"
                   if check_transport else "host metadata checked; stage sandbox transport is still unverified")
 
@@ -2026,7 +2043,7 @@ class CodexAdapter(NativeAdapter):
             status, enabled = read(cwd, "config", "--type=bool", "--get",
                                    "extensions.worktreeConfig")
             if status not in (0, 1):
-                return "could not read extensions.worktreeConfig before the Codex sandbox"
+                return f"could not read extensions.worktreeConfig before the Codex sandbox: git exited {status}: {redact(enabled)}"
             if status == 0 and enabled == "true":
                 missing = [name for name in self.WORKTREE_CONFIG
                            if not (worktree / name).exists()]
@@ -2038,7 +2055,7 @@ class CodexAdapter(NativeAdapter):
                     )
             status, hooks = read(cwd, "config", "--type=path", "--get", "core.hooksPath")
             if status not in (0, 1):
-                return "could not read core.hooksPath before the Codex sandbox"
+                return f"could not read core.hooksPath before the Codex sandbox: git exited {status}: {redact(hooks)}"
             if status == 1 or not hooks:
                 # The default hooks directory sits in the read-only common root.
                 return None
@@ -2047,11 +2064,11 @@ class CodexAdapter(NativeAdapter):
                 # Git resolves a relative hooksPath from the worktree's top level.
                 status, top = read(cwd, "rev-parse", "--show-toplevel")
                 if status != 0 or not top:
-                    return "could not resolve a relative core.hooksPath before the Codex sandbox"
+                    return f"could not resolve a relative core.hooksPath before the Codex sandbox: git exited {status}, top level={redact(top)!r}"
                 hooks_path = Path(top) / hooks_path
             hooks_path = hooks_path.resolve()
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            return f"could not read the Git configuration before the Codex sandbox ({type(exc).__name__})"
+            return f"could not read the Git configuration before the Codex sandbox ({_precheck_cause(exc)})"
         for root in self.git_write_roots(writable_dirs):
             if hooks_path.is_relative_to(Path(root).resolve()):
                 return (
@@ -2185,6 +2202,8 @@ class CodexAdapter(NativeAdapter):
             "--", sys.executable, "-c", script,
         ))
 
+        cleanup_errors: list[str] = []
+
         def cleanup_markers() -> bool:
             failed = False
             for marker, token in cleanup_tokens.items():
@@ -2193,7 +2212,8 @@ class CodexAdapter(NativeAdapter):
                         marker.unlink()
                 except FileNotFoundError:
                     continue
-                except OSError:
+                except OSError as error:
+                    cleanup_errors.append(_precheck_cause(error))
                     failed = True
             return not failed
 
@@ -2214,28 +2234,30 @@ class CodexAdapter(NativeAdapter):
             return False, "Codex Git metadata sandbox probe timed out after 15 seconds"
         except Exception as exc:
             cleanup_markers()
-            return False, f"Codex Git metadata sandbox probe could not start ({type(exc).__name__})"
+            return False, f"Codex Git metadata sandbox probe could not start ({_precheck_cause(exc)})"
         except BaseException:
             # An interrupted cycle still removes the markers this probe owns.
             cleanup_markers()
             raise
         verified = False
+        verification_error = "one or more probe markers are missing or have unexpected contents"
         if result.returncode == 0:
             try:
                 verified = all(
                     marker.is_file() and marker.read_text() == token
                     for marker, token in zip(write_markers, tokens)
                 )
-            except OSError:
+            except OSError as error:
+                verification_error = _precheck_cause(error)
                 verified = False
         if not cleanup_markers():
-            return False, "Codex Git metadata write probe could not remove its temporary markers"
+            return False, f"Codex Git metadata write probe could not remove its temporary markers: {'; '.join(cleanup_errors)}"
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:1000]
             suffix = f": {detail}" if detail else ""
             return False, f"Codex Git metadata sandbox probe exited {result.returncode}{suffix}"
         if not verified:
-            return False, "Codex sandbox could not verify every linked-worktree Git metadata root"
+            return False, f"Codex sandbox could not verify every linked-worktree Git metadata root: {verification_error}"
         return True, "Codex sandbox wrote and verified each linked-worktree Git metadata root"
 
     @staticmethod
@@ -2461,7 +2483,7 @@ class CodexAdapter(NativeAdapter):
         except subprocess.TimeoutExpired:
             outcome = (False, "the Codex review-sandbox probe timed out")
         except Exception as error:
-            outcome = (False, f"the Codex review-sandbox probe could not run ({type(error).__name__})")
+            outcome = (False, f"the Codex review-sandbox probe could not run ({_precheck_cause(error)})")
         else:
             if result.returncode != 0 or leaked:
                 detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")
@@ -2535,6 +2557,9 @@ def _git_read(cwd: str, *args: str, timeout: int = 10) -> tuple[int, str]:
         ["git", "-C", cwd, *args], capture_output=True, text=True,
         stdin=subprocess.DEVNULL, timeout=timeout, env=environment,
     )
+    if completed.returncode not in (0, 1):
+        return completed.returncode, redact(
+            completed.stderr or completed.stdout or "no diagnostic output") or "no diagnostic output"
     return completed.returncode, completed.stdout.strip()
 
 
@@ -2692,21 +2717,33 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
                              change_request_id: str | None = None) -> DispatchResult | str:
     """Guard checkout state and origin's reviewed/protected refs separately."""
     before = None
+    errors: list[str] = []
     if ref_auditor is None and cwd:
-        try:
-            if "origin" in _git_output(cwd, "remote").splitlines():
-                # No cycle auditor: this run publishes nothing (#421).
-                ref_auditor = pa.PublicationAuditor(cwd, "", None, publishes=False)
-        except Exception:
-            return "could not inspect remotes before read-only dispatch"
+        for attempt in range(2):
+            try:
+                if "origin" in _git_output(cwd, "remote").splitlines():
+                    # No cycle auditor: this run publishes nothing (#421).
+                    ref_auditor = pa.PublicationAuditor(cwd, "", None, publishes=False)
+                break
+            except Exception as error:
+                errors.append(_precheck_cause(error))
+                if attempt == 1:
+                    raise ReadOnlyAuditUnavailable(
+                        f"could not inspect remotes before read-only dispatch: {errors[-1]}", errors) from None
     if ref_auditor is not None:
-        try:
-            branch = (None if issue_review else
-                      _git_output(ref_auditor.cwd, "branch", "--show-current") or None)
-            before = ref_auditor.capture(checkout_branch=branch,
-                                        change_request_id=None if issue_review else change_request_id)
-        except Exception:
-            return "could not capture the read-only ref audit before dispatch"
+        for attempt in range(2):
+            try:
+                branch = (None if issue_review else
+                          _git_output(ref_auditor.cwd, "branch", "--show-current") or None)
+                before = ref_auditor.capture(checkout_branch=branch,
+                                            change_request_id=None if issue_review else change_request_id)
+                break
+            except Exception as error:
+                errors.append(_precheck_cause(error))
+                if attempt == 1:
+                    raise ReadOnlyAuditUnavailable(
+                        f"could not capture the read-only ref audit before dispatch: {errors[-1]}",
+                        errors) from None
     result = _verified_read_only(cwd, call)
     if isinstance(result, str):
         return result
@@ -2723,14 +2760,15 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
         audit = ref_auditor.verify(
             before, command_table_active=table_active,
             read_only=True, change_request_id=None if issue_review else change_request_id)
-    except pa.AuditUnreadable:
+    except pa.AuditUnreadable as error:
         if result.outcome is DispatchOutcome.CONTRACT_VIOLATION:
             return result
         artifacts = dict(result.artifacts)
+        artifacts["publication_audit"] = {"status": "unverified", "errors": [*errors, _precheck_cause(error)]}
         artifacts.pop("read_only_mode", None)
         artifacts.pop("read_only_verification", None)
         return replace(result, outcome=DispatchOutcome.FAILED, error_code="publication_unverified",
-                       artifacts=artifacts, detail="could not read the read-only ref audit after dispatch")
+                       artifacts=artifacts, detail=f"could not read the read-only ref audit after dispatch: {_precheck_cause(error)}")
     observed = []
     endpoint_breaches = []
     for item in result.artifacts.get("observed_ref_changes", []):
@@ -2754,6 +2792,8 @@ def _verified_read_only_refs(cwd: str | None, call, ref_auditor=None,
     artifacts = {**result.artifacts, "publication_audit": audit.evidence(),
                  "external_changes": [*observed, *audit.external_changes]}
     artifacts["publication_audit"]["external_changes"] = artifacts["external_changes"]
+    if errors:
+        artifacts["publication_audit"]["errors"] = errors
     artifacts.pop("observed_ref_changes", None)
     confirmed = any(b.kind != pa.REVIEW_TARGET_CHANGED for b in audit.breaches)
     # A checkout mutation has one primary code, even if the reviewed target
@@ -2814,7 +2854,7 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
     try:
         before = _checkout_fingerprint(checkout)
     except Exception as exc:
-        return f"could not fingerprint the read-only checkout {checkout}: {exc}"
+        return f"could not fingerprint the read-only checkout {checkout}: {_precheck_cause(exc)}"
     result = call()
     artifacts = dict(result.artifacts)
     artifacts["workspace_head_before"] = before["head"]
@@ -2827,7 +2867,7 @@ def _verified_read_only(cwd: str | None, call) -> DispatchResult | str:
         except Exception as exc:
             return _read_only_violation(
                 result, artifacts,
-                f"could not verify the read-only checkout after the dispatch: {exc}")
+                f"could not verify the read-only checkout after the dispatch: {_precheck_cause(exc)}")
         if returned != before:
             artifacts["workspace_head_after"] = returned["head"]
             artifacts["workspace_fingerprint_after"] = returned["fingerprint"]
@@ -2862,7 +2902,7 @@ def _compare_read_only(result: DispatchResult, artifacts: dict, checkout: str,
     except Exception as exc:
         return _read_only_violation(
             result, artifacts,
-            f"could not verify the read-only checkout after the stage: {exc}")
+            f"could not verify the read-only checkout after the stage: {_precheck_cause(exc)}")
     artifacts["workspace_head_after"] = after["head"]
     artifacts["workspace_fingerprint_after"] = after["fingerprint"]
     if before is not None and after["fingerprint"] == before:
@@ -2970,7 +3010,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
             raise ExecutorError("the disposable clone is not at the reviewed HEAD")
     except Exception as exc:
         left = _remove_workspace(worktree) if worktree else None
-        detail = f"could not prepare an isolated review workspace: {exc}"
+        detail = f"could not prepare an isolated review workspace: {_precheck_cause(exc)}"
         if left:
             detail += f"; cleanup failed, left on disk: {left}"
         blocked = adapter._blocked(
@@ -3025,7 +3065,7 @@ def _isolated_review_dispatch(adapter, target, task, *, cwd, dispatch_call,
             source_changed = False
         except Exception as exc:
             source_changed = True
-            source_error = f"could not verify the implementer checkout after review: {exc}"
+            source_error = f"could not verify the implementer checkout after review: {_precheck_cause(exc)}"
         try:
             workspace_head = _git_output(worktree, "rev-parse", "HEAD")
             workspace_status = _git_output(
@@ -4167,10 +4207,17 @@ def dispatch(
         # Every read-only stage, on every executor: the sandbox flag and the
         # isolated clone narrow what can be written, and this proves nothing
         # was. `enforced` survives only when the checkout is unchanged.
-        result = _verified_read_only_refs(
-            kw.get("cwd"), run_stage, ref_auditor,
-            issue_review=command_policy is not None and command_policy.role == "issue_review",
-            change_request_id=command_policy.pr_number if command_policy is not None else None)
+        try:
+            result = _verified_read_only_refs(
+                kw.get("cwd"), run_stage, ref_auditor,
+                issue_review=command_policy is not None and command_policy.role == "issue_review",
+                change_request_id=command_policy.pr_number if command_policy is not None else None)
+        except ReadOnlyAuditUnavailable as error:
+            result = DispatchResult(
+                DispatchOutcome.FAILED, target.executor, target,
+                error_code="publication_unverified", detail=str(error),
+                start_state="not_started", lifecycle_state="failed", process_exited=True,
+                artifacts={"publication_audit": error.evidence})
         if isinstance(result, str):
             return DispatchResult(
                 DispatchOutcome.BLOCKED, target.executor, target,

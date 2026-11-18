@@ -169,6 +169,15 @@ default branch, the protected branches or a change request cannot be read, the
 cycle stops with `publication_unverified`. Before the stage, nothing is
 dispatched. After it, the stage's report is not accepted.
 
+The read-only dispatch guard retries a failed pre-dispatch ref capture once
+(#510). If both attempts fail it returns `publication_unverified` with
+`start_state=not_started`; it does not call the executor and does not claim a
+contract breach. The exception class, message and available subprocess stderr
+pass through `cycle_journal.redact` before entering the result or report.
+`artifacts.publication_audit.errors` retains the failed attempts, including a
+first failure followed by a successful capture. An unreadable post-dispatch
+audit also retains the stage's existing artifacts and the redacted audit cause.
+
 On GitHub the change requests and protected branches are read through `gh api`.
 Other code hosts, Bitbucket included, have no reader until #238. For those, the
 cycle branch and the default branch are still audited through Git, and the
