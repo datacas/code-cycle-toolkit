@@ -397,7 +397,8 @@ class Journal:
         self.record(kind, role=role, component="consent", decision_key=f"grant:{grant.id}",
                     status=answer or "unanswered", reason=scope.effective,
                     correlation={"executor": scope.executor, "platform": scope.platform,
-                                 "source": source, "fingerprint": grant.fingerprint(scope)})
+                                 "source": source, "fingerprint": grant.fingerprint(scope),
+                                 **({"sandbox": grant.sandbox} if grant.sandbox else {})})
         if answer is not None:
             label = f"{grant.id}: {scope.effective}"
             self.permission(source or "consent", label,

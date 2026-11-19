@@ -937,14 +937,15 @@ class CycleRecorder:
             for note in consent.notes:
                 if note not in previous_notes and note.startswith(tuple(consent.answers)):
                     print(f"Resume grant preflight: {note}", file=sys.stderr)
-        granted = consent.granted(executor) if consent is not None else ()
+        granted = consent.granted(executor, run.role) if consent is not None else ()
         # This dispatch already ran with these denials; rerunning it with
         # the same denial context cannot change its outcome.
         attempt.denied_before = (frozenset(consent.denied_ids)
                                  if consent is not None else frozenset())
         context = ""
         if consent is not None:
-            grant_notes = [note for note in consent.notes if note.startswith(tuple(consent.answers))]
+            grant_notes = [note for note in consent.notes if note.startswith(tuple(consent.answers))
+                           or "affected checks stay not_verified" in note]
             if grant_notes:
                 context += "\n\nResume grant preflight:\n" + "\n".join(grant_notes)
             for grant_id in granted:
@@ -967,7 +968,10 @@ class CycleRecorder:
                         run.dispatch_kwargs.get("cwd"))
                     if compose_context:
                         context += "\n\n" + compose_context
-        sandbox_granted = tuple(grant_id for grant_id in granted if grant_id in GRANTS)
+        from grants import sandbox_token
+        registry = consent.registry if consent is not None else {}
+        sandbox_granted = tuple(sandbox_token(registry[grant_id]) for grant_id in granted
+                                if grant_id in GRANTS or registry[grant_id].sandbox is not None)
         return context, ({"sandbox_grants": sandbox_granted} if sandbox_granted else {})
 
     def _begin_dispatch_attempt(self, run: _StageRun, attempt: _Attempt) -> str:
@@ -1433,7 +1437,7 @@ class CycleRecorder:
         executor = attempt.target.executor
         answer = None
         if (not attempt.retry and not run.consent_requested
-                and grant.id not in consent.granted(executor)):
+                and grant.id not in consent.granted(executor, run.role)):
             run.consent_requested = True
             answer = consent.request(grant, executor, role=run.role, blocker=blocker)
         if answer == PENDING:

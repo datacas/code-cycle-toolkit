@@ -41,6 +41,51 @@ veto is a review finding.
 
 ## Per stage, not global
 
+### Parameterized sandbox grants (#509)
+
+An explicit runtime definition can use `--grant 'writable:~/.cache/example=cycle'`
+or `--grant 'network:example.com,registry.example.org=cycle'`. Answers are
+`cycle`, `persistent`, or `deny`; global answers are unavailable for these
+resources. Existing scope rules still apply: a persistent CLI answer without
+a previously recorded question holds for this run only. No agent statement
+alone creates a definition or authorizes access.
+
+Writable targets resolve `..` and symlinks before consent and again before
+dispatch. They must be strictly below the user's home directory and disjoint
+from protected credential stores, their parents and their children. In addition
+to the credential-read stores, protected targets include `.gnupg`, `.azure`,
+`.kube`, `.config/gcloud`, `.netrc`, `.npmrc`, `.pypirc`, and `.git-credentials`.
+The consent and journal stores (`.config/code-cycle`,
+`.config/code-cycle-toolkit`, and the configured consent file) are protected
+too: writing them would let a stage forge authorization. Claude's immutable
+policy directory must remain outside every granted writable path.
+Accepting a warning cannot override these bounds. A tool cache such as
+`~/.cache/example` is an exact target; granting it does not imply `~/.cache`.
+
+Domains are lower-cased IDNA ASCII hosts, de-duplicated and sorted. Schemes,
+ports and wildcard patterns are rejected. No subdomain access is implied.
+The consent ID hashes `[1, kind, canonical_parameter]`; repository and the
+executor's authorized scope are bound by the consent-store key and fingerprint.
+The readable definition and source accompany the decision and stage evidence.
+Consent-store schema 2 entries add a `sandbox` object with `version: 1`,
+`kind`, `parameter`, and `source`; unknown definition schemas do not replay.
+Serialized runtime `StagePolicy` adds a `sandbox_writable` array, defaulting
+to empty when reading an older policy.
+
+Only `implement` and `resolve` inherit these grants. Codex receives filesystem
+write entries or network-domain entries; Claude receives sandbox `allowWrite`
+and `allowedDomains` entries. Reviews, rereviews, issue reviews and security
+stages do not inherit them. A review-specific request needs a separate future
+consent path; this change does not implement that path. Denied or unavailable
+resources leave dependent checks `not_verified`, with the concrete reason.
+
+`local_sockets` is registered without an available executor scope until the
+[required real-sandbox spike](research/local-sockets-509.md) establishes its
+reach. It cannot be answered into opening Docker or external network access.
+This leaves AC-1 of #509 open. Automatic parameter discovery from observed
+denials and review-specific cycle answers also remain incomplete; explicit
+validated definitions are the implemented entry point.
+
 The runtime applies permissions to each stage it dispatches natively
 (`claude -p`, `codex exec`). Nothing is written to a global file as a side
 effect, and nothing is written into a worktree.

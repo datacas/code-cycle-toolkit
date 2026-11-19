@@ -138,6 +138,7 @@
       "test_fast_path",
       "test_finding_results",
       "test_grants",
+      "test_sandbox_grants",
       "test_host_permissions",
       "test_install_codex",
       "test_install_runtime",

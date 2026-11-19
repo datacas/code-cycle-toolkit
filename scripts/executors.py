@@ -2318,14 +2318,30 @@ class CodexAdapter(NativeAdapter):
         # this file entirely.
         argv = [self.binary, "exec", "-m", target.model,
                 "-c", f"model_reasoning_effort={target.effort}", "--json"]
-        unknown = sorted(set(sandbox_grants) - set(CODEX_GRANT_OPTIONS))
+        from grants import GrantError, canonical_domains, canonical_writable
+        parameter_grants = tuple(token for token in sandbox_grants
+                                 if token.startswith(("writable:", "network:")))
+        # Writing grants never reach a review, even via a direct adapter call.
+        granted_paths, granted_domains = [], []
+        if writes:
+            try:
+                for token in parameter_grants:
+                    kind, _, value = token.partition(":")
+                    if kind == "writable":
+                        granted_paths.append(canonical_writable(value))
+                    else:
+                        granted_domains.extend(canonical_domains(value))
+            except GrantError as error:
+                raise ExecutorError(f"sandbox grant unavailable: {error}; checks stay not_verified") from error
+        network_domains = tuple(dict.fromkeys((*(network_domains or ()), *granted_domains)))
+        unknown = sorted(set(sandbox_grants) - set(CODEX_GRANT_OPTIONS) - set(parameter_grants))
         if unknown:
             raise ExecutorError(f"Codex cannot apply sandbox grants: {', '.join(unknown)}")
         # Only a person grants this (`grants.py`). Codex's Linux sandbox blocks
         # every new AF_UNIX socket unless all are allowed, through its network
         # proxy; a filesystem rule on the socket path makes the helper fail to
         # start (#239). The proxy keeps the domain allowlist, or none at all.
-        unix_sockets = "unix_sockets" in {CODEX_GRANT_OPTIONS[grant] for grant in sandbox_grants}
+        unix_sockets = any(CODEX_GRANT_OPTIONS.get(grant) == "unix_sockets" for grant in sandbox_grants)
         profile = None
         if publishes or network_domains or unix_sockets:
             if publishes:
@@ -2389,6 +2405,11 @@ class CodexAdapter(NativeAdapter):
         elif denied:
             table = argv[existing][len(rule):]
             argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
+        if granted_paths:
+            existing = next(i for i, option in enumerate(argv) if option.startswith(rule))
+            table = argv[existing][len(rule):]
+            entries = ",".join(f'{json.dumps(path)}="write"' for path in granted_paths)
+            argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{entries}}}"
         if "docker_host" in sandbox_grants:
             try:
                 docker_config_path = _effective_docker_config_path(cwd)
@@ -3243,10 +3264,17 @@ class ClaudeAdapter(NativeAdapter):
         if policy is None:
             yield argv
             return
-        directory = Path(tempfile.mkdtemp(prefix="code-cycle-policy-",
-                                          dir=str(Path(scratch).parent)))
+        writable_roots = tuple(Path(path).resolve() for path in (cwd, scratch, *policy.sandbox_writable))
+        candidates = (str(Path(scratch).parent), tempfile.gettempdir(), "/tmp", "/var/tmp")
+        parent = next((path for path in dict.fromkeys(candidates) if Path(path).is_dir()
+                       and os.access(path, os.W_OK)
+                       and not any(Path(path).resolve().is_relative_to(root) for root in writable_roots)), None)
+        if parent is None:
+            raise ExecutorError("no policy directory outside writable paths")
+        directory = Path(tempfile.mkdtemp(prefix="code-cycle-policy-", dir=parent))
         try:
-            if _paths_overlap(str(directory), cwd) or _paths_overlap(str(directory), scratch):
+            if (_paths_overlap(str(directory), cwd) or _paths_overlap(str(directory), scratch)
+                    or any(_paths_overlap(str(directory), path) for path in policy.sandbox_writable)):
                 raise ExecutorError("the stage policy directory overlaps a writable path")
             try:
                 code, _ = _git_read(cwd, "remote", "get-url", "origin")
@@ -3275,6 +3303,9 @@ class ClaudeAdapter(NativeAdapter):
             })
             if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
+                if runtime_policy.role in sp.WRITING_ROLES:
+                    from grants import canonical_writable
+                    writable.extend(canonical_writable(path) for path in runtime_policy.sandbox_writable)
                 if runtime_policy.docker:
                     try:
                         docker_config_path = _effective_docker_config_path(cwd)
@@ -3971,6 +4002,27 @@ def dispatch(
     ref_auditor = kw.pop("publication_auditor", None)
     if command_policy is not None and not isinstance(command_policy, StagePolicy):
         raise ExecutorError("a command policy must be a StagePolicy")
+    if not kw.get("writes", False) or (command_policy is not None and command_policy.role not in sp.WRITING_ROLES):
+        sandbox_grants = tuple(token for token in sandbox_grants
+                               if not token.startswith(("writable:", "network:")))
+    if command_policy is not None and bool(kw.get("writes", False)) and command_policy.role in sp.WRITING_ROLES:
+        from grants import GrantError, canonical_domains, canonical_writable
+        extra_paths, extra_domains = [], []
+        retained = []
+        for token in sandbox_grants:
+            try:
+                if token.startswith("writable:"):
+                    extra_paths.append(canonical_writable(token.partition(":")[2]))
+                elif token.startswith("network:"):
+                    extra_domains.extend(canonical_domains(token.partition(":")[2]))
+                retained.append(token)
+            except GrantError as error:
+                task += (f"\nSandbox grant unavailable: {error}. No access was added; "
+                         "record affected checks as not_verified with this concrete limit.")
+        sandbox_grants = tuple(retained)
+        command_policy = replace(command_policy,
+                                 sandbox_writable=tuple(extra_paths),
+                                 registry_domains=tuple(dict.fromkeys((*command_policy.registry_domains, *extra_domains))))
     if (command_policy is not None and target.executor == "claude"
             and "docker_host" in sandbox_grants):
         # The grant opens docker compose up/down/ps/logs/build in the table.
@@ -4152,7 +4204,12 @@ def dispatch(
                 call_kw["dispatch_attempt_id"] = attempt_id
             elif on_dispatch_attempt is not None:
                 call_kw.pop("dispatch_attempt_id", None)
-        return adapter.dispatch(target, prompt, **call_kw)
+        result = adapter.dispatch(target, prompt, **call_kw)
+        applied_parameters = [token for token in sandbox_grants if token.startswith(("writable:", "network:"))]
+        if applied_parameters:
+            result = replace(result, artifacts={**result.artifacts, "sandbox_grants": applied_parameters,
+                             "sandbox_grant_role": command_policy.role if command_policy else None})
+        return result
 
     def run_stage() -> DispatchResult:
         if (workspace_policy is WorkspacePolicy.READ_ONLY
