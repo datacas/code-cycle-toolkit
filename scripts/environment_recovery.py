@@ -192,6 +192,8 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             elif len(set(paths)) == 1:
                 kind = "sandbox_filesystem_access"
                 definition = {"kind": "writable", "parameter": paths[0]}
+            elif not local and re.search(r"read-only file system|filesystem|writ(?:e|ing|able)", output, re.I):
+                kind = "sandbox_filesystem_access"
             denials.append({"kind": kind, "command": command, "error": output,
                             **({"sandbox_definition": definition} if definition else {}),
                             "attempted": ["runtime observed this command's sandbox denial"],

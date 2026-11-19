@@ -243,6 +243,10 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertIn("not_verified", grants.denial_context(grant))
         self.assertEqual([], recovery.codex_sandbox_denials([
             {"type": "message", "output": error}]))
+        events[1]["output"] = "SandboxDenied: read-only file system"
+        [missing] = recovery.codex_sandbox_denials(events)
+        self.assertEqual("sandbox_filesystem_access", missing["kind"])
+        self.assertNotIn("sandbox_definition", missing)
 
     def test_network_denial_and_explicit_missing_definition_use_distinct_sources(self):
         events = [
