@@ -263,9 +263,10 @@ definitions use the same broker and consent store; see
 Their canonical definitions and sources are retained with decisions and in
 dispatch artifacts. Only writing stages receive their filesystem and network
 settings; a review never inherits a writing grant. Reviews can request a
-separate cycle-only definition scoped to their exact role. Runtime-observed
-denial diagnostics supply canonical parameters; when they do not, the runtime
-asks for an explicit definition before asking permission. `local_sockets` maps
+separate cycle-only definition scoped to their exact role. Collected
+command-output diagnostics supply only untrusted target suggestions. The runtime
+asks the user for an explicit confirmed definition before asking permission;
+command output never registers an observed grant source. `local_sockets` maps
 to loopback TCP on Codex/Linux, following the
 [host-reported #509 spike](research/local-sockets-509.md). It adds no domains,
 AF_UNIX access or Docker access; Claude reports that grant unavailable.

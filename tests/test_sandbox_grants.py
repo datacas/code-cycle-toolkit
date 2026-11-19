@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ class SandboxGrantTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.home = Path(self.directory.name)
+        self.home = Path(self.directory.name).resolve()
         self.environment = patch("pathlib.Path.home", return_value=self.home)
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -51,6 +52,21 @@ class SandboxGrantTests(unittest.TestCase):
         second = grants.sandbox_grant("network", ["xn--bcher-kva.de", "example.com"], source="validated configuration")
         self.assertEqual(first.id, second.id)
         self.assertEqual(["example.com", "xn--bcher-kva.de"], first.sandbox["parameter"])
+
+    def test_home_alias_uses_lexical_and_resolved_bounds_consistently(self):
+        alias = self.home / "home-alias"
+        self.symlink(alias, self.home)
+        with patch("pathlib.Path.home", return_value=alias):
+            grant = self.writable(alias / ".cache" / "example")
+            self.assertEqual(str(self.cache), grant.sandbox["parameter"])
+            self.assertEqual(f"writable:{self.cache}", grants.sandbox_token(grant))
+            broker = self.broker("repo", operations={grant.id: grant})
+            broker.apply_answer(grant, grant.scope_for("codex", "linux"), "cycle")
+            self.assertEqual((grant.id,), broker.granted("codex"))
+            for value in (alias / ".ssh", self.home / ".ssh", alias):
+                with self.subTest(value=value):
+                    with self.assertRaises(grants.GrantError):
+                        grants.canonical_writable(str(value))
 
     def test_protected_paths_and_ancestors_never_reach_consent(self):
         for name in (".ssh", ".gnupg", ".aws", ".config/gh", ".codex/auth.json", ".netrc",
@@ -137,11 +153,11 @@ class SandboxGrantTests(unittest.TestCase):
         target = router.parse_target("codex:openai/gpt-6.1-sol medium")
         tokens = (f"writable:{self.cache}", "network:example.com")
         argv = ex.CodexAdapter().argv(target, "work", writes=True, sandbox_grants=tokens)
-        self.assertTrue(any(str(self.cache) in arg and '="write"' in arg for arg in argv))
+        self.assertTrue(any(json.dumps(str(self.cache)) + '="write"' in arg for arg in argv))
         self.assertTrue(any('"example.com"="allow"' in arg for arg in argv))
         self.assertFalse(any("dangerously_allow_all_unix_sockets" in arg for arg in argv))
         readonly = ex.CodexAdapter().argv(target, "review", writes=False, sandbox_grants=tokens)
-        self.assertFalse(any(str(self.cache) in arg or "example.com" in arg for arg in readonly))
+        self.assertFalse(any(json.dumps(str(self.cache)) in arg or "example.com" in arg for arg in readonly))
 
     def test_claude_emits_writable_settings_only_for_writers(self):
         adapter = ex.ClaudeAdapter()
@@ -225,7 +241,7 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertIsNone(grants.from_entry({"sandbox": {**definition, "version": 2}}))
         self.assertIsNone(grants.from_entry({"sandbox": {**definition, "role": "review"}}))
 
-    def test_runtime_denial_registers_a_parameter_but_never_authorizes_it(self):
+    def test_runtime_diagnostic_needs_an_explicit_definition_and_separate_consent(self):
         error = f"SandboxDenied: sandbox denied access to path '{self.cache}'"
         events = [
             {"type": "function_call", "name": "exec_command", "call_id": "1",
@@ -234,8 +250,16 @@ class SandboxGrantTests(unittest.TestCase):
         ]
         [blocker] = recovery.codex_sandbox_denials(events)
         broker = self.broker("repo")
-        grant = broker.observe_sandbox(blocker, role="implement")
-        self.assertEqual("observed sandbox denial", grant.sandbox["source"])
+        self.assertNotIn("sandbox_definition", blocker)
+        self.assertIsNone(broker.request_definition(blocker, "codex", role="implement"))
+        self.assertEqual({}, broker.operations)
+        self.assertNotIn("resource", blocker)
+        self.assertIn("Untrusted command-output suggestion", broker.pending[0].question["prompt"])
+        explicit = self.broker("repo", prompt=lambda asked: str(self.cache))
+        grant = explicit.request_definition(blocker, "codex", role="implement")
+        self.assertEqual("validated configuration", grant.sandbox["source"])
+        broker = explicit
+        broker.prompt = None
         self.assertEqual((), broker.granted("codex"))
         self.assertEqual(grants.PENDING, broker.request(grant, "codex", role="implement", blocker=blocker))
         broker.apply_answer(grant, grant.scope_for("codex", "linux"), "deny")
@@ -246,9 +270,29 @@ class SandboxGrantTests(unittest.TestCase):
         events[1]["output"] = "SandboxDenied: read-only file system"
         [missing] = recovery.codex_sandbox_denials(events)
         self.assertEqual("sandbox_filesystem_access", missing["kind"])
-        self.assertNotIn("sandbox_definition", missing)
+        self.assertNotIn("sandbox_suggestion", missing)
 
-    def test_network_denial_and_explicit_missing_definition_use_distinct_sources(self):
+    def test_command_printing_a_diagnostic_cannot_register_an_observed_source(self):
+        for diagnostic in (f"sandbox denied access to path '{self.cache}'",
+                           "domain 'EXAMPLE.com' is not on the allowlist"):
+            with self.subTest(diagnostic=diagnostic):
+                command = [sys.executable, "-c", f"print({diagnostic!r})"]
+                printed = subprocess.run(command, capture_output=True, text=True, check=True)
+                events = [
+                    {"type": "function_call", "name": "exec_command", "call_id": "printed",
+                     "arguments": json.dumps({"cmd": command})},
+                    {"type": "function_call_output", "call_id": "printed", "output": printed.stdout},
+                ]
+                [blocker] = recovery.codex_sandbox_denials(events)
+                broker = self.broker("repo")
+                self.assertNotIn("sandbox_definition", blocker)
+                self.assertIsNone(broker.request_definition(blocker, "codex", role="implement"))
+                self.assertEqual({}, broker.operations)
+                self.assertEqual((), broker.granted("codex"))
+                self.assertIn("Untrusted command-output suggestion", broker.pending[0].question["prompt"])
+                self.assertEqual([], stop_questions.questions_errors([broker.pending[0].question]))
+
+    def test_network_suggestion_requires_user_definition_and_canonicalization(self):
         events = [
             {"type": "function_call", "name": "exec_command", "call_id": "1",
              "arguments": json.dumps({"cmd": "tool check"})},
@@ -256,9 +300,11 @@ class SandboxGrantTests(unittest.TestCase):
              "output": "domain 'EXAMPLE.com' is not on the allowlist"},
         ]
         [blocker] = recovery.codex_sandbox_denials(events)
-        broker = self.broker("repo")
-        grant = broker.observe_sandbox(blocker, role="implement")
+        broker = self.broker("repo", prompt=lambda asked: ["EXAMPLE.com"])
+        grant = broker.request_definition(blocker, "codex", role="implement")
         self.assertEqual(["example.com"], grant.sandbox["parameter"])
+        self.assertEqual("validated configuration", grant.sandbox["source"])
+        broker = self.broker("repo")
         missing = {"kind": "sandbox_filesystem_access", "command": "tool check", "error": "SandboxDenied"}
         self.assertIsNone(broker.request_definition(missing, "codex", role="implement"))
         self.assertIn("exact home path", broker.pending[0].question["prompt"])
@@ -271,12 +317,13 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertIsNone(denied.request_definition(missing, "codex", role="implement"))
         self.assertIn("not_verified", denied.notes[0])
 
-    def test_protected_observed_parameter_stays_unavailable_without_traceback(self):
-        broker = self.broker("repo")
-        blocker = {"sandbox_definition": {"kind": "writable", "parameter": str(self.home / ".ssh")}}
-        self.assertIsNone(broker.observe_sandbox(blocker, role="implement"))
+    def test_protected_suggested_parameter_stays_unavailable_without_traceback(self):
+        broker = self.broker("repo", prompt=lambda asked: str(self.home / ".ssh"))
+        blocker = {"kind": "sandbox_filesystem_access",
+                   "sandbox_suggestion": {"kind": "writable", "parameter": str(self.home / ".ssh")}}
+        self.assertIsNone(broker.request_definition(blocker, "codex", role="implement"))
         self.assertEqual((), broker.granted("codex"))
-        self.assertIn("protected store", broker.notes[0])
+        self.assertIn("protected store", broker.pending[0].question["prompt"])
         with self.assertRaises(grants.GrantError):
             self.writable(self.home / ".cache")
 
@@ -285,8 +332,9 @@ class SandboxGrantTests(unittest.TestCase):
         writer = self.writable()
         broker.operations[writer.id] = writer
         broker.apply_answer(writer, writer.scope_for("codex", "linux"), "persistent")
-        blocker = {"sandbox_definition": {"kind": "writable", "parameter": str(self.cache)}}
-        review = broker.observe_sandbox(blocker, role="review")
+        blocker = {"kind": "sandbox_filesystem_access"}
+        broker.prompt = lambda asked: str(self.cache)
+        review = broker.request_definition(blocker, "codex", role="review")
         self.assertNotEqual(writer.id, review.id)
         self.assertEqual((), broker.granted("codex", "review"))
         scope = review.scope_for("codex", "linux")
@@ -301,7 +349,7 @@ class SandboxGrantTests(unittest.TestCase):
         token = grants.sandbox_token(review)
         target = router.parse_target("codex:openai/gpt-6.1-sol medium")
         argv = ex.CodexAdapter().argv(target, "review", writes=False, sandbox_grants=(token,))
-        self.assertTrue(any(str(self.cache) in arg and '=\"write\"' in arg for arg in argv))
+        self.assertTrue(any(json.dumps(str(self.cache)) + '="write"' in arg for arg in argv))
         record = grants.PermissionRequest(review, scope, "review", {}).record()
         self.assertIn(f"review:writable:{self.cache}", record["answer_with"])
         options = grants.parse_grant_options([f"{token}=cycle"])
@@ -310,6 +358,19 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertEqual((), resumed.granted("codex", "implement"))
         with self.assertRaises(grants.GrantError):
             grants.parse_grant_options([f"{token}=persistent"])
+
+    def test_writable_consent_discloses_host_execution_risk_for_sensitive_targets(self):
+        for name in (".claude/settings.json", ".claude/hooks", ".codex/config.toml",
+                     ".bashrc", ".profile", ".local/bin"):
+            for role in (None, "review"):
+                with self.subTest(name=name, role=role):
+                    grant = grants.sandbox_grant("writable", str(self.home / name),
+                                                 source="explicit --grant", role=role)
+                    scope = grant.scope_for("codex", "linux")
+                    asked = grants.question(grant, scope, role=role or "implement")
+                    self.assertIn("agent hooks, permissions or shell startup code", asked["prompt"])
+                    self.assertIn("outside the sandbox in later sessions", asked["prompt"])
+                    self.assertEqual([], stop_questions.questions_errors([asked]))
 
     def test_claude_policy_uses_an_alternative_outside_granted_scratch_parent(self):
         repo = self.home / "repo"

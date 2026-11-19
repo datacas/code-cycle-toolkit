@@ -51,7 +51,9 @@ a previously recorded question holds for this run only. No agent statement
 alone creates a definition or authorizes access.
 
 Writable targets resolve `..` and symlinks before consent and again before
-dispatch. They must be strictly below the user's home directory and disjoint
+dispatch. Lexical paths may use the lexical or resolved HOME spelling; resolved
+targets must stay below resolved HOME, including with Windows short names.
+They must be strictly below the user's home directory and disjoint
 from protected credential stores, their parents and their children. In addition
 to the credential-read stores, protected targets include `.gnupg`, `.azure`,
 `.kube`, `.config/gcloud`, `.netrc`, `.npmrc`, `.pypirc`, and `.git-credentials`.
@@ -61,6 +63,11 @@ too: writing them would let a stage forge authorization. Claude's immutable
 policy directory must remain outside every granted writable path.
 Accepting a warning cannot override these bounds. A tool cache such as
 `~/.cache/example` is an exact target; granting it does not imply `~/.cache`.
+Other exact home targets, including agent settings and hooks, shell startup
+files and `~/.local/bin`, remain eligible under the owner's bounds. Every
+writable consent question warns that persistent writes can change agent hooks,
+permissions or shell startup code executed outside the sandbox in later
+sessions. This risk appears before the target so long paths cannot hide it.
 
 Domains are lower-cased IDNA ASCII hosts, de-duplicated and sorted. Schemes,
 ports and wildcard patterns are rejected. No subdomain access is implied.
@@ -94,13 +101,16 @@ records this distinction and the remaining local verification limit. Claude has
 no measured mapping and reports this grant unavailable. `docker_host` retains
 its separately disclosed wider scope and writable Docker state.
 
-Runtime-observed Codex tool results can supply an exact quoted path from
+Codex command output can suggest an exact quoted path from
 `sandbox denied access to path '<path>'` or exact domains from
-`domain '<host>' is not on the allowlist`. These create consent requests,
-never authorization. Ordinary permission errors, command operands and agent
-prose do not establish a parameter. Ambiguous or missing definitions ask the
-user for an exact path/domain first; a second question shows the canonical
-scope before consent. Noninteractive runs retain this question and can resume
+`domain '<host>' is not on the allowlist`. A command can print these diagnostics
+itself, so parsed targets are explicitly labelled untrusted suggestions and
+never registered as an observed source. The runtime always asks the user to
+confirm or replace the exact path/domain first; the confirmed definition is
+recorded as `validated configuration`. A second question shows the canonical
+scope before consent. Ordinary permission errors, command operands and agent
+prose do not establish a parameter. Noninteractive runs retain the definition
+question and can resume
 with an explicit validated `--grant` definition. A protected definition is
 rejected even when it came from an observed denial. The original executor,
 exit proof and effect reconciliation guards remain in force for every rerun.

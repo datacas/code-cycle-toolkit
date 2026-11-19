@@ -166,7 +166,7 @@ given instead of line numbers so the references stay valid.
 | PA-48 | Writable grants exclude credential stores and their ancestors, including symlinks | `grants.canonical_writable` | Owner-defined exact home-path bounds | #509 | role contract | — |
 | PA-49 | Writing path/domain grants never reach review roles | `grants.ConsentBroker.granted`; `executors.dispatch` | Owner-defined stage scope | #509 | role contract | — |
 | PA-50 | The local-socket spike cannot be repeated inside a nested Codex boundary | `grants.LOCAL_SOCKETS`; `docs/research/local-sockets-509.md` | The executor masks its daemon socket directory; the host-reported measurement is retained separately from local verification | #509 | real limit | — |
-| PA-51 | Path/domain parameters require an observed denial or an explicit validated definition; reviews request a separate cycle-only grant | `grants.ConsentBroker.observe_sandbox`, `request_definition`, `request` | User-defined source and role boundaries; a definition never authorizes access | #509 | role contract | #509 (converted to canonical consent and separate review scopes) |
+| PA-51 | Command-output targets require an explicit confirmed definition before permission; reviews request a separate cycle-only grant | `grants.ConsentBroker.request_definition`, `request` | User-defined source and role boundaries; output is an untrusted suggestion and a definition never authorizes access | #509 | role contract | #509 (converted to canonical consent and separate review scopes) |
 
 ## Kept restrictions
 

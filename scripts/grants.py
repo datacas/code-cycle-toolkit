@@ -470,7 +470,8 @@ def canonical_writable(value: str) -> str:
         raise GrantError("writable grant needs an absolute path under HOME")
     if value.startswith("~") and value != "~" and not value.startswith("~/"):
         raise GrantError("writable grant can expand only the current user's HOME")
-    home = Path.home().resolve()
+    lexical_home = Path(os.path.abspath(Path.home()))
+    home = lexical_home.resolve()
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise GrantError("writable grant needs an absolute path under HOME")
@@ -481,12 +482,16 @@ def canonical_writable(value: str) -> str:
                      "~/.kube", "~/.config/gcloud", "~/.netrc", "~/.npmrc",
                      "~/.pypirc", "~/.git-credentials", "~/.config/code-cycle",
                      "~/.config/code-cycle-toolkit")
-        stores = [home / item[2:] for item in protected]
+        stores = [lexical_home / item[2:] for item in protected]
         stores.append(default_store_path().expanduser())
+        # Accept both spellings so a canonical definition survives replay when
+        # HOME uses a Windows short name or symlink. The real target must still
+        # stay below resolved HOME, and both spellings retain store checks.
+        if (not any(boundary in lexical.parents for boundary in (lexical_home, home))
+                or real == home or home not in real.parents):
+            raise GrantError("writable grant must be strictly under HOME")
         for target in (lexical, real):
-            if target == home or home not in target.parents:
-                raise GrantError("writable grant must be strictly under HOME")
-            if target == home / ".cache":
+            if target in (lexical_home / ".cache", home / ".cache"):
                 raise GrantError("cache grants need an exact tool directory under ~/.cache")
             for store in stores:
                 for denied in (store, store.resolve()):
@@ -527,7 +532,8 @@ def sandbox_grant(kind: str, parameter: Any, *, source: str, role: str | None = 
     if kind == "writable":
         parameter = canonical_writable(parameter)
         effective = f"write exactly {parameter}; implement and resolve stages only"
-        risks = "writes persist outside the checkout; executable tool state can affect later runs"
+        risks = ("writes persist; agent hooks, permissions or shell startup code may run "
+                 "outside the sandbox in later sessions")
     elif kind == "network":
         parameter = canonical_domains(parameter)
         effective = f"network to exact domains {', '.join(parameter)}; implement and resolve stages only"
@@ -844,12 +850,12 @@ def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
               f"Alternative: exact-HEAD CI; local checks stay unverified. "
               f"Opens {effective}. Risk: {risks}. {reach(scope)}")
     if grant.sandbox:
-        prompt = (f"The {role} stage requests {grant.resource}. Opens {effective}. "
-                  f"Risk: {risks}. Only implement and resolve receive this grant. "
+        prompt = (f"Risk: {risks}. The {role} stage requests {grant.resource}. Opens {effective}. "
+                  "Only implement and resolve receive this grant. "
                   "Alternative: leave affected checks not_verified.")
         if grant.sandbox.get("role"):
-            prompt = (f"The {role} stage requests {grant.resource}. Opens {effective}. "
-                      f"Risk: {risks}. This separate review grant lasts this cycle only.")
+            prompt = (f"Risk: {risks}. The {role} stage requests {grant.resource}. Opens {effective}. "
+                      "This separate review grant lasts this cycle only.")
     return {
         "id": question_id,
         "prompt": prompt[:597] + "..." if len(prompt) > 600 else prompt,
@@ -1086,29 +1092,8 @@ class ConsentBroker:
         return (role == definition["role"] if definition.get("role")
                 else role in {"implement", "resolve"})
 
-    def observe_sandbox(self, blocker: dict, *, role: str) -> SensitiveGrant | None:
-        """Register only parameters extracted by the runtime from a tool denial.
-
-        Callers must pass an entry from sandbox_denials, never agent output.
-        An absent/ambiguous parameter is deliberately left for an explicit
-        validated runtime definition; no command-line argument is guessed.
-        """
-        definition = blocker.get("sandbox_definition")
-        if not isinstance(definition, dict):
-            return self.grant_for(blocker)
-        try:
-            grant = sandbox_grant(definition["kind"], definition["parameter"],
-                                  source="observed sandbox denial",
-                                  role=None if role in {"implement", "resolve"} else role)
-        except (GrantError, KeyError, TypeError, OSError, RuntimeError) as error:
-            self.notes.append(f"sandbox grant unavailable: {error}; affected checks stay not_verified")
-            return None
-        self.operations[grant.id] = grant
-        blocker["resource"] = grant.id
-        return grant
-
     def request_definition(self, blocker: dict, executor: str, *, role: str) -> SensitiveGrant | None:
-        """Ask for an explicit definition when the denial supplies none.
+        """Ask for an explicit definition; tool output is only a suggestion.
 
         A definition is not consent: request() subsequently shows its canonical
         scope and asks the normal permission question. Noninteractive callers
@@ -1123,9 +1108,14 @@ class ConsentBroker:
         scope = GrantScope(executor, self.platform, "no access until an exact definition is validated and consented",
                            "guessing a target could grant unrelated access", True)
         prefix = "" if role in {"implement", "resolve"} else role + ":"
+        suggestion = blocker.get("sandbox_suggestion")
+        hint = ""
+        if isinstance(suggestion, dict) and suggestion.get("kind") == kind:
+            hint = (" Untrusted command-output suggestion (confirm or replace): "
+                    + json.dumps(suggestion.get("parameter"), ensure_ascii=True)[:160] + ".")
         asked = {"id": f"Q-{len(self.pending) + 1:03d}",
-                 "prompt": (f"The {role} sandbox denial does not identify a valid exact {kind} target. "
-                            f"Provide its exact {'domain set' if kind == 'network' else 'home path'}; "
+                 "prompt": (f"The {role} sandbox diagnostic cannot establish a trusted {kind} target."
+                            f"{hint} Provide its exact {'domain set' if kind == 'network' else 'home path'}; "
                             f"or resume with --grant '{prefix}{kind}:<exact target>=cycle'. "
                             "No access is granted by this definition question."),
                  "options": ["Provide an exact definition", "Leave affected checks not_verified"],

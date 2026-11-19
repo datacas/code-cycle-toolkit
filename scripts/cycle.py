@@ -1255,10 +1255,8 @@ class CycleRecorder:
                                       and not result.asynchronous else None)
         attempt.blocker = blocker
         if self.consent is not None and blocker is not None:
-            # Only runtime-collected command results supply parameterized
-            # definitions. The agent's environment_blocker cannot mint one.
-            if any(blocker is observed for observed in (result.artifacts.get("sandbox_denials") or ())):
-                self.consent.observe_sandbox(blocker, role=run.role)
+            # Tool output and agent blockers both require an explicit target
+            # definition. A command can print a sandbox diagnostic itself.
             denied_grant = self.consent.grant_for(blocker)
             if denied_grant is not None and denied_grant.id in self.consent.denied_ids:
                 run.denial_affected.add(denied_grant.id)

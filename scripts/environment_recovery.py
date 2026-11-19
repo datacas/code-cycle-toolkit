@@ -182,9 +182,9 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     if not local and re.search(r"network|domain|allowlist", output, re.I)
                     else "sandbox_local_access")
             definition = None
-            # Parse only explicit sandbox diagnostics, never a command operand
-            # or the agent's proposed target. Ambiguous diagnostics ask for a
-            # user-supplied exact definition instead of inferring broad access.
+            # Command output can print these diagnostics itself. Parsed targets
+            # are untrusted suggestions, never observed grant definitions; the
+            # user must confirm an exact definition before permission is asked.
             domains = re.findall(r"domain ['\"]([^'\"]+)['\"] is not on the allowlist", output, re.I)
             paths = re.findall(r"sandbox denied access to (?:path )?['\"]([^'\"]+)['\"]", output, re.I)
             if domains:
@@ -195,8 +195,8 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             elif not local and re.search(r"read-only file system|filesystem|writ(?:e|ing|able)", output, re.I):
                 kind = "sandbox_filesystem_access"
             denials.append({"kind": kind, "command": command, "error": output,
-                            **({"sandbox_definition": definition} if definition else {}),
-                            "attempted": ["runtime observed this command's sandbox denial"],
+                            **({"sandbox_suggestion": definition} if definition else {}),
+                            "attempted": ["runtime collected a sandbox diagnostic from command output"],
                             "requires_human": False})
     return denials
 
