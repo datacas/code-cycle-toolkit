@@ -25,6 +25,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import sys
 import subprocess
 import tempfile
@@ -575,10 +576,16 @@ def parse_grant_options(values: list[str] | tuple[str, ...]) -> dict[str, str]:
     answers: dict[str, str] = {}
     for value in values:
         grant_id, separator, answer = value.rpartition("=")
-        dynamic = grant_id.startswith(("writable:", "network:"))
+        role = None
+        parameter_token = grant_id
+        if grant_id.partition(":")[0] in {"review", "rereview", "security", "issue_review"}:
+            role, _, parameter_token = grant_id.partition(":")
+        dynamic = parameter_token.startswith(("writable:", "network:"))
         if dynamic:
-            kind, _, parameter = grant_id.partition(":")
-            grant_id = sandbox_token(sandbox_grant(kind, parameter, source="explicit --grant"))
+            kind, _, parameter = parameter_token.partition(":")
+            grant_id = sandbox_token(sandbox_grant(kind, parameter, source="explicit --grant", role=role))
+            if role and answer not in {ALLOW_CYCLE, DENY}:
+                raise GrantError("review sandbox grants support cycle or deny only")
         if (not separator or (not dynamic and grant_id not in GRANTS and not re.fullmatch(r"(?:command|sandbox)_[0-9a-f]{64}", grant_id))
                 or answer not in ANSWERS or (answer == ALLOW_GLOBAL and grant_id in GRANTS)):
             raise GrantError(
@@ -886,7 +893,9 @@ class PermissionRequest:
             "executor": self.scope.executor, "platform": self.scope.platform,
             "effective_scope": self.scope.effective, "risks": self.scope.risks,
             "temporary_offered": self.scope.isolated_per_dispatch,
-            "role": self.role, "answer_with": f"--grant {self.grant.id}=<answer>",
+            "role": self.role,
+            "answer_with": (f"--grant {shlex.quote(sandbox_token(self.grant))}=<answer>"
+                            if self.grant.sandbox else f"--grant {self.grant.id}=<answer>"),
             "operation": (self.blocker or {}).get("command", self.grant.reason),
             "observed_error": (self.blocker or {}).get("error"),
             "alternative": "exact-HEAD CI; local checks remain not_verified",
@@ -936,9 +945,13 @@ class ConsentBroker:
 
     def __post_init__(self) -> None:
         for token in list(self.answers):
-            if token.startswith(("writable:", "network:")):
-                kind, _, parameter = token.partition(":")
-                grant = sandbox_grant(kind, parameter, source="explicit --grant")
+            role = None
+            parameter_token = token
+            if token.partition(":")[0] in {"review", "rereview", "security", "issue_review"}:
+                role, _, parameter_token = token.partition(":")
+            if parameter_token.startswith(("writable:", "network:")):
+                kind, _, parameter = parameter_token.partition(":")
+                grant = sandbox_grant(kind, parameter, source="explicit --grant", role=role)
                 if grant.id in self.answers and self.answers[grant.id] != self.answers[token]:
                     raise GrantError(f"{grant.id} was given two different answers")
                 self.operations[grant.id] = grant
@@ -1109,10 +1122,11 @@ class ConsentBroker:
         template = SensitiveGrant(grant_id, f"an explicit {kind} definition", "sandbox denial omits its target", ())
         scope = GrantScope(executor, self.platform, "no access until an exact definition is validated and consented",
                            "guessing a target could grant unrelated access", True)
+        prefix = "" if role in {"implement", "resolve"} else role + ":"
         asked = {"id": f"Q-{len(self.pending) + 1:03d}",
                  "prompt": (f"The {role} sandbox denial does not identify a valid exact {kind} target. "
                             f"Provide its exact {'domain set' if kind == 'network' else 'home path'}; "
-                            f"or resume with --grant '{kind}:<exact target>=cycle'. "
+                            f"or resume with --grant '{prefix}{kind}:<exact target>=cycle'. "
                             "No access is granted by this definition question."),
                  "options": ["Provide an exact definition", "Leave affected checks not_verified"],
                  "recommended": None, "blocks": [f"grant:{grant_id}"], "definition_kind": kind}

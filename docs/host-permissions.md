@@ -72,6 +72,9 @@ Consent-store schema 2 entries add a `sandbox` object with `version: 1`,
 Separate review definitions use `version: 2` and add an exact `role`; their
 identity hashes `[2, kind, canonical_parameter, role]`. They accept only `cycle`
 or `deny`, never a persistent answer or an inherited writer answer.
+The recorded resume command includes the canonical definition, for example
+`--grant 'review:network:example.com=cycle'`, so a fresh process can reconstruct
+the same identity before dispatch without relying on the interrupted worker.
 Serialized runtime `StagePolicy` adds a `sandbox_writable` array, defaulting
 to empty when reading an older policy, and `sandbox_grant_role`, defaulting to
 an empty string, for the separately authorized review writable settings.

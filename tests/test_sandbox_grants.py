@@ -296,6 +296,14 @@ class SandboxGrantTests(unittest.TestCase):
         target = router.parse_target("codex:openai/gpt-6.1-sol medium")
         argv = ex.CodexAdapter().argv(target, "review", writes=False, sandbox_grants=(token,))
         self.assertTrue(any(str(self.cache) in arg and '=\"write\"' in arg for arg in argv))
+        record = grants.PermissionRequest(review, scope, "review", {}).record()
+        self.assertIn(f"review:writable:{self.cache}", record["answer_with"])
+        options = grants.parse_grant_options([f"{token}=cycle"])
+        resumed = self.broker("repo", answers=options)
+        self.assertEqual((review.id,), resumed.granted("codex", "review"))
+        self.assertEqual((), resumed.granted("codex", "implement"))
+        with self.assertRaises(grants.GrantError):
+            grants.parse_grant_options([f"{token}=persistent"])
 
     def test_claude_policy_uses_an_alternative_outside_granted_scratch_parent(self):
         repo = self.home / "repo"
