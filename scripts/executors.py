@@ -4226,7 +4226,9 @@ def dispatch(
             elif on_dispatch_attempt is not None:
                 call_kw.pop("dispatch_attempt_id", None)
         result = adapter.dispatch(target, prompt, **call_kw)
-        applied_parameters = list(sandbox_grants)
+        # Preserve the existing Docker-only dispatch receipt shape. Its scope
+        # is already recorded by the consent journal.
+        applied_parameters = [token for token in sandbox_grants if token != "docker_host"]
         if applied_parameters:
             result = replace(result, artifacts={**result.artifacts, "sandbox_grants": applied_parameters,
                              "sandbox_grant_role": command_policy.role if command_policy else None})
