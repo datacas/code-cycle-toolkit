@@ -1,7 +1,9 @@
 # Local-socket grant spike for #509
 
-Status: **not_verified**, 2026-11-19. No local-socket profile is enabled by
-this partial implementation. AC-1 remains open.
+Status: **host-reported measurement**, 2026-11-19, Codex CLI 0.170.0 on Linux.
+The supplied [host evidence](local-sockets-509-host-evidence.md) reports the
+matrix below. This stage did not execute that spike locally; local boundary
+verification remains `not_verified` because nested Codex cannot start here.
 
 The implementation stage is itself a Codex sandbox. A metadata-only read,
 `rtk proxy ls -ld /tmp/codex-daemon-1000`, returned
@@ -17,20 +19,34 @@ CODEX_HOME, or daemon options cannot recover this known limit. The selected
 executor remains Codex. This is unavailable boundary verification, not a
 successful spike and not evidence that a host-side Codex profile is unsafe.
 
-The remaining host-capable spike must record, for the installed Codex version:
+The host report used `codex sandbox -c <profile overrides> -- python3 -I probe.py`
+with three-second socket timeouts. Each profile selected
+`default_permissions="p"` and `permissions.p.extends=":workspace"`:
 
-1. Baseline and candidate profiles, with exact argv and version.
-2. TCP bind/connect on `127.0.0.1` and `::1`.
-3. External network access, including direct sockets and proxy-aware requests.
-4. AF_UNIX bind/connect to a disposable socket.
-5. Whether `/var/run/docker.sock` remains inaccessible, without running Docker
-   operations or widening Docker access.
-6. `python3 -m unittest discover -s tests` in the chosen profile.
+- A: no network override.
+- B: `features.network_proxy=true`, `permissions.p.network.enabled=true`,
+  no external domain rules, no Unix-socket option.
+- C: B plus `permissions.p.network.dangerously_allow_all_unix_sockets=true`.
 
-Implement `local_sockets` only if the measured profile grants the requested
-local access while Docker stays closed. If enabling it also opens external
-access, do not describe it as local-only. If Unix sockets require the reach
-of `docker_host`, retain that distinction and disclose the real scope.
+| Probe | A | B | C |
+|---|---|---|---|
+| TCP loopback, IPv4 and IPv6 | EPERM | allowed | allowed |
+| Direct external TCP | denied | network unreachable | network unreachable |
+| HTTPS through proxy | not run | CONNECT refused, HTTP 403 | not run |
+| Disposable AF_UNIX bind/connect | denied | EPERM | allowed |
+| Docker socket connect only | denied | EPERM | **allowed** |
+
+The host user could perform all socket probes outside isolation. The report
+also records `python3 -m unittest discover -s tests` inside B: 2,676 tests in
+540 seconds, OK with one skipped. This is supplied evidence on the preceding
+commit, not a locally executed test or proof of the current head.
+
+Decision: `local_sockets` uses B and grants loopback TCP only. It adds neither
+external domains nor AF_UNIX access. Existing separately authorized publication
+or registry domains remain in force. Unix sockets need the broader
+`docker_host` grant: C opens Docker, ssh-agent and other reachable Unix sockets.
+The grant currently has a Codex/Linux scope only; Claude reports it unavailable
+rather than claiming an equivalent unmeasured boundary.
 
 Documentation context, not execution evidence: the upstream
 [Codex network-proxy README](https://github.com/openai/codex/blob/main/codex-rs/network-proxy/README.md)

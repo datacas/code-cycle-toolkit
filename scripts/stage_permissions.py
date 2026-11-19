@@ -196,6 +196,7 @@ class StagePolicy:
     integrations: tuple[str, ...] = ()
     registry_domains: tuple[str, ...] = ()
     sandbox_writable: tuple[str, ...] = ()
+    sandbox_grant_role: str = ""
     credential_reads: tuple[str, ...] = ()
     credential_publishing: bool = False
     # Host-observed unavailable isolation: retain read/publication/edit guards,

@@ -173,7 +173,7 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             command, output = calls.get(item.get("call_id")), item.get("output")
             if not command or not isinstance(output, str):
                 continue
-            if not re.search(r"SandboxDenied|sandbox denied access|domain is not on the allowlist|"
+            if not re.search(r"SandboxDenied|sandbox denied access|domain (?:['\"][^'\"]+['\"] )?is not on the allowlist|"
                              r"network access .*blocked.*sandbox", output, re.I):
                 continue
             # A denied local socket is local access even when the message says "network".
@@ -181,7 +181,19 @@ def codex_sandbox_denials(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             kind = ("sandbox_network_access"
                     if not local and re.search(r"network|domain|allowlist", output, re.I)
                     else "sandbox_local_access")
+            definition = None
+            # Parse only explicit sandbox diagnostics, never a command operand
+            # or the agent's proposed target. Ambiguous diagnostics ask for a
+            # user-supplied exact definition instead of inferring broad access.
+            domains = re.findall(r"domain ['\"]([^'\"]+)['\"] is not on the allowlist", output, re.I)
+            paths = re.findall(r"sandbox denied access to (?:path )?['\"]([^'\"]+)['\"]", output, re.I)
+            if domains:
+                definition = {"kind": "network", "parameter": domains}
+            elif len(set(paths)) == 1:
+                kind = "sandbox_filesystem_access"
+                definition = {"kind": "writable", "parameter": paths[0]}
             denials.append({"kind": kind, "command": command, "error": output,
+                            **({"sandbox_definition": definition} if definition else {}),
                             "attempted": ["runtime observed this command's sandbox denial"],
                             "requires_human": False})
     return denials

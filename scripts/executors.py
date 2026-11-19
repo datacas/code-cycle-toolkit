@@ -64,7 +64,7 @@ from stage_permissions import StagePolicy
 from usage import normalize_executor_output
 
 #: The sensitive grants (`grants.py`) Codex knows how to apply, and how.
-CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets"}
+CODEX_GRANT_OPTIONS = {"docker_host": "unix_sockets", "local_sockets": "loopback_tcp"}
 #: Claude applies `docker_host` through the sandbox network settings and command table.
 CLAUDE_GRANT_OPTIONS = {"docker_host": "docker_compose"}
 
@@ -2320,19 +2320,26 @@ class CodexAdapter(NativeAdapter):
                 "-c", f"model_reasoning_effort={target.effort}", "--json"]
         from grants import GrantError, canonical_domains, canonical_writable
         parameter_grants = tuple(token for token in sandbox_grants
-                                 if token.startswith(("writable:", "network:")))
+                                 if token.startswith(("writable:", "network:", "review:", "rereview:", "security:", "issue_review:")))
         # Writing grants never reach a review, even via a direct adapter call.
         granted_paths, granted_domains = [], []
-        if writes:
-            try:
-                for token in parameter_grants:
+        try:
+            for token in parameter_grants:
+                review = token.startswith(("review:", "rereview:", "security:", "issue_review:"))
+                if review != (not writes):
+                    continue
+                if review:
+                    token = token.partition(":")[2]
+                if writes or review:
                     kind, _, value = token.partition(":")
                     if kind == "writable":
                         granted_paths.append(canonical_writable(value))
-                    else:
+                    elif kind == "network":
                         granted_domains.extend(canonical_domains(value))
-            except GrantError as error:
-                raise ExecutorError(f"sandbox grant unavailable: {error}; checks stay not_verified") from error
+                    else:
+                        raise GrantError("unknown parameterized sandbox token")
+        except GrantError as error:
+            raise ExecutorError(f"sandbox grant unavailable: {error}; checks stay not_verified") from error
         network_domains = tuple(dict.fromkeys((*(network_domains or ()), *granted_domains)))
         unknown = sorted(set(sandbox_grants) - set(CODEX_GRANT_OPTIONS) - set(parameter_grants))
         if unknown:
@@ -2343,7 +2350,7 @@ class CodexAdapter(NativeAdapter):
         # start (#239). The proxy keeps the domain allowlist, or none at all.
         unix_sockets = any(CODEX_GRANT_OPTIONS.get(grant) == "unix_sockets" for grant in sandbox_grants)
         profile = None
-        if publishes or network_domains or unix_sockets:
+        if publishes or network_domains or unix_sockets or "local_sockets" in sandbox_grants:
             if publishes:
                 profile = "code_cycle_publish_write" if writes else "code_cycle_publish_read"
             elif network_domains:
@@ -3303,7 +3310,8 @@ class ClaudeAdapter(NativeAdapter):
             })
             if runtime_policy.uses_bash_sandbox:
                 writable = [cwd, scratch]
-                if runtime_policy.role in sp.WRITING_ROLES:
+                if (runtime_policy.role in sp.WRITING_ROLES
+                        or runtime_policy.role == runtime_policy.sandbox_grant_role):
                     from grants import canonical_writable
                     writable.extend(canonical_writable(path) for path in runtime_policy.sandbox_writable)
                 if runtime_policy.docker:
@@ -4002,19 +4010,31 @@ def dispatch(
     ref_auditor = kw.pop("publication_auditor", None)
     if command_policy is not None and not isinstance(command_policy, StagePolicy):
         raise ExecutorError("a command policy must be a StagePolicy")
-    if not kw.get("writes", False) or (command_policy is not None and command_policy.role not in sp.WRITING_ROLES):
-        sandbox_grants = tuple(token for token in sandbox_grants
-                               if not token.startswith(("writable:", "network:")))
-    if command_policy is not None and bool(kw.get("writes", False)) and command_policy.role in sp.WRITING_ROLES:
+    writer = bool(kw.get("writes", False)) and (command_policy is None or command_policy.role in sp.WRITING_ROLES)
+    review_roles = ("review", "rereview", "security", "issue_review")
+    scoped_grants = []
+    for token in sandbox_grants:
+        if token.startswith(("writable:", "network:")) and not writer:
+            continue
+        if token.partition(":")[0] in review_roles:
+            if writer or command_policy is None or not token.startswith(command_policy.role + ":"):
+                continue
+        if token == "local_sockets" and target.executor != "codex":
+            task += "\nlocal_sockets is unavailable on this executor; affected checks stay not_verified."
+            continue
+        scoped_grants.append(token)
+    sandbox_grants = tuple(scoped_grants)
+    if command_policy is not None:
         from grants import GrantError, canonical_domains, canonical_writable
         extra_paths, extra_domains = [], []
         retained = []
         for token in sandbox_grants:
             try:
-                if token.startswith("writable:"):
-                    extra_paths.append(canonical_writable(token.partition(":")[2]))
-                elif token.startswith("network:"):
-                    extra_domains.extend(canonical_domains(token.partition(":")[2]))
+                parameter = token.partition(":")[2] if token.partition(":")[0] in review_roles else token
+                if parameter.startswith("writable:"):
+                    extra_paths.append(canonical_writable(parameter.partition(":")[2]))
+                elif parameter.startswith("network:"):
+                    extra_domains.extend(canonical_domains(parameter.partition(":")[2]))
                 retained.append(token)
             except GrantError as error:
                 task += (f"\nSandbox grant unavailable: {error}. No access was added; "
@@ -4022,6 +4042,7 @@ def dispatch(
         sandbox_grants = tuple(retained)
         command_policy = replace(command_policy,
                                  sandbox_writable=tuple(extra_paths),
+                                 sandbox_grant_role=command_policy.role if not writer and extra_paths else "",
                                  registry_domains=tuple(dict.fromkeys((*command_policy.registry_domains, *extra_domains))))
     if (command_policy is not None and target.executor == "claude"
             and "docker_host" in sandbox_grants):
@@ -4205,7 +4226,7 @@ def dispatch(
             elif on_dispatch_attempt is not None:
                 call_kw.pop("dispatch_attempt_id", None)
         result = adapter.dispatch(target, prompt, **call_kw)
-        applied_parameters = [token for token in sandbox_grants if token.startswith(("writable:", "network:"))]
+        applied_parameters = list(sandbox_grants)
         if applied_parameters:
             result = replace(result, artifacts={**result.artifacts, "sandbox_grants": applied_parameters,
                              "sandbox_grant_role": command_policy.role if command_policy else None})

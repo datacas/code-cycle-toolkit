@@ -14,6 +14,7 @@ import executors as ex
 import grants
 import router
 import stage_permissions as sp
+import environment_recovery as recovery
 
 
 class SandboxGrantTests(unittest.TestCase):
@@ -113,11 +114,23 @@ class SandboxGrantTests(unittest.TestCase):
         self.assertEqual((), broker.granted("codex"))
         self.assertIn("not_verified", " ".join(broker.notes))
 
-    def test_local_sockets_is_unavailable_until_spike_proves_scope(self):
+    def test_local_sockets_is_codex_loopback_only_and_supports_answer_scopes(self):
+        for answer in ("cycle", "persistent", "deny"):
+            broker = self.broker("repo", answers={"local_sockets": answer})
+            expected = () if answer == "deny" else ("local_sockets",)
+            self.assertEqual(expected, broker.granted("codex"))
+            self.assertEqual((), broker.granted("claude"))
         broker = self.broker("repo", answers={"local_sockets": "cycle"})
-        self.assertEqual(grants.UNSUPPORTED, broker.request(grants.LOCAL_SOCKETS, "codex", role="implement"))
-        self.assertEqual((), broker.granted("codex"))
+        self.assertEqual(grants.UNSUPPORTED, broker.request(grants.LOCAL_SOCKETS, "claude", role="implement"))
         self.assertIn("not_verified", " ".join(broker.notes))
+        target = router.parse_target("codex:openai/gpt-6.1-sol medium")
+        argv = ex.CodexAdapter().argv(target, "work", writes=True, sandbox_grants=("local_sockets",))
+        self.assertIn("features.network_proxy=true", argv)
+        self.assertTrue(any(".network.enabled=true" in arg for arg in argv))
+        self.assertFalse(any(".network.domains=" in arg for arg in argv))
+        self.assertFalse(any("dangerously_allow_all_unix_sockets" in arg for arg in argv))
+        docker = ex.CodexAdapter().argv(target, "work", writes=True, sandbox_grants=("docker_host",))
+        self.assertTrue(any("dangerously_allow_all_unix_sockets=true" in arg for arg in docker))
 
     def test_codex_profile_preserves_denials_and_separates_domains_from_docker(self):
         target = router.parse_target("codex:openai/gpt-6.1-sol medium")
@@ -176,6 +189,27 @@ class SandboxGrantTests(unittest.TestCase):
                 settings = sp.review_sandbox_settings(policy.sandbox_writable, policy.registry_domains)
                 self.assertIn("example.com", settings["sandbox"]["network"]["allowedDomains"])
                 self.assertNotIn("allowAllUnixSockets", settings["sandbox"]["network"])
+            for role in ("review", "rereview", "security", "issue_review"):
+                for own in (False, True):
+                    review_tokens = (f"{role}:writable:{self.cache}", f"{role}:network:review.example.com") if own else ()
+                    result = ex.dispatch(decision, "review", registry, writes=False,
+                                         workspace_policy=ex.WorkspacePolicy.WORKSPACE_WRITE,
+                                         policy=ex.ReadinessPolicy.ATTEMPT,
+                                         command_policy=sp.StagePolicy(role=role),
+                                         sandbox_grants=(*tokens, *review_tokens, "review:network:other.example.com")
+                                         if role != "review" else (*tokens, *review_tokens))
+                    policy = seen[target.executor]["command_policy"]
+                    self.assertEqual((str(self.cache),) if own else (), policy.sandbox_writable)
+                    self.assertEqual(("review.example.com",) if own else (), policy.registry_domains)
+                    self.assertEqual(role if own else "", policy.sandbox_grant_role)
+                    if target.executor == "claude" and own:
+                        repo = self.home / "review-repo"
+                        repo.mkdir(exist_ok=True)
+                        with ex.ClaudeAdapter().policy_files(["claude", "--verbose", "-p", "review"], policy,
+                                                            scratch=str(self.home / "scratch"), cwd=str(repo)) as argv:
+                            settings = json.loads(argv[argv.index("--settings") + 1])
+                        self.assertIn(str(self.cache), settings["sandbox"]["filesystem"]["allowWrite"])
+                        self.assertIn("review.example.com", settings["sandbox"]["network"]["allowedDomains"])
 
     def test_record_keeps_canonical_parameter_source_and_role(self):
         grant = self.writable()
@@ -189,6 +223,79 @@ class SandboxGrantTests(unittest.TestCase):
         definition = self.writable().sandbox
         self.assertIsNone(grants.from_entry({"sandbox": {**definition, "version": 2}}))
         self.assertIsNone(grants.from_entry({"sandbox": {**definition, "role": "review"}}))
+
+    def test_runtime_denial_registers_a_parameter_but_never_authorizes_it(self):
+        error = f"SandboxDenied: sandbox denied access to path '{self.cache}'"
+        events = [
+            {"type": "function_call", "name": "exec_command", "call_id": "1",
+             "arguments": json.dumps({"cmd": "tool check"})},
+            {"type": "function_call_output", "call_id": "1", "output": error},
+        ]
+        [blocker] = recovery.codex_sandbox_denials(events)
+        broker = self.broker("repo")
+        grant = broker.observe_sandbox(blocker, role="implement")
+        self.assertEqual("observed sandbox denial", grant.sandbox["source"])
+        self.assertEqual((), broker.granted("codex"))
+        self.assertEqual(grants.PENDING, broker.request(grant, "codex", role="implement", blocker=blocker))
+        broker.apply_answer(grant, grant.scope_for("codex", "linux"), "deny")
+        self.assertEqual((), broker.granted("codex"))
+        self.assertIn("not_verified", grants.denial_context(grant))
+        self.assertEqual([], recovery.codex_sandbox_denials([
+            {"type": "message", "output": error}]))
+
+    def test_network_denial_and_explicit_missing_definition_use_distinct_sources(self):
+        events = [
+            {"type": "function_call", "name": "exec_command", "call_id": "1",
+             "arguments": json.dumps({"cmd": "tool check"})},
+            {"type": "function_call_output", "call_id": "1",
+             "output": "domain 'EXAMPLE.com' is not on the allowlist"},
+        ]
+        [blocker] = recovery.codex_sandbox_denials(events)
+        broker = self.broker("repo")
+        grant = broker.observe_sandbox(blocker, role="implement")
+        self.assertEqual(["example.com"], grant.sandbox["parameter"])
+        missing = {"kind": "sandbox_filesystem_access", "command": "tool check", "error": "SandboxDenied"}
+        self.assertIsNone(broker.request_definition(missing, "codex", role="implement"))
+        self.assertIn("exact home path", broker.pending[0].question["prompt"])
+        explicit = self.broker("repo", prompt=lambda asked: str(self.cache))
+        grant = explicit.request_definition(missing, "codex", role="implement")
+        self.assertEqual("validated configuration", grant.sandbox["source"])
+        self.assertEqual((), explicit.granted("codex"))
+        denied = self.broker("repo", prompt=lambda asked: "deny")
+        self.assertIsNone(denied.request_definition(missing, "codex", role="implement"))
+        self.assertIn("not_verified", denied.notes[0])
+
+    def test_protected_observed_parameter_stays_unavailable_without_traceback(self):
+        broker = self.broker("repo")
+        blocker = {"sandbox_definition": {"kind": "writable", "parameter": str(self.home / ".ssh")}}
+        self.assertIsNone(broker.observe_sandbox(blocker, role="implement"))
+        self.assertEqual((), broker.granted("codex"))
+        self.assertIn("protected store", broker.notes[0])
+        with self.assertRaises(grants.GrantError):
+            self.writable(self.home / ".cache")
+
+    def test_review_requires_its_own_cycle_answer(self):
+        broker = self.broker("repo", store=self.store)
+        writer = self.writable()
+        broker.operations[writer.id] = writer
+        broker.apply_answer(writer, writer.scope_for("codex", "linux"), "persistent")
+        blocker = {"sandbox_definition": {"kind": "writable", "parameter": str(self.cache)}}
+        review = broker.observe_sandbox(blocker, role="review")
+        self.assertNotEqual(writer.id, review.id)
+        self.assertEqual((), broker.granted("codex", "review"))
+        scope = review.scope_for("codex", "linux")
+        self.assertEqual(2, len(grants.question(review, scope, role="review")["options"]))
+        with self.assertRaises(grants.GrantError):
+            broker.apply_answer(review, scope, "persistent")
+        broker.apply_answer(review, scope, "cycle")
+        self.assertEqual((review.id,), broker.granted("codex", "review"))
+        self.assertEqual((), broker.granted("codex", "security"))
+        self.assertEqual((), self.broker("repo", store=self.store).granted("codex", "review"))
+        self.assertEqual(review.id, grants.from_entry({"sandbox": review.sandbox}).id)
+        token = grants.sandbox_token(review)
+        target = router.parse_target("codex:openai/gpt-6.1-sol medium")
+        argv = ex.CodexAdapter().argv(target, "review", writes=False, sandbox_grants=(token,))
+        self.assertTrue(any(str(self.cache) in arg and '=\"write\"' in arg for arg in argv))
 
     def test_claude_policy_uses_an_alternative_outside_granted_scratch_parent(self):
         repo = self.home / "repo"

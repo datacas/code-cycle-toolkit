@@ -423,6 +423,38 @@ class SandboxRerouteTests(CycleTestCase):
         self.assertEqual(BLOCKER["command"], consent.pending[0].record()["operation"])
         self.assertIn("permission required", outcome.result.detail)
 
+    def test_observed_parameter_grant_reruns_on_the_same_executor(self):
+        denial = {"kind": "sandbox_network_access", "command": "tool check",
+                  "error": "domain 'example.com' is not on the allowlist",
+                  "sandbox_definition": {"kind": "network", "parameter": ["example.com"]},
+                  "attempted": ["runtime observed sandbox denial"], "requires_human": False}
+
+        class ObservedParameter(RestrictedAdapter):
+            def dispatch(self, target, task, **kwargs):
+                result = super().dispatch(target, task, **kwargs)
+                if "network:example.com" in kwargs.get("sandbox_grants", ()):
+                    return replace(result, agent_output=block("IMPLEMENTED"), artifacts={})
+                return replace(result, agent_output=block("BLOCKED"),
+                               artifacts={"sandbox_denials": [dict(denial)]})
+
+        consent = grants.ConsentBroker("owner/repo", platform="linux", prompt=lambda q: "cycle")
+        _, primary, fallback, outcome = self.execute(ObservedParameter(), consent=consent)
+        self.assertTrue(outcome.succeeded)
+        self.assertFalse(fallback.dispatched)
+        self.assertEqual(2, len(primary.dispatched))
+        self.assertEqual(("network:example.com",), primary.dispatch_kwargs[1]["sandbox_grants"])
+
+    def test_agent_only_parameter_needs_a_separate_definition_question(self):
+        blocker = {"kind": "sandbox_network_access", "command": "tool check", "error": "SandboxDenied",
+                   "sandbox_definition": {"kind": "network", "parameter": ["example.com"]},
+                   "attempted": ["checked the selected sandbox"], "requires_human": False}
+        consent = grants.ConsentBroker("owner/repo", platform="linux")
+        _, primary, fallback, outcome = self.execute(RestrictedAdapter(blocker=blocker), consent=consent)
+        self.assertFalse(fallback.dispatched)
+        self.assertEqual(1, len(primary.dispatched))
+        self.assertEqual({}, consent.operations)
+        self.assertIn("explicit network definition", consent.pending[0].grant.resource)
+
     def test_denied_permission_is_not_a_verified_pass(self):
         with patch("cycle.effect_snapshot", return_value=CLEAN):
             consent = grants.ConsentBroker("owner/repo", platform="linux",

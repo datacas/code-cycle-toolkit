@@ -262,9 +262,13 @@ definitions use the same broker and consent store; see
 [parameterized sandbox grants](host-permissions.md#parameterized-sandbox-grants-509).
 Their canonical definitions and sources are retained with decisions and in
 dispatch artifacts. Only writing stages receive their filesystem and network
-settings; a review never inherits a writing grant. `local_sockets` currently
-has no available scope: the [#509 spike](research/local-sockets-509.md) could
-not run under the nested Codex boundary, so related checks stay `not_verified`.
+settings; a review never inherits a writing grant. Reviews can request a
+separate cycle-only definition scoped to their exact role. Runtime-observed
+denial diagnostics supply canonical parameters; when they do not, the runtime
+asks for an explicit definition before asking permission. `local_sockets` maps
+to loopback TCP on Codex/Linux, following the
+[host-reported #509 spike](research/local-sockets-509.md). It adds no domains,
+AF_UNIX access or Docker access; Claude reports that grant unavailable.
 
 Some checks need a resource the sandbox blocks on purpose, such as the host Docker daemon. A stage never widens its own sandbox. It reports the restriction as an `environment_blocker`, with `"resource": "docker_host"` for Docker, and a person decides. The registry in `scripts/grants.py` holds each grant, and new resources reuse the same flow.
 

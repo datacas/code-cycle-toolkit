@@ -1255,6 +1255,10 @@ class CycleRecorder:
                                       and not result.asynchronous else None)
         attempt.blocker = blocker
         if self.consent is not None and blocker is not None:
+            # Only runtime-collected command results supply parameterized
+            # definitions. The agent's environment_blocker cannot mint one.
+            if any(blocker is observed for observed in (result.artifacts.get("sandbox_denials") or ())):
+                self.consent.observe_sandbox(blocker, role=run.role)
             denied_grant = self.consent.grant_for(blocker)
             if denied_grant is not None and denied_grant.id in self.consent.denied_ids:
                 run.denial_affected.add(denied_grant.id)
@@ -1428,6 +1432,10 @@ class CycleRecorder:
                  if blocker is not None and consent is not None
                  and not attempt.known_prerequisite
                  and self.mode is not RoutingMode.CALIBRATION else None)
+        if (grant is None and consent is not None and blocker is not None
+                and not attempt.known_prerequisite and not attempt.retry
+                and not run.consent_requested and self.mode is not RoutingMode.CALIBRATION):
+            grant = consent.request_definition(blocker, attempt.target.executor, role=run.role)
         if grant is None or consent is None or blocker is None:
             return result
         if grant.id in attempt.denied_before:

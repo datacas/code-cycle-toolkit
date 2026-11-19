@@ -69,22 +69,38 @@ executor's authorized scope are bound by the consent-store key and fingerprint.
 The readable definition and source accompany the decision and stage evidence.
 Consent-store schema 2 entries add a `sandbox` object with `version: 1`,
 `kind`, `parameter`, and `source`; unknown definition schemas do not replay.
+Separate review definitions use `version: 2` and add an exact `role`; their
+identity hashes `[2, kind, canonical_parameter, role]`. They accept only `cycle`
+or `deny`, never a persistent answer or an inherited writer answer.
 Serialized runtime `StagePolicy` adds a `sandbox_writable` array, defaulting
-to empty when reading an older policy.
+to empty when reading an older policy, and `sandbox_grant_role`, defaulting to
+an empty string, for the separately authorized review writable settings.
 
 Only `implement` and `resolve` inherit these grants. Codex receives filesystem
 write entries or network-domain entries; Claude receives sandbox `allowWrite`
 and `allowedDomains` entries. Reviews, rereviews, issue reviews and security
-stages do not inherit them. A review-specific request needs a separate future
-consent path; this change does not implement that path. Denied or unavailable
+stages do not inherit them. A review-specific request uses a separate canonical
+definition and cycle answer, and applies only to that exact review role.
+Denied or unavailable
 resources leave dependent checks `not_verified`, with the concrete reason.
 
-`local_sockets` is registered without an available executor scope until the
-[required real-sandbox spike](research/local-sockets-509.md) establishes its
-reach. It cannot be answered into opening Docker or external network access.
-This leaves AC-1 of #509 open. Automatic parameter discovery from observed
-denials and review-specific cycle answers also remain incomplete; explicit
-validated definitions are the implemented entry point.
+`local_sockets` on Codex/Linux enables the network proxy without adding domain
+rules or the all-Unix-sockets option. It grants loopback TCP (IPv4 and IPv6),
+not AF_UNIX or Docker. The [host-reported spike](research/local-sockets-509.md)
+records this distinction and the remaining local verification limit. Claude has
+no measured mapping and reports this grant unavailable. `docker_host` retains
+its separately disclosed wider scope and writable Docker state.
+
+Runtime-observed Codex tool results can supply an exact quoted path from
+`sandbox denied access to path '<path>'` or exact domains from
+`domain '<host>' is not on the allowlist`. These create consent requests,
+never authorization. Ordinary permission errors, command operands and agent
+prose do not establish a parameter. Ambiguous or missing definitions ask the
+user for an exact path/domain first; a second question shows the canonical
+scope before consent. Noninteractive runs retain this question and can resume
+with an explicit validated `--grant` definition. A protected definition is
+rejected even when it came from an observed denial. The original executor,
+exit proof and effect reconciliation guards remain in force for every rerun.
 
 The runtime applies permissions to each stage it dispatches natively
 (`claude -p`, `codex exec`). Nothing is written to a global file as a side

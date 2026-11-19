@@ -165,8 +165,8 @@ given instead of line numbers so the references stay valid.
 | PA-47 | With `docker_host`, Docker builds need writable Docker state under `DOCKER_CONFIG` (default `~/.docker`); the grant discloses that persistent write, rejects a path equal to or above the user's home directory, and retries a Buildx state-write limit with `BUILDX_CONFIG` under dispatch `TMPDIR` | `scripts/executors.py` (`_effective_docker_config_path`, `CodexAdapter.argv`, `_docker_host_probe`, `_native_review_scratch`); `scripts/grants.py` (`DOCKER_HOST`) | A direct Codex `docker build` and `docker compose build` succeed with the grant and same Docker configuration; normalized `~` and relative paths match the environment and write rule; unsafe home paths are refused; a Buildx state failure records the fallback or its real cause | #507 | role contract | #507 (converted to scoped disclosure, consent, and a bounded state path) |
 | PA-48 | Writable grants exclude credential stores and their ancestors, including symlinks | `grants.canonical_writable` | Owner-defined exact home-path bounds | #509 | role contract | — |
 | PA-49 | Writing path/domain grants never reach review roles | `grants.ConsentBroker.granted`; `executors.dispatch` | Owner-defined stage scope | #509 | role contract | — |
-| PA-50 | The local-socket spike cannot run inside the current nested Codex boundary | `grants.LOCAL_SOCKETS`; `docs/research/local-sockets-509.md` | The executor masks its daemon socket directory; no available grant scope is inferred | #509 | real limit | — |
-| PA-51 | Automatic path/domain parameter discovery and review-specific cycle consent remain incomplete | `grants.ConsentBroker.grant_for` | Only explicit validated definitions currently reach parameterized consent | #509 | toolkit veto | #509 |
+| PA-50 | The local-socket spike cannot be repeated inside a nested Codex boundary | `grants.LOCAL_SOCKETS`; `docs/research/local-sockets-509.md` | The executor masks its daemon socket directory; the host-reported measurement is retained separately from local verification | #509 | real limit | — |
+| PA-51 | Path/domain parameters require an observed denial or an explicit validated definition; reviews request a separate cycle-only grant | `grants.ConsentBroker.observe_sandbox`, `request_definition`, `request` | User-defined source and role boundaries; a definition never authorizes access | #509 | role contract | #509 (converted to canonical consent and separate review scopes) |
 
 ## Kept restrictions
 
@@ -200,8 +200,9 @@ Why each real limit and role contract stays.
 | PA-44 | A completed review receipt on the current head records work already done. Stopping a duplicate runtime dispatch as `no_progress` avoids repeating it; a subsequent resolution receipt is a new event that must be rereviewed, and explicit `--from review` or `--from rereview` remains the user's override. |
 | PA-47 | The user's accepted `docker_host` scope covers Docker state only. Refusing a `DOCKER_CONFIG` equal to or above `$HOME` keeps the grant from exposing unrelated home files; configuring a narrower Docker state directory preserves the user's ability to run builds with the grant. |
 | PA-48 | Owner-defined bounds in #509 exclude protected targets, their ancestors and children after canonicalization. The user's acceptance of a generic warning does not remove that boundary. |
-| PA-49 | The owner explicitly limits inherited writable and domain grants to implement and resolve. Review-specific cycle consent is separate unfinished work under PA-51. |
-| PA-50 | The current Codex stage masks its own daemon directory with mode 000. Nested Codex execution is unavailable here; the required host-capable spike and suite remain unverified, as recorded in `research/local-sockets-509.md`. |
+| PA-49 | The owner explicitly limits inherited writable and domain grants to implement and resolve. Review-specific cycle consent has a distinct identity and exact role under PA-51. |
+| PA-50 | The current Codex stage masks its own daemon directory with mode 000. Nested Codex execution is unavailable here; the host-reported spike and suite are preserved separately from current-head local verification in `research/local-sockets-509.md`. |
+| PA-51 | The owner's canonical-parameter and trusted-source requirement is enforced before consent. Missing definitions ask for an exact path or domain; review roles accept cycle or deny only and never inherit writer grants. |
 
 ## Vetoes: conversion and parity baseline
 
@@ -247,7 +248,6 @@ the real repository.
 | PA-37 | #446 re-reads the change request a bounded number of times before retrying | `claude -p` posts the review comment, which then exists on the change request | `codex exec` posts the same comment |
 | PA-38 | Done in #289: `--grant docker_host=cycle\|persistent` or `docker.host_socket_access: true` | `claude -p` with the user's Docker access runs `docker compose ps` | `codex exec -s workspace-write` with socket access runs `docker compose ps` |
 | PA-40 | Done in #464: `sed -n`, `sed -E` and `sed -e` read-only scripts, `date` without a clock change and `ps` with fields that show no command line are in the table of every stage; the other forms stay the PA-18 consent question | `claude -p` runs `sed -n 1,5p fixture.txt`, `date +%s` and `ps -eo pid,comm`, then `sed -i s/a/b/ fixture.txt` and `ps -eo pid,args` | `codex exec -s workspace-write` runs the same commands; a Codex stage has no command table, so the test pins that it stays equal |
-| PA-51 | Complete observed-denial parameter discovery, explicit definition questions and review-only cycle consent in #509; explicit parameterized CLI grants already apply to writers | `claude -p` uses its user-authorized path and network settings directly | `codex exec` uses its user-authorized path and network profile directly |
 
 ## Sensitive operations
 
