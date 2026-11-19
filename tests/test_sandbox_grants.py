@@ -15,6 +15,7 @@ import grants
 import router
 import stage_permissions as sp
 import environment_recovery as recovery
+import stop_questions
 
 
 class SandboxGrantTests(unittest.TestCase):
@@ -257,6 +258,7 @@ class SandboxGrantTests(unittest.TestCase):
         missing = {"kind": "sandbox_filesystem_access", "command": "tool check", "error": "SandboxDenied"}
         self.assertIsNone(broker.request_definition(missing, "codex", role="implement"))
         self.assertIn("exact home path", broker.pending[0].question["prompt"])
+        self.assertEqual([], stop_questions.questions_errors([broker.pending[0].question]))
         explicit = self.broker("repo", prompt=lambda asked: str(self.cache))
         grant = explicit.request_definition(missing, "codex", role="implement")
         self.assertEqual("validated configuration", grant.sandbox["source"])

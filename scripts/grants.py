@@ -1129,8 +1129,8 @@ class ConsentBroker:
                             f"or resume with --grant '{prefix}{kind}:<exact target>=cycle'. "
                             "No access is granted by this definition question."),
                  "options": ["Provide an exact definition", "Leave affected checks not_verified"],
-                 "recommended": None, "blocks": [f"grant:{grant_id}"], "definition_kind": kind}
-        response = self.prompt(asked) if self.prompt is not None else None
+                 "recommended": None, "blocks": [f"grant:{grant_id}"]}
+        response = self.prompt({**asked, "definition_kind": kind}) if self.prompt is not None else None
         if response == DENY:
             self.notes.append(f"{kind} definition declined; affected checks stay not_verified")
             return None
@@ -1143,7 +1143,7 @@ class ConsentBroker:
                 blocker["resource"] = grant.id
                 return grant
             except (GrantError, TypeError, OSError, RuntimeError) as error:
-                asked["prompt"] = f"Definition rejected: {error}. " + asked["prompt"]
+                asked["prompt"] = (f"Definition rejected: {error}. " + asked["prompt"])[:600]
         self._observe("decision_asked", template, scope, role)
         self.pending.append(PermissionRequest(template, scope, role, asked, blocker))
         return None
