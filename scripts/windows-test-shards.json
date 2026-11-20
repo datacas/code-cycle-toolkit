@@ -70,6 +70,7 @@
       "test_stage_dispatch",
       "test_stage_permissions",
       "test_support",
+      "test_table_consent",
       "test_validate_workflow",
       "test_workspace_setup"
     ],
@@ -105,6 +106,7 @@
       "test_command_permissions",
       "test_consent_variants",
       "test_compose_consent",
+      "test_table_consent",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_permission_view",
