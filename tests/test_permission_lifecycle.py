@@ -70,8 +70,10 @@ class PermissionCLITests(unittest.TestCase):
             self.assertEqual(0, listed.returncode, listed.stderr)
             entries = json.loads(listed.stdout)
             self.assertEqual("DENIED", entries[0]["status"])
-            self.assertEqual("project configuration", entries[-1]["source"])
-            self.assertEqual("GRANTED", entries[-1]["status"])
+            effective = {entry["grant"]: entry for entry in entries if entry.get("effective")}
+            self.assertEqual("project configuration", effective["docker_host"]["source"])
+            self.assertEqual("GRANTED", effective["docker_host"]["status"])
+            self.assertEqual("UNKNOWN", effective["local_sockets"]["status"])
             command[2] = "revoke"
             revoked = subprocess.run(command + ["--grant-id", "docker_host"], cwd=root,
                                      env=env, capture_output=True, text=True)

@@ -195,6 +195,8 @@ class StagePolicy:
     commands: tuple[str, ...] = ()
     integrations: tuple[str, ...] = ()
     registry_domains: tuple[str, ...] = ()
+    sandbox_writable: tuple[str, ...] = ()
+    sandbox_grant_role: str = ""
     credential_reads: tuple[str, ...] = ()
     credential_publishing: bool = False
     # Host-observed unavailable isolation: retain read/publication/edit guards,
@@ -288,7 +290,7 @@ class StagePolicy:
     def uses_bash_sandbox(self) -> bool:
         """Keep Claude sandbox emission and its preflight on the same scope."""
         return self.active and not self.static_only and bool(
-            self.requires_confined_verification or self.registry_domains
+            self.requires_confined_verification or self.registry_domains or self.sandbox_writable
             or self.publication_commands or self.docker)
 
     def to_json(self) -> str:
@@ -304,7 +306,7 @@ class StagePolicy:
         if unknown:
             raise PolicyError(f"unknown stage policy keys: {', '.join(unknown)}")
         data["verify_prefixes"] = tuple(data.get("verify_prefixes") or ())
-        for key in ("tools", "commands", "integrations", "registry_domains", "credential_reads", "command_permissions", "evidence_paths"):
+        for key in ("tools", "commands", "integrations", "registry_domains", "sandbox_writable", "credential_reads", "command_permissions", "evidence_paths"):
             data[key] = tuple(data.get(key) or ())
         return cls(**data)
 

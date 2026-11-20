@@ -25,6 +25,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import sys
 import subprocess
 import tempfile
@@ -85,6 +86,7 @@ class SensitiveGrant:
     #: blocker that does not carry `resource` itself.
     terms: tuple[str, ...] = ()
     operation: dict[str, Any] | None = None
+    sandbox: dict[str, Any] | None = None
 
     def scope_for(self, executor: str, platform: str) -> GrantScope | None:
         return next((scope for scope in self.scopes
@@ -308,6 +310,21 @@ def _valid_word(word: Any) -> bool:
 
 
 def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
+    definition = entry.get("sandbox")
+    if isinstance(definition, dict):
+        version = definition.get("version")
+        fields = {"version", "kind", "parameter", "source"}
+        if version == 2:
+            fields.add("role")
+        if version not in (1, 2) or set(definition) != fields:
+            return None
+        if version == 2 and definition.get("role") not in {"review", "rereview", "security", "issue_review"}:
+            return None
+        try:
+            return sandbox_grant(definition["kind"], definition["parameter"],
+                                 source=definition["source"], role=definition.get("role"))
+        except (GrantError, KeyError, TypeError, OSError, RuntimeError):
+            return None
     op = entry.get("operation")
     if isinstance(op, dict) and op.get("version") == 2:
         try:
@@ -431,7 +448,123 @@ DOCKER_HOST = SensitiveGrant(
     terms=("docker",),
 )
 
-GRANTS: dict[str, SensitiveGrant] = {grant.id: grant for grant in (DOCKER_HOST,)}
+LOCAL_SOCKETS = SensitiveGrant(
+    id="local_sockets", resource="loopback TCP sockets without Docker access",
+    reason="checks need TCP bind/connect on localhost",
+    scopes=(GrantScope(
+        executor="codex", platform="linux",
+        effective="loopback TCP bind/connect (IPv4 and IPv6); no external domains or Unix sockets are added",
+        risks="the stage can reach local TCP services; Docker and AF_UNIX remain closed unless separately granted",
+        isolated_per_dispatch=True,
+    ),),
+    terms=("127.0.0.1", "::1", "af_inet", "localhost"),
+)
+
+GRANTS: dict[str, SensitiveGrant] = {grant.id: grant for grant in (DOCKER_HOST, LOCAL_SOCKETS)}
+
+
+def canonical_writable(value: str) -> str:
+    """A precise home path, disjoint from credentials in both directions."""
+    from stage_permissions import CREDENTIAL_STORES, GH_CREDENTIAL_STORE
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise GrantError("writable grant needs an absolute path under HOME")
+    if value.startswith("~") and value != "~" and not value.startswith("~/"):
+        raise GrantError("writable grant can expand only the current user's HOME")
+    lexical_home = Path(os.path.abspath(Path.home()))
+    home = lexical_home.resolve()
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise GrantError("writable grant needs an absolute path under HOME")
+    lexical = Path(os.path.abspath(path))
+    try:
+        real = path.resolve()
+        protected = (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE, "~/.gnupg", "~/.azure",
+                     "~/.kube", "~/.config/gcloud", "~/.netrc", "~/.npmrc",
+                     "~/.pypirc", "~/.git-credentials", "~/.config/code-cycle",
+                     "~/.config/code-cycle-toolkit")
+        stores = [lexical_home / item[2:] for item in protected]
+        stores.append(default_store_path().expanduser())
+        # Accept both spellings so a canonical definition survives replay when
+        # HOME uses a Windows short name or symlink. The real target must still
+        # stay below resolved HOME, and both spellings retain store checks.
+        if (not any(boundary in lexical.parents for boundary in (lexical_home, home))
+                or real == home or home not in real.parents):
+            raise GrantError("writable grant must be strictly under HOME")
+        for target in (lexical, real):
+            if target in (lexical_home / ".cache", home / ".cache"):
+                raise GrantError("cache grants need an exact tool directory under ~/.cache")
+            for store in stores:
+                for denied in (store, store.resolve()):
+                    if target == denied or target in denied.parents or denied in target.parents:
+                        raise GrantError(f"writable grant overlaps protected store {store}")
+    except (OSError, RuntimeError) as error:
+        raise GrantError(f"cannot canonicalize writable grant: {error}") from error
+    return str(real)
+
+
+def canonical_domains(value: str | list[str]) -> list[str]:
+    """Exact IDNA hosts only; no URLs, ports, wildcards or implicit children."""
+    values = value.split(",") if isinstance(value, str) else value
+    if not isinstance(values, list) or not values:
+        raise GrantError("network grant needs a non-empty domain set")
+    hosts = set()
+    for item in values:
+        if not isinstance(item, str):
+            raise GrantError("network grant domains must be strings")
+        try:
+            host = item.strip().rstrip(".").encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise GrantError("invalid IDNA domain") from error
+        if (len(host) > 253 or not host or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in host.split("."))):
+            raise GrantError(f"invalid exact domain {item!r}")
+        hosts.add(host)
+    return sorted(hosts)
+
+
+def sandbox_grant(kind: str, parameter: Any, *, source: str, role: str | None = None) -> SensitiveGrant:
+    """Build a validated definition, never an authorization from agent text."""
+    if source not in {"explicit --grant", "validated configuration", "observed sandbox denial"}:
+        raise GrantError("sandbox parameter needs a runtime-validated source")
+    if role is not None and role not in {"review", "rereview", "security", "issue_review"}:
+        raise GrantError("sandbox review grant needs an exact review role")
+    if kind == "writable":
+        parameter = canonical_writable(parameter)
+        effective = f"write exactly {parameter}; implement and resolve stages only"
+        risks = ("writes persist; agent hooks, permissions or shell startup code may run "
+                 "outside the sandbox in later sessions")
+    elif kind == "network":
+        parameter = canonical_domains(parameter)
+        effective = f"network to exact domains {', '.join(parameter)}; implement and resolve stages only"
+        risks = "requests may send project data to these domains; no implicit subdomains"
+    else:
+        raise GrantError(f"unknown sandbox grant kind {kind!r}")
+    if role:
+        effective = effective.replace("implement and resolve stages only", f"{role} stage only, this cycle")
+    material = json.dumps([2, kind, parameter, role] if role else [1, kind, parameter],
+                          separators=(",", ":"), ensure_ascii=True)
+    grant_id = "sandbox_" + hashlib.sha256(material.encode()).hexdigest()
+    return SensitiveGrant(
+        grant_id, effective, "an explicitly defined sandbox resource is needed",
+        tuple(GrantScope(executor, "linux", effective, risks, True)
+              for executor in ("codex", "claude")),
+        sandbox={"version": 2 if role else 1, "kind": kind, "parameter": parameter, "source": source,
+                 **({"role": role} if role else {})})
+
+
+def sandbox_token(grant: SensitiveGrant) -> str:
+    definition = grant.sandbox
+    if definition is None:
+        return grant.id
+    # Revalidate at dispatch, including symlinks changed since consent.
+    rebuilt = sandbox_grant(definition["kind"], definition["parameter"], source=definition["source"],
+                            role=definition.get("role"))
+    if rebuilt.id != grant.id:
+        raise GrantError("sandbox parameter changed since consent")
+    parameter = definition["parameter"]
+    return ((definition["role"] + ":" if definition.get("role") else "") + definition["kind"]
+            + ":" + (",".join(parameter) if isinstance(parameter, list) else parameter))
 
 
 def current_platform() -> str:
@@ -448,8 +581,18 @@ def parse_grant_options(values: list[str] | tuple[str, ...]) -> dict[str, str]:
     """Read repeated `--grant ID=cycle|persistent|deny` options."""
     answers: dict[str, str] = {}
     for value in values:
-        grant_id, separator, answer = value.partition("=")
-        if (not separator or (grant_id not in GRANTS and not re.fullmatch(r"command_[0-9a-f]{64}", grant_id))
+        grant_id, separator, answer = value.rpartition("=")
+        role = None
+        parameter_token = grant_id
+        if grant_id.partition(":")[0] in {"review", "rereview", "security", "issue_review"}:
+            role, _, parameter_token = grant_id.partition(":")
+        dynamic = parameter_token.startswith(("writable:", "network:"))
+        if dynamic:
+            kind, _, parameter = parameter_token.partition(":")
+            grant_id = sandbox_token(sandbox_grant(kind, parameter, source="explicit --grant", role=role))
+            if role and answer not in {ALLOW_CYCLE, DENY}:
+                raise GrantError("review sandbox grants support cycle or deny only")
+        if (not separator or (not dynamic and grant_id not in GRANTS and not re.fullmatch(r"(?:command|sandbox)_[0-9a-f]{64}", grant_id))
                 or answer not in ANSWERS or (answer == ALLOW_GLOBAL and grant_id in GRANTS)):
             raise GrantError(
                 f"--grant must be ID={'|'.join(ANSWERS)} with ID one of "
@@ -457,6 +600,8 @@ def parse_grant_options(values: list[str] | tuple[str, ...]) -> dict[str, str]:
         if answers.get(grant_id, answer) != answer:
             raise GrantError(f"--grant {grant_id} was given two different answers")
         answers[grant_id] = answer
+        if dynamic and answer == ALLOW_GLOBAL:
+            raise GrantError("sandbox grants support cycle, persistent or deny only")
     return answers
 
 
@@ -644,6 +789,7 @@ class ConsentStore:
             **({"operation": grant.operation} if getattr(grant, "operation", None) else {}),
             "user_approval": {"decision": decision, "source": "consent answer"},
             "executed_commands": [],
+            **({"sandbox": grant.sandbox} if grant.sandbox else {}),
         }
         # The latest decision is the one in force: an opposite decision for the
         # same operation stored under another role is superseded, and kept in
@@ -693,6 +839,8 @@ def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
         options.append(f"Allow for this cycle ({ALLOW_CYCLE})")
     options += [f"Allow persistently for this repository ({ALLOW_PERSISTENT})",
                 f"Deny ({DENY})", f"Use exact-HEAD CI; leave local checks unverified ({DENY})"]
+    if grant.sandbox and grant.sandbox.get("role"):
+        options = [f"Allow for this cycle ({ALLOW_CYCLE})", f"Deny ({DENY})"]
     # The answer is not per stage: say who else receives it.
     operation = str((blocker or {}).get("command") or grant.reason)[:60]
     # Full scope/risks and unabridged operation accompany the request record.
@@ -701,6 +849,13 @@ def question(grant: SensitiveGrant, scope: GrantScope, *, role: str,
     prompt = (f"The {role} stage needs {grant.resource} for {operation}. "
               f"Alternative: exact-HEAD CI; local checks stay unverified. "
               f"Opens {effective}. Risk: {risks}. {reach(scope)}")
+    if grant.sandbox:
+        prompt = (f"Risk: {risks}. The {role} stage requests {grant.resource}. Opens {effective}. "
+                  "Only implement and resolve receive this grant. "
+                  "Alternative: leave affected checks not_verified.")
+        if grant.sandbox.get("role"):
+            prompt = (f"Risk: {risks}. The {role} stage requests {grant.resource}. Opens {effective}. "
+                      "This separate review grant lasts this cycle only.")
     return {
         "id": question_id,
         "prompt": prompt[:597] + "..." if len(prompt) > 600 else prompt,
@@ -744,10 +899,13 @@ class PermissionRequest:
             "executor": self.scope.executor, "platform": self.scope.platform,
             "effective_scope": self.scope.effective, "risks": self.scope.risks,
             "temporary_offered": self.scope.isolated_per_dispatch,
-            "role": self.role, "answer_with": f"--grant {self.grant.id}=<answer>",
+            "role": self.role,
+            "answer_with": (f"--grant {shlex.quote(sandbox_token(self.grant))}=<answer>"
+                            if self.grant.sandbox else f"--grant {self.grant.id}=<answer>"),
             "operation": (self.blocker or {}).get("command", self.grant.reason),
             "observed_error": (self.blocker or {}).get("error"),
             "alternative": "exact-HEAD CI; local checks remain not_verified",
+            **({"sandbox": self.grant.sandbox} if self.grant.sandbox else {}),
             **({"pattern": self.grant.operation,
                 "pros": "finish the requested operation",
                 "cons": "extra user-level access for the selected scope",
@@ -790,6 +948,20 @@ class ConsentBroker:
     operations: dict[str, SensitiveGrant] = field(default_factory=dict)
     cycle_id: str | None = None
     task_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for token in list(self.answers):
+            role = None
+            parameter_token = token
+            if token.partition(":")[0] in {"review", "rereview", "security", "issue_review"}:
+                role, _, parameter_token = token.partition(":")
+            if parameter_token.startswith(("writable:", "network:")):
+                kind, _, parameter = parameter_token.partition(":")
+                grant = sandbox_grant(kind, parameter, source="explicit --grant", role=role)
+                if grant.id in self.answers and self.answers[grant.id] != self.answers[token]:
+                    raise GrantError(f"{grant.id} was given two different answers")
+                self.operations[grant.id] = grant
+                self.answers[grant.id] = self.answers.pop(token)
 
     @property
     def cycle_scope(self) -> str | None:
@@ -853,6 +1025,8 @@ class ConsentBroker:
             if grant_id in GRANTS:
                 continue
             grant = self.registry.get(grant_id)
+            if grant is not None and grant.sandbox and not self._sandbox_role(grant, role):
+                continue
             if grant is None:
                 note = f"{grant_id}: resume grant cannot apply; no matching grant is registered"
             else:
@@ -912,14 +1086,83 @@ class ConsentBroker:
     def grant_for(self, blocker: dict) -> SensitiveGrant | None:
         return next((grant for grant in self.registry.values() if grant.matches(blocker)), None)
 
-    def granted(self, executor: str) -> tuple[str, ...]:
+    @staticmethod
+    def _sandbox_role(grant: SensitiveGrant, role: str) -> bool:
+        definition = grant.sandbox or {}
+        return (role == definition["role"] if definition.get("role")
+                else role in {"implement", "resolve"})
+
+    def request_definition(self, blocker: dict, executor: str, *, role: str) -> SensitiveGrant | None:
+        """Ask for an explicit definition; tool output is only a suggestion.
+
+        A definition is not consent: request() subsequently shows its canonical
+        scope and asks the normal permission question. Noninteractive callers
+        retain the definition question and can resume with an exact --grant.
+        """
+        if blocker.get("kind") not in {"sandbox_network_access", "sandbox_filesystem_access"}:
+            return None
+        kind = "network" if blocker["kind"] == "sandbox_network_access" else "writable"
+        material = json.dumps([kind, role, blocker.get("command")], sort_keys=True)
+        grant_id = "sandbox_" + hashlib.sha256(material.encode()).hexdigest()
+        template = SensitiveGrant(grant_id, f"an explicit {kind} definition", "sandbox denial omits its target", ())
+        scope = GrantScope(executor, self.platform, "no access until an exact definition is validated and consented",
+                           "guessing a target could grant unrelated access", True)
+        prefix = "" if role in {"implement", "resolve"} else role + ":"
+        suggestion = blocker.get("sandbox_suggestion")
+        hint = ""
+        if isinstance(suggestion, dict) and suggestion.get("kind") == kind:
+            hint = (" Untrusted command-output suggestion (confirm or replace): "
+                    + json.dumps(suggestion.get("parameter"), ensure_ascii=True)[:160] + ".")
+        asked = {"id": f"Q-{len(self.pending) + 1:03d}",
+                 "prompt": (f"The {role} sandbox diagnostic cannot establish a trusted {kind} target."
+                            f"{hint} Provide its exact {'domain set' if kind == 'network' else 'home path'}; "
+                            f"or resume with --grant '{prefix}{kind}:<exact target>=cycle'. "
+                            "No access is granted by this definition question."),
+                 "options": ["Provide an exact definition", "Leave affected checks not_verified"],
+                 "recommended": None, "blocks": [f"grant:{grant_id}"]}
+        response = self.prompt({**asked, "definition_kind": kind}) if self.prompt is not None else None
+        if response == DENY:
+            self.notes.append(f"{kind} definition declined; affected checks stay not_verified")
+            return None
+        if response is not None:
+            try:
+                parameter = response.get("parameter") if isinstance(response, dict) else response
+                grant = sandbox_grant(kind, parameter, source="validated configuration",
+                                      role=None if role in {"implement", "resolve"} else role)
+                self.operations[grant.id] = grant
+                blocker["resource"] = grant.id
+                return grant
+            except (GrantError, TypeError, OSError, RuntimeError) as error:
+                asked["prompt"] = (f"Definition rejected: {error}. " + asked["prompt"])[:600]
+        self._observe("decision_asked", template, scope, role)
+        self.pending.append(PermissionRequest(template, scope, role, asked, blocker))
+        return None
+
+    def granted(self, executor: str, role: str = "implement") -> tuple[str, ...]:
         """Revalidate effective decisions immediately before each dispatch."""
         granted, denied = set(), set()
         for grant in self.registry.values():
+            if grant.sandbox is not None:
+                if not self._sandbox_role(grant, role):
+                    continue
+                try:
+                    sandbox_token(grant)
+                except GrantError as error:
+                    self.notes.append(f"{grant.id}: unavailable: {error}; affected checks stay not_verified")
+                    continue
             scope = grant.scope_for(executor, self.platform)
             if scope is None:
+                if grant.id in self.answers or grant.id in self.preauthorized:
+                    note = (f"{grant.id}: unavailable on {executor}/{self.platform}; "
+                            "affected checks stay not_verified")
+                    if note not in self.notes:
+                        self.notes.append(note)
                 continue
-            answer, source = self._resolve(grant, scope)
+            try:
+                answer, source = self._resolve(grant, scope)
+            except GrantError as error:
+                self.notes.append(f"{grant.id}: unavailable: {error}; affected checks stay not_verified")
+                continue
             if answer in (ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL):
                 granted.add(grant.id)
             elif answer == DENY:
@@ -929,7 +1172,9 @@ class ConsentBroker:
             if self._observed.get(key) != answer:
                 self._observed[key] = answer
                 if answer is not None:
-                    self._observe("decision_answered", grant, scope, "dispatch", answer, source)
+                    self._observe("decision_answered", grant, scope, role if grant.sandbox else "dispatch", answer, source)
+            if grant.sandbox and answer in (ALLOW_CYCLE, ALLOW_PERSISTENT):
+                self._observe("decision_answered", grant, scope, role, answer, source)
         self.granted_ids, self.denied_ids = granted, denied
         return tuple(sorted(granted))
 
@@ -969,7 +1214,7 @@ class ConsentBroker:
             stored = self.store.load(self.cycle_scope, grant, scope)
             if stored is not None:
                 return (ALLOW_CYCLE if stored == "allow" else DENY), "cycle"
-        if self.store is not None:
+        if self.store is not None and not (grant.sandbox and grant.sandbox.get("role")):
             try:
                 stored = self.store.load(self.repo_id, grant, scope, allow_global=allow_global)
             except GrantError as error:
@@ -995,6 +1240,14 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        if grant.sandbox is not None:
+            sandbox_token(grant)
+            if answer not in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
+                raise GrantError("sandbox grants support cycle, persistent or deny only")
+            if grant.sandbox.get("role") and answer == ALLOW_PERSISTENT:
+                raise GrantError("review sandbox grants support cycle or deny only")
+            if grant.sandbox.get("role"):
+                persist = False
         unique = unique_path(grant.operation) if answer in {ALLOW_PERSISTENT, ALLOW_GLOBAL} else None
         if unique:
             # Kept for this cycle, where it can still match; never refused (#439 AC-14).
@@ -1068,12 +1321,19 @@ class ConsentBroker:
     def request(self, grant: SensitiveGrant, executor: str, *, role: str,
                 blocker: dict[str, Any] | None = None) -> str:
         """Answer a stage's request, ask for it, or leave it pending."""
+        if grant.sandbox and not self._sandbox_role(grant, role):
+            self.notes.append(f"{grant.id}: writing-stage grant does not reach {role}; checks stay not_verified")
+            return UNSUPPORTED
         scope = grant.scope_for(executor, self.platform)
         if scope is None:
             self.notes.append(f"{grant.id} is not available for {executor} on "
-                              f"{self.platform}; the sandbox was not widened")
+                              f"{self.platform}; the sandbox was not widened; affected checks stay not_verified")
             return UNSUPPORTED
-        answer, source = self._resolve(grant, scope)
+        try:
+            answer, source = self._resolve(grant, scope)
+        except GrantError as error:
+            self.notes.append(f"{grant.id}: unavailable: {error}; affected checks stay not_verified")
+            return UNSUPPORTED
         if answer is not None:
             self._observed[grant.fingerprint(scope)] = answer
             self._observe("decision_answered", grant, scope, role, answer, source)
@@ -1171,6 +1431,10 @@ def denial_context(grant: SensitiveGrant) -> str:
 
 
 def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
+    if grant.sandbox:
+        return (f"The user granted {grant.id}: {scope.effective}. "
+                f"Canonical definition: {json.dumps(grant.sandbox, sort_keys=True)}. "
+                "Only the stages named in this scope receive it.")
     if grant.operation is not None:
         warnings = compose_warnings(grant.operation)
         return (f"The user granted {grant.id} only for role {grant.operation['role']} "
@@ -1205,6 +1469,14 @@ def terminal_prompt(stream_in=None, stream_out=None) -> Callable[[dict], str | d
             if not line:
                 return None
             choice = line.strip()
+            if asked.get("definition_kind"):
+                if choice in {"2", DENY}:
+                    return DENY
+                if choice == "1":
+                    print("Exact target: ", end="", file=stream_out, flush=True)
+                    target = stream_in.readline()
+                    return target.strip() if target else None
+                return choice
             if choice.startswith("{"):
                 try:
                     edited = json.loads(choice)

@@ -41,6 +41,80 @@ veto is a review finding.
 
 ## Per stage, not global
 
+### Parameterized sandbox grants (#509)
+
+An explicit runtime definition can use `--grant 'writable:~/.cache/example=cycle'`
+or `--grant 'network:example.com,registry.example.org=cycle'`. Answers are
+`cycle`, `persistent`, or `deny`; global answers are unavailable for these
+resources. Existing scope rules still apply: a persistent CLI answer without
+a previously recorded question holds for this run only. No agent statement
+alone creates a definition or authorizes access.
+
+Writable targets resolve `..` and symlinks before consent and again before
+dispatch. Lexical paths may use the lexical or resolved HOME spelling; resolved
+targets must stay below resolved HOME, including with Windows short names.
+They must be strictly below the user's home directory and disjoint
+from protected credential stores, their parents and their children. In addition
+to the credential-read stores, protected targets include `.gnupg`, `.azure`,
+`.kube`, `.config/gcloud`, `.netrc`, `.npmrc`, `.pypirc`, and `.git-credentials`.
+The consent and journal stores (`.config/code-cycle`,
+`.config/code-cycle-toolkit`, and the configured consent file) are protected
+too: writing them would let a stage forge authorization. Claude's immutable
+policy directory must remain outside every granted writable path.
+Accepting a warning cannot override these bounds. A tool cache such as
+`~/.cache/example` is an exact target; granting it does not imply `~/.cache`.
+Other exact home targets, including agent settings and hooks, shell startup
+files and `~/.local/bin`, remain eligible under the owner's bounds. Every
+writable consent question warns that persistent writes can change agent hooks,
+permissions or shell startup code executed outside the sandbox in later
+sessions. This risk appears before the target so long paths cannot hide it.
+
+Domains are lower-cased IDNA ASCII hosts, de-duplicated and sorted. Schemes,
+ports and wildcard patterns are rejected. No subdomain access is implied.
+The consent ID hashes `[1, kind, canonical_parameter]`; repository and the
+executor's authorized scope are bound by the consent-store key and fingerprint.
+The readable definition and source accompany the decision and stage evidence.
+Consent-store schema 2 entries add a `sandbox` object with `version: 1`,
+`kind`, `parameter`, and `source`; unknown definition schemas do not replay.
+Separate review definitions use `version: 2` and add an exact `role`; their
+identity hashes `[2, kind, canonical_parameter, role]`. They accept only `cycle`
+or `deny`, never a persistent answer or an inherited writer answer.
+The recorded resume command includes the canonical definition, for example
+`--grant 'review:network:example.com=cycle'`, so a fresh process can reconstruct
+the same identity before dispatch without relying on the interrupted worker.
+Serialized runtime `StagePolicy` adds a `sandbox_writable` array, defaulting
+to empty when reading an older policy, and `sandbox_grant_role`, defaulting to
+an empty string, for the separately authorized review writable settings.
+
+Only `implement` and `resolve` inherit these grants. Codex receives filesystem
+write entries or network-domain entries; Claude receives sandbox `allowWrite`
+and `allowedDomains` entries. Reviews, rereviews, issue reviews and security
+stages do not inherit them. A review-specific request uses a separate canonical
+definition and cycle answer, and applies only to that exact review role.
+Denied or unavailable
+resources leave dependent checks `not_verified`, with the concrete reason.
+
+`local_sockets` on Codex/Linux enables the network proxy without adding domain
+rules or the all-Unix-sockets option. It grants loopback TCP (IPv4 and IPv6),
+not AF_UNIX or Docker. The [host-reported spike](research/local-sockets-509.md)
+records this distinction and the remaining local verification limit. Claude has
+no measured mapping and reports this grant unavailable. `docker_host` retains
+its separately disclosed wider scope and writable Docker state.
+
+Codex command output can suggest an exact quoted path from
+`sandbox denied access to path '<path>'` or exact domains from
+`domain '<host>' is not on the allowlist`. A command can print these diagnostics
+itself, so parsed targets are explicitly labelled untrusted suggestions and
+never registered as an observed source. The runtime always asks the user to
+confirm or replace the exact path/domain first; the confirmed definition is
+recorded as `validated configuration`. A second question shows the canonical
+scope before consent. Ordinary permission errors, command operands and agent
+prose do not establish a parameter. Noninteractive runs retain the definition
+question and can resume
+with an explicit validated `--grant` definition. A protected definition is
+rejected even when it came from an observed denial. The original executor,
+exit proof and effect reconciliation guards remain in force for every rerun.
+
 The runtime applies permissions to each stage it dispatches natively
 (`claude -p`, `codex exec`). Nothing is written to a global file as a side
 effect, and nothing is written into a worktree.
