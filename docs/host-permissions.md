@@ -171,6 +171,16 @@ The table remains the default. Git forms outside it (`ls-tree`, `stash`,
 program-selecting environment prefixes, and `gh` reads outside the table or
 repository receive an exact consent question. The question names the command
 and its target and warns that options can execute programs or write files.
+These are **interpreter consent**: Git aliases, configuration (`-c alias.*`,
+`--config-env`, `GIT_CONFIG_*`, including configuration files selected through
+the environment) and programs they start can hide operations from the hook.
+Publication guards cannot inspect those hidden operations. For example,
+`git -c 'alias.x=push --force origin main' x` or a `branch -D` alias can rewrite
+or delete refs after consent; neither is covered by the direct-push and
+direct-deletion checks below. The warning appears before the command in the
+consent question so it survives truncation. Only external isolation and the
+provider's protections constrain such internal effects; consent never widens
+either boundary.
 Implement and resolve may also request explicit consent for writes outside
 the cycle, such as `gh issue create` or comments on related issues. Those
 writes are attributed to the granting decision; review, rereview and
@@ -194,9 +204,13 @@ resolution produces a different identity and asks again. A missing Compose
 file, missing `env_file`, unavailable Docker executable or other resolver error
 retains its observed cause and remains unverified; it is not a consent question.
 
-Consent does not widen host or OS permissions. Force-push, protected destinations,
-ref deletion, credential access, redirects outside `$TMPDIR`, role-owned review
+Consent does not widen host or OS permissions. Directly expressed force-push,
+protected destinations, ref deletion, credential access, redirects outside `$TMPDIR`, role-owned review
 artefacts and merging/closing PRs keep their existing guards (#457 is separate).
+In particular, `gh auth token`, `gh auth status -t/--show-token` (including
+bundled short flags), and authentication mutations such as `login`, `logout`,
+`refresh`, `switch` and `setup-git` retain the credential guard in every role,
+even with an exact grant. Ordinary `gh auth status` remains a permitted read.
 Arbitrary provider API write payloads and GraphQL mutations retain the existing
 publication contracts; use a named CLI operation for an attributed outside-cycle
 write. Shared-hook direct-baseline tests run per executor in

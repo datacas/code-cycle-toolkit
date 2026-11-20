@@ -282,7 +282,8 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
     if warnings:
         risks += " Compose warnings: " + "; ".join(warnings) + "."
     if op.get("guard_consent"):
-        risks = ("Exact consent: options may execute programs or write outside the cycle. "
+        risks = ("Exact interpreter consent: options and aliases may execute programs or write outside the cycle; "
+                 "publication guards cannot inspect hidden operations. "
                  "The target and every argument remain exact; prior grants do not reach review. " + risks)
     if program == "docker":
         risks += (" The hook recomputes the effective Compose configuration before each run; "
@@ -380,7 +381,8 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     # A disclosed host access comes before the generic risk, so it is never cut.
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
     if op.get("guard_consent") and not compose_timeout(op):
-        warned = "WARNING: options can execute programs or write outside the cycle. " + warned
+        warned = ("WARNING: interpreter consent; options and aliases can execute programs or write outside the cycle; "
+                  "publication guards cannot inspect hidden operations. " + warned)
     if (blocker or {}).get("unresolved_directory"):
         warned += ("WARNING: a directory change cannot be resolved; relative operands are "
                    "checked only for credential-store names. ")
@@ -407,7 +409,7 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
         scope_note += (f" {TOOL_RESULTS_OPERAND} matches any saved output of the current "
                        "session, whose content may be untrusted.")
     return {"id": question_id,
-            "prompt": (f"{role}: {compound}{command[:140]}.{scope_note}{detail[:120]} {warned}" +
+            "prompt": (f"{role}: {warned}{compound}{command[:140]}.{scope_note}{detail[:120]} " +
                        ("Exact only; earlier grants do not reach review. " if op.get("guard_consent") else
                         "The answer holds in every stage role. ") +
                        "Pattern grants never bypass Git, credential or redirect guards. "

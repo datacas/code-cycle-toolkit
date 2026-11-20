@@ -1870,8 +1870,8 @@ def read_operands(words: list[str]) -> list[str]:
 
 def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                consent: bool = False) -> None:
-    # Exact consent can cover global options, but they must never hide a push
-    # or deletion from the remaining publication guards (#456).
+    # Direct pushes and deletions retain their guards. Options and aliases are
+    # interpreter consent: hidden operations cannot be inspected (#456).
     if consent:
         args = list(args)
         selection = []
@@ -2194,19 +2194,27 @@ def _same_repo(value: str, repo: str | None) -> bool:
 
 def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
               consent: bool = False) -> None:
+    bare = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if word in {"-R", "--repo", "--hostname"}:
+            index += 2
+            continue
+        if not word.startswith(("--repo=", "--hostname=")):
+            bare.append(word)
+        index += 1
+    if bare[:1] == ["auth"]:
+        # Authentication status without tokens is a read. Credential output
+        # and mutations retain their guard even after exact consent (#456).
+        if bare[1:2] != ["status"] or any(
+                word.startswith("--show-token") or
+                word.startswith("-") and not word.startswith("--") and "t" in word[1:]
+                for word in bare[2:]):
+            raise PolicyError("gh auth credential disclosure and mutations retain the credential guard")
     if consent:
         # The table is a default, not a veto. Keep the stage's artefact and
         # publication contracts before permitting an exact exception (#456).
-        bare = []
-        index = 0
-        while index < len(args):
-            word = args[index]
-            if word in {"-R", "--repo", "--hostname"}:
-                index += 2
-                continue
-            if not word.startswith(("--repo=", "--hostname=")):
-                bare.append(word)
-            index += 1
         key = tuple(bare[:2])
         if key in {("pr", "merge"), ("pr", "close"), ("issue", "close")}:
             raise PolicyError("the cycle never merges or closes provider artefacts")

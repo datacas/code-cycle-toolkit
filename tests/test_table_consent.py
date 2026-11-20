@@ -168,6 +168,53 @@ class TableConsentTests(unittest.TestCase):
             with self.subTest(role=role, command=command):
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.root)))
 
+    def test_git_aliases_require_disclosed_interpreter_consent(self):
+        # Git configuration is executable input. Do not claim to inspect its
+        # hidden operations, or execute these destructive examples in a test.
+        commands = (
+            "git -c 'alias.x=push --force origin main' x",
+            "git -c 'alias.y=branch -D' y topic",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x "
+            "GIT_CONFIG_VALUE_0='push --force origin main' git x",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.y "
+            "GIT_CONFIG_VALUE_0='branch -D' git y topic",
+        )
+        for executor in ("claude", "codex"):
+            for command in commands:
+                with self.subTest(executor=executor, command=command):
+                    self.assertFalse(self.hook(self.policy, command))
+                    broker = grants.ConsentBroker("owner/repo", platform="linux")
+                    request = cp.refused_operation([command], self.policy, broker, executor, str(self.root))
+                    self.assertIsNotNone(request)
+                    grant = broker.operations[request["resource"]]
+                    self.assertTrue(grant.operation["guard_consent"])
+                    question = grants.question(grant, grant.scopes[0], role="implement", blocker=request)
+                    self.assertIn("interpreter consent", question["prompt"])
+                    self.assertIn("publication guards cannot inspect hidden operations", question["prompt"])
+                    self.assertIn("publication guards cannot inspect hidden operations", grant.scopes[0].risks)
+                    broker.apply_answer(grant, grant.scopes[0], "cycle")
+                    allowed = replace(self.policy, command_permissions=broker.command_entries(executor, "implement"))
+                    self.assertTrue(self.hook(allowed, command))
+                    self.assertFalse(self.hook(allowed, command + " different"))
+
+    def test_gh_credentials_stay_protected_after_exact_consent(self):
+        commands = (
+            "gh auth token", "gh auth status --show-token", "gh auth status -t",
+            "gh --hostname github.com auth status -at", "gh auth status --show-token=true",
+            "gh auth refresh", "gh auth logout", "gh auth setup-git", "gh auth login", "gh auth switch",
+        )
+        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+            policy = replace(self.policy, role=role)
+            for command in commands:
+                with self.subTest(role=role, command=command):
+                    self.assertIn("credential", sp.protected_reason("Bash", {"command": command}, policy, str(self.root)) or "")
+                    op = sp.operation("Bash", {"command": command}, policy, str(self.root))
+                    allowed = replace(policy, command_permissions=({"operation": op, "decision": "allow"},))
+                    self.assertFalse(self.hook(allowed, command))
+                    self.assertIsNone(cp.refused_operation([command], policy,
+                        grants.ConsentBroker("owner/repo", platform="linux"), "codex", str(self.root)))
+            self.assertTrue(self.hook(policy, "gh auth status"))
+
     def test_inspection_never_executes_consented_pager_or_config(self):
         command = "git --paginate -c core.pager=unsafe -C /fixture push origin HEAD"
         with patch.object(sp.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "topic\n", "")) as run:
