@@ -785,11 +785,14 @@ class IndirectAndGuardTests(ComposeConsentCase):
 
     def test_environment_prefixes_never_hide_git_guards(self):
         policy = self.policy("implement", base_branch="main")
-        for command in ("GIT_DIR=/tmp/x git status", "FOO=1 git push --force origin topic",
-                        "FOO=1 gh pr merge 1", "GH_HOST=evil.example gh pr view 1",
-                        "HOME=/tmp/fake git status", "GITHUB_TOKEN=x gh pr view 1"):
+        for command in ("FOO=1 git push --force origin topic", "FOO=1 gh pr merge 1"):
             with self.subTest(command=command):
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+        for command in ("GIT_DIR=/tmp/x git status", "GH_HOST=evil.example gh pr view 1",
+                        "HOME=/tmp/fake git status", "GITHUB_TOKEN=x gh pr view 1"):
+            with self.subTest(converted=command):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertTrue(sp.operation("Bash", {"command": command}, policy, str(self.clone))["guard_consent"])
 
 
 class HookBudgetTests(ComposeConsentCase):
@@ -871,22 +874,22 @@ class SocketFirstTests(ComposeConsentCase):
         for command in ("PATH=/tmp/bin git status", "LD_PRELOAD=/tmp/x.so git status",
                         "DYLD_INSERT_LIBRARIES=/tmp/x.dylib gh pr view 1"):
             with self.subTest(command=command):
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertTrue(sp.operation("Bash", {"command": command}, policy, str(self.clone))["guard_consent"])
         self.assertIsNone(sp.protected_reason("Bash", {"command": "FOO=1 git status"}, policy,
                                               str(self.clone)))
 
     def test_program_hiding_prefixes_are_a_real_limit_not_a_consent(self):
         policy = self.policy("implement", base_branch="main")
         for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK,
-                        "GIT_DIR=/x rtk git push --force origin main", "rtk rtk git push --force origin main",
-                        "EDITOR=/tmp/x git commit", "git_dir=/x git status", "BROWSER=/tmp/x gh pr view 1 --web"):
+                        "GIT_DIR=/x rtk git push --force origin main", "rtk rtk git push --force origin main"):
             with self.subTest(command=command):
                 self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
                 self.assertFalse(sp.check(command, self.policy(), cwd=str(self.clone)).allowed)
-        for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK,
-                        "GIT_DIR=/x rtk git status"):
+        for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK):
             with self.subTest(question=command):
                 self.assertIsNone(self.request(command)[0])
+        self.assertIsNotNone(self.request("GIT_DIR=/x rtk git status")[0])
 
 
 class StoredDenialTests(ComposeConsentCase):

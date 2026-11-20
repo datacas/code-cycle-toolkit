@@ -122,12 +122,19 @@ class OperationTests(unittest.TestCase):
                                                   allowed).allowed)
 
     def test_ac4_granted_git_gh_reads_preserve_direct_guards(self):
-        commands = ("git ls-remote --upload-pa=evil origin", "git ls-remote ext::evil",
-                    "git ls-remote --server-option origin ext::evil", "git ls-remote -o origin ext::evil",
-                    "git -c alias.x=evil x", "gh api repos/other/repo/pulls/409",
-                    "gh api repos/owner/repo/pulls/410", "gh api repos/owner/repo/pulls/409 -X DELETE",
+        # #456 lifts table/read/executing-option guards only with exact consent.
+        converted = ("git ls-remote --upload-pa=evil origin", "git ls-remote ext::evil",
+                     "git ls-remote --server-option origin ext::evil", "git ls-remote -o origin ext::evil",
+                     "git -c alias.x=evil x", "gh api repos/other/repo/pulls/409",
+                     "gh api repos/owner/repo/pulls/410", "gh api repos/owner/repo/pulls/409 --hostname evil.invalid")
+        policy = replace(self.policy, role="resolve", change_request_id="409")
+        for command in converted:
+            with self.subTest(converted=command):
+                grant, _ = self.grant(command, policy)
+                allowed = replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+                self.assertTrue(sp.check(command, allowed).allowed)
+        commands = ("gh api repos/owner/repo/pulls/409 -X DELETE",
                     "gh api repos/owner/repo/pulls/409 -f body=changed",
-                    "gh api repos/owner/repo/pulls/409 --hostname evil.invalid",
                     "gh pr edit 409 --body changed", "gh pr merge 409")
         for command in commands:
             with self.subTest(command=command):
