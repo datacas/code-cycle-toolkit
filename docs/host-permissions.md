@@ -195,9 +195,22 @@ ordinary cross-role grant rule, not a change to grant propagation generally.
 Consent and observed executions are recorded with the executor and exact
 operation. Git publication checks use the selected Git global options when
 reading refs, so `-C` cannot attest a push against the invoking checkout.
-The separate value of `--attr-source <tree-ish>` is consumed before checking
-the subcommand, just like its `--attr-source=<tree-ish>` spelling. It does not
-hide a directly expressed push or ref deletion from those checks.
+Global options are parsed with explicit value arity before checking the
+subcommand, including `--attr-source <tree-ish>`, `--shallow-file <file>` and
+the older `--super-prefix <prefix>`. Recognised no-value flags and attached
+values do not hide a directly expressed push or ref deletion. A missing value
+produces an argument error. At an unrecognised global option, inspection stops
+without treating its value as a command. The remaining operation is **opaque**,
+and the leading interpreter warning says so; an exact grant still authorizes
+it. A user-selected Git wrapper or newer Git may support that syntax, so an
+unknown arity adds no toolkit veto. Direct publication/workspace guards cannot
+attest this opaque tail; credential and redirect guards still apply to the
+whole command, and external isolation still bounds its effects. Adding the
+documented arity and a direct baseline makes new syntax inspectable.
+The known grammar follows Git 2.56.1's `handle_options` and
+retains older forms; `--version`, help and path queries stop before any later
+workspace subcommand, as Git itself does. Inspection forwards only repository
+selectors, never configuration, pagers, execution paths or shallow-file inputs.
 
 The same direct guards apply through literal `command`/`builtin`, `timeout`,
 `nice` and `env` runners, including nested forms and their supported literal
@@ -217,8 +230,9 @@ resolution produces a different identity and asks again. A missing Compose
 file, missing `env_file`, unavailable Docker executable or other resolver error
 retains its observed cause and remains unverified; it is not a consent question.
 
-Consent does not widen host or OS permissions. Directly expressed force-push,
-protected destinations, ref deletion, credential access, redirects outside `$TMPDIR`, role-owned review
+Consent does not widen host or OS permissions. In known Git syntax, directly
+expressed force-push, protected destinations and ref deletion keep their guards.
+Credential access, redirects outside `$TMPDIR`, role-owned review
 artefacts and merging/closing PRs keep their existing guards (#457 is separate).
 In particular, `gh auth token`, `gh auth status -t/--show-token` (including
 bundled short flags), and authentication mutations such as `login`, `logout`,

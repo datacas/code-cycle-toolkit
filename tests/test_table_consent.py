@@ -215,6 +215,102 @@ class TableConsentTests(unittest.TestCase):
         self.assertIn("needs a value", sp.protected_reason("Bash", {"command": "git --attr-source"},
                                                          self.policy, str(self.root)) or "")
 
+    def test_git_shallow_file_keeps_direct_publication_guards(self):
+        # Reproduce REV-004 through inspection and the hook, never execute a
+        # force-push or deletion. The exact grant must not erase role guards.
+        for executor in ("claude", "codex"):
+            for role in ("implement", "resolve"):
+                policy = replace(self.policy, role=role)
+                for operation in ("push --force origin main", "branch -D topic"):
+                    command = f"git --shallow-file HEAD {operation}"
+                    with self.subTest(executor=executor, role=role, command=command):
+                        self.assertIsNotNone(sp.protected_reason(
+                            "Bash", {"command": command}, policy, str(self.root)))
+                        op = sp.operation("Bash", {"command": command}, policy, str(self.root))
+                        allowed = replace(policy, command_permissions=({"operation": op, "decision": "allow"},))
+                        self.assertFalse(self.hook(allowed, command))
+                        self.assertIsNone(cp.refused_operation([command], policy,
+                            grants.ConsentBroker("owner/repo", platform="linux"), executor, str(self.root)))
+
+    def test_git_global_options_do_not_guess_value_arity(self):
+        value_options = ("--shallow-file HEAD", "--shallow-file=HEAD",
+                         "--super-prefix fixture/", "--super-prefix=fixture/",
+                         "--attr-source HEAD", "--attr-source=HEAD",
+                         "--config-env fixture=FIXTURE", "--config-env=fixture=FIXTURE")
+        flags = ("-p", "--paginate", "-P", "--no-pager", "--bare",
+                 "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice",
+                 "--literal-pathspecs", "--no-literal-pathspecs", "--glob-pathspecs",
+                 "--noglob-pathspecs", "--icase-pathspecs", "--exec-path=/fixture")
+        for option in (*value_options, *flags):
+            for operation, expected in (("push --force origin main", "never allowed"),
+                                        ("branch -D topic", "deletion of Git refs")):
+                command = f"git {option} {operation}"
+                with self.subTest(command=command):
+                    self.assertIn(expected, sp.protected_reason(
+                        "Bash", {"command": command}, self.policy, str(self.root)) or "")
+        for option in ("--shallow-file", "--super-prefix"):
+            with self.subTest(missing=option):
+                self.assertIn("needs a value", sp.protected_reason(
+                    "Bash", {"command": f"git {option}"}, self.policy, str(self.root)) or "")
+        for option in ("--future-global-option", "--future-global-option=HEAD", "-z"):
+            command = f"git {option} HEAD push --force origin main"
+            with self.subTest(unknown=option):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+                self.assertIn("opaque", sp.guard_consent_reason(
+                    "Bash", {"command": command}, self.policy, str(self.root)) or "")
+
+    def test_git_global_queries_stop_before_workspace_commands(self):
+        for query in ("--version", "-v", "--help", "-h", "--exec-path", "--html-path",
+                      "--man-path", "--info-path", "--list-cmds=main"):
+            command = f"git {query} push --force origin main"
+            with self.subTest(query=query), patch.object(sp.subprocess, "run",
+                    side_effect=AssertionError("query inspection ran a program")):
+                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+
+    def test_git_unknown_global_option_retains_disclosed_exact_consent(self):
+        # PA-23 permits a user-selected Git wrapper with its own option grammar.
+        # Its harmless direct baseline must remain executable after consent.
+        (self.bin / "git").symlink_to("/bin/echo")
+        command = f"PATH={shlex.quote(str(self.bin))} git --fixture-global-option HEAD status"
+        direct = subprocess.run(["git", "--fixture-global-option", "HEAD", "status"],
+            cwd=self.root, env={**os.environ, "PATH": str(self.bin)},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, direct.returncode, direct.stderr)
+        self.assertEqual("--fixture-global-option HEAD status\n", direct.stdout)
+        for executor in ("claude", "codex"):
+            with self.subTest(executor=executor):
+                self.assertFalse(self.hook(self.policy, command))
+                broker = grants.ConsentBroker("owner/repo", platform="linux")
+                request = cp.refused_operation([command], self.policy, broker, executor, str(self.root))
+                self.assertIsNotNone(request)
+                grant = broker.operations[request["resource"]]
+                question = grants.question(grant, grant.scopes[0], role="implement", blocker=request)
+                self.assertIn("Unknown Git option arity", question["prompt"])
+                self.assertIn("opaque", grant.scopes[0].risks)
+                broker.apply_answer(grant, grant.scopes[0], "cycle")
+                allowed = replace(self.policy, command_permissions=broker.command_entries(executor, "implement"))
+                self.assertTrue(self.hook(allowed, command))
+                self.assertFalse(self.hook(allowed, command + " different"))
+        for guarded in (command + " > " + shlex.quote(str(self.root.parent / "outside.txt")),
+                        command + " " + shlex.quote(str(Path.home() / ".codex/auth.json"))):
+            self.assertIsNotNone(sp.protected_reason("Bash", {"command": guarded}, self.policy, str(self.root)))
+
+    def test_git_shallow_file_read_retains_exact_consent(self):
+        command = "git --shallow-file HEAD status --porcelain"
+        direct = self.run_command(command)
+        self.assertEqual(0, direct.returncode, direct.stderr)
+        for executor in ("claude", "codex"):
+            with self.subTest(executor=executor):
+                self.assertFalse(self.hook(self.policy, command))
+                broker = grants.ConsentBroker("owner/repo", platform="linux")
+                request = cp.refused_operation([command], self.policy, broker, executor, str(self.root))
+                self.assertIsNotNone(request)
+                grant = broker.operations[request["resource"]]
+                broker.apply_answer(grant, grant.scopes[0], "cycle")
+                allowed = replace(self.policy, command_permissions=broker.command_entries(executor, "implement"))
+                self.assertTrue(self.hook(allowed, command))
+                self.assertFalse(self.hook(allowed, command.replace("HEAD", "other")))
+
     def test_runner_wrappers_keep_direct_guards(self):
         for executor in ("claude", "codex"):
             for prefix in ("timeout 5", "timeout -s KILL -k 2s 5s", "nice -n 5", "command --",

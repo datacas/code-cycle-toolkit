@@ -284,6 +284,7 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
     if op.get("guard_consent"):
         risks = ("Exact interpreter consent: options and aliases may execute programs or write outside the cycle; "
                  "publication guards cannot inspect hidden operations. "
+                 "Unknown Git option arity leaves the remaining operation opaque. "
                  "The target and every argument remain exact; prior grants do not reach review. " + risks)
     if program == "docker":
         risks += (" The hook recomputes the effective Compose configuration before each run; "
@@ -382,7 +383,8 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
     if op.get("guard_consent") and not compose_timeout(op):
         warned = ("WARNING: interpreter consent; options and aliases can execute programs or write outside the cycle; "
-                  "publication guards cannot inspect hidden operations. " + warned)
+                  "publication guards cannot inspect hidden operations. "
+                  "Unknown Git option arity leaves the remaining operation opaque. " + warned)
     if (blocker or {}).get("unresolved_directory"):
         warned += ("WARNING: a directory change cannot be resolved; relative operands are "
                    "checked only for credential-store names. ")

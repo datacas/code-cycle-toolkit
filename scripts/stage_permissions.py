@@ -1868,24 +1868,49 @@ def read_operands(words: list[str]) -> list[str]:
     return paths
 
 
+def _git_global_options(args: list[str]) -> tuple[list[str] | None, list[str]]:
+    """Return the command and safe selectors; None means opaque option arity."""
+    args = list(args)
+    selection: list[str] = []
+    # Git's handle_options, including older --super-prefix. Never guess that
+    # an unknown option is valueless or name its value as the subcommand.
+    value_options = {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                     "--config-env", "--attr-source", "--shallow-file", "--super-prefix"}
+    flags = {"--no-pager", "-P", "--paginate", "-p", "--bare",
+             "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice",
+             "--literal-pathspecs", "--no-literal-pathspecs", "--glob-pathspecs",
+             "--noglob-pathspecs", "--icase-pathspecs"}
+    while args and args[0].startswith("-"):
+        option = args.pop(0)
+        if option in value_options:
+            if not args:
+                raise PolicyError(f"git {option} needs a value")
+            value = args.pop(0)
+            if option in {"-C", "--git-dir", "--work-tree", "--namespace"}:
+                selection.extend((option, value))
+        elif option.startswith(("--git-dir=", "--work-tree=", "--namespace=")) or option == "--bare":
+            selection.append(option)
+        elif (option in flags or option.startswith("--exec-path=")
+              or "=" in option and option.partition("=")[0] in value_options):
+            pass
+        elif (option in {"--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path"}
+              or option.startswith("--list-cmds=") or option.startswith("--exec-path")):
+            # Git exits or dispatches help/version before later words.
+            return [], selection
+        else:
+            return None, selection
+    return args, selection
+
+
 def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                consent: bool = False) -> None:
-    # Direct pushes and deletions retain their guards. Options and aliases are
-    # interpreter consent: hidden operations cannot be inspected (#456).
+    # Known syntax keeps the direct guards. Unknown syntax is disclosed opaque
+    # interpreter consent, never a guessed command or an extra toolkit veto.
     if consent:
-        args = list(args)
-        selection = []
-        while args and args[0].startswith("-"):
-            option = args.pop(0)
-            if option in {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
-                          "--config-env", "--attr-source"}:
-                if not args:
-                    raise PolicyError(f"git {option} needs a value")
-                value = args.pop(0)
-                if option in {"-C", "--git-dir", "--work-tree", "--namespace"}:
-                    selection.extend((option, value))
-            elif option.startswith(("-C", "--git-dir=", "--work-tree=", "--namespace=")) or option == "--bare":
-                selection.append(option)
+        command_args, selection = _git_global_options(args)
+        if command_args is None or not command_args:
+            return
+        args = command_args
         original_run = run
         def selected_run(command, **kwargs):
             # Inspection runs outside the sandbox. Never forward -c, --paginate
@@ -4522,6 +4547,8 @@ def guard_consent_reason(tool: str, tool_input: dict[str, Any], policy: Any,
             return "environment prefixes may select programs or redirect Git/gh operations"
         checker = _check_git if _program(words[0]) == "git" else _check_gh
         try:
+            if checker is _check_git and _git_global_options(list(words[1:]))[0] is None:
+                return "unknown Git option arity leaves the remaining operation opaque; exact interpreter consent required"
             checker(list(words[1:]), policy, cwd=guard_cwd, run=no_execution)
         except PolicyError as error:
             return str(error)
