@@ -197,6 +197,72 @@ class TableConsentTests(unittest.TestCase):
                     self.assertTrue(self.hook(allowed, command))
                     self.assertFalse(self.hook(allowed, command + " different"))
 
+    def test_git_attr_source_keeps_direct_publication_guards(self):
+        # These commands are inspected, never executed against a remote.
+        for executor in ("claude", "codex"):
+            for option in ("--attr-source HEAD", "--attr-source=HEAD"):
+                for operation in ("push --force origin main", "push origin HEAD:main",
+                                  "branch -D topic", "tag -d fixture", "update-ref -d refs/heads/topic"):
+                    command = f"git {option} {operation}"
+                    with self.subTest(executor=executor, command=command):
+                        reason = sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root))
+                        self.assertIsNotNone(reason)
+                        op = sp.operation("Bash", {"command": command}, self.policy, str(self.root))
+                        allowed = replace(self.policy, command_permissions=({"operation": op, "decision": "allow"},))
+                        self.assertFalse(self.hook(allowed, command))
+                        self.assertIsNone(cp.refused_operation([command], self.policy,
+                            grants.ConsentBroker("owner/repo", platform="linux"), executor, str(self.root)))
+        self.assertIn("needs a value", sp.protected_reason("Bash", {"command": "git --attr-source"},
+                                                         self.policy, str(self.root)) or "")
+
+    def test_runner_wrappers_keep_direct_guards(self):
+        for executor in ("claude", "codex"):
+            for prefix in ("timeout 5", "timeout -s KILL -k 2s 5s", "nice -n 5", "command --",
+                           "env FIXTURE=1", "env -i -u FIXTURE", "env -C . timeout 5 nice -n 5",
+                           "rtk proxy timeout --signal=KILL 5"):
+                for operation in ("gh auth token", "gh auth status -at", "git push --force origin main",
+                                  "git branch -D fixture", "gh pr merge 1"):
+                    command = f"{prefix} {operation}"
+                    with self.subTest(executor=executor, command=command):
+                        self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+                        op = sp.operation("Bash", {"command": command}, self.policy, str(self.root))
+                        allowed = replace(self.policy, command_permissions=({"operation": op, "decision": "allow"},))
+                        self.assertFalse(self.hook(allowed, command))
+                        self.assertIsNone(cp.refused_operation([command], self.policy,
+                            grants.ConsentBroker("owner/repo", platform="linux"), executor, str(self.root)))
+
+    def test_runner_reads_keep_whole_command_consent(self):
+        for executor in ("claude", "codex"):
+            command = "timeout 5 git --attr-source HEAD status"
+            with self.subTest(executor=executor):
+                broker = grants.ConsentBroker("owner/repo", platform="linux")
+                request = cp.refused_operation([command], self.policy, broker, executor, str(self.root))
+                self.assertIsNotNone(request)
+                grant = broker.operations[request["resource"]]
+                self.assertTrue(grant.operation["guard_consent"])
+                broker.apply_answer(grant, grant.scopes[0], "cycle")
+                allowed = replace(self.policy, command_permissions=broker.command_entries(executor, "implement"))
+                self.assertTrue(self.hook(allowed, command))
+                self.assertFalse(self.hook(allowed, command.replace("timeout 5", "timeout 6")))
+        for command in ("echo timeout 5 gh auth token", "printf gh auth token", "command -v gh"):
+            self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+
+    def test_runner_directory_and_environment_reach_git_inspector(self):
+        command = "env -C /fixture GIT_DIR=repo.git timeout 5 git push origin HEAD"
+        with patch.object(sp.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "main\n", "")) as run:
+            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+        self.assertEqual("/fixture", run.call_args.kwargs["cwd"])
+        self.assertEqual(["git", "--no-pager", "--git-dir=repo.git", "rev-parse", "--abbrev-ref", "HEAD"],
+                         run.call_args.args[0])
+
+    def test_runner_directory_keeps_relative_credential_guard(self):
+        # Only inspect strings: never execute a read of a credential store.
+        for reader in ("grep token", "rg token", "cat"):
+            command = f"env -C {shlex.quote(str(Path.home()))} {reader} .codex/auth.json"
+            with self.subTest(reader=reader):
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+                self.assertIsNone(sp.protected_reason("Bash", {"command": "echo " + command}, self.policy, str(self.root)))
+
     def test_gh_credentials_stay_protected_after_exact_consent(self):
         commands = (
             "gh auth token", "gh auth status --show-token", "gh auth status -t",

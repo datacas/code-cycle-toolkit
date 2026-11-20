@@ -195,6 +195,19 @@ ordinary cross-role grant rule, not a change to grant propagation generally.
 Consent and observed executions are recorded with the executor and exact
 operation. Git publication checks use the selected Git global options when
 reading refs, so `-C` cannot attest a push against the invoking checkout.
+The separate value of `--attr-source <tree-ish>` is consumed before checking
+the subcommand, just like its `--attr-source=<tree-ish>` spelling. It does not
+hide a directly expressed push or ref deletion from those checks.
+
+The same direct guards apply through literal `command`/`builtin`, `timeout`,
+`nice` and `env` runners, including nested forms and their supported literal
+options. `env -C` selects the inspection directory and environment assignments
+select the inspected Git repository. Consent still covers the **whole** command,
+including the runner and every argument. Argument-printing commands and
+`command -v`/`-V` do not execute the named program. Unknown runner options,
+`env -S` source and arbitrary program internals remain opaque interpreter
+effects that require external isolation; the hook does not search arbitrary
+arguments for a command to execute or inspect.
 
 With `docker_host` granted, a Compose inspection **timeout** offers a cycle-only
 exact grant without `config_sha256`. The warning states that the effective

@@ -1878,7 +1878,7 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         while args and args[0].startswith("-"):
             option = args.pop(0)
             if option in {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
-                          "--config-env"}:
+                          "--config-env", "--attr-source"}:
                 if not args:
                     raise PolicyError(f"git {option} needs a value")
                 value = args.pop(0)
@@ -4145,6 +4145,61 @@ def _directory_builtin(words: list[str]) -> list[str] | None:
     return words if words[:1] and words[0] in _DIRECTORY_CHANGES else None
 
 
+def _runner_command_parts(words: list[str], cwd: str | None) -> tuple[list[str], list[str], str | None]:
+    """Inspect literal known runners without changing the granted command.
+
+    Unknown runner options and interpreter source (such as env -S) remain
+    opaque. Never search arbitrary arguments for a program name.
+    """
+    environment: list[str] = []
+    while words:
+        assignments, words = command_parts(words)
+        environment.extend(assignments)
+        if not words:
+            break
+        program = _program(words[0])
+        if program in {"command", "builtin"}:
+            words = _unwrapped_builtin([program, *words[1:]]) or []
+            continue
+        if program not in {"env", "nice", "timeout"}:
+            break
+        remaining = words[1:]
+        while remaining and remaining[0].startswith("-"):
+            option, remaining = remaining[0], remaining[1:]
+            if option == "--":
+                break
+            if program == "env" and option in {"-", "-i", "--ignore-environment"}:
+                environment.clear()
+                continue
+            flags = {"env": {"-v", "--debug"}, "nice": set(),
+                     "timeout": {"--foreground", "--preserve-status", "-v", "--verbose"}}
+            if option in flags[program] or program == "nice" and re.fullmatch(r"-[0-9]+", option):
+                continue
+            options = {"env": ("-u", "--unset", "-C", "--chdir"),
+                       "nice": ("-n", "--adjustment"),
+                       "timeout": ("-s", "--signal", "-k", "--kill-after")}[program]
+            name = next((name for name in options if option == name or
+                         (option.startswith(name + "=") if name.startswith("--") else
+                          option.startswith(name) and len(option) > len(name))), None)
+            if name is None:
+                return environment, words, cwd
+            if option == name:
+                if not remaining:
+                    return environment, words, cwd
+                value, remaining = remaining[0], remaining[1:]
+            else:
+                value = option[len(name):].removeprefix("=")
+            if program == "env":
+                if name in {"-C", "--chdir"}:
+                    cwd = str(Path(cwd or ".") / os.path.expanduser(value))
+                else:
+                    environment = [entry for entry in environment if entry.partition("=")[0] != value]
+        if program == "timeout":
+            remaining = remaining[1:]  # duration is not the executed program
+        words = remaining
+    return environment, words, cwd
+
+
 def _operand_values(word: str) -> list[str]:
     """The path spellings a word may carry: itself, `name=value`, `-Xvalue`."""
     values = [] if word.startswith("-") else [word]
@@ -4460,14 +4515,14 @@ def guard_consent_reason(tool: str, tool_input: dict[str, Any], policy: Any,
     # shell grammar words. Re-parsing their joined words can recreate the same
     # compound node indefinitely (case statements inside substitutions).
     for segment in parsed.segments if parsed.shell_source is not None else (parsed,):
-        environment, words = command_parts(segment.words)
+        environment, words, guard_cwd = _runner_command_parts(list(segment.words), cwd)
         if not words or _program(words[0]) not in {"git", "gh"}:
             continue
         if any(_GUARD_DEFEATING_ENV.match(value.partition("=")[0]) for value in environment):
             return "environment prefixes may select programs or redirect Git/gh operations"
         checker = _check_git if _program(words[0]) == "git" else _check_gh
         try:
-            checker(list(words[1:]), policy, cwd=cwd, run=no_execution)
+            checker(list(words[1:]), policy, cwd=guard_cwd, run=no_execution)
         except PolicyError as error:
             return str(error)
         except InspectionNeeded:
@@ -4505,34 +4560,39 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             hidden = hidden_program(environment, words)
             if hidden:
                 return hidden
-            program = os.path.basename(words[0]).removesuffix(".exe")
+            outer_program = _program(words[0])
+            guard_environment, guarded_words, guard_cwd = _runner_command_parts(list(parsed.words), cwd)
+            hidden = hidden_program(guard_environment, guarded_words)
+            if hidden:
+                return hidden
+            program = _program(guarded_words[0]) if guarded_words else ""
             # Re-run all Git/GitHub argument, publication and workspace guards.
             # A grant is not a different stage role or a different PR context.
             if program == "git":
-                if (len(words) > 2 and words[1] in {"branch", "tag", "update-ref"}
+                if (len(guarded_words) > 2 and guarded_words[1] in {"branch", "tag", "update-ref"}
                         and any(word.split("=", 1)[0] == "--delete" or
                                 word.startswith("-") and not word.startswith("--")
-                                and any(letter in word[1:] for letter in "dD") for word in words[2:])):
+                                and any(letter in word[1:] for letter in "dD") for word in guarded_words[2:])):
                     return "deletion of Git refs is never allowed"
                 # Apply only repository selectors when the guard reads HEAD.
                 # Other environment settings may execute programs and remain
                 # inside the executor rather than the host-side inspector.
                 selectors = ["--" + {"GIT_DIR": "git-dir", "GIT_WORK_TREE": "work-tree"}[name] + "=" + value
-                             for assignment in environment
+                             for assignment in guard_environment
                              for name, _, value in [assignment.partition("=")]
                              if name in {"GIT_DIR", "GIT_WORK_TREE"}]
-                _check_git([*selectors, *words[1:]], policy, cwd=cwd, run=subprocess.run, consent=True)
+                _check_git([*selectors, *guarded_words[1:]], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
             elif program == "gh":
-                _check_gh(words[1:], policy, cwd=cwd, run=subprocess.run, consent=True)
+                _check_gh(guarded_words[1:], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
             elif program == "find":
-                if any(word in FIND_FORBIDDEN for word in words[1:]):
+                if any(word in FIND_FORBIDDEN for word in guarded_words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
             # `env -C` runs its program in another directory (REV-008), also
             # behind `command`, `nice`, `timeout -s KILL 5` or any other runner
             # (REV-010). Only a program that just prints or searches its
             # arguments cannot run `env`.
-            chdir = None if program in _ARGUMENT_READERS else next(
+            chdir = None if outer_program in _ARGUMENT_READERS else next(
                 (found for index, word in enumerate(words)
                  if os.path.basename(word).removesuffix(".exe") == "env"
                  for found in (_env_chdir(words[index:]),) if found is not None), None)
