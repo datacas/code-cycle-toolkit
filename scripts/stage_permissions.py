@@ -4442,29 +4442,28 @@ def guard_consent_reason(tool: str, tool_input: dict[str, Any], policy: Any,
     if tool != "Bash":
         return None
     parsed = parse_command(tool_input.get("command", ""), policy.tmpdir)
-    if parsed.shell_source is not None:
-        for segment in parsed.segments:
-            if guard_consent_reason(tool, {"command": shlex.join(segment.words)}, policy, cwd):
-                return "shell contains a Git or gh operation requiring exact consent"
-        return None
-    environment, words = command_parts(parsed.words)
-    if not words or _program(words[0]) not in {"git", "gh"}:
-        return None
-    if any(_GUARD_DEFEATING_ENV.match(value.partition("=")[0]) for value in environment):
-        return "environment prefixes may select programs or redirect Git/gh operations"
-    checker = _check_git if _program(words[0]) == "git" else _check_gh
     class InspectionNeeded(Exception):
         pass
     def no_execution(*args, **kwargs):
         # Identity construction never performs provider lookups or runs a
         # subprocess. Live publication checks belong to protected_reason.
         raise InspectionNeeded()
-    try:
-        checker(list(words[1:]), policy, cwd=cwd, run=no_execution)
-    except PolicyError as error:
-        return str(error)
-    except InspectionNeeded:
-        return None
+    # Segments are already parsed and include empty redirect-only entries and
+    # shell grammar words. Re-parsing their joined words can recreate the same
+    # compound node indefinitely (case statements inside substitutions).
+    for segment in parsed.segments if parsed.shell_source is not None else (parsed,):
+        environment, words = command_parts(segment.words)
+        if not words or _program(words[0]) not in {"git", "gh"}:
+            continue
+        if any(_GUARD_DEFEATING_ENV.match(value.partition("=")[0]) for value in environment):
+            return "environment prefixes may select programs or redirect Git/gh operations"
+        checker = _check_git if _program(words[0]) == "git" else _check_gh
+        try:
+            checker(list(words[1:]), policy, cwd=cwd, run=no_execution)
+        except PolicyError as error:
+            return str(error)
+        except InspectionNeeded:
+            continue
     return None
 
 
