@@ -241,8 +241,9 @@ even with an exact grant. Ordinary `gh auth status` remains a permitted read.
 Arbitrary provider API write payloads and GraphQL mutations retain the existing
 publication contracts; use a named CLI operation for an attributed outside-cycle
 write. Shared-hook direct-baseline tests run per executor in
-`tests/test_table_consent.py`. Native `claude -p` and `codex exec` parity, with a
-real GitHub fixture repository for PA-22, are tracked in #516;
+`tests/test_table_consent.py`. Manual native `claude -p` and `codex exec` runs of PA-20 to PA-24, with a
+real fixture repository for PA-22, matched the direct baselines on 2026-11-21
+(#516). The frozen native checks are not yet re-run through the runtime, and
 the fixture executables used by CI do not establish native parity.
 
 The hook validates arguments, not only the program:
