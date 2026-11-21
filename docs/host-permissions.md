@@ -243,8 +243,9 @@ publication contracts; use a named CLI operation for an attributed outside-cycle
 write. Shared-hook direct-baseline tests run per executor in
 `tests/test_table_consent.py`. Manual native `claude -p` and `codex exec` runs of PA-20 to PA-24, with a
 real fixture repository for PA-22, matched the direct baselines on 2026-11-21
-(#516). The frozen native checks are not yet re-run through the runtime, and
-the fixture executables used by CI do not establish native parity.
+(#516). The procedure is [native-parity-runs.md](native-parity-runs.md); the
+frozen native checks cannot run it inside a cycle, and the fixture executables
+used by CI do not establish native parity.
 
 The hook validates arguments, not only the program:
 

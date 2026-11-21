@@ -32,6 +32,7 @@ Guides are listed in reading order. Each one has one main topic and links to the
 | [Role workspace policy](role-workspace-policy.md) | The write permission each dispatched role has, and which executors can enforce it |
 | [Host permissions](host-permissions.md) | The agent capability parity rule, each stage's closed command table, how Claude and Codex enforce it, their limits, and the opt-in global set |
 | [Capability parity audit](capability-parity-audit.md) | Every toolkit-owned restriction classified as a real limit, a role contract or a toolkit veto, with the issue that converts each veto and its parity baseline per executor |
+| [Native parity runs](native-parity-runs.md) | The manual procedure that runs the audit's baselines with the real `claude -p` and `codex exec` and compares them with the toolkit's consent decision |
 | [Stage registry and execution plan](execution-plan.md) | Static stage/control metadata and the validated, versioned `ExecutionPlan` contract |
 | [Dependency preparation](dependency-preparation.md) | Frozen Node installs, user-selected tools/integrations, registry access and setup evidence |
 | [Native preparation campaign](dependency-preparation-campaign.md) | Observed native validation failures and the remaining host validation for #279 |
