@@ -242,7 +242,7 @@ Arbitrary provider API write payloads and GraphQL mutations retain the existing
 publication contracts; use a named CLI operation for an attributed outside-cycle
 write. Shared-hook direct-baseline tests run per executor in
 `tests/test_table_consent.py`. Native `claude -p` and `codex exec` parity, with a
-real GitHub fixture repository for PA-22, remain required before #456 closes;
+real GitHub fixture repository for PA-22, are tracked in #516;
 the fixture executables used by CI do not establish native parity.
 
 The hook validates arguments, not only the program:
