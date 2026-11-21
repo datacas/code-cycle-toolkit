@@ -161,6 +161,10 @@ class PolicyError(ValueError):
     """A command, or a configured command, the policy refuses."""
 
 
+class ComposeResolutionTimeout(PolicyError):
+    """The inspection budget expired, rather than configuration being absent."""
+
+
 def _runtime_directory() -> str:
     """The directory this module is installed in, in POSIX form."""
     return Path(__file__).resolve().parent.as_posix()
@@ -1864,13 +1868,74 @@ def read_operands(words: list[str]) -> list[str]:
     return paths
 
 
+def _git_global_options(args: list[str]) -> tuple[list[str] | None, list[str]]:
+    """Return the command and safe selectors; None means opaque option arity."""
+    args = list(args)
+    selection: list[str] = []
+    # Git's handle_options, including older --super-prefix. Never guess that
+    # an unknown option is valueless or name its value as the subcommand.
+    value_options = {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                     "--config-env", "--attr-source", "--shallow-file", "--super-prefix"}
+    flags = {"--no-pager", "-P", "--paginate", "-p", "--bare",
+             "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice",
+             "--literal-pathspecs", "--no-literal-pathspecs", "--glob-pathspecs",
+             "--noglob-pathspecs", "--icase-pathspecs"}
+    while args and args[0].startswith("-"):
+        option = args.pop(0)
+        if option in value_options:
+            if not args:
+                raise PolicyError(f"git {option} needs a value")
+            value = args.pop(0)
+            if option in {"-C", "--git-dir", "--work-tree", "--namespace"}:
+                selection.extend((option, value))
+        elif option.startswith(("--git-dir=", "--work-tree=", "--namespace=")) or option == "--bare":
+            selection.append(option)
+        elif (option in flags or option.startswith("--exec-path=")
+              or "=" in option and option.partition("=")[0] in value_options):
+            pass
+        elif (option in {"--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path"}
+              or option.startswith("--list-cmds=") or option.startswith("--exec-path")):
+            # Git exits or dispatches help/version before later words.
+            return [], selection
+        else:
+            return None, selection
+    return args, selection
+
+
 def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                consent: bool = False) -> None:
+    # Known syntax keeps the direct guards. Unknown syntax is disclosed opaque
+    # interpreter consent, never a guessed command or an extra toolkit veto.
+    if consent:
+        command_args, selection = _git_global_options(args)
+        if command_args is None or not command_args:
+            return
+        args = command_args
+        original_run = run
+        def selected_run(command, **kwargs):
+            # Inspection runs outside the sandbox. Never forward -c, --paginate
+            # or --exec-path: consent authorizes execution inside the executor,
+            # not a pager or alias in the host-side guard.
+            return original_run([command[0], "--no-pager", *selection, *command[1:]], **kwargs)
+        run = selected_run
     while args and args[0] == "--no-pager":
         args = args[1:]
     if not args or args[0].startswith("-"):
         raise PolicyError("git global options other than --no-pager are not allowed")
     subcommand, rest = args[0], args[1:]
+    read_form = (subcommand == "stash" and rest[:1] in (["list"], ["show"]) or
+                 subcommand == "tag" and (not rest or rest[:1] in (["--list"], ["-l"])) or
+                 subcommand == "config" and rest[:1] in (["--get"], ["--get-all"], ["--list"], ["-l"]))
+    if (consent and policy.role not in WRITING_ROLES
+            and not read_form
+            and subcommand not in GIT_COMMON_READ | GIT_REVIEW_READ | {
+                "ls-tree", "ls-remote", "branch", "worktree", "fetch"}):
+        raise PolicyError("this role may not modify the Git workspace")
+    if subcommand in {"branch", "tag", "update-ref"} and any(
+            word == "--delete" or word.startswith("--delete=") or
+            word.startswith("-") and not word.startswith("--") and
+            any(letter in word[1:] for letter in "dD") for word in rest):
+        raise PolicyError("deletion of Git refs is never allowed")
     if subcommand == "push" and policy.static_only:
         raise PolicyError("publication requires the stage sandbox; no host-side push fallback")
     allowed = set(GIT_COMMON_READ)
@@ -1882,13 +1947,22 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         allowed.add("ls-remote")
     if subcommand == "branch":
         if rest != ["--show-current"]:
-            raise PolicyError("git branch is allowed only as git branch --show-current")
-        return
+            listing = not rest or all(word in {"--list", "--all", "-a", "--remotes", "-r",
+                                               "--verbose", "-v", "-vv", "--no-color"} for word in rest)
+            if not consent or policy.role not in WRITING_ROLES and not listing:
+                raise PolicyError("git branch is allowed only as git branch --show-current")
+        if not consent:
+            return
     if subcommand == "worktree" and policy.role in WRITING_ROLES:
         # The implementer inspects linked worktrees; it never creates one.
         if rest not in (["list"], ["list", "--porcelain"]):
-            raise PolicyError("git worktree is allowed only as git worktree list")
-        return
+            if not consent:
+                raise PolicyError("git worktree is allowed only as git worktree list")
+        if not consent:
+            return
+    if consent and subcommand == "worktree" and policy.role not in WRITING_ROLES:
+        if rest not in (["list"], ["list", "--porcelain"]):
+            raise PolicyError("this role may only inspect linked worktrees")
     if policy.role in REVIEW_ROLES and subcommand == "fetch":
         if not policy.fetch_origin:
             raise PolicyError("this review workspace has no origin remote to fetch")
@@ -1899,9 +1973,9 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
             and policy.role == "resolve"):
         _check_merge(rest, policy, cwd=cwd, run=run)
         return
-    if subcommand not in allowed:
+    if subcommand not in allowed and not consent:
         raise PolicyError(f"git {subcommand} is not in the {policy.role} stage's command table")
-    if subcommand == "ls-remote":
+    if subcommand == "ls-remote" and not consent:
         positional = []
         options = True
         for word in rest:
@@ -1915,14 +1989,14 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                 positional.append(word)
         if not positional or positional[0] != "origin":
             raise PolicyError("git ls-remote may use only the origin remote")
-    for word in rest:
+    for word in (() if consent else rest):
         if (any(_names_git_option(word, option) for option in GIT_EXECUTING_OPTIONS)
                 or word.startswith("-O")
                 # `git grep -O` runs a pager; short options bundle, as in `-iO<cmd>`.
                 or (subcommand == "grep" and word.startswith("-")
                     and not word.startswith("--") and "O" in word)):
             raise PolicyError(f"git option {word} runs another program")
-    for index, word in enumerate(rest):
+    for index, word in enumerate(() if consent else rest):
         if not _names_git_option(word, "--output"):
             continue
         if "=" in word:
@@ -1932,10 +2006,10 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         if not inside_tmpdir(target, policy.tmpdir):
             raise PolicyError("git --output may write only into $TMPDIR")
     if subcommand == "push":
-        _check_push(rest, policy, cwd=cwd, run=run)
-    elif subcommand == "pull" and policy.code_host == "github":
+        _check_push(rest, policy, cwd=cwd, run=run, consent=consent)
+    elif subcommand == "pull" and policy.code_host == "github" and not consent:
         _check_pull(rest, policy)
-    elif subcommand in {"fetch", "pull"}:
+    elif subcommand in {"fetch", "pull"} and not consent:
         remotes = [word for word in rest if not word.startswith("-")]
         if remotes and remotes[0] != "origin":
             raise PolicyError(f"git {subcommand} may use only the origin remote")
@@ -1987,13 +2061,17 @@ def _names_git_option(word: str, option: str) -> bool:
     return name.startswith("--") and len(name) > 2 and option.startswith(name)
 
 
-def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run) -> None:
+def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
+                consent: bool = False) -> None:
     positional: list[str] = []
     index = 0
     while index < len(args):
         word = args[index]
         if word.startswith("--"):
             name = word.split("=", 1)[0]
+            if consent and any(_names_git_option(word, option) for option in ("--receive-pack", "--exec")):
+                index += 1 if "=" in word else 2
+                continue
             if name in {"--force", "--force-with-lease", "--force-if-includes", "--mirror",
                         "--delete", "--prune", "--all", "--branches", "--repo"}:
                 raise PolicyError(f"git push {name} is never allowed")
@@ -2141,6 +2219,64 @@ def _same_repo(value: str, repo: str | None) -> bool:
 
 def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
               consent: bool = False) -> None:
+    bare = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if word in {"-R", "--repo", "--hostname"}:
+            index += 2
+            continue
+        if not word.startswith(("--repo=", "--hostname=")):
+            bare.append(word)
+        index += 1
+    if bare[:1] == ["auth"]:
+        # Authentication status without tokens is a read. Credential output
+        # and mutations retain their guard even after exact consent (#456).
+        if bare[1:2] != ["status"] or any(
+                word.startswith("--show-token") or
+                word.startswith("-") and not word.startswith("--") and "t" in word[1:]
+                for word in bare[2:]):
+            raise PolicyError("gh auth credential disclosure and mutations retain the credential guard")
+    if consent:
+        # The table is a default, not a veto. Keep the stage's artefact and
+        # publication contracts before permitting an exact exception (#456).
+        key = tuple(bare[:2])
+        if key in {("pr", "merge"), ("pr", "close"), ("issue", "close")}:
+            raise PolicyError("the cycle never merges or closes provider artefacts")
+        if key == ("pr", "review"):
+            # Approval and another role's review remain outside this contract.
+            return _check_gh(args, policy, cwd=cwd, run=run)
+        if key == ("pr", "create") and policy.role != "implement":
+            raise PolicyError("only implement opens the cycle's change request")
+        if key == ("pr", "edit") and policy.role != "implement":
+            raise PolicyError("only implement edits the change-request summary")
+        if bare[:1] == ["api"]:
+            if bare[1:2] == ["graphql"]:
+                if policy.role != "resolve":
+                    raise PolicyError("only resolve may mutate review threads")
+                return _check_thread_call(bare[2:], policy, cwd=cwd, run=run)
+            methods = [word.partition("=")[2] if "=" in word else
+                       (bare[i + 1] if i + 1 < len(bare) else "")
+                       for i, word in enumerate(bare)
+                       if word in {"-X", "--method"} or word.startswith("--method=")]
+            methods.extend(word[2:] for word in bare if word.startswith("-X") and word != "-X")
+            fields = any(word in {"-f", "-F", "--field", "--raw-field", "--input"}
+                         or word.startswith(("--field=", "--raw-field=", "--input=", "-f", "-F"))
+                         for word in bare[1:])
+            read = (not methods and not fields or methods == ["GET"])
+            if not read:
+                # Arbitrary API bodies can close or merge a PR. Keep the
+                # concrete publication guard; named CLI writes below disclose
+                # their target and effect without inspecting opaque payloads.
+                raise PolicyError("provider API writes must use an attributed CLI operation")
+            return
+        read = len(bare) >= 2 and (bare[1] in {
+            "view", "list", "diff", "checks", "status"} or bare[0] == "search")
+        if read or policy.role in WRITING_ROLES:
+            return
+        # Reviewers may still comment on their own PR, with all existing
+        # argument and target checks. They cannot publish elsewhere.
+        return _check_gh(args, policy, cwd=cwd, run=run)
     if args == GH_API_USER:
         return
     # Global repository selection may appear anywhere and must be this cycle's.
@@ -2163,14 +2299,6 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         if policy.role != "resolve":
             raise PolicyError("gh api graphql is available only to the resolve stage")
         return _check_thread_call(remaining[2:], policy, cwd=cwd, run=run)
-    if consent and remaining[:1] == ["api"]:
-        expected = f"repos/{policy.repo}/pulls/{policy.pr_number}" if policy.repo and policy.pr_number else None
-        if len(remaining) > 1 and remaining[1] == expected:
-            # A grant lifts table membership, never API method, endpoint or input guards.
-            options = remaining[2:]
-            if options and (len(options) != 2 or options[0] != "--jq"):
-                raise PolicyError("a granted PR API read takes only --jq; GET is required")
-            return
     if remaining[:1] == ["api"] and policy.role == "resolve":
         if remaining != args:
             raise PolicyError("the annotations read takes only --jq and --paginate")
@@ -3767,7 +3895,7 @@ def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None
         try:
             completed = COMPOSE_RUN(arguments, cwd, env, remaining)
         except subprocess.TimeoutExpired as error:
-            raise PolicyError("the effective Compose configuration could not be resolved within "
+            raise ComposeResolutionTimeout("the effective Compose configuration could not be resolved within "
                               f"{COMPOSE_RESOLUTION_BUDGET_SECONDS} seconds; the runtime cannot "
                               "identify this run and refuses it") from error
         except (OSError, subprocess.SubprocessError, ValueError) as error:
@@ -3793,7 +3921,7 @@ def _resolve_within_budget(base: list[str], env: dict[str, str], cwd: str | None
                 "warnings": ["the effective configuration is not JSON; its mounts and "
                              "privileges were not inspected"]}
     if completed is None:
-        raise PolicyError("the effective Compose configuration could not be resolved within "
+        raise ComposeResolutionTimeout("the effective Compose configuration could not be resolved within "
                           f"{COMPOSE_RESOLUTION_BUDGET_SECONDS} seconds; the runtime cannot "
                           "identify this run and refuses it")
     raise PolicyError("the effective Compose configuration could not be resolved "
@@ -3825,7 +3953,8 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         parsed = parse_command(command, policy.tmpdir)
         if parsed.shell_source is not None:
             return {"version": 1, "role": consent_role(policy.role), "tool": tool,
-                    "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []}}
+                    "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []},
+                    **({"guard_consent": True} if guard_consent_reason(tool, tool_input, policy, cwd) else {})}
         words = list(parsed.words)
         if not words:
             raise ValueError("empty command")
@@ -3885,7 +4014,15 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             if command_words[1:2] == ["compose"] and getattr(policy, "docker", False):
                 values = {assignment.partition("=")[0]: assignment.partition("=")[2]
                           for assignment in environment}
-                extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
+                try:
+                    extra["compose"] = COMPOSE_RESOLVER(command_words, values, cwd, root, policy.tmpdir)
+                except ComposeResolutionTimeout:
+                    extra["compose"] = {"resolution": "timeout", "warnings": [
+                        "effective Compose configuration inspection timed out; its mounts and "
+                        "privileges were not inspected; exact consent is for this cycle only"]}
+                    extra["guard_consent"] = True
+        if guard_consent_reason(tool, tool_input, policy, cwd):
+            extra["guard_consent"] = True
         check_id = configured_check_id(words, policy)
         if check_id:
             extra["check"] = check_id
@@ -3906,6 +4043,13 @@ def same_operation(stored: Any, op: dict[str, Any]) -> bool:
     """Exact equality of the operation, whatever role it was decided in (#500)."""
     if not isinstance(stored, dict):
         return False
+    if stored.get("guard_consent") or op.get("guard_consent"):
+        # #456 exceptions are exact, including environment and configured
+        # checks. An earlier writing-stage consent never reaches review.
+        if (stored.get("role") != op.get("role") and
+                (stored.get("role") == "review" or op.get("role") == "review")):
+            return False
+        return {**stored, "role": op.get("role")} == op
     def ordinary(value):
         for word in value.get("pattern", {}).get("words", []):
             name = (word.get("env") if isinstance(word, dict) else
@@ -3944,7 +4088,8 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
     # Pattern authorization lifts table membership, never a concrete guard.
     patterns = [entry for entry in policy.command_permissions
                 if entry.get("operation", {}).get("version") == 2]
-    if patterns and tool == "Bash" and protected_reason(tool, tool_input, policy, cwd) is None:
+    if (patterns and tool == "Bash" and not op.get("guard_consent")
+            and protected_reason(tool, tool_input, policy, cwd) is None):
         from grants import pattern_covers_operation
         covering = set()
         for entry in patterns:
@@ -4023,6 +4168,61 @@ def _directory_builtin(words: list[str]) -> list[str] | None:
     """The cd, pushd or popd words a segment runs, through builtin/command."""
     words = _unwrapped_builtin(words) or []
     return words if words[:1] and words[0] in _DIRECTORY_CHANGES else None
+
+
+def _runner_command_parts(words: list[str], cwd: str | None) -> tuple[list[str], list[str], str | None]:
+    """Inspect literal known runners without changing the granted command.
+
+    Unknown runner options and interpreter source (such as env -S) remain
+    opaque. Never search arbitrary arguments for a program name.
+    """
+    environment: list[str] = []
+    while words:
+        assignments, words = command_parts(words)
+        environment.extend(assignments)
+        if not words:
+            break
+        program = _program(words[0])
+        if program in {"command", "builtin"}:
+            words = _unwrapped_builtin([program, *words[1:]]) or []
+            continue
+        if program not in {"env", "nice", "timeout"}:
+            break
+        remaining = words[1:]
+        while remaining and remaining[0].startswith("-"):
+            option, remaining = remaining[0], remaining[1:]
+            if option == "--":
+                break
+            if program == "env" and option in {"-", "-i", "--ignore-environment"}:
+                environment.clear()
+                continue
+            flags = {"env": {"-v", "--debug"}, "nice": set(),
+                     "timeout": {"--foreground", "--preserve-status", "-v", "--verbose"}}
+            if option in flags[program] or program == "nice" and re.fullmatch(r"-[0-9]+", option):
+                continue
+            options = {"env": ("-u", "--unset", "-C", "--chdir"),
+                       "nice": ("-n", "--adjustment"),
+                       "timeout": ("-s", "--signal", "-k", "--kill-after")}[program]
+            name = next((name for name in options if option == name or
+                         (option.startswith(name + "=") if name.startswith("--") else
+                          option.startswith(name) and len(option) > len(name))), None)
+            if name is None:
+                return environment, words, cwd
+            if option == name:
+                if not remaining:
+                    return environment, words, cwd
+                value, remaining = remaining[0], remaining[1:]
+            else:
+                value = option[len(name):].removeprefix("=")
+            if program == "env":
+                if name in {"-C", "--chdir"}:
+                    cwd = str(Path(cwd or ".") / os.path.expanduser(value))
+                else:
+                    environment = [entry for entry in environment if entry.partition("=")[0] != value]
+        if program == "timeout":
+            remaining = remaining[1:]  # duration is not the executed program
+        words = remaining
+    return environment, words, cwd
 
 
 def _operand_values(word: str) -> list[str]:
@@ -4324,6 +4524,39 @@ def unresolved_directory(command: str, policy: Any, cwd: str | None = None) -> b
         return False
 
 
+def guard_consent_reason(tool: str, tool_input: dict[str, Any], policy: Any,
+                         cwd: str | None) -> str | None:
+    """The #456 warning for an exact-only Git/gh exception, never authority."""
+    if tool != "Bash":
+        return None
+    parsed = parse_command(tool_input.get("command", ""), policy.tmpdir)
+    class InspectionNeeded(Exception):
+        pass
+    def no_execution(*args, **kwargs):
+        # Identity construction never performs provider lookups or runs a
+        # subprocess. Live publication checks belong to protected_reason.
+        raise InspectionNeeded()
+    # Segments are already parsed and include empty redirect-only entries and
+    # shell grammar words. Re-parsing their joined words can recreate the same
+    # compound node indefinitely (case statements inside substitutions).
+    for segment in parsed.segments if parsed.shell_source is not None else (parsed,):
+        environment, words, guard_cwd = _runner_command_parts(list(segment.words), cwd)
+        if not words or _program(words[0]) not in {"git", "gh"}:
+            continue
+        if any(_GUARD_DEFEATING_ENV.match(value.partition("=")[0]) for value in environment):
+            return "environment prefixes may select programs or redirect Git/gh operations"
+        checker = _check_git if _program(words[0]) == "git" else _check_gh
+        try:
+            if checker is _check_git and _git_global_options(list(words[1:]))[0] is None:
+                return "unknown Git option arity leaves the remaining operation opaque; exact interpreter consent required"
+            checker(list(words[1:]), policy, cwd=guard_cwd, run=no_execution)
+        except PolicyError as error:
+            return str(error)
+        except InspectionNeeded:
+            continue
+    return None
+
+
 def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None,
                      *, _parsed: ParsedCommand | None = None, _dotglob: bool = False,
                      _nocaseglob: bool = False) -> str | None:
@@ -4354,33 +4587,39 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             hidden = hidden_program(environment, words)
             if hidden:
                 return hidden
-            if _program(words[0]) in {"git", "gh"} and any(
-                    _GUARD_DEFEATING_ENV.match(assignment.partition("=")[0]) for assignment in environment):
-                return ("GIT_*, GH_*, GITHUB_*, HOME, XDG_*, PATH, LD_*, DYLD_*, editor, pager, "
-                        "browser and SSH program prefixes on git or gh defeat their argument guards")
-            program = os.path.basename(words[0]).removesuffix(".exe")
+            outer_program = _program(words[0])
+            guard_environment, guarded_words, guard_cwd = _runner_command_parts(list(parsed.words), cwd)
+            hidden = hidden_program(guard_environment, guarded_words)
+            if hidden:
+                return hidden
+            program = _program(guarded_words[0]) if guarded_words else ""
             # Re-run all Git/GitHub argument, publication and workspace guards.
             # A grant is not a different stage role or a different PR context.
             if program == "git":
-                if words[1:2] == ["push"]:
-                    _check_push(words[2:], policy, cwd=cwd, run=subprocess.run)
-                if (len(words) > 2 and words[1] in {"branch", "tag", "update-ref"}
+                if (len(guarded_words) > 2 and guarded_words[1] in {"branch", "tag", "update-ref"}
                         and any(word.split("=", 1)[0] == "--delete" or
                                 word.startswith("-") and not word.startswith("--")
-                                and any(letter in word[1:] for letter in "dD") for word in words[2:])):
+                                and any(letter in word[1:] for letter in "dD") for word in guarded_words[2:])):
                     return "deletion of Git refs is never allowed"
-                _check_git(words[1:], policy, cwd=cwd, run=subprocess.run, consent=True)
+                # Apply only repository selectors when the guard reads HEAD.
+                # Other environment settings may execute programs and remain
+                # inside the executor rather than the host-side inspector.
+                selectors = ["--" + {"GIT_DIR": "git-dir", "GIT_WORK_TREE": "work-tree"}[name] + "=" + value
+                             for assignment in guard_environment
+                             for name, _, value in [assignment.partition("=")]
+                             if name in {"GIT_DIR", "GIT_WORK_TREE"}]
+                _check_git([*selectors, *guarded_words[1:]], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
             elif program == "gh":
-                _check_gh(words[1:], policy, cwd=cwd, run=subprocess.run, consent=True)
+                _check_gh(guarded_words[1:], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
             elif program == "find":
-                if any(word in FIND_FORBIDDEN for word in words[1:]):
+                if any(word in FIND_FORBIDDEN for word in guarded_words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths
             # `env -C` runs its program in another directory (REV-008), also
             # behind `command`, `nice`, `timeout -s KILL 5` or any other runner
             # (REV-010). Only a program that just prints or searches its
             # arguments cannot run `env`.
-            chdir = None if program in _ARGUMENT_READERS else next(
+            chdir = None if outer_program in _ARGUMENT_READERS else next(
                 (found for index, word in enumerate(words)
                  if os.path.basename(word).removesuffix(".exe") == "env"
                  for found in (_env_chdir(words[index:]),) if found is not None), None)

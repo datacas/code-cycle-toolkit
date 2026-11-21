@@ -142,8 +142,8 @@ def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str
             "requires_human": False,
             # Evidence ties the decision to the exact check and configuration (#398).
             **({"check": op["check"]} if op.get("check") else {}),
-            **({"config_sha256": compose["config_sha256"],
-                "warnings": list(compose.get("warnings") or [])} if compose else {})}
+            **({"config_sha256": compose["config_sha256"]} if compose and "config_sha256" in compose else {}),
+            **({"warnings": list(compose.get("warnings") or [])} if compose else {})}
 
 
 def _observed_policy(policy: Any, event: dict[str, Any]) -> Any:
@@ -209,7 +209,7 @@ def _refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         grant = make_grant(op, executor, broker.platform)
         proposal = event.get("pattern_proposal")
-        if isinstance(proposal, dict) and tool == "Bash":
+        if isinstance(proposal, dict) and tool == "Bash" and not op.get("guard_consent"):
             try:
                 grant = make_pattern_grant(
                     proposal["pattern"], policy.role, executor, broker.platform,
@@ -945,7 +945,7 @@ def stored_check_denials(policy: Any, executor: str, platform: str, cwd: str | N
         outcomes.append({"grant": grant.id, "command": command, "answer": DENY,
                          "essential": False, "checks": [], "check": op["check"],
                          "source": "stored decision",
-                         **({"config_sha256": compose["config_sha256"],
+                         **({"config_sha256": compose.get("config_sha256"),
                              "warnings": list(compose.get("warnings") or [])} if compose else {})})
         seen.add(op["check"])
     return outcomes

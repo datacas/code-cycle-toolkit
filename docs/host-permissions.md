@@ -163,14 +163,96 @@ and rereview run them **only inside their disposable clone**. Without either key
 no verification command is preauthorized; an operation outside the table asks
 for consent. See [Configuration → Allowed commands](configuration.md#allowed-commands).
 
-The hook validates arguments, not only the program, and it is fail-closed:
+### Exact consent for Git, gh and Compose (#456)
+
+The table remains the default. Git forms outside it (`ls-tree`, `stash`,
+`worktree add`, other fetch/pull forms), Git global and executing options
+(`-c`, `-C`, `--upload-pack`, `grep -O`, `--output` outside `$TMPDIR`),
+program-selecting environment prefixes, and `gh` reads outside the table or
+repository receive an exact consent question. The question names the command
+and its target and warns that options can execute programs or write files.
+These are **interpreter consent**: Git aliases, configuration (`-c alias.*`,
+`--config-env`, `GIT_CONFIG_*`, including configuration files selected through
+the environment) and programs they start can hide operations from the hook.
+Publication guards cannot inspect those hidden operations. For example,
+`git -c 'alias.x=push --force origin main' x` or a `branch -D` alias can rewrite
+or delete refs after consent; neither is covered by the direct-push and
+direct-deletion checks below. The warning appears before the command in the
+consent question so it survives truncation. Only external isolation and the
+provider's protections constrain such internal effects; consent never widens
+either boundary.
+Implement and resolve may also request explicit consent for writes outside
+the cycle, such as `gh issue create` or comments on related issues. Those
+writes are attributed to the granting decision; review, rereview and
+issue_review retain their publication contracts.
+
+These converted guards accept **exact grants only**, including all flags,
+environment prefixes and destinations. A regex, including a user-edited
+matcher, never lifts them. A grant from another role does not reach review
+or rereview; a fresh explicit decision there can authorize a permitted read.
+Review and rereview share their review role. This is an exception to the
+ordinary cross-role grant rule, not a change to grant propagation generally.
+Consent and observed executions are recorded with the executor and exact
+operation. Git publication checks use the selected Git global options when
+reading refs, so `-C` cannot attest a push against the invoking checkout.
+Global options are parsed with explicit value arity before checking the
+subcommand, including `--attr-source <tree-ish>`, `--shallow-file <file>` and
+the older `--super-prefix <prefix>`. Recognised no-value flags and attached
+values do not hide a directly expressed push or ref deletion. A missing value
+produces an argument error. At an unrecognised global option, inspection stops
+without treating its value as a command. The remaining operation is **opaque**,
+and the leading interpreter warning says so; an exact grant still authorizes
+it. A user-selected Git wrapper or newer Git may support that syntax, so an
+unknown arity adds no toolkit veto. Direct publication/workspace guards cannot
+attest this opaque tail; credential and redirect guards still apply to the
+whole command, and external isolation still bounds its effects. Adding the
+documented arity and a direct baseline makes new syntax inspectable.
+The known grammar follows Git 2.56.1's `handle_options` and
+retains older forms; `--version`, help and path queries stop before any later
+workspace subcommand, as Git itself does. Inspection forwards only repository
+selectors, never configuration, pagers, execution paths or shallow-file inputs.
+
+The same direct guards apply through literal `command`/`builtin`, `timeout`,
+`nice` and `env` runners, including nested forms and their supported literal
+options. `env -C` selects the inspection directory and environment assignments
+select the inspected Git repository. Consent still covers the **whole** command,
+including the runner and every argument. Argument-printing commands and
+`command -v`/`-V` do not execute the named program. Unknown runner options,
+`env -S` source and arbitrary program internals remain opaque interpreter
+effects that require external isolation; the hook does not search arbitrary
+arguments for a command to execute or inspect.
+
+With `docker_host` granted, a Compose inspection **timeout** offers a cycle-only
+exact grant without `config_sha256`. The warning states that the effective
+configuration, mounts and privileges were not inspected. Repository and forever
+answers are rejected; pattern grants cannot cover it. A subsequent successful
+resolution produces a different identity and asks again. A missing Compose
+file, missing `env_file`, unavailable Docker executable or other resolver error
+retains its observed cause and remains unverified; it is not a consent question.
+
+Consent does not widen host or OS permissions. In known Git syntax, directly
+expressed force-push, protected destinations and ref deletion keep their guards.
+Credential access, redirects outside `$TMPDIR`, role-owned review
+artefacts and merging/closing PRs keep their existing guards (#457 is separate).
+In particular, `gh auth token`, `gh auth status -t/--show-token` (including
+bundled short flags), and authentication mutations such as `login`, `logout`,
+`refresh`, `switch` and `setup-git` retain the credential guard in every role,
+even with an exact grant. Ordinary `gh auth status` remains a permitted read.
+Arbitrary provider API write payloads and GraphQL mutations retain the existing
+publication contracts; use a named CLI operation for an attributed outside-cycle
+write. Shared-hook direct-baseline tests run per executor in
+`tests/test_table_consent.py`. Native `claude -p` and `codex exec` parity, with a
+real GitHub fixture repository for PA-22, remain required before #456 closes;
+the fixture executables used by CI do not establish native parity.
+
+The hook validates arguments, not only the program:
 
 - simple literal commands use the table. Chaining (`&&`, `;`, `|`), heredocs,
   substitutions, other expansions and globs use shell-operation consent,
   with every visible segment checked against the concrete guards (#439);
 - `$TMPDIR` is the only expansion, and only when it is the dispatch's own
   runtime directory (`<parent>/code-cycle-tmp-*`). A path given to
-  `--body-file`, `git … --output` or an output redirection (`>`, `>>`, `2>`)
+  `--body-file` or an output redirection (`>`, `>>`, `2>`)
   must resolve, through symlinks and `..`, strictly inside it: not `/tmp`,
   not another `code-cycle-tmp-*`, not the checkout;
 - `git push` must name `origin` and an explicit branch. Every force variant is
@@ -180,12 +262,13 @@ The hook validates arguments, not only the program, and it is fail-closed:
   and `master` are never a destination, whether spelled `main`,
   `refs/heads/main`, `heads/main` or `HEAD` while on it;
 - Git options that run another program (`-c`, `-C`, `--upload-pack`,
-  `--receive-pack`, `--exec-path`, `grep -O`) are refused, including the
+  `--receive-pack`, `--exec-path`, `grep -O`) require exact consent, including the
   abbreviations Git expands (`--open-files=…`, `--upload-pa=…`) and `O` in a
   bundled `git grep` flag (`-iO…`);
-- `gh` is limited to this cycle's repository (`-R`/`--repo`, URLs), change
-  request and work item; `--hostname` is refused; `gh api` is refused except
-  `gh api user --jq .login` and resolve's three thread calls;
+- `gh` defaults to this cycle's repository (`-R`/`--repo`, URLs), change
+  request and work item. Reads beyond this default, including `--hostname`
+  and `gh api` GET, require exact consent; writes follow the role contracts
+  and explicit outside-cycle consent described above;
 - `find -exec`, `-execdir`, `-ok`, `-okdir`, `-delete` and `-fprint*` are
   refused, and the read-only shell tools may not redirect output;
 - `sed`, `date` and `ps` are read-only tools only in the forms below (#464);
@@ -216,7 +299,7 @@ The hook validates arguments, not only the program, and it is fail-closed:
   program after the prefixes. `GIT_*`, `GH_*`, `GITHUB_*`, `HOME`, `XDG_*`,
   `PATH`, `LD_*`, `DYLD_*`, `EDITOR`, `VISUAL`, `PAGER`, `LESS*`, `BROWSER`,
   `SSH_ASKPASS*` and `SSH_*COMMAND` prefixes on `git` or `gh`, in any letter
-  case, are refused: they redirect the program, or choose a program it starts,
+  case, need exact consent: they redirect the program, or choose a program it starts,
   where the guards cannot see it. A command whose program the runtime cannot
   identify after an append-style `NAME+=value` prefix or nested `rtk` retains
   its guard. Ordinary assignments before or after one `rtk` wrapper are

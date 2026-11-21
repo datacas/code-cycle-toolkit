@@ -244,7 +244,7 @@ def pattern_covers_operation(pattern: dict[str, Any], op: dict[str, Any]) -> boo
     """A simple-command matcher never implicitly authorizes shell source."""
     from stage_permissions import normalized_command
     shell = op.get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]
-    return (not shell or pattern.get("compound") is True) and pattern_matches(
+    return not op.get("guard_consent") and (not shell or pattern.get("compound") is True) and pattern_matches(
         pattern.get("pattern", {}).get("regex", ""), normalized_command(op))
 
 
@@ -266,6 +266,11 @@ def compose_warnings(op: dict[str, Any] | None) -> list[str]:
     return [str(item) for item in warnings] if isinstance(warnings, list) else []
 
 
+def compose_timeout(op: dict[str, Any] | None) -> bool:
+    compose = (op or {}).get("compose")
+    return isinstance(compose, dict) and compose.get("resolution") == "timeout"
+
+
 def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGrant:
     pattern = json.dumps(op, sort_keys=True)
     program = _command_program(op) if op.get("tool") == "Bash" else "edit"
@@ -276,9 +281,14 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
     warnings = compose_warnings(op)
     if warnings:
         risks += " Compose warnings: " + "; ".join(warnings) + "."
+    if op.get("guard_consent"):
+        risks = ("Exact interpreter consent: options and aliases may execute programs or write outside the cycle; "
+                 "publication guards cannot inspect hidden operations. "
+                 "Unknown Git option arity leaves the remaining operation opaque. "
+                 "The target and every argument remain exact; prior grants do not reach review. " + risks)
     if program == "docker":
         risks += (" The hook recomputes the effective Compose configuration before each run; "
-                  "a changed configuration asks again.") if op.get("compose") else ""
+                  "a changed configuration asks again.") if op.get("compose") and not compose_timeout(op) else ""
     elif program != "edit":
         # Indirect Docker (#398): the hook sees this command, never what it starts.
         risks += (" With docker_host granted, this command and anything it starts reach "
@@ -340,10 +350,12 @@ def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
     if (not isinstance(op, dict) or op.get("version") != 1
             or not isinstance(op.get("role"), str) or not isinstance(op.get("pattern"), dict)
             or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}
-            or not set(op) <= {"version", "role", "tool", "pattern", "compose", "check"}
+            or not set(op) <= {"version", "role", "tool", "pattern", "compose", "check", "guard_consent"}
+            or ("guard_consent" in op and op["guard_consent"] is not True)
             or ("check" in op and not isinstance(op["check"], str))
             or ("compose" in op and not (isinstance(op["compose"], dict)
-                                         and isinstance(op["compose"].get("config_sha256"), str)))):
+                                         and (isinstance(op["compose"].get("config_sha256"), str)
+                                              or compose_timeout(op) and op.get("guard_consent") is True)))):
         return None
     pattern = op["pattern"]
     if op["tool"] == "Bash":
@@ -369,6 +381,10 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     warnings = compose_warnings(op)
     # A disclosed host access comes before the generic risk, so it is never cut.
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
+    if op.get("guard_consent") and not compose_timeout(op):
+        warned = ("WARNING: interpreter consent; options and aliases can execute programs or write outside the cycle; "
+                  "publication guards cannot inspect hidden operations. "
+                  "Unknown Git option arity leaves the remaining operation opaque. " + warned)
     if (blocker or {}).get("unresolved_directory"):
         warned += ("WARNING: a directory change cannot be resolved; relative operands are "
                    "checked only for credential-store names. ")
@@ -395,16 +411,17 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
         scope_note += (f" {TOOL_RESULTS_OPERAND} matches any saved output of the current "
                        "session, whose content may be untrusted.")
     return {"id": question_id,
-            "prompt": (f"{role}: {compound}{command[:140]}.{scope_note}{detail[:120]} {warned}"
-                       "The answer holds in every stage role. "
+            "prompt": (f"{role}: {warned}{compound}{command[:140]}.{scope_note}{detail[:120]} " +
+                       ("Exact only; earlier grants do not reach review. " if op.get("guard_consent") else
+                        "The answer holds in every stage role. ") +
                        "Pattern grants never bypass Git, credential or redirect guards. "
                        "Interpreter internals require external isolation. "
                        f"{regex_note} {skip}"
                        f"Outside table: {reason[:40]}. Risk: {scope.risks[:60]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
                        "Protected commands receive no pattern authorization.")[:600],
-            "options": command_options(str((grant.operation or {}).get("role", role)),
-                                       unique_path=unique),
+            "options": (["this cycle", "deny"] if compose_timeout(op) else
+                        command_options(str((grant.operation or {}).get("role", role)), unique_path=unique)),
             "recommended": None,
             "blocks": [f"grant:{grant.id}"]}
 
@@ -1007,6 +1024,8 @@ class ConsentBroker:
             if not (op and scope is not None):
                 continue
             answer, source = self._resolve(grant, scope, allow_global=allow_global)
+            if compose_timeout(op) and answer != DENY and source not in {"cycle", "--grant"}:
+                continue
             if answer is None:
                 continue
             decision, rank = ("deny" if answer == DENY else "allow"), _source_rank(source)
@@ -1045,11 +1064,12 @@ class ConsentBroker:
 
     def record_executions(self, commands: list[str], executor: str, policy: Any,
                           cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:
-        from stage_permissions import operation, protected_reason
+        from stage_permissions import operation, protected_reason, same_operation
         if self.store is None:
             return
         pattern_grants = [grant for grant in self.registry.values()
-                          if (grant.operation or {}).get("version") == 2]
+                          if (grant.operation or {}).get("version") == 2
+                          or (grant.operation or {}).get("guard_consent")]
         if not pattern_grants:
             return
         retained = {record["command"]: record["operation"] for record in observed or []
@@ -1063,8 +1083,8 @@ class ConsentBroker:
                 for grant in pattern_grants:
                     stored = grant.operation or {}
                     scope = grant.scope_for(executor, self.platform)
-                    if (stored.get("version") != 2 or scope is None
-                            or not pattern_covers_operation(stored, op)):
+                    if (scope is None or not (same_operation(stored, op)
+                            if stored.get("guard_consent") else pattern_covers_operation(stored, op))):
                         continue
                     for repo in (self.cycle_scope, self.repo_id, "*"):
                         if repo and self.store.load(repo, grant, scope) == "allow":
@@ -1201,7 +1221,7 @@ class ConsentBroker:
                               "showed this scope")
             return answer, RUN_ONLY_SOURCE
         # Configuration remains a separate explicit source of authorization.
-        if grant.id in self.preauthorized:
+        if grant.id in self.preauthorized and not compose_timeout(grant.operation):
             return ALLOW_PERSISTENT, "project configuration"
         if key in self._cycle_answers:
             if (getattr(grant, "operation", None) and self.cycle_scope and self.store
@@ -1221,6 +1241,8 @@ class ConsentBroker:
                 self.notes.append(f"{error}; no stored authorization applied")
                 return None, None
             if stored is not None:
+                if stored == "allow" and compose_timeout(grant.operation):
+                    return None, None
                 return (ALLOW_PERSISTENT if stored == "allow" else DENY), "consents.json"
         return None, None
 
@@ -1240,6 +1262,8 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        if compose_timeout(grant.operation) and answer not in {ALLOW_CYCLE, DENY}:
+            raise GrantError("Compose resolution timeout supports this cycle or deny only")
         if grant.sandbox is not None:
             sandbox_token(grant)
             if answer not in {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY}:
@@ -1437,14 +1461,19 @@ def granted_context(grant: SensitiveGrant, scope: GrantScope) -> str:
                 "Only the stages named in this scope receive it.")
     if grant.operation is not None:
         warnings = compose_warnings(grant.operation)
+        compose_note = ""
+        if compose_timeout(grant.operation):
+            compose_note = (" Compose inspection timed out; this cycle only, without a configuration digest. "
+                            + "; ".join(warnings))
+        elif grant.operation.get("compose"):
+            compose_note = (" The hook recomputes the effective Compose configuration before the run; "
+                            "if it changed, the run is refused and asks again. Record the check with "
+                            f"its config_sha256 {grant.operation['compose']['config_sha256']}"
+                            + (f" and these warnings: {'; '.join(warnings)}" if warnings else "") + ".")
         return (f"The user granted {grant.id} only for role {grant.operation['role']} "
                 f"and exact pattern {scope.effective}. This does not widen the sandbox "
                 "or authorize another stage role. Interpreter internals depend on external isolation."
-                + (" The hook recomputes the effective Compose configuration before the run; "
-                   "if it changed, the run is refused and asks again. Record the check with "
-                   f"its config_sha256 {grant.operation['compose']['config_sha256']}"
-                   + (f" and these warnings: {'; '.join(warnings)}" if warnings else "") + "."
-                   if grant.operation.get("compose") else ""))
+                + compose_note)
     return (
         f"The user granted {grant.resource} to this and every later "
         f"{scope.executor} stage of the cycle. The sandbox now opens "
