@@ -913,7 +913,7 @@ class DockerBlockerTests(unittest.TestCase):
             self.assertIsNone(recovery.denied_docker_blocker(
                 self.BLOCKED, ["git push origin HEAD", "git status"]))
         # The push rule asked for its branch and got the refusing runner.
-        self.assertEqual([(["git", "rev-parse", "--abbrev-ref", "HEAD"],)], ran)
+        self.assertEqual([(["git", "--no-pager", "rev-parse", "--abbrev-ref", "HEAD"],)], ran)
 
 
 class RuntimePolicyTests(unittest.TestCase):
