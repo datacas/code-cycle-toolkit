@@ -1282,9 +1282,16 @@ def git_remote_identity(url: str, cwd: str | None) -> str:
     return hashlib.sha256(url.encode()).hexdigest()
 
 
+#: Options an ordinary working-branch push may carry without consent.
+_WORKING_BRANCH_PUSH_OPTIONS = frozenset({
+    "--set-upstream", "--quiet", "--verbose", "--progress", "--porcelain",
+    "--no-verify", "--verify", "--dry-run", "--atomic"})
+
+
 def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                         cwd: str | None, *, resolve: bool = True, run=None,
-                        _parsed: ParsedCommand | None = None) -> dict[str, Any] | None:
+                        _parsed: ParsedCommand | None = None,
+                        _working_branch: bool = True) -> dict[str, Any] | None:
     """Resolve the scope shown to the person; never execute the requested operation.
 
     Read-only Git inspection is bounded. A failed inspection is a real limit,
@@ -1325,7 +1332,11 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                 segment_policy = replace(policy, credential_reads=tuple(dict.fromkeys(
                     (*policy.credential_reads, *credential_stores))))
                 segment_detail = sensitive_operation("Bash", {"command": shlex.join(segment.words)}, segment_policy, directory,
-                                                     resolve=resolve, _parsed=segment)
+                                                     resolve=resolve, _parsed=segment,
+                                                     # Earlier segments may cd or export
+                                                     # configuration; a compound already
+                                                     # needs consent, so keep the ref binding.
+                                                     _working_branch=False)
                 if segment_detail:
                     parts.append(segment_detail)
             if parts:
@@ -1467,15 +1478,30 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
         base = subcommand == "push" and any(
             word.split(":")[-1].removeprefix("refs/heads/").removeprefix("heads/")
             in {"main", "master", policy.base_branch} for word in rest if not word.startswith("-"))
-        # An unqualified HEAD destination depends on the selected repository.
-        # Do not inspect even HEAD until host-side inspection was authorized.
-        broad = broad or subcommand == "push" and any(
+        positional = [word for word in rest if not word.startswith("-")]
+        # The working-branch push of implement and resolve keeps its
+        # consent-free path (#456): no global option, no Git environment, so
+        # nothing selects another repository or configuration. _check_push
+        # reads HEAD of the cycle worktree as before and confirms that a named
+        # source is a local branch, never a tag or another ref.
+        # A runner (env -C, timeout, nice) or any variable prefix (GIT_*,
+        # HOME, XDG_CONFIG_HOME) can select another directory or configuration.
+        working_branch_push = (
+            _working_branch and subcommand == "push" and not environment
+            and list(words) == list(parsed.words) and len(args) == len(words) - 1
+            and all(word in _WORKING_BRANCH_PUSH_OPTIONS or re.fullmatch(r"-[uqvn]+", word)
+                    for word in rest if word.startswith("-"))
+            and len(positional) >= 2 and positional[0] == "origin" and "tag" not in positional[1:]
+            and all(":" not in spec and not spec.startswith("+") for spec in positional[1:]))
+        # Otherwise an unqualified HEAD destination depends on the selected
+        # repository. Do not inspect even HEAD until host-side inspection was
+        # authorized.
+        broad = broad or subcommand == "push" and not working_branch_push and any(
             word.rsplit(":", 1)[-1] in {"HEAD", "@"} for word in rest)
         # Git can infer the tag namespace from an unqualified source. Only
         # explicit branch sources or HEAD with an explicit destination are
         # known without reading the selected repository.
-        positional = [word for word in rest if not word.startswith("-")]
-        broad = broad or subcommand == "push" and any(
+        broad = broad or subcommand == "push" and not working_branch_push and any(
             ":" not in spec or spec.partition(":")[0] not in {"HEAD", "@"}
             and not spec.startswith("refs/heads/") for spec in positional[1:])
         exceptional_push = False
@@ -2548,8 +2574,10 @@ def _names_git_option(word: str, option: str) -> bool:
 def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                 consent: bool = False) -> None:
     if consent:
+        # The rebuilt command has lost its runner, variables and global
+        # options, so never classify it as the consent-free working-branch push.
         detail = sensitive_operation("Bash", {"command": shlex.join(["git", "push", *args])},
-                                     policy, cwd, resolve=False, run=run)
+                                     policy, cwd, resolve=False, run=run, _working_branch=False)
         if detail and detail["kind"] == "git_refs":
             return  # These guards now require warned, bound exact consent.
     positional: list[str] = []
@@ -2593,9 +2621,16 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
     for refspec in refspecs:
         if refspec.startswith("+"):
             raise PolicyError("a +refspec forces the push; it is never allowed")
-        source, _, destination = refspec.partition(":")
+        source, separator, destination = refspec.partition(":")
         if not source:
             raise PolicyError("an empty source deletes the remote ref; it is never allowed")
+        if not separator and source not in {"HEAD", "@"}:
+            # Git resolves an unqualified source like rev-parse does, tags
+            # first: only a local branch keeps the destination in refs/heads/.
+            expected = source if source.startswith("refs/heads/") else "refs/heads/" + source
+            if _full_ref_name(source, cwd, run) != expected:
+                raise PolicyError(f"git push source {source!r} is not only a local branch; "
+                                  "use git push origin HEAD:<branch>")
         destination = destination or source
         if (destination.startswith("refs/") and not destination.startswith("refs/heads/")
                 or destination.startswith("tags/")):
@@ -2610,6 +2645,43 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                  destination.removeprefix("heads/")}
         if names & protected:
             raise PolicyError(f"pushing to the base branch {destination} is never allowed")
+        if not separator and _push_destination_remapped(cwd, run):
+            # remote.origin.push or push.default=upstream|tracking can send a
+            # colon-less refspec to another branch, such as the base it tracks.
+            raise PolicyError("Git configuration can remap this push destination; "
+                              "use git push origin HEAD:<branch>")
+
+
+def _push_destination_remapped(cwd: str | None, run) -> bool:
+    """Whether the cycle worktree's Git configuration may remap a bare refspec."""
+    values = []
+    for key in ("remote.origin.push", "push.default"):
+        try:
+            completed = run(["git", "config", "--get-all", key], cwd=cwd, capture_output=True,
+                            text=True, timeout=10, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if completed.returncode not in {0, 1}:
+            return True
+        values.append((completed.stdout or "").strip() if completed.returncode == 0 else "")
+    mapping, defaults = values
+    # Several configuration files may set push.default; treat any remapping
+    # value as decisive rather than guessing which one Git applies last.
+    return bool(mapping) or any(line.strip().casefold() in {"upstream", "tracking"}
+                                for line in defaults.splitlines())
+
+
+def _full_ref_name(name: str, cwd: str | None, run) -> str | None:
+    """The full ref an unqualified name resolves to in the cycle worktree."""
+    if name.startswith("-"):
+        return None
+    try:
+        completed = run(["git", "rev-parse", "--symbolic-full-name", "--verify", "--quiet", name],
+                        cwd=cwd, capture_output=True, text=True, timeout=10,
+                        stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (completed.stdout or "").strip() if completed.returncode == 0 else None
 
 
 def _current_branch(cwd: str | None, run) -> str:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,9 +35,24 @@ RESOLVE = ("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $th
            "{ thread { isResolved } } }")
 
 
-def on_branch(name: str):
-    """A fake `git rev-parse --abbrev-ref HEAD` that reports `name`."""
+def on_branch(name: str, refs: dict[str, str] | None = None,
+              config: dict[str, str] | None = None):
+    """A fake `git rev-parse --abbrev-ref HEAD` that reports `name`.
+
+    `--symbolic-full-name` resolves every name to a local branch unless `refs`
+    maps it to another full ref, or to "" when it does not resolve. `git config`
+    reads report only the keys in `config`.
+    """
     def run(argv, **_):
+        if argv[1:2] == ["config"]:
+            value = (config or {}).get(argv[-1])
+            return subprocess.CompletedProcess(argv, 1 if value is None else 0,
+                                               stdout="" if value is None else value + "\n", stderr="")
+        if "--symbolic-full-name" in argv:
+            full = (refs or {}).get(argv[-1], argv[-1] if argv[-1].startswith("refs/")
+                                    else "refs/heads/" + argv[-1])
+            return subprocess.CompletedProcess(argv, 0 if full else 1,
+                                               stdout=f"{full}\n" if full else "", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout=f"{name}\n", stderr="")
     return run
 
@@ -319,6 +335,11 @@ class GitTests(PolicyTestCase):
             for command in ("git add scripts/x.py", "git commit -m 'feat: x'",
                             "git push -u origin HEAD:issue-142",
                             "git push origin HEAD:issue-142", "git push --set-upstream origin HEAD:x",
+                            # The ordinary working-branch push needs no consent (REV-005).
+                            "git push -u origin issue-142", "git push origin HEAD",
+                            "git push origin @", "git push --set-upstream origin x",
+                            "git push origin issue-142", "git push -uq origin HEAD",
+                            "git push origin refs/heads/issue-142",
                             "git fetch origin", "git pull --no-rebase origin issue-142",
                             "git checkout issue-142", "git switch issue-142", "git rm old.py",
                             "git mv a.py b.py", "git worktree list",
@@ -409,7 +430,96 @@ class GitTests(PolicyTestCase):
                 self.denied(command, policy)
         self.denied("git push origin HEAD", policy, branch="develop")
         self.denied("git push -u origin @", policy, branch="main")
-        self.denied("git push origin HEAD", policy, branch="issue-142")
+        self.allowed("git push origin HEAD", policy, branch="issue-142")
+
+    def test_working_branch_push_stays_consent_free_only_for_a_local_branch(self) -> None:
+        # REV-005: the routine push keeps its #456 path. A bare source that
+        # resolves to a tag, another ref or nothing, or a push that selects
+        # another repository or configuration, uses warned ref consent.
+        policy = self.policy("implement")
+        cwd = self.directory.name
+        for command in ("git push origin HEAD", "git push -u origin issue-142",
+                        "git push --set-upstream origin issue-142"):
+            with self.subTest(command=command):
+                self.assertIsNone(sp.sensitive_operation(
+                    "Bash", {"command": command}, policy, cwd, resolve=False,
+                    run=on_branch("issue-142")))
+                self.allowed(command, policy)
+        for refs in ({"v1": "refs/tags/v1"}, {"v1": "refs/remotes/origin/v1"}, {"v1": ""}):
+            with self.subTest(refs=refs):
+                decision = sp.check("git push origin v1", policy, cwd=cwd,
+                                    run=on_branch("issue-142", refs))
+                self.assertFalse(decision.allowed)
+                self.assertEqual("sensitive_consent", decision.rule)
+        for config in ({"push.default": "upstream"}, {"push.default": "tracking"},
+                       {"push.default": "simple\nupstream"},
+                       {"remote.origin.push": "+refs/heads/issue-142:refs/heads/main"}):
+            for command in ("git push origin issue-142", "git push origin HEAD"):
+                with self.subTest(config=config, command=command):
+                    decision = sp.check(command, policy, cwd=cwd,
+                                        run=on_branch("issue-142", config=config))
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual("sensitive_consent", decision.rule)
+            with self.subTest(config=config, command="explicit destination"):
+                self.assertTrue(sp.check("git push origin HEAD:issue-142", policy, cwd=cwd,
+                                         run=on_branch("issue-142", config=config)).allowed)
+        ran = []
+
+        def recording(argv, **_):
+            ran.append(argv)
+            return on_branch("issue-142")(argv)
+
+        for command in ("git -C ../other push origin HEAD", "GIT_DIR=../x/.git git push origin HEAD",
+                        "git -c remote.origin.pushurl=../x push origin HEAD",
+                        "env -C ../other git push origin HEAD", "timeout 60 git push origin HEAD",
+                        "HOME=/tmp/x git push origin issue-142",
+                        "XDG_CONFIG_HOME=/tmp/x git push origin HEAD",
+                        "git push origin HEAD:refs/tags/v1", "git push -o ci.skip origin HEAD",
+                        "git push origin tag v1", "git push origin", "git push upstream HEAD"):
+            with self.subTest(command=command):
+                ran.clear()
+                decision = sp.check(command, policy, cwd=cwd, run=recording)
+                self.assertFalse(decision.allowed)
+                self.assertEqual("sensitive_consent", decision.rule)
+                self.assertEqual([], ran, "host-side Git ran before consent")
+        # A compound keeps the ref warning and binding for its push segment.
+        for command in ("true && git push origin HEAD", "cd ../other && git push origin HEAD",
+                        "export HOME=/tmp/x; git push origin issue-142"):
+            with self.subTest(command=command):
+                detail = sp.sensitive_operation("Bash", {"command": command}, policy, cwd,
+                                                resolve=False, run=recording)
+                self.assertIsNotNone(detail)
+                self.assertIn("git_refs", json.dumps(detail))
+
+    def test_working_branch_push_reads_real_git_refs_and_remapping(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        repo = Path(self.directory.name) / "repo"
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+        def git(*arguments: str) -> None:
+            subprocess.run(["git", *arguments], cwd=repo, env=env, check=True,
+                           capture_output=True, text=True)
+
+        repo.mkdir()
+        git("init", "-q", "-b", "issue-142")
+        git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+            "commit", "-q", "--allow-empty", "-m", "x")
+        git("tag", "v1")
+        policy = self.policy("implement")
+
+        def real(argv, **kwargs):
+            return subprocess.run(argv, **{**kwargs, "env": env})
+
+        for command in ("git push origin issue-142", "git push -u origin HEAD"):
+            with self.subTest(command=command):
+                self.assertTrue(sp.check(command, policy, cwd=str(repo), run=real).allowed)
+        self.assertEqual("sensitive_consent",
+                         sp.check("git push origin v1", policy, cwd=str(repo), run=real).rule)
+        git("config", "push.default", "upstream")
+        self.assertEqual("sensitive_consent",
+                         sp.check("git push origin issue-142", policy, cwd=str(repo), run=real).rule)
 
     def test_a_push_names_origin_and_its_branch(self) -> None:
         policy = self.policy("implement")
@@ -1039,7 +1149,7 @@ class SkillCoverageTests(PolicyTestCase):
                         if command in {"git add", "git commit", "git push"}:
                             command = {"git add": "git add scripts/x.py",
                                        "git commit": "git commit -m x",
-                                       "git push": "git push origin HEAD:issue-142"}[command]
+                                       "git push": "git push origin HEAD"}[command]
                         if (role not in {"implement", "resolve"}
                                 and command.startswith(("git add", "git commit", "git push"))):
                             continue  # a writer's commands, named in shared text

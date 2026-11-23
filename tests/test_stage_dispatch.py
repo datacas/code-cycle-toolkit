@@ -912,8 +912,8 @@ class DockerBlockerTests(unittest.TestCase):
                                side_effect=lambda *a, **_: ran.append(a) or 1 / 0):
             self.assertIsNone(recovery.denied_docker_blocker(
                 self.BLOCKED, ["git push origin HEAD", "git status"]))
-        # Unqualified HEAD requires inspection consent before reading the branch.
-        self.assertEqual([], ran)
+        # The working-branch push rule asked for its branch and got the refusing runner.
+        self.assertEqual([(["git", "rev-parse", "--abbrev-ref", "HEAD"],)], ran)
 
 
 class RuntimePolicyTests(unittest.TestCase):

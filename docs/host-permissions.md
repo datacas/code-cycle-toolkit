@@ -257,11 +257,18 @@ The hook validates arguments, not only the program:
   `--body-file` or an output redirection (`>`, `>>`, `2>`)
   must resolve, through symlinks and `..`, strictly inside it: not `/tmp`,
   not another `code-cycle-tmp-*`, not the checkout;
-- `git push` must name `origin` and an explicit branch destination
-  in a refspec (`HEAD:<branch>` or `refs/heads/<source>:<branch>`). A bare
-  source name, an omitted refspec or an unqualified `HEAD` destination is
-  inferred from the selected repository, so it uses the inspection and
-  ref-consent flow below. Without that consent every force variant is
+- `git push` must name `origin` and a branch: an explicit destination in a
+  refspec (`HEAD:<branch>` or `refs/heads/<source>:<branch>`), or the
+  ordinary working-branch push `git push [-u] origin HEAD|<branch>`. The
+  working-branch push needs no consent when it is a plain `git push` in the
+  stage's directory: no global Git option, no runner such as `env` or
+  `timeout`, no variable prefix and not part of a compound command. `HEAD` is read from
+  the cycle worktree, a bare `<branch>` must resolve to `refs/heads/<branch>`
+  there (not to a tag or another ref), and neither `remote.origin.push` nor
+  `push.default=upstream|tracking` may be set, because they can remap the
+  destination to the base branch. Otherwise a bare source name, an omitted refspec or an unqualified `HEAD`
+  destination is inferred from the selected repository, so it uses the
+  inspection and ref-consent flow below. Without that consent every force variant is
   refused (`--force`, `--force-with-lease`, `--force-if-includes`, `-f` in any
   combined flag, a `+refspec`, flags after the refspec), as are `--mirror`,
   `--all`, `--delete`, `--prune`, `--tags`, `--follow-tags`, tags, other refs
@@ -925,7 +932,11 @@ and exact ref-consent flow. The warning states that tags, other refs and other
 remotes are outside publication-audit coverage. When the command also carries
 an executing option or alias (`--receive-pack`, `--exec`, `-c`), the question
 keeps the warning that it can execute programs. Patterns never authorize these
-exceptions. Use `git push origin HEAD:<branch>` for an explicit branch push.
+exceptions. The ordinary working-branch push stays outside this flow and needs
+no consent: `git push origin HEAD:<branch>`, and the plain `git push [-u]
+origin HEAD|<branch>` under the conditions in the hook-arguments list above
+(no runner, variable prefix, global option or compound command, a local branch
+source and no remapping configuration).
 Inspection identities normalize command tokens and dispatch temporary paths,
 so an equivalent spelling on resume retains its inspection consent.
 This converts argument-guard exceptions (PA-20) to disclosed consent
