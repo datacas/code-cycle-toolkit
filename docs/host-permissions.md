@@ -392,7 +392,7 @@ the audit's pipeline and heredoc directly in Bash with the same operation
 after consent through the shared hook, including file contents, grant and
 execution records. This verifies each executor's grant metadata, not its
 native CLI enforcement. The [manual native comparison](native-parity-runs.md)
-now includes PA-19; both native comparisons remain pending and #455 stays open.
+now includes PA-19; both native comparisons were recorded on 2026-11-23 with no divergence.
 A real native limitation remains a limitation, and `not_verified` is never
 reported as demonstrated parity.
 Exact compound grants now append observed executions to `executed_commands`,
