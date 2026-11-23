@@ -2587,7 +2587,7 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
     if not refspecs:
         # Without a refspec, `push.default` or `remote.origin.push` decides the
         # destination, which could be the base branch the command never names.
-        raise PolicyError("git push needs an explicit branch, such as git push origin HEAD")
+        raise PolicyError("git push needs an explicit branch, such as git push origin HEAD:<branch>")
     # The usual default names stay protected even when the base is another.
     protected = {"main", "master"} | ({policy.base_branch} if policy.base_branch else set())
     for refspec in refspecs:

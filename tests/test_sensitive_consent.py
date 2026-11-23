@@ -121,6 +121,19 @@ class SensitiveConsentTests(unittest.TestCase):
                                                                          "decision": "allow"},))
                     self.assertFalse(sp.check(command, allowed, cwd=str(self.repo)).allowed)
 
+    def test_executing_push_option_keeps_its_program_warning(self):
+        for executor in ("claude", "codex"):
+            for command in ("git push --receive-pack=git-receive-pack origin HEAD:topic",
+                            "git push --exec=git-receive-pack origin HEAD:topic"):
+                with self.subTest(command=command, executor=executor):
+                    operation = sp.operation("Bash", {"command": command}, self.policy, str(self.repo))
+                    self.assertTrue(operation.get("guard_consent"))
+                    self.assertIn("sensitive", operation)
+                    grant = grants.make_grant(operation, executor, "linux")
+                    prompt = grants.question(grant, grant.scopes[0], role="implement")["prompt"]
+                    self.assertIn("can execute programs", prompt)
+                    self.assertIn(operation["sensitive"]["warning"][:60], prompt)
+
     def test_push_exception_consent_discloses_audit_limits_and_runs(self):
         other = self.root / "other.git"
         self.run_git("init", "--bare", str(other))

@@ -428,8 +428,12 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
         binding = (" Bindings: " + "; ".join(
             f"{move['remote']} {move['ref']} {move['before'] or 'absent'} -> {move['after'] or 'deleted'}"
             for move in moves)) if moves else ""
+        # A push option such as --receive-pack/--exec or a Git alias runs a
+        # program; the ref warning alone would not disclose that.
+        executes = ("WARNING: options or aliases in this command can execute programs. "
+                    if op.get("guard_consent") else "")
         return {"id": question_id,
-                "prompt": (f"{role}: {sensitive['warning']} {command[:140]}.{binding} "
+                "prompt": (f"{role}: {executes}{sensitive['warning']} {command[:140]}.{binding} "
                            "Full bindings are in the consent record. Approve this exact operation?")[:600],
                 "options": (["this cycle", "deny"] if sensitive.get("cycle_only") else
                             command_options(role, unique_path=unique)),

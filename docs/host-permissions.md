@@ -261,12 +261,14 @@ The hook validates arguments, not only the program:
   in a refspec (`HEAD:<branch>` or `refs/heads/<source>:<branch>`). A bare
   source name, an omitted refspec or an unqualified `HEAD` destination is
   inferred from the selected repository, so it uses the inspection and
-  ref-consent flow below. Every force variant is
+  ref-consent flow below. Without that consent every force variant is
   refused (`--force`, `--force-with-lease`, `--force-if-includes`, `-f` in any
   combined flag, a `+refspec`, flags after the refspec), as are `--mirror`,
-  `--all`, `--delete`, `--prune` and an empty source. The base branch, `main`
-  and `master` are never a destination, whether spelled `main`,
-  `refs/heads/main`, `heads/main` or `HEAD` while on it;
+  `--all`, `--delete`, `--prune`, `--tags`, `--follow-tags`, tags, other refs
+  and an empty source; the base branch, `main` and `master` are not a
+  destination, whether spelled `main`, `refs/heads/main`, `heads/main` or
+  `HEAD` while on it. These forms use the warned, bound exact consent of #457
+  described below;
 - Git options that run another program (`-c`, `-C`, `--upload-pack`,
   `--receive-pack`, `--exec-path`, `grep -O`) require exact consent, including the
   abbreviations Git expands (`--open-files=…`, `--upload-pa=…`) and `O` in a
@@ -920,7 +922,9 @@ Pushes outside the ordinary `origin`/explicit-branch path, including another
 remote, a URL, inferred destinations, tag-publishing flags, tags or other refs
 and executing options, also use this inspection
 and exact ref-consent flow. The warning states that tags, other refs and other
-remotes are outside publication-audit coverage. Patterns never authorize these
+remotes are outside publication-audit coverage. When the command also carries
+an executing option or alias (`--receive-pack`, `--exec`, `-c`), the question
+keeps the warning that it can execute programs. Patterns never authorize these
 exceptions. Use `git push origin HEAD:<branch>` for an explicit branch push.
 Inspection identities normalize command tokens and dispatch temporary paths,
 so an equivalent spelling on resume retains its inspection consent.
