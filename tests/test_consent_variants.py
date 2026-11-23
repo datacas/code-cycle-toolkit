@@ -845,6 +845,16 @@ class ConsentVariantsTests(unittest.TestCase):
             positive=["printf hello | cat"], negative=["\n"])
         return replace(sp.StagePolicy(role), command_permissions=({"operation": grant.operation, "decision": "allow"},))
 
+    def assert_inspection_request(self, request, broker):
+        self.assertIsNotNone(request)
+        grant = broker.operations[request["resource"]]
+        sensitive = grant.operation["sensitive"]
+        self.assertTrue(sensitive["cycle_only"])
+        self.assertTrue(sensitive["role_bound"])
+        self.assertTrue(any(part["kind"] == "git_inspection" for part in sensitive["parts"]))
+        self.assertEqual(["this cycle", "deny"],
+                         grants.question(grant, grant.scopes[0], role="resolve")["options"])
+
     @posix_shell
     def test_rev014_case_patterns_do_not_end_substitutions(self):
         for executor in ("claude", "codex"):
@@ -859,8 +869,15 @@ class ConsentVariantsTests(unittest.TestCase):
                                       [segment.words for segment in parsed.segments])
                         self.assertIn("git", str(unconsented_reason("Bash", {"command": command}, current, root)).lower())
                         self.assertFalse(sp.check(command, current, cwd=root).allowed)
-                        self.assertIsNone(cp.refused_operation([command], current,
-                            grants.ConsentBroker("owner/repo", platform="linux"), executor, root))
+                        broker = grants.ConsentBroker("owner/repo", platform="linux")
+                        with patch.object(sp.subprocess, "run", side_effect=AssertionError("unconsented inspection")):
+                            request = cp.refused_operation([command], current, broker, executor, root)
+                        if role == "resolve":
+                            # A writing role may ask to inspect; its broad
+                            # pattern still never authorizes the ref operation.
+                            self.assert_inspection_request(request, broker)
+                        else:
+                            self.assertIsNone(request)
                     command = form.replace("{cmd}", "cat ~/.ssh/id_rsa")
                     with self.subTest(executor=executor, role=role, command=command):
                         self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
@@ -991,10 +1008,13 @@ class ConsentVariantsTests(unittest.TestCase):
                                                     for segment in segments), segments)
                                 self.assertIsNotNone(unconsented_reason('Bash', {'command': command}, policy, root))
                                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
-                                request = cp.refused_operation([command], policy,
-                                    grants.ConsentBroker('owner/repo', platform='linux'), executor, root)
+                                broker = grants.ConsentBroker('owner/repo', platform='linux')
+                                with patch.object(sp.subprocess, 'run', side_effect=AssertionError('unconsented inspection')):
+                                    request = cp.refused_operation([command], policy, broker, executor, root)
                                 if body.startswith('cat '):
                                     self.assertIsNotNone(request)
+                                elif role == 'resolve' and body.startswith('git '):
+                                    self.assert_inspection_request(request, broker)
                                 else:
                                     self.assertIsNone(request)
 
