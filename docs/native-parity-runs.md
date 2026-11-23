@@ -105,7 +105,20 @@ Limits of this comparison:
 
 - 2026-11-21, #516: PA-20 to PA-24, Claude and Codex, no divergence from the
   direct baselines.
-- #455, PA-19: native Claude and Codex comparisons **pending**. The named
-  tests in `tests/test_compound_parity.py` compare direct Bash execution with
-  execution after the real shared hook accepts each executor's grant metadata;
-  they do not launch either native executor or establish native parity.
+- 2026-11-23, #455: PA-19, Claude and Codex, no divergence from the direct
+  baselines. Fixture `/tmp/pa19/fx`, `TMPDIR=/tmp/pa19/fx/tmp`; neither Bash
+  tool overrode it and both printed `PA19_TARGET=/tmp/pa19/fx/tmp/pa19.txt`.
+  `git log --oneline | head -5`: both printed `1abceee init`, the same as the
+  direct run (exit 0). The heredoc: neither executor reported a denial; after a
+  separate Claude run the file held exactly `PA-19 fixture` and a newline
+  (14 bytes, `od -c`), and the direct run under the same `TMPDIR` exited 0 with
+  the same file. Codex reported exit 0; Claude reported no exit status, so its
+  write is confirmed by the file contents, not a captured status. `toolkit`:
+  for Claude and Codex and both commands, `table_allowed` is `false` and
+  `consent_offered`, `allowed_after_exact_grant`, `variant_refused` and
+  `hook_allows_after_grant` are `true`. No actual permission or infrastructure
+  limit was observed.
+  The named tests in `tests/test_compound_parity.py` compare direct Bash
+  execution with execution after the real shared hook accepts each executor's
+  grant metadata; they do not launch either native executor, so this run is
+  the native evidence.
