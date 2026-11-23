@@ -1,6 +1,6 @@
 # Native parity runs
 
-The consent conversions of #456 (rows PA-20 to PA-24 of the
+The consent conversions of #455 and #456 (rows PA-19 to PA-24 of the
 [capability parity audit](capability-parity-audit.md)) are tested in CI through
 the shared hook, with fixture `gh` and `docker` executables. That does not prove
 the native executors behave the same, so this procedure runs the audit's
@@ -15,6 +15,9 @@ when the consent code (`scripts/stage_permissions.py`, `scripts/grants.py`,
 `scripts/command_permissions.py`) or a row of the audit changes.
 
 ## Requirements
+
+For PA-19 alone, only `claude`, `codex`, `git`, Bash, and the user's normal
+native configuration are needed. No GitHub fixture or Docker access is used.
 
 - `claude`, `codex`, `gh` (authenticated), `git`, and Docker with `alpine:3`
   available.
@@ -37,6 +40,25 @@ where the fixtures and the `*.json` results go (default: a temporary
 directory), `--rows PA-20,PA-23` limits the rows, `--read-repo` changes what
 PA-21 reads and `--claude-model` the model `claude -p` uses.
 
+For #455, select only PA-19 (outside the cycle stage):
+
+```text
+python3 docs/native-parity/run.py setup
+python3 docs/native-parity/run.py --rows PA-19 toolkit
+python3 docs/native-parity/run.py --rows PA-19 native claude
+python3 docs/native-parity/run.py --rows PA-19 native codex
+```
+
+Run the direct commands in the same `fx` directory and with `TMPDIR` set to
+its absolute `tmp` subdirectory, as the PA-19 native runner does. Compare
+`git log --oneline | head -5` output with the native report. The second command
+is `cat <<EOF > $TMPDIR/pa19.txt`, with body `PA-19 fixture` and closing `EOF`:
+remove `pa19.txt` before each side, then check that each run creates exactly
+`PA-19 fixture` followed by a newline. Record the environment, commands,
+outputs, file contents, and any actual permission or infrastructure limit.
+Keep #455 open until both native comparisons are recorded; `not_verified`
+does not demonstrate parity. PA-19 needs no Docker cleanup.
+
 ## What each side does
 
 | Side | What it runs |
@@ -45,7 +67,8 @@ PA-21 reads and `--claude-model` the model `claude -p` uses.
 | `native claude` | `claude -p --allowedTools Bash` is asked to run the audit's baseline command in the fixture and to report its exit code and output. |
 | `native codex` | `codex exec -s workspace-write` does the same, with `sandbox_workspace_write.network_access=true` for PA-21 and PA-22. |
 
-The commands per row are the ones in the audit: `git ls-tree HEAD` and
+The commands per row are the ones in the audit: a pipe to `head` and a heredoc
+into `$TMPDIR` (PA-19), `git ls-tree HEAD` and
 `git stash list` (PA-20), `gh issue list` (PA-21), `gh issue create` (PA-22),
 `git -c core.pager=cat log -1` and `GIT_PAGER=cat git log -1` (PA-23), and
 `docker compose run --rm fixture true` (PA-24).
@@ -72,3 +95,7 @@ Limits of this comparison:
 
 - 2026-11-21, #516: PA-20 to PA-24, Claude and Codex, no divergence from the
   direct baselines.
+- #455, PA-19: native Claude and Codex comparisons **pending**. The named
+  tests in `tests/test_compound_parity.py` compare direct Bash execution with
+  execution after the real shared hook accepts each executor's grant metadata;
+  they do not launch either native executor or establish native parity.

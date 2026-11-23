@@ -1067,10 +1067,11 @@ class ConsentBroker:
         from stage_permissions import operation, protected_reason, same_operation
         if self.store is None:
             return
-        pattern_grants = [grant for grant in self.registry.values()
+        execution_grants = [grant for grant in self.registry.values()
                           if (grant.operation or {}).get("version") == 2
-                          or (grant.operation or {}).get("guard_consent")]
-        if not pattern_grants:
+                          or (grant.operation or {}).get("guard_consent")
+                          or (grant.operation or {}).get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]]
+        if not execution_grants:
             return
         retained = {record["command"]: record["operation"] for record in observed or []
                     if isinstance(record, dict) and isinstance(record.get("command"), str)
@@ -1080,11 +1081,11 @@ class ConsentBroker:
                 continue
             try:
                 op = retained.get(command) or operation("Bash", {"command": command}, policy, cwd)
-                for grant in pattern_grants:
+                for grant in execution_grants:
                     stored = grant.operation or {}
                     scope = grant.scope_for(executor, self.platform)
                     if (scope is None or not (same_operation(stored, op)
-                            if stored.get("guard_consent") else pattern_covers_operation(stored, op))):
+                            if stored.get("version") == 1 else pattern_covers_operation(stored, op))):
                         continue
                     for repo in (self.cycle_scope, self.repo_id, "*"):
                         if repo and self.store.load(repo, grant, scope) == "allow":

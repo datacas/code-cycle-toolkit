@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual native parity runs for the consent conversions of #456 (PA-20 to PA-24).
+"""Manual native parity runs for #455 and #456 (PA-19 to PA-24).
 
 Run by a person, outside any cycle stage, with their own credentials. See
 docs/native-parity-runs.md for the procedure and what to compare.
@@ -24,11 +24,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT = ("Run exactly this shell command in the current directory, nothing else, then reply "
           "with its exit code and its stdout/stderr verbatim: ")
+PA19_COMMANDS = (
+    "git log --oneline | head -5",
+    "cat <<EOF > $TMPDIR/pa19.txt\nPA-19 fixture\nEOF",
+)
 
 
 def cases(args):
     """(row, directory, command) as the audit lists them."""
     return [
+        *(("PA-19", "fx", command) for command in PA19_COMMANDS),
         ("PA-20", "fx", "git ls-tree HEAD"),
         ("PA-20", "fx", "git stash list"),
         ("PA-21", "fx", f"gh issue list --repo {args.read_repo} --state open --limit 3"),
@@ -45,6 +50,7 @@ def setup(args):
     fx, dk = work / "fx", work / "dk"
     fx.mkdir(parents=True, exist_ok=True)
     dk.mkdir(parents=True, exist_ok=True)
+    (fx / "tmp").mkdir(exist_ok=True)
     if not (fx / ".git").exists():
         for command in (["git", "init", "-q"],
                         ["git", "config", "user.email", "fixture@example.invalid"],
@@ -71,7 +77,7 @@ def toolkit(args):
             command = command.replace("{executor}", executor)
             cwd = str(Path(args.workdir) / directory)
             tmp = Path(tempfile.mkdtemp())
-            policy = sp.StagePolicy("implement", tmpdir=str(tmp), repo=args.read_repo,
+            policy = sp.StagePolicy("implement", tmpdir=str(Path(cwd) / "tmp") if row == "PA-19" else str(tmp), repo=args.read_repo,
                                     change_request_id="1", docker=True)
             record = {"executor": executor, "row": row, "command": command,
                       "table_allowed": sp.check(command, policy, cwd=cwd).allowed}
@@ -106,6 +112,9 @@ def native(args):
         if args.rows and row not in args.rows:
             continue
         command = command.replace("{executor}", executor)
+        case_env = dict(env)
+        if row == "PA-19":
+            case_env["TMPDIR"] = str(Path(args.workdir).resolve() / directory / "tmp")
         if executor == "claude":
             argv = ["claude", "-p", PROMPT + command, "--model", args.claude_model,
                     "--allowedTools", "Bash", "--output-format", "json"]
@@ -117,7 +126,7 @@ def native(args):
             argv.append(PROMPT + command)
         started = time.time()
         try:
-            run = subprocess.run(argv, cwd=Path(args.workdir) / directory, env=env, capture_output=True,
+            run = subprocess.run(argv, cwd=Path(args.workdir) / directory, env=case_env, capture_output=True,
                                  text=True, timeout=300, stdin=subprocess.DEVNULL)
             text, code = run.stdout, run.returncode
             if executor == "claude":
