@@ -1196,12 +1196,15 @@ class ReconciledCycleTests(RunCycleTestCase):
 
     def test_464_a_saved_grant_applies_before_the_unattended_policy(self):
         # The stored answer is read first: no request is left pending for it.
+        # Use an explicit branch push; inferred destinations need cycle-only
+        # inspection consent and are covered by test_sensitive_consent.
+        command = "git push origin HEAD:task-435"
         broker_store = grants.ConsentStore(self.home / "consents.json")
-        grant = cp.make_grant(cp.operation("Bash", {"command": "git push origin task-435"},
+        grant = cp.make_grant(cp.operation("Bash", {"command": command},
             sp.StagePolicy("implement", repo="owner/api")), "claude", "linux")
         broker = grants.ConsentBroker("owner/api", platform="linux", store=broker_store)
         broker.apply_answer(grant, grant.scope_for("claude", "linux"), "persistent")
-        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "git push origin task-435"}}],
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": command}}],
                                published(remote_head=OTHER))
         self.assertNotIn("no one was attached", report.stopped_because or "")
 
