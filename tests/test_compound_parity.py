@@ -78,3 +78,28 @@ class CompoundParityTests(unittest.TestCase):
 
     def test_codex_pa19_direct_baseline(self):
         self.parity("codex")
+
+    def test_pa19_heredoc_reports_overridden_tmpdir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            effective = root / "executor tmp"
+            effective.mkdir()
+            run = subprocess.run(["bash", "-c", COMMANDS[1]], cwd=root,
+                                 env={**os.environ, "TMPDIR": str(effective)},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, run.returncode, run.stderr)
+            reported = run.stdout.removeprefix("PA19_TARGET=").strip()
+            self.assertEqual(str(effective / "pa19.txt"), reported)
+            self.assertEqual("PA-19 fixture\n", Path(reported).read_text())
+            self.assertFalse((root / "pa19.txt").exists())
+
+    def test_pa19_target_marker_does_not_hide_failed_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            effective = Path(directory) / "missing"
+            run = subprocess.run(["bash", "-c", COMMANDS[1]], cwd=directory,
+                                 env={**os.environ, "TMPDIR": str(effective)},
+                                 capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(0, run.returncode)
+            self.assertEqual(f"PA19_TARGET={effective / 'pa19.txt'}\n", run.stdout)
+            self.assertTrue(run.stderr)
+            self.assertFalse((effective / "pa19.txt").exists())

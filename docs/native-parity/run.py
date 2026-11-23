@@ -26,7 +26,8 @@ PROMPT = ("Run exactly this shell command in the current directory, nothing else
           "with its exit code and its stdout/stderr verbatim: ")
 PA19_COMMANDS = (
     "git log --oneline | head -5",
-    "cat <<EOF > $TMPDIR/pa19.txt\nPA-19 fixture\nEOF",
+    'printf \'PA19_TARGET=%s\\n\' "$TMPDIR/pa19.txt"\n'
+    'cat <<EOF > "$TMPDIR/pa19.txt"\nPA-19 fixture\nEOF',
 )
 
 

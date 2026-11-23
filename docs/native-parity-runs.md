@@ -50,12 +50,22 @@ python3 docs/native-parity/run.py --rows PA-19 native codex
 ```
 
 Run the direct commands in the same `fx` directory and with `TMPDIR` set to
-its absolute `tmp` subdirectory, as the PA-19 native runner does. Compare
+its absolute `tmp` subdirectory, as the PA-19 native runner requests. Compare
 `git log --oneline | head -5` output with the native report. The second command
-is `cat <<EOF > $TMPDIR/pa19.txt`, with body `PA-19 fixture` and closing `EOF`:
-remove `pa19.txt` before each side, then check that each run creates exactly
-`PA-19 fixture` followed by a newline. Record the environment, commands,
-outputs, file contents, and any actual permission or infrastructure limit.
+prints `PA19_TARGET=<expanded path>` before running `cat <<EOF` into that
+quoted path, with body `PA-19 fixture` and closing `EOF`. A native executor's
+Bash tool may override `TMPDIR`: use the path printed by that execution,
+never infer it from the runner's environment. Record an override as an
+environment difference and use the same effective `TMPDIR` for the direct
+comparison. Remove the file at the reported path before each side (repeat
+after learning an overridden path if necessary), then check that each run
+creates exactly `PA-19 fixture` followed by a newline at that path. Record
+the command's exit code as well as the marker and file contents: a marker
+alone does not prove a successful write. A missing marker, refusal, nonzero
+exit or inaccessible file needs investigation and remains `not_verified`
+until explained; do not infer parity or divergence from a missing file at
+`fx/tmp/pa19.txt`. Record the environment, commands, outputs, file contents,
+and any actual permission or infrastructure limit.
 Keep #455 open until both native comparisons are recorded; `not_verified`
 does not demonstrate parity. PA-19 needs no Docker cleanup.
 
