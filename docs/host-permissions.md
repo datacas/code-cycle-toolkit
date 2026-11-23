@@ -257,7 +257,11 @@ The hook validates arguments, not only the program:
   `--body-file` or an output redirection (`>`, `>>`, `2>`)
   must resolve, through symlinks and `..`, strictly inside it: not `/tmp`,
   not another `code-cycle-tmp-*`, not the checkout;
-- `git push` must name `origin` and an explicit branch. Every force variant is
+- `git push` must name `origin` and an explicit branch destination
+  in a refspec (`HEAD:<branch>` or `refs/heads/<source>:<branch>`). A bare
+  source name, an omitted refspec or an unqualified `HEAD` destination is
+  inferred from the selected repository, so it uses the inspection and
+  ref-consent flow below. Every force variant is
   refused (`--force`, `--force-with-lease`, `--force-if-includes`, `-f` in any
   combined flag, a `+refspec`, flags after the refspec), as are `--mirror`,
   `--all`, `--delete`, `--prune` and an empty source. The base branch, `main`

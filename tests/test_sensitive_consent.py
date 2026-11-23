@@ -70,6 +70,14 @@ class SensitiveConsentTests(unittest.TestCase):
         self.run_git("-C", str(selected), "config", "core.sshCommand", str(transport))
         self.run_git("-C", str(selected), "config", "ssh.variant", "ssh")
         self.run_git("-C", str(selected), "remote", "add", "origin", "ssh://fixture.invalid/repo")
+        # An ambient GIT_SSH_COMMAND/GIT_SSH (some agent sandboxes set one to
+        # reach their proxy) outranks core.sshCommand; remove it so the
+        # selected configuration is what decides the transport.
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in {"GIT_SSH_COMMAND", "GIT_SSH"}}
+        ambient = patch.dict(os.environ, environment, clear=True)
+        ambient.start()
+        self.addCleanup(ambient.stop)
         for prefix in (f"git -C {selected}", f"git --git-dir={selected}/.git",
                        f"GIT_DIR={selected}/.git git", f"env -C {selected} git"):
             with self.subTest(prefix=prefix):
