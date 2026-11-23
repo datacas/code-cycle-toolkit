@@ -400,17 +400,31 @@ class SensitiveConsentTests(unittest.TestCase):
     def test_consent_inspection_contacts_selected_endpoints_only_after_consent(self):
         stranger = self.root / "stranger.git"
         self.run_git("init", "--bare", str(stranger))
+        self.run_git("remote", "add", "inspection", str(self.remote))
+        self.run_git("config", "remote.inspection.pushurl", str(self.remote))
+        original = self.run_git("--git-dir=" + str(self.remote), "rev-parse", "refs/heads/main")
+        self.run_git("commit", "--allow-empty", "-m", "new target")
+        self.run_git("branch", "main")
+        pushed = self.run_git("rev-parse", "HEAD")
         contacted = []
         real = sp.subprocess.run
 
         def spy(command, *args, **kwargs):
             if "ls-remote" in command:
-                contacted.append(command[-1])
+                env = kwargs.get("env", {})
+                slot = int(env.get("GIT_CONFIG_COUNT", "0")) - 1
+                key = env.get(f"GIT_CONFIG_KEY_{slot}", "")
+                contacted.append(key.removeprefix("url.").removesuffix(".insteadOf"))
             return real(command, *args, **kwargs)
 
         for command in (f"git push --force {stranger} HEAD:main",
-                        f"git push --force --repo={stranger} HEAD:main",
-                        f"git -c remote.origin.pushurl={stranger} push --force origin HEAD:main"):
+                        f"git push --force --repo={stranger} --all",
+                        f"git push --force --repo={self.remote} {stranger} HEAD:main",
+                        f"git -c remote.origin.pushurl={stranger} push --force origin HEAD:main",
+                        *(f"git -c {section}.{stranger}.{key}={self.remote} push --force {repository} HEAD:main"
+                          for section, key in (("url", "insteadOf"), ("url", "pushInsteadOf"),
+                                               ("URL", "INSTEADOF"), ("URL", "PUSHINSTEADOF"))
+                          for repository in ("origin", str(self.remote)))):
             with self.subTest(command=command), patch.object(sp.subprocess, "run", spy):
                 contacted.clear()
                 first = sp.operation("Bash", {"command": command}, self.policy, str(self.repo))
@@ -420,8 +434,66 @@ class SensitiveConsentTests(unittest.TestCase):
                 self.assertEqual([], contacted)
                 allowed, grant, _ = self.approve(command, "claude")
                 self.assertIn(str(stranger), contacted)
-                self.assertTrue(grant.operation["sensitive"]["movements"])
+                moves = grant.operation["sensitive"]["movements"]
+                self.assertTrue(moves)
+                self.assertEqual({sp.git_remote_identity(str(stranger), str(self.repo))},
+                                 {move["remote_identity"] for move in moves})
                 self.assertTrue(self.hook(command, allowed))
+                direct = subprocess.run(shlex.split(command), cwd=self.repo, capture_output=True, timeout=30)
+                self.assertEqual(0, direct.returncode, direct.stderr)
+                self.assertEqual(pushed, self.run_git("--git-dir=" + str(stranger), "rev-parse", "refs/heads/main"))
+                self.assertEqual(original, self.run_git("--git-dir=" + str(self.remote), "rev-parse", "refs/heads/main"))
+
+    def test_relative_endpoint_binding_uses_gits_selected_working_directory(self):
+        stranger = self.root / "stranger.git"
+        self.run_git("init", "--bare", str(stranger))
+        nested = self.root / "nested"
+        nested.mkdir()
+        selected = nested / "selected"
+        self.run_git("clone", "-b", "topic", str(self.remote), str(selected))
+        subdir = selected / "subdir"
+        subdir.mkdir()
+        bare = nested / "selected.git"
+        self.run_git("clone", "--bare", str(selected), str(bare))
+        for prefix, config_args, relative in (
+                (f"git -C {subdir}", ("-C", str(selected)), "../../stranger.git"),
+                (f"git -C {bare}", ("--git-dir=" + str(bare),), "../../stranger.git"),
+                (f"git --git-dir={bare}", ("--git-dir=" + str(bare),), "../stranger.git")):
+            with self.subTest(prefix=prefix):
+                self.run_git(*config_args, "config", "remote.origin.url", relative)
+                command = prefix + " push --force origin HEAD:main"
+                allowed, grant, _ = self.approve(command, "claude")
+                self.assertEqual(sp.git_remote_identity(str(stranger), str(self.repo)),
+                                 grant.operation["sensitive"]["movements"][0]["remote_identity"])
+                self.assertTrue(self.hook(command, allowed))
+                direct = subprocess.run(shlex.split(command), cwd=self.repo, capture_output=True, timeout=30)
+                self.assertEqual(0, direct.returncode, direct.stderr)
+                self.assertEqual(self.run_git("rev-parse", "HEAD"),
+                                 self.run_git("--git-dir=" + str(stranger), "rev-parse", "refs/heads/main"))
+
+    def test_resolved_endpoint_is_not_rewritten_again_for_old_refs(self):
+        first = self.root / "child" / "remote.git"
+        second = self.root / "child" / "child" / "remote.git"
+        for target in (first, second):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self.run_git("init", "--bare", str(target))
+        old = self.run_git("rev-parse", "HEAD")
+        self.run_git("push", str(first), "HEAD:main")
+        self.run_git("commit", "--allow-empty", "-m", "different second endpoint")
+        self.run_git("push", str(second), "HEAD:main")
+        self.run_git("commit", "--allow-empty", "-m", "pushed")
+        command = (f"git -c url.{self.root}/child/.insteadOf={self.root}/ "
+                   "push --force origin HEAD:main")
+        allowed, grant, _ = self.approve(command, "claude")
+        move = grant.operation["sensitive"]["movements"][0]
+        self.assertEqual(sp.git_remote_identity(str(first), str(self.repo)), move["remote_identity"])
+        self.assertEqual(old, move["before"])
+        self.assertTrue(self.hook(command, allowed))
+        direct = subprocess.run(shlex.split(command), cwd=self.repo, capture_output=True, timeout=30)
+        self.assertEqual(0, direct.returncode, direct.stderr)
+        self.assertEqual(self.run_git("rev-parse", "HEAD"),
+                         self.run_git("--git-dir=" + str(first), "rev-parse", "refs/heads/main"))
+        self.assertFalse(self.hook(command, allowed), "actual old SHA changed; fresh consent is required")
 
     def test_unconfined_publication_does_not_authorize_compound_verification(self):
         policy = replace(self.policy, static_only=True, test_command="python3 -m unittest")

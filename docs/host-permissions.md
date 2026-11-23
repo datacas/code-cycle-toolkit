@@ -903,6 +903,14 @@ to repository selectors (`-C`, `--git-dir`, `GIT_DIR`), runner directory changes
 and URL or configuration overrides too. Inspection consent never authorizes
 the ref operation: after inspection, a second consent binds its resolved refs
 and SHAs. A real inspection failure retains its cause.
+Literal `url.*.insteadOf` and `url.*.pushInsteadOf` settings take part in binding
+resolution, including case-insensitive Git section/key spellings. The bound
+remote is the effective push endpoint after those rewrites.
+An explicit repository operand also takes precedence over `--repo`, as it does
+for Git itself. Rewrites apply to named remotes and literal endpoint operands.
+Relative local endpoints use Git's effective selected working directory.
+Old-ref inspection pins that resolved endpoint, so a rewrite is not applied
+again when reading the SHAs shown in consent.
 
 Pushes outside the ordinary `origin`/explicit-branch path, including another
 remote, a URL, inferred destinations, tag-publishing flags, tags or other refs

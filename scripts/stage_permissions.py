@@ -42,6 +42,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -1407,7 +1408,7 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                     settings.append(key + "=" + value)
         for setting in settings:
             key = setting.partition("=")[0]
-            if re.fullmatch(r"remote\.[A-Za-z0-9._/-]+\.(?:url|pushurl|push)|branch\.[A-Za-z0-9._/-]+\.(?:remote|pushRemote|merge)|remote\.pushDefault|push\.default", key):
+            if re.fullmatch(r"remote\.[A-Za-z0-9._/-]+\.(?:url|pushurl|push)|branch\.[A-Za-z0-9._/-]+\.(?:remote|pushRemote|merge)|remote\.pushDefault|push\.default|url\..+\.(?:insteadOf|pushInsteadOf)", key, re.IGNORECASE):
                 selection.extend(("-c", setting))
         if not args:
             return None
@@ -1509,10 +1510,11 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                        and includes_inspection(entry.get("operation", {}).get("sensitive", {}))
                        for entry in policy.command_permissions):
                 return inspection
-            def inspect(*arguments: str, optional: bool = False) -> str:
+            def inspect(*arguments: str, optional: bool = False,
+                        env: dict[str, str] | None = None) -> str:
                 try:
                     done = subprocess.run(["git", "--no-pager", *selection,
-                                           *arguments], cwd=cwd,
+                                           *arguments], cwd=cwd, env=env,
                                           capture_output=True, text=True, timeout=30,
                                           stdin=subprocess.DEVNULL)
                 except (OSError, subprocess.SubprocessError) as error:
@@ -1548,21 +1550,75 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                     operands.append(word)
             current = inspect("symbolic-ref", "HEAD", optional=True)
             branch = current.removeprefix("refs/heads/")
-            remote = selected_remote or (operands[0] if operands else
+            # Git sets up nonbare commands at the worktree root. Bare
+            # commands retain the caller directory after literal -C options;
+            # --git-dir alone does not move that directory.
+            git_cwd = Path(cwd or ".").resolve()
+            index = 0
+            while index < len(selection):
+                if selection[index] == "-C":
+                    git_cwd = (git_cwd / selection[index + 1]).resolve()
+                index += 2 if selection[index] in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"} else 1
+            if inspect("rev-parse", "--is-bare-repository") == "false":
+                git_cwd = Path(inspect("rev-parse", "--show-toplevel"))
+            # A positional repository takes precedence over --repo, exactly
+            # as Git's push option parser does.
+            remote = operands[0] if operands else (selected_remote or
                 inspect("config", "--get", f"branch.{branch}.pushRemote", optional=True) or
                 inspect("config", "--get", "remote.pushDefault", optional=True) or
                 inspect("config", "--get", f"branch.{branch}.remote", optional=True) or "origin")
-            if remote in inspect("remote").splitlines():
+            names = inspect("remote").splitlines()
+            if remote in names:
                 urls = inspect("remote", "get-url", "--push", "--all", remote).splitlines()
             else:
-                urls = [remote]
+                # remote get-url requires a locally configured remote. Resolve
+                # literal operands in disposable config containing only the
+                # effective URL rules; never edit the selected repository or
+                # inherit an unrelated remote's pushurl/conditional includes.
+                rules = inspect("config", "-z", "--get-regexp",
+                                r"^url\..*\.(insteadof|pushinsteadof)$", optional=True)
+                rewrites = [tuple(item.split("\n", 1)) for item in rules.split("\0") if item]
+                env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+                env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+                try:
+                    with tempfile.TemporaryDirectory(prefix="code-cycle-url-") as scratch:
+                        directory = Path(scratch)
+                        (directory / "objects").mkdir()
+                        (directory / "refs").mkdir()
+                        (directory / "HEAD").write_text("ref: refs/heads/main\n")
+                        (directory / "config").write_text("[core]\n\tbare = true\n")
+                        base = ["git", "--no-pager", "--git-dir=" + scratch]
+                        for key, value in [("remote.inspection.url", remote), *rewrites]:
+                            done = subprocess.run([*base, "config", "--local", "--add", key, value],
+                                cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+                                stdin=subprocess.DEVNULL)
+                            if done.returncode:
+                                raise PolicyError(f"Git consent URL configuration failed: exit {done.returncode}")
+                        done = subprocess.run([*base, "remote", "get-url", "--push", "--all", "inspection"],
+                            cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+                            stdin=subprocess.DEVNULL)
+                        if done.returncode:
+                            raise PolicyError(f"Git consent URL resolution failed: exit {done.returncode}")
+                        urls = done.stdout.strip().splitlines()
+                except (OSError, subprocess.SubprocessError) as error:
+                    raise PolicyError(f"Git consent URL resolution unavailable: {type(error).__name__}") from error
             # The separate inspection consent above covers selected endpoints
             # and repository configuration; inspection never authorizes a push.
             movements = []
             for push_url in urls:
-                remote_id = git_remote_identity(push_url, cwd)
-                old_refs = dict(line.split("\t", 1)[::-1] for line in inspect("ls-remote", "--refs", push_url).splitlines())
-                specs = operands if selected_remote else operands[1:]
+                remote_id = git_remote_identity(push_url, str(git_cwd))
+                # The URL is already rewritten. A unique full-prefix mapping
+                # pins ls-remote to that endpoint without applying the original
+                # rules again, retaining the selected transport/auth settings.
+                marker = "code-cycle-inspect:" + os.urandom(16).hex()
+                env = dict(os.environ)
+                slot = int(env.get("GIT_CONFIG_COUNT", "0"))
+                env.update(GIT_CONFIG_COUNT=str(slot + 1))
+                env[f"GIT_CONFIG_KEY_{slot}"] = f"url.{push_url}.insteadOf"
+                env[f"GIT_CONFIG_VALUE_{slot}"] = marker
+                old_refs = dict(line.split("\t", 1)[::-1] for line in inspect(
+                    "ls-remote", "--refs", marker, env=env).splitlines())
+                specs = operands[1:]
                 deleting = "--delete" in rest or any(w.startswith("-") and not w.startswith("--") and "d" in w[1:] for w in rest)
                 if "--mirror" in rest:
                     specs = [f"{ref}:{ref}" for ref in local] + [f":{ref}" for ref in old_refs if ref not in local]

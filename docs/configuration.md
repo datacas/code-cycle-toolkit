@@ -311,6 +311,9 @@ use the same flow, never regex grants; the warning
 discloses publication-audit coverage limits. Git-config consent discloses that
 the sandbox write exception permits the whole approved file and that later
 host-side Git commands also load its settings.
+Literal Git URL rewrites (`url.*.insteadOf` and `url.*.pushInsteadOf`, with
+case-insensitive section/key names) are applied during binding inspection, so
+the recorded identity names the effective push endpoint.
 
 Exact operation records carry optional `sensitive` metadata: the warning,
 approved stores, cycle/role restrictions and resolved ref movements. Legacy
