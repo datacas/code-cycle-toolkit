@@ -1378,7 +1378,9 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                for root in _git_config_paths()) for candidate in candidates):
             return {"kind": "git_config", "warning":
                     "WARNING: Git configuration can execute programs on later allowed commands; "
-                    "linked worktrees share the common Git directory and the main repository configuration."}
+                    "including host-side inspection outside the stage sandbox. The sandbox permits writes to the whole "
+                    "approved file, not just the exact edit. Linked worktrees share the common Git directory "
+                    "and the main repository configuration."}
         return None
     if not words:
         return None
@@ -1388,9 +1390,6 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
         selection.extend("--" + {"GIT_DIR": "git-dir", "GIT_WORK_TREE": "work-tree"}[name] + "=" + value
                          for assignment in environment for name, _, value in [assignment.partition("=")]
                          if name in {"GIT_DIR", "GIT_WORK_TREE"})
-        # Repository selectors without the command's own configuration
-        # overrides: what the repository itself configures.
-        selectors = list(selection)
         # Only literal destination/ref settings may enter host-side read-only
         # inspection. Never forward aliases, pagers, transport executables or
         # credential-helper settings from the requested command.
@@ -1450,7 +1449,9 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                 targets = [str((Path(cwd or ".") / done.stdout.strip() / filename).resolve())]
             return {"kind": "git_config", "targets": targets, "warning":
                     "WARNING: Git configuration can execute programs on later allowed commands; "
-                    "linked worktrees share the common Git directory and the main repository configuration."}
+                    "including host-side inspection outside the stage sandbox. The sandbox permits writes to the whole "
+                    "approved file, not just the exact edit. Linked worktrees share the common Git directory "
+                    "and the main repository configuration."}
         deletion = subcommand in {"branch", "tag", "update-ref"} and any(
             word == "--delete" or word.startswith("--delete=") or
             word.startswith("-") and not word.startswith("--") and any(c in word[1:] for c in "dD")
@@ -1460,24 +1461,57 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
             and any(c in word[1:] for c in "fd") for word in rest)
         broad = subcommand == "push" and (len([word for word in rest if not word.startswith("-")]) <= 1
             or any(word.startswith(":") for word in rest) or any(word.split("=", 1)[0] in {
-            "--delete", "--prune", "--mirror", "--all", "--branches", "--repo"} for word in rest)
+            "--delete", "--prune", "--mirror", "--all", "--branches", "--repo", "--tags", "--follow-tags"} for word in rest)
             )
         base = subcommand == "push" and any(
             word.split(":")[-1].removeprefix("refs/heads/").removeprefix("heads/")
             in {"main", "master", policy.base_branch} for word in rest if not word.startswith("-"))
-        if subcommand == "push" and any(word in {"HEAD", "@"} for word in rest):
-            def selected_run(command, **kwargs):
-                return run([command[0], "--no-pager", *selection, *command[1:]], **kwargs)
-            base = base or _current_branch(cwd, selected_run) in {"main", "master", policy.base_branch}
-        if deletion or force or broad or base:
+        # An unqualified HEAD destination depends on the selected repository.
+        # Do not inspect even HEAD until host-side inspection was authorized.
+        broad = broad or subcommand == "push" and any(
+            word.rsplit(":", 1)[-1] in {"HEAD", "@"} for word in rest)
+        # Git can infer the tag namespace from an unqualified source. Only
+        # explicit branch sources or HEAD with an explicit destination are
+        # known without reading the selected repository.
+        positional = [word for word in rest if not word.startswith("-")]
+        broad = broad or subcommand == "push" and any(
+            ":" not in spec or spec.partition(":")[0] not in {"HEAD", "@"}
+            and not spec.startswith("refs/heads/") for spec in positional[1:])
+        exceptional_push = False
+        if subcommand == "push" and not (force or broad or base):
+            try:
+                _check_push(rest, policy, cwd=cwd, run=run)
+            except PolicyError:
+                exceptional_push = True
+        if deletion or force or broad or base or exceptional_push:
             if not resolve or policy.role not in WRITING_ROLES:
                 return {"kind": "git_refs", "cycle_only": True,
                         "publication_unconfined": bool(policy.static_only and subcommand == "push"),
                         "warning": "WARNING: Git ref changes need recorded exact consent bound to the remote, ref and old/new SHAs."
                                    + (" Publication runs without a confirmed sandbox." if policy.static_only and subcommand == "push" else "")}
-            def inspect(*arguments: str, optional: bool = False, trusted: bool = False) -> str:
+            # The hook and broker both run outside the executor's sandbox.
+            # A selected repository can configure executable transports, so
+            # authorize inspection separately BEFORE running any selected Git.
+            identity = operation(tool, data, policy, cwd, _include_sensitive=False)
+            directory = str(Path(cwd or ".").resolve())
+            inspection = {"kind": "git_inspection", "cycle_only": True, "role_bound": True,
+                          "directory": _relative_value(directory, policy, None) or directory,
+                          "command_sha256": hashlib.sha256(json.dumps(identity["pattern"], sort_keys=True).encode()).hexdigest(),
+                          "warning": "WARNING: binding inspection runs host-side Git outside the stage sandbox; "
+                                     "selected repository configuration may execute programs and contact endpoints. "
+                                     "This authorizes inspection only; the ref operation needs separate consent."}
+
+            def includes_inspection(detail: dict[str, Any]) -> bool:
+                return detail == inspection or any(includes_inspection(part) for part in detail.get("parts", []))
+
+            if not any(entry.get("decision") == "allow"
+                       and entry.get("operation", {}).get("role") == policy.role
+                       and includes_inspection(entry.get("operation", {}).get("sensitive", {}))
+                       for entry in policy.command_permissions):
+                return inspection
+            def inspect(*arguments: str, optional: bool = False) -> str:
                 try:
-                    done = subprocess.run(["git", "--no-pager", *(selectors if trusted else selection),
+                    done = subprocess.run(["git", "--no-pager", *selection,
                                            *arguments], cwd=cwd,
                                           capture_output=True, text=True, timeout=30,
                                           stdin=subprocess.DEVNULL)
@@ -1522,18 +1556,8 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                 urls = inspect("remote", "get-url", "--push", "--all", remote).splitlines()
             else:
                 urls = [remote]
-            # This inspection runs host-side, outside the stage sandbox, before
-            # anyone consents. It contacts only endpoints the repository itself
-            # configures, never a URL or override chosen by the command.
-            configured = {git_remote_identity(url, cwd)
-                          for name in inspect("remote", trusted=True).splitlines()
-                          for direction in ((), ("--push",))
-                          for url in inspect("remote", "get-url", *direction, "--all", name,
-                                             trusted=True).splitlines()}
-            if any(git_remote_identity(url, cwd) not in configured for url in urls):
-                raise PolicyError("Git consent inspection contacts only remote endpoints the repository "
-                                  "configures; add the remote first, which is a Git configuration edit "
-                                  "with its own consent")
+            # The separate inspection consent above covers selected endpoints
+            # and repository configuration; inspection never authorizes a push.
             movements = []
             for push_url in urls:
                 remote_id = git_remote_identity(push_url, cwd)
@@ -1544,7 +1568,7 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                     specs = [f"{ref}:{ref}" for ref in local] + [f":{ref}" for ref in old_refs if ref not in local]
                 elif any(word in rest for word in ("--all", "--branches")):
                     specs = [f"{ref}:{ref}" for ref in local if ref.startswith("refs/heads/")]
-                elif not specs:
+                elif not specs and "--tags" not in rest:
                     specs = inspect("config", "--get-all", f"remote.{remote}.push", optional=True).splitlines()
                     if not specs:
                         default = inspect("config", "--get", "push.default", optional=True) or "simple"
@@ -1557,8 +1581,19 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                             upstream_remote = inspect("config", "--get", f"branch.{branch}.remote", optional=True)
                             target = upstream if upstream and default in {"upstream", "tracking", "simple"} and upstream_remote == remote else current
                             specs = [f"{current}:{target}"]
+                # `git push <remote> tag <name>` is a refspec shorthand.
+                named_specs = []
+                index = 0
+                while index < len(specs):
+                    if specs[index] == "tag" and index + 1 < len(specs):
+                        ref = "refs/tags/" + specs[index + 1]
+                        named_specs.append(f"{ref}:{ref}")
+                        index += 2
+                    else:
+                        named_specs.append(specs[index])
+                        index += 1
                 expanded_specs = []
-                for spec in specs:
+                for spec in named_specs:
                     if spec.lstrip("+") == ":":
                         expanded_specs.extend(f"{ref}:{ref}" for ref in local
                                               if ref.startswith("refs/heads/") and ref in old_refs)
@@ -1581,6 +1616,18 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                     else:
                         expanded_specs.append(spec)
                 specs = expanded_specs
+                if "--tags" in rest:
+                    specs += [f"{ref}:{ref}" for ref in local if ref.startswith("refs/tags/")]
+                elif "--follow-tags" in rest:
+                    for source in [spec.lstrip("+").partition(":")[0] for spec in specs]:
+                        if not source:
+                            continue
+                        for line in inspect("for-each-ref", "--format=%(objecttype) %(refname)",
+                                            "--merged=" + source, "refs/tags").splitlines():
+                            object_type, ref = line.split(" ", 1)
+                            if object_type == "tag" and ref not in old_refs:
+                                specs.append(f"{ref}:{ref}")
+                specs = list(dict.fromkeys(specs))
                 for spec in specs:
                     source, colon, target = spec.lstrip("+").partition(":")
                     if deleting:
@@ -1601,7 +1648,8 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                                       "ref": target, "before": old_refs.get(target), "after": new})
             return {"kind": "git_refs", "cycle_only": True, "movements": movements,
                     "publication_unconfined": bool(policy.static_only),
-                    "warning": "WARNING: rewrites published history, changes a base branch or deletes a ref others may use. "
+                    "warning": "WARNING: publishes refs, may rewrite history, change a base branch or delete refs. "
+                               "Tags, other refs and other remotes are outside publication-audit coverage. "
                                "Consent binds the remote, ref and old/new SHAs for this cycle only."
                                + (" Publication runs without a confirmed sandbox." if policy.static_only else "")}
     if policy.static_only and (program == "git" and words[1:2] == ["push"] or program == "gh"
@@ -2444,7 +2492,10 @@ def _names_git_option(word: str, option: str) -> bool:
 def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                 consent: bool = False) -> None:
     if consent:
-        return  # Exact resolved ref consent is checked before this guard (#457).
+        detail = sensitive_operation("Bash", {"command": shlex.join(["git", "push", *args])},
+                                     policy, cwd, resolve=False, run=run)
+        if detail and detail["kind"] == "git_refs":
+            return  # These guards now require warned, bound exact consent.
     positional: list[str] = []
     index = 0
     while index < len(args):
@@ -2490,6 +2541,9 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         if not source:
             raise PolicyError("an empty source deletes the remote ref; it is never allowed")
         destination = destination or source
+        if (destination.startswith("refs/") and not destination.startswith("refs/heads/")
+                or destination.startswith("tags/")):
+            raise PolicyError("git push destination needs branch publication or warned exact ref consent")
         if destination in {"HEAD", "@"}:
             destination = _current_branch(cwd, run)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", destination) or ".." in destination:
@@ -4336,7 +4390,8 @@ COMPOSE_RESOLVER = _resolve_compose
 COMPOSE_RUN = _run_bounded
 
 
-def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None) -> dict[str, Any]:
+def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None,
+              *, _include_sensitive: bool = True) -> dict[str, Any]:
     """Normalize only verified per-dispatch paths. Code, flags and destinations stay exact.
 
     A quoted interpreter argument is opaque, even if it contains a temp path.
@@ -4353,7 +4408,7 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             raise ValueError("command must be a string")
         parsed = parse_command(command, policy.tmpdir)
         if parsed.shell_source is not None:
-            sensitive = sensitive_operation(tool, tool_input, policy, cwd)
+            sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
             return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool,
                     "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []},
                     **({"sensitive": sensitive} if sensitive else {}),
@@ -4429,7 +4484,7 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         check_id = configured_check_id(words, policy)
         if check_id:
             extra["check"] = check_id
-        sensitive = sensitive_operation(tool, tool_input, policy, cwd)
+        sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
         if sensitive:
             extra["sensitive"] = sensitive
         return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool,
@@ -4442,7 +4497,7 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         pattern = {"target": path}
     else:
         raise ValueError("unsupported tool")
-    sensitive = sensitive_operation(tool, tool_input, policy, cwd)
+    sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
     return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool, "pattern": pattern,
             **({"sensitive": sensitive} if sensitive else {})}
 

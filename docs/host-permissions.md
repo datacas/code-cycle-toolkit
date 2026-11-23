@@ -230,10 +230,10 @@ resolution produces a different identity and asks again. A missing Compose
 file, missing `env_file`, unavailable Docker executable or other resolver error
 retains its observed cause and remains unverified; it is not a consent question.
 
-Consent does not widen host or OS permissions. In known Git syntax, directly
-expressed force-push, protected destinations and ref deletion keep their guards.
-Credential access, redirects outside `$TMPDIR`, role-owned review
-artefacts and merging/closing PRs keep their existing guards; sensitive operations use #457 consent below.
+Consent does not widen host or OS permissions. Directly expressed force-push,
+protected destinations, ref deletion and credential reads use the warned exact
+consent described in #457 below. Redirects outside `$TMPDIR`, role-owned review
+artefacts and merging/closing PRs keep their existing guards.
 In particular, `gh auth token`, `gh auth status -t/--show-token` (including
 bundled short flags), and authentication mutations such as `login`, `logout`,
 `refresh`, `switch` and `setup-git` retain the credential guard in every role,
@@ -895,17 +895,35 @@ about changing the integration target, and ref deletion about removing a ref
 others may use. They offer **this cycle / deny** only. Consent binds the resolved
 remote identity, exact ref and old/new SHAs; a changed binding asks again.
 Patterns, repository and global grants do not authorize these ref operations.
-The runtime resolves those bindings host-side, outside the stage sandbox and
-before anyone consents, so it contacts only remote endpoints the repository
-itself configures. A URL operand, `--repo` or a `-c remote.*` override that
-names another endpoint gets no question and the denial says why; add the remote
-first, a Git configuration edit with its own consent, and push to it.
+Binding resolution first asks for separate, cycle-only, role-bound consent to
+run host-side Git inspection outside the stage sandbox. The warning explains
+that the selected repository configuration can execute programs and contact
+endpoints. No selected Git inspection runs before that consent. This applies
+to repository selectors (`-C`, `--git-dir`, `GIT_DIR`), runner directory changes,
+and URL or configuration overrides too. Inspection consent never authorizes
+the ref operation: after inspection, a second consent binds its resolved refs
+and SHAs. A real inspection failure retains its cause.
+
+Pushes outside the ordinary `origin`/explicit-branch path, including another
+remote, a URL, inferred destinations, tag-publishing flags, tags or other refs
+and executing options, also use this inspection
+and exact ref-consent flow. The warning states that tags, other refs and other
+remotes are outside publication-audit coverage. Patterns never authorize these
+exceptions. Use `git push origin HEAD:<branch>` for an explicit branch push.
+Inspection identities normalize command tokens and dispatch temporary paths,
+so an equivalent spelling on resume retains its inspection consent.
+This converts argument-guard exceptions (PA-20) to disclosed consent
+without adding a toolkit veto.
 
 Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited.
 
 Git configuration edits warn that a later allowed Git command can execute a
-program. Linked worktrees share the common Git directory: editing its config
-also changes the user's main repository. Consent permits the exact edit.
+program, including host-side inspection outside the stage sandbox. Linked
+worktrees share the common Git directory: editing its config also changes the
+user's main repository. The tool hook matches the approved command or tool and
+target; file-edit consent does not bind individual keys or replacement text.
+The sandbox write exception permits the whole approved file. The consent
+warning discloses that scope.
 
 Publication without a confirmed sandbox receives an explicit reduced-guarantee
 warning and operation consent. This covers publication only; configured tests

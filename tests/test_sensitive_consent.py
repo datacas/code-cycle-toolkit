@@ -47,12 +47,150 @@ class SensitiveConsentTests(unittest.TestCase):
         policy = policy or self.policy
         broker = grants.ConsentBroker("owner/repo", platform="linux", cycle_id="fixture")
         request = cp.refused_operation([command], policy, broker, executor, str(self.repo))
+        if request and broker.operations[request["resource"]].operation["sensitive"]["kind"] == "git_inspection":
+            inspection = broker.operations[request["resource"]]
+            broker.apply_answer(inspection, inspection.scopes[0], "cycle")
+            policy = replace(policy, command_permissions=broker.command_entries(executor, policy.role))
+        request = cp.refused_operation([command], policy, broker, executor, str(self.repo))
         self.assertIsNotNone(request, command)
         grant = broker.operations[request["resource"]]
         question = grants.question(grant, grant.scopes[0], role=policy.role, blocker=request)
         self.assertIn("WARNING", question["prompt"])
         broker.apply_answer(grant, grant.scopes[0], "cycle")
         return replace(policy, command_permissions=broker.command_entries(executor, policy.role)), grant, broker
+
+    def test_host_git_inspection_needs_separate_consent_for_selected_configuration(self):
+        selected = self.root / "selected"
+        self.run_git("init", str(selected))
+        marker = self.root / "host-executed"
+        transport = self.root / "ssh-fixture"
+        transport.write_text("#!/bin/sh\n: > " + shlex.quote(str(marker)) +
+                             "\nexec git-upload-pack " + shlex.quote(str(self.remote)) + "\n")
+        transport.chmod(0o755)
+        self.run_git("-C", str(selected), "config", "core.sshCommand", str(transport))
+        self.run_git("-C", str(selected), "config", "ssh.variant", "ssh")
+        self.run_git("-C", str(selected), "remote", "add", "origin", "ssh://fixture.invalid/repo")
+        for prefix in (f"git -C {selected}", f"git --git-dir={selected}/.git",
+                       f"GIT_DIR={selected}/.git git", f"env -C {selected} git"):
+            with self.subTest(prefix=prefix):
+                marker.unlink(missing_ok=True)
+                command = prefix + " push --force origin :topic"
+                data = {"command": command}
+                operation = sp.operation("Bash", data, self.policy, str(self.repo))
+                self.assertFalse(marker.exists(), "binding inspection ran before consent")
+                self.assertEqual("git_inspection", operation["sensitive"]["kind"])
+                self.assertIn("host-side", operation["sensitive"]["warning"])
+                grant = grants.make_grant(operation, "claude", "linux")
+                broker = grants.ConsentBroker("owner/repo", platform="linux", cycle_id="fixture")
+                broker.operations[grant.id] = grant
+                broker.apply_answer(grant, grant.scopes[0], "cycle")
+                allowed = replace(self.policy, command_permissions=broker.command_entries("claude", "implement"))
+                resolved = sp.operation("Bash", data, allowed, str(self.repo))
+                self.assertTrue(marker.exists(), "the explicitly authorized inspector did not run")
+                self.assertEqual("git_refs", resolved["sensitive"]["kind"])
+                self.assertFalse(sp.check(command, allowed, cwd=str(self.repo)).allowed,
+                                 "inspection consent must never authorize the push")
+                other_role = replace(allowed, role="resolve")
+                self.assertEqual("git_inspection", sp.operation("Bash", data, other_role,
+                                                               str(self.repo))["sensitive"]["kind"])
+
+    def test_push_exceptions_need_warned_exact_consent_not_patterns(self):
+        for executor in ("claude", "codex"):
+            for command in ("git push https://example.invalid/x.git HEAD:topic",
+                            "git push origin HEAD:refs/tags/v9",
+                            "git push origin HEAD:refs/notes/fixture"):
+                with self.subTest(command=command, executor=executor):
+                    broker = grants.ConsentBroker("owner/repo", platform="linux")
+                    request = cp.refused_operation([command], self.policy, broker, executor, str(self.repo))
+                    self.assertIsNotNone(request)
+                    grant = broker.operations[request["resource"]]
+                    self.assertEqual("git_inspection", grant.operation["sensitive"]["kind"])
+                    self.assertEqual(["this cycle", "deny"], grants.question(
+                        grant, grant.scopes[0], role="implement")["options"])
+                    pattern = grants.make_pattern_grant("git push .*", "implement", executor, "linux",
+                        proposer="fixture", justification="regression", positive=[command], negative=["git status"])
+                    allowed = replace(self.policy, command_permissions=({"operation": pattern.operation,
+                                                                         "decision": "allow"},))
+                    self.assertFalse(sp.check(command, allowed, cwd=str(self.repo)).allowed)
+
+    def test_push_exception_consent_discloses_audit_limits_and_runs(self):
+        other = self.root / "other.git"
+        self.run_git("init", "--bare", str(other))
+        self.run_git("remote", "add", "other", str(other))
+        for executor in ("claude", "codex"):
+            for command in ("git push other HEAD:topic", f"git push {other} HEAD:topic",
+                            "git push origin HEAD:refs/tags/v9", "git push origin HEAD:refs/notes/fixture"):
+                with self.subTest(command=command, executor=executor):
+                    allowed, grant, _ = self.approve(command, executor)
+                    self.assertIn("outside publication-audit coverage", grant.operation["sensitive"]["warning"])
+                    self.assertFalse(grants.pattern_covers_operation({"pattern": {"regex": "git push .*"}},
+                                                                    grant.operation))
+                    self.assertTrue(self.hook(command, allowed))
+                    done = subprocess.run(shlex.split(command), cwd=self.repo, capture_output=True, timeout=30)
+                    self.assertEqual(0, done.returncode, done.stderr)
+
+    def test_git_configuration_warning_discloses_whole_file_and_host_scope(self):
+        for executor in ("claude", "codex"):
+            with self.subTest(executor=executor):
+                allowed, grant, _ = self.approve("git config fixture.setting value", executor)
+                warning = grants.question(grant, grant.scopes[0], role="implement")["prompt"]
+                self.assertIn("host-side inspection outside the stage sandbox", warning)
+                self.assertIn("whole approved file", warning)
+                self.assertIn("common Git directory", warning)
+                self.assertEqual((str(self.repo / ".git/config"),), sp.consented_git_edits(allowed))
+
+    def test_selected_head_destination_requires_inspection_and_ref_consent(self):
+        selected = self.root / "selected"
+        self.run_git("clone", str(self.remote), str(selected))
+        self.run_git("-C", str(selected), "checkout", "main")
+        for destination in ("HEAD", "@"):
+            command = f"git -C {selected} push origin topic:{destination}"
+            # The source need not exist for classification; nothing runs yet.
+            with patch.object(sp.subprocess, "run", side_effect=AssertionError("unconsented inspection")):
+                self.assertIsNotNone(sp.sensitive_operation("Bash", {"command": command}, self.policy,
+                                                          str(self.repo), resolve=False))
+                self.assertEqual("git_inspection", sp.operation("Bash", {"command": command},
+                                                               self.policy, str(self.repo))["sensitive"]["kind"])
+            for executor in ("claude", "codex"):
+                grant = grants.make_pattern_grant("git .*push.*", "implement", executor, "linux",
+                    proposer="fixture", justification="regression", positive=[command], negative=["git status"])
+                allowed = replace(self.policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+                self.assertFalse(sp.check(command, allowed, cwd=str(self.repo)).allowed)
+
+    def test_tag_publication_forms_bind_exact_tags_and_warn(self):
+        self.run_git("tag", "lightweight")
+        self.run_git("tag", "-a", "annotated", "-m", "fixture")
+        for executor in ("claude", "codex"):
+            for arguments, tags in (("HEAD:topic --tags", {"lightweight", "annotated"}),
+                                    ("--tags", {"lightweight", "annotated"}),
+                                    ("HEAD:topic --follow-tags", {"annotated"}),
+                                    ("lightweight", {"lightweight"}),
+                                    ("refs/tags/annotated:newtag", {"newtag"}),
+                                    ("tag lightweight", {"lightweight"})):
+                with self.subTest(executor=executor, arguments=arguments):
+                    command = "git push origin " + arguments
+                    allowed, grant, _ = self.approve(command, executor)
+                    moves = grant.operation["sensitive"]["movements"]
+                    self.assertEqual({"refs/tags/" + tag for tag in tags},
+                                     {move["ref"] for move in moves if move["ref"].startswith("refs/tags/")})
+                    self.assertTrue(self.hook(command, allowed))
+                    direct = subprocess.run(shlex.split(command), cwd=self.repo, capture_output=True, timeout=30)
+                    self.assertEqual(0, direct.returncode, direct.stderr)
+                    for tag in tags:
+                        self.run_git("push", "origin", "--delete", "refs/tags/" + tag)
+
+    def test_inspection_consent_normalizes_token_spelling_and_dispatch_paths(self):
+        policies = [replace(self.policy, tmpdir=str(self.root / name)) for name in ("first", "second")]
+        operations = []
+        for policy in policies:
+            path = Path(policy.tmpdir)
+            path.mkdir()
+            command = "git -C " + shlex.quote(str(path)) + " push --force origin HEAD:topic"
+            operations.append(sp.operation("Bash", {"command": command}, policy, str(self.repo)))
+        self.assertTrue(sp.same_operation(operations[0], operations[1]))
+        command = "git   -C '" + str(self.root / "second") + "' push --force origin HEAD:topic"
+        self.assertTrue(sp.same_operation(operations[1], sp.operation("Bash", {"command": command},
+                                                                     policies[1], str(self.repo))))
 
     def hook(self, command, policy):
         path = self.root / "policy.json"
@@ -259,9 +397,7 @@ class SensitiveConsentTests(unittest.TestCase):
         self.assertEqual(pa.PASSED, result.status)
         self.assertEqual("../remote.git", result.authorized_changes[0]["consented_remote"])
 
-    def test_consent_inspection_never_contacts_an_unconfigured_endpoint(self):
-        # Resolution runs host-side before consent; an endpoint chosen by the
-        # command (URL operand, --repo or a -c override) is never contacted.
+    def test_consent_inspection_contacts_selected_endpoints_only_after_consent(self):
         stranger = self.root / "stranger.git"
         self.run_git("init", "--bare", str(stranger))
         contacted = []
@@ -276,21 +412,16 @@ class SensitiveConsentTests(unittest.TestCase):
                         f"git push --force --repo={stranger} HEAD:main",
                         f"git -c remote.origin.pushurl={stranger} push --force origin HEAD:main"):
             with self.subTest(command=command), patch.object(sp.subprocess, "run", spy):
-                with self.assertRaisesRegex(sp.PolicyError, "configures"):
-                    sp.operation("Bash", {"command": command}, self.policy, str(self.repo))
+                contacted.clear()
+                first = sp.operation("Bash", {"command": command}, self.policy, str(self.repo))
+                self.assertEqual("git_inspection", first["sensitive"]["kind"])
                 broker = grants.ConsentBroker("owner/repo", platform="linux", cycle_id="fixture")
-                self.assertIsNone(cp.refused_operation([command], self.policy, broker, "claude", str(self.repo)))
-        self.assertNotIn(str(stranger), contacted)
-        path = self.root / "policy.json"
-        path.write_text(self.policy.to_json())
-        done = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
-            input=json.dumps({"tool_name": "Bash", "tool_input": {
-                "command": f"git push --force {stranger} HEAD:main"}, "cwd": str(self.repo)}),
-            text=True, capture_output=True, timeout=30)
-        self.assertIn("no consent can be asked", done.stdout)
-        # The configured endpoint, under another spelling, still resolves.
-        self.assertTrue(sp.operation("Bash", {"command": "git push --force ../remote.git HEAD:main"},
-                                     self.policy, str(self.repo))["sensitive"]["movements"])
+                self.assertIsNotNone(cp.refused_operation([command], self.policy, broker, "claude", str(self.repo)))
+                self.assertEqual([], contacted)
+                allowed, grant, _ = self.approve(command, "claude")
+                self.assertIn(str(stranger), contacted)
+                self.assertTrue(grant.operation["sensitive"]["movements"])
+                self.assertTrue(self.hook(command, allowed))
 
     def test_unconfined_publication_does_not_authorize_compound_verification(self):
         policy = replace(self.policy, static_only=True, test_command="python3 -m unittest")
@@ -333,7 +464,8 @@ class SensitiveConsentTests(unittest.TestCase):
         for field, value in (("ref", "refs/heads/protected"),
                              ("before", "0" * 40), ("after", "0" * 40), ("remote_identity", "other")):
             entries = json.loads(json.dumps(allowed.command_permissions))
-            entries[0]["operation"]["sensitive"]["movements"][0][field] = value
+            entry = next(item for item in entries if item["operation"]["sensitive"]["kind"] == "git_refs")
+            entry["operation"]["sensitive"]["movements"][0][field] = value
             self.assertEqual(pa.VIOLATED, auditor.verify(before, consents=tuple(entries)).status)
 
     def test_documentation_and_reduced_roadmap_scope(self):

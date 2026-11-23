@@ -301,6 +301,17 @@ Sensitive-operation consent (#457) replaces PA-25 to PA-29 and the publication p
 
 Interpreter internals still depend on external isolation; operation consent does not remove host or OS restrictions.
 
+Before resolving Git ref bindings, the runtime asks for separate cycle-only,
+role-bound consent to host-side inspection. Selected repository configuration
+may execute programs or contact endpoints outside the stage sandbox. That
+consent authorizes inspection only; the ref operation then needs its own
+resolved consent. Push exceptions (other remotes, URL operands, inferred
+destinations, tag-publishing flags, tags, other refs and executing options)
+use the same flow, never regex grants; the warning
+discloses publication-audit coverage limits. Git-config consent discloses that
+the sandbox write exception permits the whole approved file and that later
+host-side Git commands also load its settings.
+
 Exact operation records carry optional `sensitive` metadata: the warning,
 approved stores, cycle/role restrictions and resolved ref movements. Legacy
 generic grants are not upgraded into sensitive approvals. The publication

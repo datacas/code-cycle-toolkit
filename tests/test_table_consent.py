@@ -328,13 +328,11 @@ class TableConsentTests(unittest.TestCase):
         for command in ("echo timeout 5 gh auth token", "printf gh auth token", "command -v gh"):
             self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
 
-    def test_runner_directory_and_environment_reach_git_inspector(self):
+    def test_runner_directory_and_environment_do_not_run_git_before_inspection_consent(self):
         command = "env -C /fixture GIT_DIR=repo.git timeout 5 git push origin HEAD"
         with patch.object(sp.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "main\n", "")) as run:
             self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
-        self.assertEqual("/fixture", run.call_args.kwargs["cwd"])
-        self.assertEqual(["git", "--no-pager", "--git-dir=repo.git", "rev-parse", "--abbrev-ref", "HEAD"],
-                         run.call_args.args[0])
+        run.assert_not_called()
 
     def test_runner_directory_keeps_relative_credential_guard(self):
         # Only inspect strings: never execute a read of a credential store.
@@ -368,7 +366,7 @@ class TableConsentTests(unittest.TestCase):
         command = "git --paginate -c core.pager=unsafe -C /fixture push origin HEAD"
         with patch.object(sp.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "topic\n", "")) as run:
             self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
-        self.assertEqual(["git", "--no-pager", "-C", "/fixture", "rev-parse", "--abbrev-ref", "HEAD"], run.call_args.args[0])
+        run.assert_not_called()  # Even a selected HEAD read now waits for inspection consent.
         with patch.object(sp.subprocess, "run", side_effect=AssertionError("identity ran a program")):
             self.assertIsNone(sp.guard_consent_reason("Bash", {"command": "git push origin HEAD"},
                                                       self.policy, str(self.root)))

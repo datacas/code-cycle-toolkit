@@ -317,8 +317,8 @@ class GitTests(PolicyTestCase):
         for role in ("implement", "resolve"):
             policy = self.policy(role)
             for command in ("git add scripts/x.py", "git commit -m 'feat: x'",
-                            "git push -u origin issue-142", "git push origin HEAD",
-                            "git push origin HEAD:issue-142", "git push --set-upstream origin x",
+                            "git push -u origin HEAD:issue-142",
+                            "git push origin HEAD:issue-142", "git push --set-upstream origin HEAD:x",
                             "git fetch origin", "git pull --no-rebase origin issue-142",
                             "git checkout issue-142", "git switch issue-142", "git rm old.py",
                             "git mv a.py b.py", "git worktree list",
@@ -409,7 +409,7 @@ class GitTests(PolicyTestCase):
                 self.denied(command, policy)
         self.denied("git push origin HEAD", policy, branch="develop")
         self.denied("git push -u origin @", policy, branch="main")
-        self.allowed("git push origin HEAD", policy, branch="issue-142")
+        self.denied("git push origin HEAD", policy, branch="issue-142")
 
     def test_a_push_names_origin_and_its_branch(self) -> None:
         policy = self.policy("implement")
@@ -1039,12 +1039,16 @@ class SkillCoverageTests(PolicyTestCase):
                         if command in {"git add", "git commit", "git push"}:
                             command = {"git add": "git add scripts/x.py",
                                        "git commit": "git commit -m x",
-                                       "git push": "git push origin HEAD"}[command]
+                                       "git push": "git push origin HEAD:issue-142"}[command]
                         if (role not in {"implement", "resolve"}
                                 and command.startswith(("git add", "git commit", "git push"))):
                             continue  # a writer's commands, named in shared text
                         with self.subTest(role=role, skill=skill, command=command):
-                            self.allowed(self.concrete(command), policy)
+                            concrete = self.concrete(command)
+                            if sp.sensitive_operation("Bash", {"command": concrete}, policy, None, resolve=False):
+                                self.assertEqual("sensitive_consent", sp.check(concrete, policy).rule)
+                            else:
+                                self.allowed(concrete, policy)
 
     def test_no_documented_command_uses_a_substitution(self) -> None:
         for skills in self.STAGES.values():
