@@ -386,6 +386,19 @@ edited answer must include `"compound":true`; this opt-in is stored in the
 grant's operation and the question explicitly says that it authorizes every
 segment of matching shell source. Existing pattern entries without this field
 cover simple commands only. There is no program denylist for patterns.
+PA-19 traceability is owned by #455. Its named tests
+`test_claude_pa19_direct_baseline` and `test_codex_pa19_direct_baseline` compare
+the audit's pipeline and heredoc directly in Bash with the same operation
+after consent through the shared hook, including file contents, grant and
+execution records. This verifies each executor's grant metadata, not its
+native CLI enforcement. The [manual native comparison](native-parity-runs.md)
+now includes PA-19; both native comparisons remain pending and #455 stays open.
+A real native limitation remains a limitation, and `not_verified` is never
+reported as demonstrated parity.
+Exact compound grants now append observed executions to `executed_commands`,
+as pattern grants already do. An extended or changed compound operation does
+not match that exact grant and is not recorded against it.
+
 The question warns that shell and interpreter internals require external
 isolation. Each visible segment, including command and process substitutions,
 retains the Git, publication, credential and redirect guards. A matching

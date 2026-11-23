@@ -49,6 +49,7 @@
       "test_command_permissions",
       "test_consent_variants",
       "test_compose_consent",
+      "test_compound_parity",
       "test_ci_failure_access",
       "test_cycle_journal",
       "test_cycle_stage_characterization",
@@ -103,6 +104,7 @@
       "test_workspace_setup"
     ],
     "windows-3": [
+      "test_compound_parity",
       "test_command_permissions",
       "test_consent_variants",
       "test_compose_consent",
