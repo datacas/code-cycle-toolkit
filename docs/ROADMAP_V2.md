@@ -365,10 +365,10 @@ These 22 issues run before the 2.0 integration sequence above. In the project th
 
 | Wave | Issues (in order) | Theme |
 |---|---|---|
-| 0 | #522, #523, #524 | Cycle stops that a person must clear by hand: a `--grant` answer lost on resume (#522), a stage that already published ends `BLOCKED` or `failed` on a refused read-only command or probe (#523) and ordinary read-only Git, gh and unittest commands refused to stages (#524, capability parity #450); all P0, urgent |
+| 0 | #522, #523, #524, #459 | Cycle stops that a person must clear by hand: a `--grant` answer lost on resume (#522), a stage that already published ends `BLOCKED` or `failed` on a refused read-only command or probe (#523), ordinary read-only Git, gh and unittest commands refused to stages (#524, capability parity #450) and a report rejected on its representation, which leaves a passing suite `not_verified` and asks the same verification decision once per check (#459, moved here from wave 3 on 2026-11-23); all P0, urgent |
 | 1 | #508, #507, #510 | Sandbox and precheck failures that stop reviews and CI now |
 | 2 | #509, #456, #455, #457, #458 | Sandbox grants and conversion of toolkit vetoes to consent (agent capability parity, #450); serial, they share `grants.py` and `stage_permissions.py` |
-| 3 | #486, #503, #504, #525, #410, #425, #459 | Recovery, resume and final statuses; #503 and #504 share `cycle.py` and `run_cycle.py`; #525 (P1, urgent) hands the worktree to the fallback when quota runs out mid-stage |
+| 3 | #486, #503, #504, #525, #410, #425 | Recovery, resume and final statuses; #503 and #504 share `cycle.py` and `run_cycle.py`; #525 (P1, urgent) hands the worktree to the fallback when quota runs out mid-stage |
 | 4 | #470, #506, #282, #415 | CI gate policy, review run identity and status feed |
 
 ### Primera tanda aprobada
