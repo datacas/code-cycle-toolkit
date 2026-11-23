@@ -230,10 +230,10 @@ resolution produces a different identity and asks again. A missing Compose
 file, missing `env_file`, unavailable Docker executable or other resolver error
 retains its observed cause and remains unverified; it is not a consent question.
 
-Consent does not widen host or OS permissions. In known Git syntax, directly
-expressed force-push, protected destinations and ref deletion keep their guards.
-Credential access, redirects outside `$TMPDIR`, role-owned review
-artefacts and merging/closing PRs keep their existing guards (#457 is separate).
+Consent does not widen host or OS permissions. Directly expressed force-push,
+protected destinations, ref deletion and credential reads use the warned exact
+consent described in #457 below. Redirects outside `$TMPDIR`, role-owned review
+artefacts and merging/closing PRs keep their existing guards.
 In particular, `gh auth token`, `gh auth status -t/--show-token` (including
 bundled short flags), and authentication mutations such as `login`, `logout`,
 `refresh`, `switch` and `setup-git` retain the credential guard in every role,
@@ -257,12 +257,25 @@ The hook validates arguments, not only the program:
   `--body-file` or an output redirection (`>`, `>>`, `2>`)
   must resolve, through symlinks and `..`, strictly inside it: not `/tmp`,
   not another `code-cycle-tmp-*`, not the checkout;
-- `git push` must name `origin` and an explicit branch. Every force variant is
+- `git push` must name `origin` and a branch: an explicit destination in a
+  refspec (`HEAD:<branch>` or `refs/heads/<source>:<branch>`), or the
+  ordinary working-branch push `git push [-u] origin HEAD|<branch>`. The
+  working-branch push needs no consent when it is a plain `git push` in the
+  stage's directory: no global Git option, no runner such as `env` or
+  `timeout`, no variable prefix and not part of a compound command. `HEAD` is read from
+  the cycle worktree, a bare `<branch>` must resolve to `refs/heads/<branch>`
+  there (not to a tag or another ref), and neither `remote.origin.push` nor
+  `push.default=upstream|tracking` may be set, because they can remap the
+  destination to the base branch. Otherwise a bare source name, an omitted refspec or an unqualified `HEAD`
+  destination is inferred from the selected repository, so it uses the
+  inspection and ref-consent flow below. Without that consent every force variant is
   refused (`--force`, `--force-with-lease`, `--force-if-includes`, `-f` in any
   combined flag, a `+refspec`, flags after the refspec), as are `--mirror`,
-  `--all`, `--delete`, `--prune` and an empty source. The base branch, `main`
-  and `master` are never a destination, whether spelled `main`,
-  `refs/heads/main`, `heads/main` or `HEAD` while on it;
+  `--all`, `--delete`, `--prune`, `--tags`, `--follow-tags`, tags, other refs
+  and an empty source; the base branch, `main` and `master` are not a
+  destination, whether spelled `main`, `refs/heads/main`, `heads/main` or
+  `HEAD` while on it. These forms use the warned, bound exact consent of #457
+  described below;
 - Git options that run another program (`-c`, `-C`, `--upload-pack`,
   `--receive-pack`, `--exec-path`, `grep -O`) require exact consent, including the
   abbreviations Git expands (`--open-files=…`, `--upload-pa=…`) and `O` in a
@@ -887,37 +900,77 @@ entry from another scope or report a silent success.
 Resuming a work item reloads its command-consent cycle lineage; a second work
 item starts a separate lineage and does not receive cycle-only decisions.
 
-Force-push, direct pushes to base/protected branches, deletion of Git refs and
-direct reads naming a protected credential store cannot be granted: publication
-integrity and credential confidentiality require these boundaries. Under
-[agent capability parity](#agent-capability-parity) the audit classifies these
-never-grant boundaries, Git configuration edits and the refusal of `forever`
-for review roles as toolkit vetoes. They are to become consent with a risk
-warning and a record (rows PA-25 to PA-31 of the
-[audit](capability-parity-audit.md#sensitive-operations)); until that change
-ships, the behaviour below still applies. The hook
-recognizes a store named as a complete argument or edit target. It does not
-inspect recursive ancestor reads (`grep -r token ~`), attached option paths
-(`grep -f~/.ssh/id_ed25519 ...`, `--file=...`) or opaque program internals.
-Credential confidentiality for these forms requires the external sandbox's
-deny-read rules; operation consent never widens those rules. Direct command consent
-also retains argument validation, redirect and workspace/publication guards;
-Git configuration edits remain guarded because they can turn later reads into
-code execution. Foreground and verification-timeout safeguards remain in force.
-Exact consent permits `git ls-remote origin ...` and a GET of
-`gh api repos/<cycle-repo>/pulls/<current-pr> [--jq <filter>]`. Git execution
-options, another remote, API method overrides, input fields and other PRs
-remain guarded. Other Git/GitHub argument or publication guard failures are
-not offered as grantable questions: an answer could not override those guards.
-Read-tool validation distinguishes file operands from grep patterns, jq
-filters and option data. The runtime's exact supplied evidence file is readable
-outside the workspace without consent; its directory and siblings gain no access.
-An interpreter (`python3 -c`, `bash -c`, `node -e`, etc.) can be granted for its
-concrete command. The question warns that the hook **cannot inspect or enforce
-restrictions inside that code**. Never-grant operations inside an authorized
-interpreter need external isolation: sandbox rules, filesystem permissions,
-restricted credentials and code-host protections. A command grant never widens
-that isolation.
+## Sensitive operation consent (#457)
+
+PA-25 to PA-29 and publication under PA-31 use a warning, explicit consent and
+an audit record. Force-push warns about rewriting published history, base pushes
+about changing the integration target, and ref deletion about removing a ref
+others may use. They offer **this cycle / deny** only. Consent binds the resolved
+remote identity, exact ref and old/new SHAs; a changed binding asks again.
+Patterns, repository and global grants do not authorize these ref operations.
+Binding resolution first asks for separate, cycle-only, role-bound consent to
+run host-side Git inspection outside the stage sandbox. The warning explains
+that the selected repository configuration can execute programs and contact
+endpoints. No selected Git inspection runs before that consent. This applies
+to repository selectors (`-C`, `--git-dir`, `GIT_DIR`), runner directory changes,
+and URL or configuration overrides too. Inspection consent never authorizes
+the ref operation: after inspection, a second consent binds its resolved refs
+and SHAs. A real inspection failure retains its cause.
+Literal `url.*.insteadOf` and `url.*.pushInsteadOf` settings take part in binding
+resolution, including case-insensitive Git section/key spellings. The bound
+remote is the effective push endpoint after those rewrites.
+An explicit repository operand also takes precedence over `--repo`, as it does
+for Git itself. Rewrites apply to named remotes and literal endpoint operands.
+Relative local endpoints use Git's effective selected working directory.
+Old-ref inspection pins that resolved endpoint, so a rewrite is not applied
+again when reading the SHAs shown in consent.
+
+Pushes outside the ordinary `origin`/explicit-branch path, including another
+remote, a URL, inferred destinations, tag-publishing flags, tags or other refs
+and executing options, also use this inspection
+and exact ref-consent flow. The warning states that tags, other refs and other
+remotes are outside publication-audit coverage. When the command also carries
+an executing option or alias (`--receive-pack`, `--exec`, `-c`), the question
+keeps the warning that it can execute programs. Patterns never authorize these
+exceptions. The ordinary working-branch push stays outside this flow and needs
+no consent: `git push origin HEAD:<branch>`, and the plain `git push [-u]
+origin HEAD|<branch>` under the conditions in the hook-arguments list above
+(no runner, variable prefix, global option or compound command, a local branch
+source and no remapping configuration).
+Inspection identities normalize command tokens and dispatch temporary paths,
+so an equivalent spelling on resume retains its inspection consent.
+This converts argument-guard exceptions (PA-20) to disclosed consent
+without adding a toolkit veto.
+
+Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited.
+
+Git configuration edits warn that a later allowed Git command can execute a
+program, including host-side inspection outside the stage sandbox. Linked
+worktrees share the common Git directory: editing its config also changes the
+user's main repository. The tool hook matches the approved command or tool and
+target; file-edit consent does not bind individual keys or replacement text.
+The sandbox write exception permits the whole approved file. The consent
+warning discloses that scope.
+
+Publication without a confirmed sandbox receives an explicit reduced-guarantee
+warning and operation consent. This covers publication only; configured tests
+remain #291. It creates no host-side push fallback. A host permission denial,
+OS restriction, missing executable, infrastructure failure or provider branch
+protection is still a real limit, with its actual cause, never a consent grant.
+
+The publication audit records an approved move as `authorized_operation` only
+when remote identity, exact ref and old/new SHAs all match an allow. Unmatched
+observed moves retain the existing breach/external-change classification. Its
+coverage is the cycle branch, base branch and protected branches; tags and
+other refs are out of scope. Merging and closing remain role contracts.
+PA-30 is a role contract with PA-14: a forever grant never reaches review or
+rereview, which analyse untrusted change-request code. Cycle and repository
+consents retain #500 behaviour except the credential-read rule above.
+
+The hook inspects directly expressed operations, including known Git global
+options. Interpreter internals cannot be inspected: their restrictions depend
+on external isolation, filesystem permissions and code-host protections.
+Foreground and verification-timeout safeguards remain in force.
 
 The stage report lists each refused command, read from Claude's
 `permission_denials` and the hook's stream. A denied `docker compose …` in a stage that then reports

@@ -453,7 +453,10 @@ class StageDispatch:
                 before, change_request_id=number,
                 command_table_active=(outcome is not None and outcome.result is not None
                                       and outcome.result.artifacts.get("command_policy") == "active"),
-                read_only=role in {"review", "rereview"})
+                read_only=role in {"review", "rereview"},
+                consents=(self.consent.command_entries(outcome.result.executor, role)
+                          if getattr(self, "consent", None) is not None
+                          and outcome is not None and outcome.result is not None else ()))
             if role in {"review", "rereview"} and outcome is not None and outcome.result is not None:
                 inner = outcome.result.artifacts.get("publication_audit", {})
                 supplemental = [Breach(item["kind"], item["ref"], item.get("before"), item.get("after"))

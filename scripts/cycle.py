@@ -127,10 +127,11 @@ PUBLICATION_OPERATIONS = {
     "push_branch": "push the working branch",
 }
 
-#: Forbidden in every stage, whatever its contract allows.
+#: Sensitive publication needs recorded consent; merging/closing keep their role contract.
 PUBLICATION_PROHIBITIONS = (
-    "Never merge, force-push, delete remote refs, push to or otherwise modify "
-    "the base branch, close an issue or change request unless explicitly "
+    "Force-push, delete refs or modify the base branch only after recorded exact consent "
+    "bound to the remote, ref and old/new SHAs for this cycle. Never merge "
+    "or close an issue or change request unless explicitly "
     "instructed, or publish anything that belongs to another stage."
 )
 

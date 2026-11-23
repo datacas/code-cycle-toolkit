@@ -563,7 +563,10 @@ class RoleWorkspacePolicyTests(CycleTestCase):
         self.assertIn("you may comment", resolve)
         self.assertNotIn("You may not", implement)
         for task in adapter.dispatched:
-            self.assertIn("Never merge, force-push, delete remote refs", task)
+            self.assertIn("only after recorded exact consent", task)
+            self.assertIn("remote, ref and old/new SHAs for this cycle", task)
+            self.assertIn("Never merge", task)
+            self.assertNotIn("Never merge, force-push", task)
             self.assertIn("For a GitHub code host, when `gh` is authenticated", task)
             self.assertIn("retry once with `gh`", task)
             self.assertIn("For Bitbucket, use its configured tooling", task)

@@ -218,18 +218,18 @@ class OperationTests(unittest.TestCase):
                 self.assertIn(term, content)
 
     def test_ac4_direct_publication_guards_survive_even_a_forged_grant(self):
-        for command in ("git push --force origin topic", "git push origin HEAD:main",
-                        "git push origin :topic", "gh pr merge 4 --repo owner/repo"):
+        for command in ("gh pr merge 4 --repo owner/repo",):
             with self.subTest(command=command):
                 grant, _ = self.grant(command)
                 policy = replace(self.policy, command_permissions=({"operation": grant.operation,
                                                                     "decision": "allow"},))
                 self.assertFalse(sp.check(command, policy).allowed)
 
-    def test_edit_grant_does_not_defeat_git_alias_guards(self):
+    def test_git_configuration_edit_requires_new_sensitive_scope(self):
         for name in (".git", ".GIT", ".git. ", ".git::$INDEX_ALLOCATION"):
             data = {"file_path": str(self.root / name / "config")}
             op = cp.operation("Edit", data, self.policy)
+            op.pop("sensitive", None)  # Legacy target-only authorization is insufficient.
             policy = replace(self.policy, command_permissions=({"operation": op, "decision": "allow"},))
             self.assertFalse(sp.check_file_edit("Edit", data, policy).allowed)
 
@@ -237,19 +237,21 @@ class OperationTests(unittest.TestCase):
         (self.root / "outside").symlink_to(self.root.parent, target_is_directory=True)
         self.assertFalse(sp.check("cat outside/decision.json", self.policy, cwd=str(self.root)).allowed)
 
-    def test_never_grantable_ref_writes_are_not_offered_in_any_role(self):
-        for role in ("implement", "review", "rereview", "resolve", "issue_review"):
+    def test_ref_writes_remain_outside_read_only_role_contracts(self):
+        for role in ("review", "rereview", "issue_review"):
             for command in ("git push --force origin topic", "git push origin HEAD:main",
                             "git branch -df topic", "git tag --delete=tag"):
                 self.assertIsNone(cp.refused_operation([command], replace(self.policy, role=role),
                                                        self.broker, "claude"))
 
-    def test_ac4_protected_credentials_are_never_grantable(self):
+    def test_legacy_credential_grants_require_new_sensitive_consent(self):
         command = shlex.join(["cat", str(Path.home() / ".codex" / "auth.json")])
         grant, _ = self.grant(command)
-        policy = replace(self.policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
+        operation = dict(grant.operation)
+        operation.pop("sensitive", None)
+        policy = replace(self.policy, command_permissions=({"operation": operation, "decision": "allow"},))
         self.assertFalse(sp.check(command, policy).allowed)
-        self.assertIsNone(cp.refused_operation([command], policy, self.broker, "claude"))
+        self.assertIsNotNone(cp.refused_operation([command], policy, self.broker, "claude"))
 
     def test_ac4_tmpdir_only_normalizes_resolved_members_not_code(self):
         command = shlex.join(["stat", str(self.root / "snapshot")])
@@ -1194,12 +1196,15 @@ class ReconciledCycleTests(RunCycleTestCase):
 
     def test_464_a_saved_grant_applies_before_the_unattended_policy(self):
         # The stored answer is read first: no request is left pending for it.
+        # Use an explicit branch push; inferred destinations need cycle-only
+        # inspection consent and are covered by test_sensitive_consent.
+        command = "git push origin HEAD:task-435"
         broker_store = grants.ConsentStore(self.home / "consents.json")
-        grant = cp.make_grant(cp.operation("Bash", {"command": "git push origin task-435"},
+        grant = cp.make_grant(cp.operation("Bash", {"command": command},
             sp.StagePolicy("implement", repo="owner/api")), "claude", "linux")
         broker = grants.ConsentBroker("owner/api", platform="linux", store=broker_store)
         broker.apply_answer(grant, grant.scope_for("claude", "linux"), "persistent")
-        report, _ = self.cycle([{"tool": "Bash", "input": {"command": "git push origin task-435"}}],
+        report, _ = self.cycle([{"tool": "Bash", "input": {"command": command}}],
                                published(remote_head=OTHER))
         self.assertNotIn("no one was attached", report.stopped_because or "")
 

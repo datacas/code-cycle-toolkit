@@ -297,7 +297,29 @@ After a refusal the runtime adds its own record to the stage's result: `permissi
 
 Cycle revocation requires both `--cycle-id <id>` and `--task-id <work-item>`. A revoke with no matching stored decision fails and names the searched scope. It never silently reports that a global or cycle decision was removed from the repository scope.
 
-Force-push, direct pushes to base/protected branches, deletion of Git refs and direct reads naming a protected credential store are never grantable: they would defeat publication integrity or expose credentials. Credential detection in the hook covers complete argument paths and edit targets; recursive ancestor reads, attached option paths and opaque program internals require the external sandbox's deny-read rules. Direct Git configuration edits remain guarded because they can make later reads execute code. Exact consent can lift table membership for `git ls-remote origin ...` and a GET of the current PR with `gh api repos/<cycle-repo>/pulls/<current-pr> [--jq <filter>]`; execution options, other remotes, method overrides and publication guards still apply. Other direct Git/GitHub guard failures are non-grantable, rather than questions whose answers cannot work. Read tools classify file operands separately from patterns and filters; the runtime supplies an exact evidence-file read exception. Interpreters such as `python3 -c`, `bash -c` and `node -e` can receive exact-operation consent, with a warning: the hook cannot enforce its restrictions inside interpreter code. That requires external isolation, filesystem permissions, restricted credentials and code-host protections. See [command consent and limits](host-permissions.md#when-a-command-is-denied).
+Sensitive-operation consent (#457) replaces PA-25 to PA-29 and the publication part of PA-31. Risky Git ref operations offer this cycle or deny only, bound to the resolved remote, exact ref and old/new SHAs. A changed binding asks again. The publication audit records matching moves as authorized and reports unmatched observed moves. It observes the cycle branch, base branch and protected branches; tags and other refs remain outside its coverage. Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited. Git configuration edits warn that later allowed commands can execute programs and that linked worktrees share the common Git directory with the main repository. Publication without a confirmed sandbox asks with an explicit warning; configured verification remains #291. Real host, OS, infrastructure and provider limits remain failures with their observed cause. PA-30 is a role contract alongside PA-14: forever grants never reach review or rereview. See [sensitive operation consent](host-permissions.md#sensitive-operation-consent-457).
+
+Interpreter internals still depend on external isolation; operation consent does not remove host or OS restrictions.
+
+Before resolving Git ref bindings, the runtime asks for separate cycle-only,
+role-bound consent to host-side inspection. Selected repository configuration
+may execute programs or contact endpoints outside the stage sandbox. That
+consent authorizes inspection only; the ref operation then needs its own
+resolved consent. Push exceptions (other remotes, URL operands, inferred
+destinations, tag-publishing flags, tags, other refs and executing options)
+use the same flow, never regex grants; the warning
+discloses publication-audit coverage limits. Git-config consent discloses that
+the sandbox write exception permits the whole approved file and that later
+host-side Git commands also load its settings.
+Literal Git URL rewrites (`url.*.insteadOf` and `url.*.pushInsteadOf`, with
+case-insensitive section/key names) are applied during binding inspection, so
+the recorded identity names the effective push endpoint.
+
+Exact operation records carry optional `sensitive` metadata: the warning,
+approved stores, cycle/role restrictions and resolved ref movements. Legacy
+generic grants are not upgraded into sensitive approvals. The publication
+audit exposes matching moves in `authorized_changes`; allowed hook accesses
+are recorded as `permission_execution` / `authorized_operation` journal events.
 
 ### BasedPyright
 

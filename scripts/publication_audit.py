@@ -1,6 +1,6 @@
 """What a publishing stage left on the code host, checked after it (#261).
 
-The cycle never merges, never force-pushes and never deletes refs. A stage's
+The cycle never merges; exact recorded consent may authorize ref changes. A stage's
 command table (#142) narrows what it can run, but code a verification executes
 and tools its host pre-approves can still reach the code host. So after every
 publishing stage the runtime compares the state the invariants name with the
@@ -207,6 +207,7 @@ class AuditResult:
     breaches: tuple[Breach, ...] = ()
     unverified: tuple[str, ...] = ()
     external_changes: tuple[dict, ...] = ()
+    authorized_changes: tuple[dict, ...] = ()
 
     def evidence(self) -> dict:
         """JSON-safe ref evidence, classifications and reasons; never URLs."""
@@ -222,6 +223,7 @@ class AuditResult:
                     "refs": refs, "change_requests": requests,
                     "breaches": [breach.evidence() for breach in self.breaches]}
         evidence["external_changes"] = list(self.external_changes)
+        evidence["authorized_changes"] = list(self.authorized_changes)
         if self.unverified:
             evidence["unverified"] = list(self.unverified)
         return evidence
@@ -326,12 +328,24 @@ class PublicationAuditor:
     def verify(self, before: Snapshot, *,
                change_request_id: str | None = None,
                command_table_active: bool = False,
-               read_only: bool = False) -> AuditResult:
+               read_only: bool = False,
+               consents: tuple[dict, ...] = ()) -> AuditResult:
         """Compare the same audited state with `before`."""
         heads = _remote_heads(self._git)
         after_refs = {name: heads.get(name) for name in before.refs}
         breaches = []
         external_changes = []
+        authorized_changes = []
+        authorized = [move for entry in consents if entry.get("decision") == "allow"
+                      for move in entry.get("operation", {}).get("sensitive", {}).get("movements", [])]
+        remote_identity = None
+        if authorized:
+            # ls-remote above observes the fetch endpoint. A consent for a
+            # different pushurl must never authorize a move of that endpoint.
+            urls = self._git("remote", "get-url", AUDITED_REMOTE).strip().splitlines()
+            if len(urls) == 1:
+                from stage_permissions import git_remote_identity
+                remote_identity = git_remote_identity(urls[0], self.cwd)
         requests_readable = True
         try:
             after_requests = self._change_requests(before.cycle_branch, change_request_id)
@@ -346,6 +360,14 @@ class PublicationAuditor:
             if new == old:
                 continue
             ref = f"refs/heads/{name}"
+            movement = {"remote": AUDITED_REMOTE, "remote_identity": remote_identity,
+                        "ref": ref, "before": old, "after": new}
+            matches = [item for item in authorized if all(item.get(key) == movement[key]
+                       for key in ("remote_identity", "ref", "before", "after"))]
+            if not read_only and remote_identity and matches:
+                authorized_changes.append({**movement, "class": "authorized_operation",
+                                           "consented_remote": matches[0]["remote"]})
+                continue
             strict = name == before.default_branch or name in before.protected
             if new is None:
                 breaches.append(Breach(REVIEW_TARGET_CHANGED if read_only and not strict else DELETED,
@@ -393,7 +415,8 @@ class PublicationAuditor:
         return AuditResult(status=status, before=before, after_refs=after_refs,
                            after_change_requests=after_requests,
                            breaches=tuple(breaches), unverified=before.unverified,
-                           external_changes=tuple(external_changes))
+                           external_changes=tuple(external_changes),
+                           authorized_changes=tuple(authorized_changes))
 
     def _classify_move(self, before: Snapshot, after_refs: dict,
                        requests: dict, name: str, old: str, new: str, *,

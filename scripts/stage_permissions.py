@@ -42,6 +42,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -175,7 +176,7 @@ class StagePolicy:
     """What one dispatched stage may run through Bash, and in which context.
 
     The repository, change request and work item scope the publishing `gh`
-    commands; the base branch is the push target no stage may write. `tmpdir`
+    commands; changes to the base branch need exact recorded consent. `tmpdir`
     and `rtk` are filled in at dispatch time, when they are known.
     """
 
@@ -1274,10 +1275,514 @@ def dispatch_unique_path(op: Any) -> str | None:
 
 # --- the table ---------------------------------------------------------------
 
+def git_remote_identity(url: str, cwd: str | None) -> str:
+    """Bind local remotes to their resolved location, never a relative spelling."""
+    if os.path.isabs(url) or ":" not in url:
+        url = str((Path(cwd or ".") / os.path.expanduser(url)).resolve())
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+#: Options an ordinary working-branch push may carry without consent.
+_WORKING_BRANCH_PUSH_OPTIONS = frozenset({
+    "--set-upstream", "--quiet", "--verbose", "--progress", "--porcelain",
+    "--no-verify", "--verify", "--dry-run", "--atomic"})
+
+
+def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
+                        cwd: str | None, *, resolve: bool = True, run=None,
+                        _parsed: ParsedCommand | None = None,
+                        _working_branch: bool = True) -> dict[str, Any] | None:
+    """Resolve the scope shown to the person; never execute the requested operation.
+
+    Read-only Git inspection is bounded. A failed inspection is a real limit,
+    never an invented SHA or an authorization for an unknown destination.
+    """
+    run = run or subprocess.run
+    paths: list[str] = []
+    words: list[str] = []
+    selection: list[str] = []
+    if tool == "Bash":
+        parsed = _parsed or parse_command(data.get("command", ""), policy.tmpdir)
+        if parsed.shell_source is not None:
+            parts = []
+            credential_stores = []
+            raw_guard = _compound_analysis(tool, data, parsed, policy, cwd, _credential_only=True)[0]
+            candidates = (_guarded_stores(policy) if raw_guard in {
+                "protected credential reads cannot be granted", _UNRESOLVED_CREDENTIAL} else [])
+            for store in candidates:
+                probe = replace(policy, credential_reads=tuple(
+                    item for item in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE) if item != store),
+                    credential_publishing=False)
+                reason = _compound_analysis(tool, data, parsed, probe, cwd, _credential_only=True)[0]
+                if reason in {"protected credential reads cannot be granted", _UNRESOLVED_CREDENTIAL}:
+                    credential_stores.append(store)
+            if credential_stores:
+                parts.append({"kind": "credential", "stores": credential_stores,
+                              "role_bound": policy.role not in WRITING_ROLES,
+                              "cycle_only": policy.role not in WRITING_ROLES,
+                              "warning": "WARNING: credential stores become readable by this stage and code it runs: "
+                                         + ", ".join(credential_stores)})
+            directory = cwd
+            for segment in parsed.segments:
+                if not segment.words:
+                    continue
+                if segment.words[0] == "cd" and len(segment.words) == 2:
+                    directory = str(Path(directory or ".") / os.path.expanduser(segment.words[1]))
+                    continue
+                segment_policy = replace(policy, credential_reads=tuple(dict.fromkeys(
+                    (*policy.credential_reads, *credential_stores))))
+                segment_detail = sensitive_operation("Bash", {"command": shlex.join(segment.words)}, segment_policy, directory,
+                                                     resolve=resolve, _parsed=segment,
+                                                     # Earlier segments may cd or export
+                                                     # configuration; a compound already
+                                                     # needs consent, so keep the ref binding.
+                                                     _working_branch=False)
+                if segment_detail:
+                    parts.append(segment_detail)
+            if parts:
+                return {"kind": "compound_sensitive", "parts": parts,
+                        "cycle_only": any(part.get("cycle_only") for part in parts),
+                        "role_bound": any(part.get("role_bound") for part in parts),
+                        "stores": list(dict.fromkeys(store for part in parts for store in part.get("stores", []))),
+                        "movements": [move for part in parts for move in part.get("movements", [])],
+                        "publication_unconfined": any(part.get("publication_unconfined")
+                            or part.get("kind") == "unconfined_publication" for part in parts),
+                        "warning": " ".join(part["warning"] for part in parts)}
+            return None
+        environment, words, cwd = _runner_command_parts(list(parsed.words), cwd)
+        paths = list(parsed.words[1:]) + [target for _, _, target in parsed.redirects if target]
+    elif tool in FILE_EDIT_TOOLS:
+        paths = [data.get(FILE_EDIT_TOOLS[tool], "")]
+    else:
+        return None
+    stores = []
+    raw_guard = (protected_reason(tool, data, policy, cwd, _parsed=parsed, _credential_only=True)
+                 if tool == "Bash" else credential_reason(paths, policy, cwd))
+    candidates = (_guarded_stores(policy) if raw_guard in {
+        "protected credential reads cannot be granted", _UNRESOLVED_CREDENTIAL} else [])
+    for store in candidates:
+        probe = replace(policy, credential_reads=tuple(
+            item for item in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE) if item != store),
+            credential_publishing=False)
+        reason = (protected_reason(tool, data, probe, cwd, _parsed=parsed, _credential_only=True)
+                  if tool == "Bash" else credential_reason(paths, probe, cwd))
+        if reason in {"protected credential reads cannot be granted", _UNRESOLVED_CREDENTIAL}:
+            stores.append(store)
+    if stores:
+        restricted = policy.role not in WRITING_ROLES
+        detail: dict[str, Any] = {"kind": "credential", "stores": stores,
+                "cycle_only": restricted, "role_bound": restricted,
+                "warning": "WARNING: credential stores become readable by this stage and code it runs: "
+                           + ", ".join(stores)}
+        other = sensitive_operation(tool, data, replace(policy, credential_reads=tuple(dict.fromkeys(
+            (*policy.credential_reads, *stores)))), cwd, resolve=resolve,
+            _parsed=parsed if tool == "Bash" else None)
+        if other:
+            detail.update(parts=[other], movements=other.get("movements", []),
+                          cycle_only=restricted or other.get("cycle_only", False),
+                          warning=detail["warning"] + " " + other["warning"])
+        return detail
+    if tool != "Bash":
+        path = Path(cwd or ".") / os.path.expanduser(paths[0])
+        candidates = (path.absolute(), path.resolve())
+        if any(any(part.casefold().split(":", 1)[0].rstrip(" .") == ".git" for part in candidate.parts)
+               or any(candidate == root or root in candidate.parents
+               for root in _git_config_paths()) for candidate in candidates):
+            return {"kind": "git_config", "warning":
+                    "WARNING: Git configuration can execute programs on later allowed commands; "
+                    "including host-side inspection outside the stage sandbox. The sandbox permits writes to the whole "
+                    "approved file, not just the exact edit. Linked worktrees share the common Git directory "
+                    "and the main repository configuration."}
+        return None
+    if not words:
+        return None
+    program = _program(words[0])
+    if program == "git":
+        args, selection = _git_global_options(words[1:])
+        selection.extend("--" + {"GIT_DIR": "git-dir", "GIT_WORK_TREE": "work-tree"}[name] + "=" + value
+                         for assignment in environment for name, _, value in [assignment.partition("=")]
+                         if name in {"GIT_DIR", "GIT_WORK_TREE"})
+        # Only literal destination/ref settings may enter host-side read-only
+        # inspection. Never forward aliases, pagers, transport executables or
+        # credential-helper settings from the requested command.
+        settings = []
+        for index, word in enumerate(words[1:]):
+            if word == "-c" and index + 2 < len(words):
+                settings.append(words[index + 2])
+            elif word.startswith("-c") and not word.startswith("--") and len(word) > 2:
+                settings.append(word[2:])
+        assignments = {name: value for item in environment for name, _, value in [item.partition("=")]}
+        for name, key in assignments.items():
+            if name.startswith("GIT_CONFIG_KEY_"):
+                value = assignments.get(name.replace("_KEY_", "_VALUE_"))
+                if value is not None:
+                    settings.append(key + "=" + value)
+        for setting in settings:
+            key = setting.partition("=")[0]
+            if re.fullmatch(r"remote\.[A-Za-z0-9._/-]+\.(?:url|pushurl|push)|branch\.[A-Za-z0-9._/-]+\.(?:remote|pushRemote|merge)|remote\.pushDefault|push\.default|url\..+\.(?:insteadOf|pushInsteadOf)", key, re.IGNORECASE):
+                selection.extend(("-c", setting))
+        if not args:
+            return None
+        subcommand, rest = args[0], args[1:]
+        if subcommand == "push":
+            options = {"--force", "--force-with-lease", "--force-if-includes", "--mirror",
+                       "--delete", "--prune", "--all", "--branches", "--repo", "--push-option",
+                       "--receive-pack", "--exec", "--set-upstream", "--no-verify", "--verify",
+                       "--dry-run", "--porcelain", "--quiet", "--verbose", "--progress",
+                       "--atomic", "--follow-tags", "--tags"}
+            normalized = []
+            for word in rest:
+                name, equals, value = word.partition("=")
+                matches = [option for option in options if name.startswith("--") and option.startswith(name)]
+                normalized.append((matches[0] + ("=" + value if equals else "")) if len(matches) == 1 else word)
+            rest = normalized
+        elif subcommand in {"branch", "tag", "update-ref"}:
+            rest = ["--delete" + word[len(word.partition("=")[0]):]
+                    if word.startswith("--") and "--delete".startswith(word.partition("=")[0]) else word
+                    for word in rest]
+        if subcommand == "config" and rest and rest[0] not in {"--get", "--get-all", "--get-regexp", "--list", "-l"}:
+            if "--global" in rest:
+                targets = [str(path) for path in _git_config_paths()]
+            elif any(word.startswith("--file=") for word in rest):
+                value = next(word.partition("=")[2] for word in rest if word.startswith("--file="))
+                targets = [str((Path(cwd or ".") / os.path.expanduser(value)).resolve())]
+            elif "--file" in rest or "-f" in rest:
+                index = rest.index("--file") if "--file" in rest else rest.index("-f")
+                if index + 1 >= len(rest):
+                    raise PolicyError("Git config file selection needs a path")
+                targets = [str((Path(cwd or ".") / os.path.expanduser(rest[index + 1])).resolve())]
+            else:
+                directory_option = "--git-dir" if "--worktree" in rest else "--git-common-dir"
+                done = subprocess.run(["git", "--no-pager", *selection, "rev-parse", directory_option],
+                                      cwd=cwd, capture_output=True, text=True, timeout=10)
+                if done.returncode:
+                    raise PolicyError("Git configuration target could not be resolved")
+                filename = "config.worktree" if "--worktree" in rest else "config"
+                targets = [str((Path(cwd or ".") / done.stdout.strip() / filename).resolve())]
+            return {"kind": "git_config", "targets": targets, "warning":
+                    "WARNING: Git configuration can execute programs on later allowed commands; "
+                    "including host-side inspection outside the stage sandbox. The sandbox permits writes to the whole "
+                    "approved file, not just the exact edit. Linked worktrees share the common Git directory "
+                    "and the main repository configuration."}
+        deletion = subcommand in {"branch", "tag", "update-ref"} and any(
+            word == "--delete" or word.startswith("--delete=") or
+            word.startswith("-") and not word.startswith("--") and any(c in word[1:] for c in "dD")
+            for word in rest)
+        force = subcommand == "push" and any(
+            word.startswith(("--force", "+")) or word.startswith("-") and not word.startswith("--")
+            and any(c in word[1:] for c in "fd") for word in rest)
+        broad = subcommand == "push" and (len([word for word in rest if not word.startswith("-")]) <= 1
+            or any(word.startswith(":") for word in rest) or any(word.split("=", 1)[0] in {
+            "--delete", "--prune", "--mirror", "--all", "--branches", "--repo", "--tags", "--follow-tags"} for word in rest)
+            )
+        base = subcommand == "push" and any(
+            word.split(":")[-1].removeprefix("refs/heads/").removeprefix("heads/")
+            in {"main", "master", policy.base_branch} for word in rest if not word.startswith("-"))
+        positional = [word for word in rest if not word.startswith("-")]
+        # The working-branch push of implement and resolve keeps its
+        # consent-free path (#456): no global option, no Git environment, so
+        # nothing selects another repository or configuration. _check_push
+        # reads HEAD of the cycle worktree as before and confirms that a named
+        # source is a local branch, never a tag or another ref.
+        # A runner (env -C, timeout, nice) or any variable prefix (GIT_*,
+        # HOME, XDG_CONFIG_HOME) can select another directory or configuration.
+        working_branch_push = (
+            _working_branch and subcommand == "push" and not environment
+            and list(words) == list(parsed.words) and len(args) == len(words) - 1
+            and all(word in _WORKING_BRANCH_PUSH_OPTIONS or re.fullmatch(r"-[uqvn]+", word)
+                    for word in rest if word.startswith("-"))
+            and len(positional) >= 2 and positional[0] == "origin" and "tag" not in positional[1:]
+            and all(":" not in spec and not spec.startswith("+") for spec in positional[1:]))
+        # Otherwise an unqualified HEAD destination depends on the selected
+        # repository. Do not inspect even HEAD until host-side inspection was
+        # authorized.
+        broad = broad or subcommand == "push" and not working_branch_push and any(
+            word.rsplit(":", 1)[-1] in {"HEAD", "@"} for word in rest)
+        # Git can infer the tag namespace from an unqualified source. Only
+        # explicit branch sources or HEAD with an explicit destination are
+        # known without reading the selected repository.
+        broad = broad or subcommand == "push" and not working_branch_push and any(
+            ":" not in spec or spec.partition(":")[0] not in {"HEAD", "@"}
+            and not spec.startswith("refs/heads/") for spec in positional[1:])
+        exceptional_push = False
+        if subcommand == "push" and not (force or broad or base):
+            try:
+                _check_push(rest, policy, cwd=cwd, run=run)
+            except PolicyError:
+                exceptional_push = True
+        if deletion or force or broad or base or exceptional_push:
+            if not resolve or policy.role not in WRITING_ROLES:
+                return {"kind": "git_refs", "cycle_only": True,
+                        "publication_unconfined": bool(policy.static_only and subcommand == "push"),
+                        "warning": "WARNING: Git ref changes need recorded exact consent bound to the remote, ref and old/new SHAs."
+                                   + (" Publication runs without a confirmed sandbox." if policy.static_only and subcommand == "push" else "")}
+            # The hook and broker both run outside the executor's sandbox.
+            # A selected repository can configure executable transports, so
+            # authorize inspection separately BEFORE running any selected Git.
+            identity = operation(tool, data, policy, cwd, _include_sensitive=False)
+            directory = str(Path(cwd or ".").resolve())
+            inspection = {"kind": "git_inspection", "cycle_only": True, "role_bound": True,
+                          "directory": _relative_value(directory, policy, None) or directory,
+                          "command_sha256": hashlib.sha256(json.dumps(identity["pattern"], sort_keys=True).encode()).hexdigest(),
+                          "warning": "WARNING: binding inspection runs host-side Git outside the stage sandbox; "
+                                     "selected repository configuration may execute programs and contact endpoints. "
+                                     "This authorizes inspection only; the ref operation needs separate consent."}
+
+            def includes_inspection(detail: dict[str, Any]) -> bool:
+                return detail == inspection or any(includes_inspection(part) for part in detail.get("parts", []))
+
+            if not any(entry.get("decision") == "allow"
+                       and entry.get("operation", {}).get("role") == policy.role
+                       and includes_inspection(entry.get("operation", {}).get("sensitive", {}))
+                       for entry in policy.command_permissions):
+                return inspection
+            def inspect(*arguments: str, optional: bool = False,
+                        env: dict[str, str] | None = None) -> str:
+                try:
+                    done = subprocess.run(["git", "--no-pager", *selection,
+                                           *arguments], cwd=cwd, env=env,
+                                          capture_output=True, text=True, timeout=30,
+                                          stdin=subprocess.DEVNULL)
+                except (OSError, subprocess.SubprocessError) as error:
+                    raise PolicyError(f"Git consent inspection unavailable: {type(error).__name__}") from error
+                if done.returncode:
+                    if optional and done.returncode == 1:
+                        return ""
+                    raise PolicyError(f"Git consent inspection failed: git {arguments[0]} exited {done.returncode}")
+                return done.stdout.strip()
+            local = dict(line.split(" ", 1)[::-1] for line in inspect(
+                "for-each-ref", "--format=%(objectname) %(refname)").splitlines())
+            if deletion:
+                return {"kind": "git_refs", "cycle_only": True, "local_refs": local,
+                        "directory": str(Path(cwd or ".").resolve()), "warning":
+                        "WARNING: deletes local Git refs others may use. Exact consent is for this cycle only."}
+            # Resolve push destinations and old/new heads before asking. Remote
+            # URLs are fingerprinted, never copied into the consent journal.
+            operands = []
+            skip = False
+            selected_remote = None
+            for index, word in enumerate(rest):
+                if skip:
+                    skip = False
+                    continue
+                if (word in {"--push-option", "-o", "--receive-pack", "--exec", "--repo"}
+                        or word.startswith("-") and not word.startswith("--") and word.endswith("o")):
+                    if word == "--repo" and index + 1 < len(rest):
+                        selected_remote = rest[index + 1]
+                    skip = True
+                elif word.startswith("--repo="):
+                    selected_remote = word.partition("=")[2]
+                elif not word.startswith("-"):
+                    operands.append(word)
+            current = inspect("symbolic-ref", "HEAD", optional=True)
+            branch = current.removeprefix("refs/heads/")
+            # Git sets up nonbare commands at the worktree root. Bare
+            # commands retain the caller directory after literal -C options;
+            # --git-dir alone does not move that directory.
+            git_cwd = Path(cwd or ".").resolve()
+            index = 0
+            while index < len(selection):
+                if selection[index] == "-C":
+                    git_cwd = (git_cwd / selection[index + 1]).resolve()
+                index += 2 if selection[index] in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"} else 1
+            if inspect("rev-parse", "--is-bare-repository") == "false":
+                git_cwd = Path(inspect("rev-parse", "--show-toplevel"))
+            # A positional repository takes precedence over --repo, exactly
+            # as Git's push option parser does.
+            remote = operands[0] if operands else (selected_remote or
+                inspect("config", "--get", f"branch.{branch}.pushRemote", optional=True) or
+                inspect("config", "--get", "remote.pushDefault", optional=True) or
+                inspect("config", "--get", f"branch.{branch}.remote", optional=True) or "origin")
+            names = inspect("remote").splitlines()
+            if remote in names:
+                urls = inspect("remote", "get-url", "--push", "--all", remote).splitlines()
+            else:
+                # remote get-url requires a locally configured remote. Resolve
+                # literal operands in disposable config containing only the
+                # effective URL rules; never edit the selected repository or
+                # inherit an unrelated remote's pushurl/conditional includes.
+                rules = inspect("config", "-z", "--get-regexp",
+                                r"^url\..*\.(insteadof|pushinsteadof)$", optional=True)
+                rewrites = [tuple(item.split("\n", 1)) for item in rules.split("\0") if item]
+                env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+                env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+                try:
+                    with tempfile.TemporaryDirectory(prefix="code-cycle-url-") as scratch:
+                        directory = Path(scratch)
+                        (directory / "objects").mkdir()
+                        (directory / "refs").mkdir()
+                        (directory / "HEAD").write_text("ref: refs/heads/main\n")
+                        (directory / "config").write_text("[core]\n\tbare = true\n")
+                        base = ["git", "--no-pager", "--git-dir=" + scratch]
+                        for key, value in [("remote.inspection.url", remote), *rewrites]:
+                            done = subprocess.run([*base, "config", "--local", "--add", key, value],
+                                cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+                                stdin=subprocess.DEVNULL)
+                            if done.returncode:
+                                raise PolicyError(f"Git consent URL configuration failed: exit {done.returncode}")
+                        done = subprocess.run([*base, "remote", "get-url", "--push", "--all", "inspection"],
+                            cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+                            stdin=subprocess.DEVNULL)
+                        if done.returncode:
+                            raise PolicyError(f"Git consent URL resolution failed: exit {done.returncode}")
+                        urls = done.stdout.strip().splitlines()
+                except (OSError, subprocess.SubprocessError) as error:
+                    raise PolicyError(f"Git consent URL resolution unavailable: {type(error).__name__}") from error
+            # The separate inspection consent above covers selected endpoints
+            # and repository configuration; inspection never authorizes a push.
+            movements = []
+            for push_url in urls:
+                remote_id = git_remote_identity(push_url, str(git_cwd))
+                # The URL is already rewritten. A unique full-prefix mapping
+                # pins ls-remote to that endpoint without applying the original
+                # rules again, retaining the selected transport/auth settings.
+                marker = "code-cycle-inspect:" + os.urandom(16).hex()
+                env = dict(os.environ)
+                slot = int(env.get("GIT_CONFIG_COUNT", "0"))
+                env.update(GIT_CONFIG_COUNT=str(slot + 1))
+                env[f"GIT_CONFIG_KEY_{slot}"] = f"url.{push_url}.insteadOf"
+                env[f"GIT_CONFIG_VALUE_{slot}"] = marker
+                old_refs = dict(line.split("\t", 1)[::-1] for line in inspect(
+                    "ls-remote", "--refs", marker, env=env).splitlines())
+                specs = operands[1:]
+                deleting = "--delete" in rest or any(w.startswith("-") and not w.startswith("--") and "d" in w[1:] for w in rest)
+                if "--mirror" in rest:
+                    specs = [f"{ref}:{ref}" for ref in local] + [f":{ref}" for ref in old_refs if ref not in local]
+                elif any(word in rest for word in ("--all", "--branches")):
+                    specs = [f"{ref}:{ref}" for ref in local if ref.startswith("refs/heads/")]
+                elif not specs and "--tags" not in rest:
+                    specs = inspect("config", "--get-all", f"remote.{remote}.push", optional=True).splitlines()
+                    if not specs:
+                        default = inspect("config", "--get", "push.default", optional=True) or "simple"
+                        if default == "matching":
+                            specs = [f"{ref}:{ref}" for ref in local if ref.startswith("refs/heads/") and ref in old_refs]
+                        elif default == "nothing":
+                            specs = []  # Git itself rejects this configured mode.
+                        else:
+                            upstream = inspect("config", "--get", f"branch.{branch}.merge", optional=True)
+                            upstream_remote = inspect("config", "--get", f"branch.{branch}.remote", optional=True)
+                            target = upstream if upstream and default in {"upstream", "tracking", "simple"} and upstream_remote == remote else current
+                            specs = [f"{current}:{target}"]
+                # `git push <remote> tag <name>` is a refspec shorthand.
+                named_specs = []
+                index = 0
+                while index < len(specs):
+                    if specs[index] == "tag" and index + 1 < len(specs):
+                        ref = "refs/tags/" + specs[index + 1]
+                        named_specs.append(f"{ref}:{ref}")
+                        index += 2
+                    else:
+                        named_specs.append(specs[index])
+                        index += 1
+                expanded_specs = []
+                for spec in named_specs:
+                    if spec.lstrip("+") == ":":
+                        expanded_specs.extend(f"{ref}:{ref}" for ref in local
+                                              if ref.startswith("refs/heads/") and ref in old_refs)
+                        continue
+                    source, colon, target = spec.lstrip("+").partition(":")
+                    if "*" in source:
+                        target = target or source
+                        prefix, _, suffix = source.partition("*")
+                        for ref in local:
+                            if ref.startswith(prefix) and ref.endswith(suffix):
+                                middle = ref[len(prefix):len(ref) - len(suffix) if suffix else None]
+                                expanded_specs.append(f"{ref}:{target.replace('*', middle)}")
+                        if "--prune" in rest:
+                            tp, _, ts = target.partition("*")
+                            for ref in old_refs:
+                                if ref.startswith(tp) and ref.endswith(ts):
+                                    middle = ref[len(tp):len(ref) - len(ts) if ts else None]
+                                    if source.replace("*", middle) not in local:
+                                        expanded_specs.append(f":{ref}")
+                    else:
+                        expanded_specs.append(spec)
+                specs = expanded_specs
+                if "--tags" in rest:
+                    specs += [f"{ref}:{ref}" for ref in local if ref.startswith("refs/tags/")]
+                elif "--follow-tags" in rest:
+                    for source in [spec.lstrip("+").partition(":")[0] for spec in specs]:
+                        if not source:
+                            continue
+                        for line in inspect("for-each-ref", "--format=%(objecttype) %(refname)",
+                                            "--merged=" + source, "refs/tags").splitlines():
+                            object_type, ref = line.split(" ", 1)
+                            if object_type == "tag" and ref not in old_refs:
+                                specs.append(f"{ref}:{ref}")
+                specs = list(dict.fromkeys(specs))
+                for spec in specs:
+                    source, colon, target = spec.lstrip("+").partition(":")
+                    if deleting:
+                        target, source = source, ""
+                    target = target or source
+                    if target in {"HEAD", "@"}:
+                        target = inspect("symbolic-ref", "HEAD")
+                    if not target.startswith("refs/"):
+                        if target.startswith(("heads/", "tags/")):
+                            target = "refs/" + target
+                        else:
+                            existing = [ref for ref in ("refs/heads/" + target, "refs/tags/" + target) if ref in old_refs]
+                            source_ref = inspect("rev-parse", "--symbolic-full-name", source) if source else ""
+                            target = (existing[0] if len(existing) == 1 else
+                                      ("refs/tags/" if source_ref.startswith("refs/tags/") else "refs/heads/") + target)
+                    new = inspect("rev-parse", "--verify", source) if source else None
+                    movements.append({"remote": remote, "remote_identity": remote_id,
+                                      "ref": target, "before": old_refs.get(target), "after": new})
+            return {"kind": "git_refs", "cycle_only": True, "movements": movements,
+                    "publication_unconfined": bool(policy.static_only),
+                    "warning": "WARNING: publishes refs, may rewrite history, change a base branch or delete refs. "
+                               "Tags, other refs and other remotes are outside publication-audit coverage. "
+                               "Consent binds the remote, ref and old/new SHAs for this cycle only."
+                               + (" Publication runs without a confirmed sandbox." if policy.static_only else "")}
+    if policy.static_only and (program == "git" and words[1:2] == ["push"] or program == "gh"
+            and any(word in {"comment", "create", "edit", "review"} for word in words[1:])
+            or program == "python3" and tuple(words) in replace(policy, static_only=False).publication_commands):
+        return {"kind": "unconfined_publication", "warning":
+                "WARNING: publication runs without a confirmed sandbox; configured verification remains separate (#291)."}
+    return None
+
+
+def consented_credential_reads(policy: Any) -> tuple[str, ...]:
+    """Only approved stores enter the executor's per-dispatch sandbox settings."""
+    return tuple(dict.fromkeys(store for entry in policy.command_permissions
+        if entry.get("decision") == "allow"
+        and (policy.role in WRITING_ROLES or entry.get("operation", {}).get("role") == policy.role
+             and entry.get("operation", {}).get("sensitive", {}).get("cycle_only") is True)
+        and (not entry.get("operation", {}).get("sensitive", {}).get("role_bound")
+             or entry["operation"].get("role") == policy.role)
+        for store in entry.get("operation", {}).get("sensitive", {}).get("stores", [])
+        if store in (*CREDENTIAL_STORES, GH_CREDENTIAL_STORE)))
+
+
+def consented_git_edits(policy: Any) -> tuple[str, ...]:
+    if policy.role not in WRITING_ROLES:
+        return ()
+    return tuple(dict.fromkeys(target
+        for entry in policy.command_permissions if entry.get("decision") == "allow"
+        and entry.get("operation", {}).get("sensitive", {}).get("kind") == "git_config"
+        for target in ([entry["operation"]["pattern"]["target"]]
+                       if isinstance(entry.get("operation", {}).get("pattern", {}).get("target"), str)
+                       else entry["operation"]["sensitive"].get("targets", []))))
+
+
 def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
           run=subprocess.run) -> Decision:
     """Decide whether this stage may run `command`. Never raises."""
     try:
+        sensitive = sensitive_operation("Bash", {"command": command}, policy, cwd,
+                                        resolve=False, run=run)
+        if sensitive:
+            guard = protected_reason("Bash", {"command": command}, policy, cwd)
+            if guard is not None:
+                return Decision(False, guard, rule="sensitive_guard")
+            # Legacy and regex grants cannot authorize these operations. Avoid
+            # remote inspection until an exact sensitive decision could match.
+            eligible = any(entry.get("operation", {}).get("sensitive")
+                           for entry in policy.command_permissions)
+            answer = matching_answer("Bash", {"command": command}, policy, cwd) if eligible else None
+            if answer == "allow":
+                return Decision(True, "allowed by recorded sensitive operation consent")
+            return Decision(False, sensitive["warning"], rule="sensitive_consent")
         if matching_answer("Bash", {"command": command}, policy, cwd) == "deny":
             return Decision(False, "the user denied this exact operation; skip it, checks not_verified",
                             rule="user_denial")
@@ -1414,12 +1919,17 @@ def check_file_edit(tool_name: str, tool_input, policy: StagePolicy, *,
     """Decide whether this stage may edit a file with a non-Bash tool. Never raises.
 
     A non-writing stage edits only inside its own `$TMPDIR`, where its skills
-    write the comment body they publish with `--body-file` (#272). No stage
-    edits Git's configuration, a `.git` directory or a `.git` file:
-    `core.fsmonitor`, `diff.external` and the like would make an allowed
-    `git status` or `git diff` run a program.
+    write the comment body they publish with `--body-file` (#272). Writing
+    stages need recorded exact consent to edit Git's configuration or `.git`:
+    settings such as `core.fsmonitor` can make later allowed reads run code.
     """
     try:
+        sensitive = sensitive_operation(tool_name, tool_input or {}, policy, cwd)
+        if sensitive:
+            answer = matching_answer(tool_name, tool_input or {}, policy, cwd)
+            if answer == "allow" and protected_reason(tool_name, tool_input or {}, policy, cwd) is None:
+                return Decision(True, "allowed by recorded sensitive operation consent")
+            return Decision(False, sensitive["warning"], rule="sensitive_consent")
         path = (tool_input or {}).get(FILE_EDIT_TOOLS[tool_name])
         if not isinstance(path, str) or not path.strip():
             raise PolicyError("the edit names no file")
@@ -1931,12 +2441,12 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
             and subcommand not in GIT_COMMON_READ | GIT_REVIEW_READ | {
                 "ls-tree", "ls-remote", "branch", "worktree", "fetch"}):
         raise PolicyError("this role may not modify the Git workspace")
-    if subcommand in {"branch", "tag", "update-ref"} and any(
+    if not consent and subcommand in {"branch", "tag", "update-ref"} and any(
             word == "--delete" or word.startswith("--delete=") or
             word.startswith("-") and not word.startswith("--") and
             any(letter in word[1:] for letter in "dD") for word in rest):
         raise PolicyError("deletion of Git refs is never allowed")
-    if subcommand == "push" and policy.static_only:
+    if subcommand == "push" and policy.static_only and not consent:
         raise PolicyError("publication requires the stage sandbox; no host-side push fallback")
     allowed = set(GIT_COMMON_READ)
     if policy.role in GIT_SEARCH_ROLES:
@@ -2063,6 +2573,13 @@ def _names_git_option(word: str, option: str) -> bool:
 
 def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                 consent: bool = False) -> None:
+    if consent:
+        # The rebuilt command has lost its runner, variables and global
+        # options, so never classify it as the consent-free working-branch push.
+        detail = sensitive_operation("Bash", {"command": shlex.join(["git", "push", *args])},
+                                     policy, cwd, resolve=False, run=run, _working_branch=False)
+        if detail and detail["kind"] == "git_refs":
+            return  # These guards now require warned, bound exact consent.
     positional: list[str] = []
     index = 0
     while index < len(args):
@@ -2098,16 +2615,26 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
     if not refspecs:
         # Without a refspec, `push.default` or `remote.origin.push` decides the
         # destination, which could be the base branch the command never names.
-        raise PolicyError("git push needs an explicit branch, such as git push origin HEAD")
+        raise PolicyError("git push needs an explicit branch, such as git push origin HEAD:<branch>")
     # The usual default names stay protected even when the base is another.
     protected = {"main", "master"} | ({policy.base_branch} if policy.base_branch else set())
     for refspec in refspecs:
         if refspec.startswith("+"):
             raise PolicyError("a +refspec forces the push; it is never allowed")
-        source, _, destination = refspec.partition(":")
+        source, separator, destination = refspec.partition(":")
         if not source:
             raise PolicyError("an empty source deletes the remote ref; it is never allowed")
+        if not separator and source not in {"HEAD", "@"}:
+            # Git resolves an unqualified source like rev-parse does, tags
+            # first: only a local branch keeps the destination in refs/heads/.
+            expected = source if source.startswith("refs/heads/") else "refs/heads/" + source
+            if _full_ref_name(source, cwd, run) != expected:
+                raise PolicyError(f"git push source {source!r} is not only a local branch; "
+                                  "use git push origin HEAD:<branch>")
         destination = destination or source
+        if (destination.startswith("refs/") and not destination.startswith("refs/heads/")
+                or destination.startswith("tags/")):
+            raise PolicyError("git push destination needs branch publication or warned exact ref consent")
         if destination in {"HEAD", "@"}:
             destination = _current_branch(cwd, run)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", destination) or ".." in destination:
@@ -2118,6 +2645,43 @@ def _check_push(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                  destination.removeprefix("heads/")}
         if names & protected:
             raise PolicyError(f"pushing to the base branch {destination} is never allowed")
+        if not separator and _push_destination_remapped(cwd, run):
+            # remote.origin.push or push.default=upstream|tracking can send a
+            # colon-less refspec to another branch, such as the base it tracks.
+            raise PolicyError("Git configuration can remap this push destination; "
+                              "use git push origin HEAD:<branch>")
+
+
+def _push_destination_remapped(cwd: str | None, run) -> bool:
+    """Whether the cycle worktree's Git configuration may remap a bare refspec."""
+    values = []
+    for key in ("remote.origin.push", "push.default"):
+        try:
+            completed = run(["git", "config", "--get-all", key], cwd=cwd, capture_output=True,
+                            text=True, timeout=10, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if completed.returncode not in {0, 1}:
+            return True
+        values.append((completed.stdout or "").strip() if completed.returncode == 0 else "")
+    mapping, defaults = values
+    # Several configuration files may set push.default; treat any remapping
+    # value as decisive rather than guessing which one Git applies last.
+    return bool(mapping) or any(line.strip().casefold() in {"upstream", "tracking"}
+                                for line in defaults.splitlines())
+
+
+def _full_ref_name(name: str, cwd: str | None, run) -> str | None:
+    """The full ref an unqualified name resolves to in the cycle worktree."""
+    if name.startswith("-"):
+        return None
+    try:
+        completed = run(["git", "rev-parse", "--symbolic-full-name", "--verify", "--quiet", name],
+                        cwd=cwd, capture_output=True, text=True, timeout=10,
+                        stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (completed.stdout or "").strip() if completed.returncode == 0 else None
 
 
 def _current_branch(cwd: str | None, run) -> str:
@@ -3341,6 +3905,20 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         else:
             decision = check_bash_tool_input(event.get("tool_input") or {}, policy,
                                              cwd=event.get("cwd"))
+        if decision.allowed:
+            try:
+                approved = operation(tool, event.get("tool_input") or {}, policy, event.get("cwd"))
+                if approved.get("sensitive") and policy.journal_path and policy.cycle_id:
+                    from cycle_journal import record_event
+                    record_event(policy.journal_path, repo_id=policy.repo or "unknown",
+                                 task_id=policy.work_item_id or "unknown", cycle_id=policy.cycle_id,
+                                 kind="stage_result", role=policy.role, stage_seq=policy.stage_seq,
+                                 attempt_id=policy.attempt_id, component="permission_execution",
+                                 status="authorized_operation", reason=approved["sensitive"]["warning"],
+                                 correlation={"operation": denial_operation_id(approved, None),
+                                              "tool_use_id": event.get("tool_use_id")})
+            except Exception:
+                pass  # Recording never supplies or revokes authorization.
     except Exception as error:
         reason = f"the stage policy could not run ({type(error).__name__})"
         note = _journal_denial(policy, None, "hook_bash", None, reason) if policy else None
@@ -3356,12 +3934,17 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
             command = f"{tool} {target}" if isinstance(target, str) else tool
         else:
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        inspection_note = ""
         try:
             # A missing docker_host grant is its own question, asked first (#398).
             requested_operation = (None if decision.needs_docker
                                    else operation(tool, tool_input, policy, event.get("cwd")))
-        except (ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError) as error:
             requested_operation = None
+            # A sensitive operation whose bindings cannot be resolved gets no
+            # question; say why instead of leaving the agent waiting for one.
+            if isinstance(error, PolicyError) and decision.rule == "sensitive_consent":
+                inspection_note = f"; no consent can be asked: {error}"
         # Every denial is recorded with the rule that applied and an operation
         # identifier, including an operation that can never be granted (#364).
         rule = decision.rule or ("edit_rule" if editing else "command_table")
@@ -3372,7 +3955,7 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
                                command, decision.reason, rule=rule, operation_id=operation_id)
         print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
-                                   f"{decision.reason}{_journal_note(note)}. {advice} "
+                                   f"{decision.reason}{inspection_note}{_journal_note(note)}. {advice} "
                                    f"COMMAND_PERMISSION_TMPDIR={json.dumps(policy.tmpdir)} "
                                    f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
                                    f"COMMAND_PERMISSION_RULE={json.dumps(rule)} "
@@ -3935,7 +4518,8 @@ COMPOSE_RESOLVER = _resolve_compose
 COMPOSE_RUN = _run_bounded
 
 
-def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None) -> dict[str, Any]:
+def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None = None,
+              *, _include_sensitive: bool = True) -> dict[str, Any]:
     """Normalize only verified per-dispatch paths. Code, flags and destinations stay exact.
 
     A quoted interpreter argument is opaque, even if it contains a temp path.
@@ -3952,8 +4536,10 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
             raise ValueError("command must be a string")
         parsed = parse_command(command, policy.tmpdir)
         if parsed.shell_source is not None:
-            return {"version": 1, "role": consent_role(policy.role), "tool": tool,
+            sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
+            return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool,
                     "pattern": {"words": ["<SHELL>", _shell_identity(parsed, policy, cwd)], "redirects": []},
+                    **({"sensitive": sensitive} if sensitive else {}),
                     **({"guard_consent": True} if guard_consent_reason(tool, tool_input, policy, cwd) else {})}
         words = list(parsed.words)
         if not words:
@@ -4026,7 +4612,10 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         check_id = configured_check_id(words, policy)
         if check_id:
             extra["check"] = check_id
-        return {"version": 1, "role": consent_role(policy.role), "tool": tool,
+        sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
+        if sensitive:
+            extra["sensitive"] = sensitive
+        return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool,
                 "pattern": pattern, **extra}
     elif tool in FILE_EDIT_TOOLS:
         path = tool_input.get(FILE_EDIT_TOOLS[tool])
@@ -4036,13 +4625,21 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         pattern = {"target": path}
     else:
         raise ValueError("unsupported tool")
-    return {"version": 1, "role": consent_role(policy.role), "tool": tool, "pattern": pattern}
+    sensitive = sensitive_operation(tool, tool_input, policy, cwd) if _include_sensitive else None
+    return {"version": 1, "role": policy.role if sensitive else consent_role(policy.role), "tool": tool, "pattern": pattern,
+            **({"sensitive": sensitive} if sensitive else {})}
 
 
 def same_operation(stored: Any, op: dict[str, Any]) -> bool:
     """Exact equality of the operation, whatever role it was decided in (#500)."""
     if not isinstance(stored, dict):
         return False
+    if stored.get("sensitive") or op.get("sensitive"):
+        if stored.get("sensitive") != op.get("sensitive"):
+            return False
+        if op.get("sensitive", {}).get("role_bound") and stored.get("role") != op.get("role"):
+            return False
+        return {**stored, "role": op.get("role")} == op
     if stored.get("guard_consent") or op.get("guard_consent"):
         # #456 exceptions are exact, including environment and configured
         # checks. An earlier writing-stage consent never reaches review.
@@ -4088,7 +4685,7 @@ def matching_answer(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str
     # Pattern authorization lifts table membership, never a concrete guard.
     patterns = [entry for entry in policy.command_permissions
                 if entry.get("operation", {}).get("version") == 2]
-    if (patterns and tool == "Bash" and not op.get("guard_consent")
+    if (patterns and tool == "Bash" and not op.get("guard_consent") and not op.get("sensitive")
             and protected_reason(tool, tool_input, policy, cwd) is None):
         from grants import pattern_covers_operation
         covering = set()
@@ -4267,6 +4864,8 @@ def _could_name_credential(word: str, policy: Any, dotglob: bool, nocaseglob: bo
     stores = [candidate.parts
               for store in _guarded_stores(policy)
               for candidate in (Path(os.path.expanduser(store)), Path(os.path.expanduser(store)).resolve())]
+    if not stores:
+        return False
     for value in _operand_values(word):
         tilde = _tilde_directory(value)
         if tilde:
@@ -4391,7 +4990,7 @@ def _env_chdir(words: list[str]) -> str | None:
 
 
 def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedCommand,
-                       policy: Any, cwd: str | None) -> tuple[str | None, bool]:
+                       policy: Any, cwd: str | None, *, _credential_only: bool = False) -> tuple[str | None, bool]:
     """Guard every segment of shell source against every directory it may run in.
 
     Returns the guard, and whether a directory change could not be resolved.
@@ -4435,7 +5034,7 @@ def _compound_analysis(tool: str, tool_input: dict[str, Any], parsed: ParsedComm
                 if any(_could_name_credential(word, policy, dotglob, nocaseglob) for word in operands):
                     return _UNRESOLVED_CREDENTIAL, True
             guard = protected_reason(tool, tool_input, policy, possible_cwd, _parsed=segment,
-                                     _dotglob=dotglob, _nocaseglob=nocaseglob)
+                                     _dotglob=dotglob, _nocaseglob=nocaseglob, _credential_only=_credential_only)
             if guard:
                 return guard, None in possible_cwds
         unwrapped = _unwrapped_builtin(segment_words) or []
@@ -4559,19 +5158,43 @@ def guard_consent_reason(tool: str, tool_input: dict[str, Any], policy: Any,
 
 def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | None,
                      *, _parsed: ParsedCommand | None = None, _dotglob: bool = False,
-                     _nocaseglob: bool = False) -> str | None:
+                     _nocaseglob: bool = False, _credential_only: bool = False) -> str | None:
     """Guards consent cannot remove on directly expressed operations.
 
     Never pretend to inspect code inside an interpreter or a project program.
     """
     try:
+        # Segment analysis uses the raw credential guard to discover candidate
+        # stores before consent. The outer operation binds the approved stores.
+        sensitive = (None if _parsed is not None else
+                     sensitive_operation(tool, tool_input, policy, cwd, resolve=False))
+        if sensitive and (sensitive["kind"] == "unconfined_publication" or sensitive.get("publication_unconfined")):
+            if tool == "Bash":
+                source = _parsed or parse_command(tool_input.get("command", ""), policy.tmpdir)
+                if source.shell_source is not None:
+                    for segment in source.segments:
+                        detail = sensitive_operation(tool, tool_input, policy, cwd, resolve=False, _parsed=segment)
+                        if detail and (detail.get("publication_unconfined") or detail["kind"] == "unconfined_publication"):
+                            continue
+                        _, words, directory = _runner_command_parts(list(segment.words), cwd)
+                        if not words or _program(words[0]) in {"echo", "printf", "true", "false", ":", "wait"}:
+                            continue
+                        _check_words(words, segment, policy, cwd=directory, run=subprocess.run)
+            policy = replace(policy, static_only=False)
+        if sensitive and sensitive.get("stores"):
+            policy = replace(policy, credential_reads=tuple(dict.fromkeys(
+                (*policy.credential_reads, *sensitive["stores"]))))
+        if sensitive and sensitive["kind"] == "git_config":
+            if policy.role not in WRITING_ROLES:
+                return "this role may not modify the Git workspace"
+            return None
         if tool == "Bash":
             command = tool_input.get("command")
             if not isinstance(command, str):
                 return "command must be a string"
             parsed = _parsed or parse_command(command, policy.tmpdir)
             if parsed.shell_source is not None:
-                return _compound_analysis(tool, tool_input, parsed, policy, cwd)[0]
+                return _compound_analysis(tool, tool_input, parsed, policy, cwd, _credential_only=_credential_only)[0]
             for _, operator, target in parsed.redirects:
                 if (target is not None and operator.startswith(">")
                         and not inside_tmpdir(str(Path(cwd or ".") / target), policy.tmpdir)):
@@ -4595,12 +5218,7 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
             program = _program(guarded_words[0]) if guarded_words else ""
             # Re-run all Git/GitHub argument, publication and workspace guards.
             # A grant is not a different stage role or a different PR context.
-            if program == "git":
-                if (len(guarded_words) > 2 and guarded_words[1] in {"branch", "tag", "update-ref"}
-                        and any(word.split("=", 1)[0] == "--delete" or
-                                word.startswith("-") and not word.startswith("--")
-                                and any(letter in word[1:] for letter in "dD") for word in guarded_words[2:])):
-                    return "deletion of Git refs is never allowed"
+            if program == "git" and not _credential_only:
                 # Apply only repository selectors when the guard reads HEAD.
                 # Other environment settings may execute programs and remain
                 # inside the executor rather than the host-side inspector.
@@ -4609,9 +5227,9 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                              for name, _, value in [assignment.partition("=")]
                              if name in {"GIT_DIR", "GIT_WORK_TREE"}]
                 _check_git([*selectors, *guarded_words[1:]], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
-            elif program == "gh":
+            elif program == "gh" and not _credential_only:
                 _check_gh(guarded_words[1:], policy, cwd=guard_cwd, run=subprocess.run, consent=True)
-            elif program == "find":
+            elif program == "find" and not _credential_only:
                 if any(word in FIND_FORBIDDEN for word in guarded_words[1:]):
                     return "find arguments that execute or write retain their direct-command guard"
             paths = [assignment.partition("=")[2] for assignment in environment] + words[1:] + redirect_paths

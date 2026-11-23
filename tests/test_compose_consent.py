@@ -787,7 +787,9 @@ class IndirectAndGuardTests(ComposeConsentCase):
         policy = self.policy("implement", base_branch="main")
         for command in ("FOO=1 git push --force origin topic", "FOO=1 gh pr merge 1"):
             with self.subTest(command=command):
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertTrue(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone))
+                                or sp.sensitive_operation("Bash", {"command": command}, policy,
+                                                          str(self.clone), resolve=False))
         for command in ("GIT_DIR=/tmp/x git status", "GH_HOST=evil.example gh pr view 1",
                         "HOME=/tmp/fake git status", "GITHUB_TOKEN=x gh pr view 1"):
             with self.subTest(converted=command):
@@ -884,7 +886,9 @@ class SocketFirstTests(ComposeConsentCase):
         for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK,
                         "GIT_DIR=/x rtk git push --force origin main", "rtk rtk git push --force origin main"):
             with self.subTest(command=command):
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone)))
+                self.assertTrue(sp.protected_reason("Bash", {"command": command}, policy, str(self.clone))
+                                or sp.sensitive_operation("Bash", {"command": command}, policy,
+                                                          str(self.clone), resolve=False))
                 self.assertFalse(sp.check(command, self.policy(), cwd=str(self.clone)).allowed)
         for command in ("GIT_DIR+=/x git push --force origin main", "A+=1 " + CHECK):
             with self.subTest(question=command):

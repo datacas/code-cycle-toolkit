@@ -200,6 +200,16 @@ def _refused_operation(denials: object, policy: Any, broker: Any, executor: str,
                 op = operation(tool, data, observed_policy, cwd)
         except (ValueError, TypeError, OSError):
             continue
+        # Retained tool metadata proves temporary path normalization only. It
+        # never defines credential reach, consent scopes or ref bindings.
+        from stage_permissions import sensitive_operation
+        try:
+            sensitive = sensitive_operation(tool, data, observed_policy, cwd)
+        except (ValueError, TypeError, OSError):
+            continue
+        op = {key: value for key, value in op.items() if key != "sensitive"}
+        if sensitive:
+            op.update(role=policy.role, sensitive=sensitive)
         command = str(data.get("command", ""))
         decision = (check(command, observed_policy, cwd=cwd) if tool == "Bash"
                     else check_file_edit(tool, data, observed_policy, cwd=cwd))
@@ -209,7 +219,7 @@ def _refused_operation(denials: object, policy: Any, broker: Any, executor: str,
             continue
         grant = make_grant(op, executor, broker.platform)
         proposal = event.get("pattern_proposal")
-        if isinstance(proposal, dict) and tool == "Bash" and not op.get("guard_consent"):
+        if isinstance(proposal, dict) and tool == "Bash" and not op.get("guard_consent") and not op.get("sensitive"):
             try:
                 grant = make_pattern_grant(
                     proposal["pattern"], policy.role, executor, broker.platform,

@@ -1450,7 +1450,8 @@ class NativeAdapter(Adapter):
         policy_note: dict[str, Any] = ({} if command_policy is None else {"command_policy": (
             "active" if policy is not None
             else f"inactive: {command_policy.inactive_reason}")})
-        credential_reads = command_policy.credential_reads if command_policy is not None else ()
+        credential_reads = tuple(dict.fromkeys((*command_policy.credential_reads,
+            *sp.consented_credential_reads(command_policy)))) if command_policy is not None else ()
         policy_note["credential_read_policy"] = {
             "exceptions": list(credential_reads),
             "denied_paths": list(sp.credential_read_denials(
@@ -1606,6 +1607,7 @@ class NativeAdapter(Adapter):
         argv_options = {}
         if self.name == "codex" and command_policy is not None:
             argv_options["credential_reads"] = credential_reads
+            argv_options["git_config_edits"] = sp.consented_git_edits(command_policy)
             # The owner authorizes issue-review GitHub network reads (#279).
             # Stored gh credentials now require an explicit credential_reads
             # exception (#294); workspace and publication remain read-only.
@@ -2309,7 +2311,8 @@ class CodexAdapter(NativeAdapter):
              ignore_rules: bool = False,
              review_clone: str | None = None,
              network_domains: tuple[str, ...] | None = None,
-             credential_reads: tuple[str, ...] = ()) -> list[str]:
+             credential_reads: tuple[str, ...] = (),
+             git_config_edits: tuple[str, ...] = ()) -> list[str]:
         # `codex exec` is read-only unless told otherwise, which is why four
         # canary runs had an implementer that could not implement: it reported
         # BLOCKED on "the read-only workspace" and nothing here had ever asked
@@ -2412,6 +2415,8 @@ class CodexAdapter(NativeAdapter):
         elif denied:
             table = argv[existing][len(rule):]
             argv[existing] = f"{rule}{table[:-1]}{',' if table[1:-1].strip() else ''}{denied}}}"
+        if writes:
+            granted_paths.extend(git_config_edits)
         if granted_paths:
             existing = next(i for i, option in enumerate(argv) if option.startswith(rule))
             table = argv[existing][len(rule):]
@@ -3328,11 +3333,13 @@ class ClaudeAdapter(NativeAdapter):
                         if status == 0:
                             git_directories.append(str((Path(cwd) / path).resolve()))
                     writable.extend(CodexAdapter.git_write_roots(tuple(dict.fromkeys(git_directories))))
+                    writable.extend(sp.consented_git_edits(runtime_policy))
                 settings.update(sp.review_sandbox_settings(
                     tuple(writable), runtime_policy.registry_domains,
                     docker_host=runtime_policy.docker,
                     publishes=runtime_policy.credential_publishing,
-                    credential_reads=runtime_policy.credential_reads))
+                    credential_reads=tuple(dict.fromkeys((*runtime_policy.credential_reads,
+                        *sp.consented_credential_reads(runtime_policy))))))
             if os.name != "nt":
                 for path in (script, journal_module, policy_file,
                              directory / "grants.py", directory / "command_permissions.py"):

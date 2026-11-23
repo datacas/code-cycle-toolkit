@@ -67,8 +67,7 @@ it with `--config`.
 authorized.
 
 The user applies any configuration change; the agent does not edit its own
-sandbox exceptions. Credential-read exceptions do not grant cycle, repository,
-or forever consent, and must not be offered as those consent choices. These
+sandbox exceptions. Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited. These
 remedies are a fallback for a stage without the
 [runtime issue snapshot](#github-work-items-in-issue-review) of [#397](https://github.com/datacas/code-cycle-toolkit/issues/397).
 
