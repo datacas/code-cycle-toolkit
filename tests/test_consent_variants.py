@@ -25,9 +25,22 @@ import command_permissions as cp
 posix_shell = unittest.skipIf(os.name == "nt", "bash semantics on POSIX paths; covered by the Linux job")
 
 
+def unconsented_reason(tool, data, policy, cwd):
+    """A legacy generic grant must still meet either a guard or fresh #457 consent."""
+    return (sp.protected_reason(tool, data, policy, cwd)
+            or (sp.sensitive_operation(tool, data, policy, cwd, resolve=False) or {}).get("warning"))
+
+
 class ConsentVariantsTests(unittest.TestCase):
     def approved(self, policy, command, regex=None, executor="claude", store=None, cwd=None):
-        op = sp.operation("Bash", {"command": command}, policy, cwd)
+        # These regressions model pre-#457 generic grants. New sensitive
+        # approvals carry explicit scope metadata and have their own real
+        # direct/mediated baselines in test_sensitive_consent.
+        sensitive = sp.sensitive_operation
+        with patch.object(sp, "sensitive_operation", side_effect=lambda *a, **kw:
+                          sensitive(*a, **{**kw, "resolve": False})):
+            op = sp.operation("Bash", {"command": command}, policy, cwd)
+        op.pop("sensitive", None)
         grant = (grants.make_pattern_grant(regex, policy.role, executor, "linux",
                  proposer="test agent", justification="read API contracts",
                  positive=[sp.normalized_command(op)], negative=["rm -rf /"])
@@ -197,7 +210,7 @@ class ConsentVariantsTests(unittest.TestCase):
                             "printf x | cat > /outside/file"):
                 with self.subTest(command=command):
                     current, _ = self.approved(policy, command)
-                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, root))
+                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, root))
                     self.assertFalse(sp.check(command, current, cwd=root).allowed)
 
     @posix_shell
@@ -298,7 +311,7 @@ class ConsentVariantsTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         safe = "cd -P /outside/api; cat schema.json"
         current, _ = self.approved(policy, safe)
@@ -341,7 +354,7 @@ class ConsentVariantsTests(unittest.TestCase):
                                 'cd "$REPO_ROOT" && make build', 'cd "$X" && pytest config/tests',
                                 'cd "$X" && cat config/settings.py', 'cd "$X" && make VAR=x test'):
                     with self.subTest(command=command):
-                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, root))
                         self.assertTrue(sp.unresolved_directory(command, policy, root))
                         decision = sp.check(command, policy, cwd=root)
                         self.assertEqual("command_table", decision.rule)
@@ -358,7 +371,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 baseline = subprocess.run(["bash", "-c", command], cwd=root,
                                           env={**os.environ, "X": root}, capture_output=True)
                 self.assertEqual((0, b"done\n"), (baseline.returncode, baseline.stdout))
-                self.assertIsNone(cp.refused_operation(["cd ~/.codex && cat auth.json"], policy,
+                self.assertIsNotNone(cp.refused_operation(["cd ~/.codex && cat auth.json"], policy,
                                                        grants.ConsentBroker("owner/repo", platform="linux"),
                                                        "claude", root))
 
@@ -378,7 +391,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         'cd "$X" && cp -r .claude $TMPDIR/', 'cd "$X" && ls .config'):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
 
     @posix_shell
@@ -388,7 +401,7 @@ class ConsentVariantsTests(unittest.TestCase):
         for command in (f"ls {users}/*/project", "ls ~/*", "du -sh /h*", f'find {users} -path "{users}/*/x"',
                         "ls ~/*/notes"):
             with self.subTest(command=command):
-                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                 self.assertNotEqual("credential_guard", sp.check(command, policy).rule)
                 current, _ = self.approved(policy, command)
                 self.assertTrue(sp.check(command, current).allowed)
@@ -399,19 +412,19 @@ class ConsentVariantsTests(unittest.TestCase):
                         f"diff --from-file={Path.home()}/.ssh/id_rsa /dev/null", "tar -C~/.ssh -cf x y"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         with patch.dict(os.environ, {"BASHOPTS": "checkwinsize:dotglob"}):
-            self.assertIsNotNone(sp.protected_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
+            self.assertIsNotNone(unconsented_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
         with patch.dict(os.environ, {"BASHOPTS": "checkwinsize", "GLOBIGNORE": ""}):
-            self.assertIsNone(sp.protected_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
+            self.assertIsNone(unconsented_reason("Bash", {"command": "cat ~/*/auth.json"}, policy, None))
 
     @posix_shell
     def test_rev007_deep_globstar_fails_closed_quickly(self):
         policy = sp.StagePolicy("resolve")
         command = "cat /" + "**/" * 990 + "x"
         started = time.monotonic()
-        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+        self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
         cp.refused_operation([command], policy, grants.ConsentBroker("owner/repo", platform="linux"), "claude")
         self.assertLess(time.monotonic() - started, 10)
 
@@ -423,7 +436,7 @@ class ConsentVariantsTests(unittest.TestCase):
             policy = sp.StagePolicy("resolve", tmpdir=root)
             for command in ("ls ..", "cat ../README.md", "cat ./notes.txt"):
                 with self.subTest(command=command):
-                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(cwd)))
+                    self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, str(cwd)))
 
     @posix_shell
     def test_rev008_builtin_command_and_cdpath_directory_changes_are_guarded(self):
@@ -441,7 +454,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         "env --chd=$HOME/.codex cat auth.json", "env --chd ~/.codex cat auth.json"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         for safe in ("command -v cd; cat schema.json", "env -C /outside/api cat schema.json"):
             current, _ = self.approved(policy, safe)
@@ -451,7 +464,7 @@ class ConsentVariantsTests(unittest.TestCase):
             current, _ = self.approved(policy, command)
             self.assertFalse(sp.check(command, current).allowed)
             command = "cd sub && make build"
-            self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+            self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
 
     @posix_shell
     def test_rev008_env_options_and_reassigned_home_or_oldpwd_are_guarded(self):
@@ -467,12 +480,12 @@ class ConsentVariantsTests(unittest.TestCase):
                         'declare "HO""ME=$X"; cd; cat id_rsa'):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         for safe in ("env -u LC_ALL cat schema.json", "env -uLC_ALL cat schema.json", "cd /tmp; cd -; ls",
                      'env -S "perl -w" cat schema.json', 'cd "${HOME}/proj" && cat schema.json'):
             with self.subTest(command=safe):
-                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": safe}, policy, None))
 
     @posix_shell
     def test_rev009_tilde_prefixes_name_what_bash_reads(self):
@@ -490,11 +503,11 @@ class ConsentVariantsTests(unittest.TestCase):
                                 "cat ~{+,}/.codex/auth.json", "cat ~{a,}/.ssh/id_rsa"):
                     with self.subTest(command=command):
                         current, _ = self.approved(policy, command)
-                        self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                        self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                         self.assertFalse(sp.check(command, current).allowed)
                 for command in ("cat ~+/README.md", "cat ~-/notes.txt", "cd ~-; ls", f"ls ~{entry.pw_name}/projects"):
                     with self.subTest(command=command):
-                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                        self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                         current, _ = self.approved(policy, command)
                         self.assertTrue(sp.check(command, current).allowed)
                 for command in ("cat ~-/notes.txt", "cd ~-; ls"):
@@ -512,12 +525,12 @@ class ConsentVariantsTests(unittest.TestCase):
                         'xargs -a /dev/null env -C "$X" cat id_rsa', "exec -a name env -C ~/.ssh cat id_rsa"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         for safe in ("nice env -C /outside/api cat schema.json", "command env -C /outside/api cat schema.json",
                      'echo env -C "$X" id_rsa', 'grep env -C "$N" config'):
             with self.subTest(command=safe):
-                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": safe}, policy, None))
                 current, _ = self.approved(policy, safe)
                 self.assertTrue(sp.check(safe, current).allowed)
 
@@ -543,14 +556,14 @@ class ConsentVariantsTests(unittest.TestCase):
             current = replace(policy, command_permissions=({"operation": grant.operation, "decision": "allow"},))
             for command in commands:
                 with self.subTest(role=role, command=command):
-                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                     self.assertIsNone(sp.matching_answer("Bash", {"command": command}, current, None))
                     self.assertFalse(sp.check(command, current).allowed)
             for command in ('export "CD""PATH=~"; cd src; cat README.md',
                             'read "$n"; cd -; cat schema.json',
                             'shopt -s "dot""glob"; cat /outside/api/*.json'):
                 with self.subTest(role=role, command=command):
-                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                     self.assertIsNotNone(cp.refused_operation([command], policy,
                         grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
                     self.assertTrue(sp.check(command, current).allowed)
@@ -571,18 +584,18 @@ class ConsentVariantsTests(unittest.TestCase):
                             "shopt -s extglob; cat ~/+(x|.ssh)/../.ssh/id_rsa"):
                 with self.subTest(role=role, command=command):
                     current, _ = self.approved(policy, command)
-                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                     self.assertFalse(sp.check(command, current).allowed)
             for inherited, command in (("nocaseglob", "cat ~/.SS?/id_rsa"),
                                         ("extglob", "cat ~/@(.ssh|other)/id_rsa")):
                 with self.subTest(inherited=inherited), patch.dict(os.environ, {"BASHOPTS": inherited}):
-                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, policy, None))
             with patch.dict(os.environ, {"BASHOPTS": "", "GLOBIGNORE": ""}):
-                self.assertIsNone(sp.protected_reason("Bash", {"command": "cat ~/.SS?/id_rsa"}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": "cat ~/.SS?/id_rsa"}, policy, None))
             for command in ("shopt -s nocaseglob; cat /outside/api/*.JSON",
                             "shopt -s extglob; cat /outside/api/@(schema|types).json"):
                 with self.subTest(command=command):
-                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                     current, _ = self.approved(policy, command)
                     self.assertTrue(sp.check(command, current).allowed)
 
@@ -615,7 +628,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         self.assertEqual(str(store / "id_rsa"), baseline.stdout.splitlines()[-1])
                         command = prefix + "cat " + operand
                         for role in ("resolve", "rereview"):
-                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command},
+                            self.assertIsNotNone(unconsented_reason("Bash", {"command": command},
                                 sp.StagePolicy(role), root))
 
     @posix_shell
@@ -638,11 +651,11 @@ class ConsentVariantsTests(unittest.TestCase):
                         command = program + " " + target + suffix
                         with self.subTest(role=role, program=program):
                             current, _ = self.approved(policy, command)
-                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, root))
+                            self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, root))
                             self.assertFalse(sp.check(command, current, cwd=root).allowed)
                     safe = "cd " + target + "; cat schema.json"
                     self.assertTrue(sp.unresolved_directory(safe, policy, root))
-                    self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, root))
+                    self.assertIsNone(unconsented_reason("Bash", {"command": safe}, policy, root))
                     current, _ = self.approved(policy, safe)
                     self.assertTrue(sp.check(safe, current, cwd=root).allowed)
 
@@ -658,7 +671,7 @@ class ConsentVariantsTests(unittest.TestCase):
                             parsed = sp.parse_command(command, None)
                             self.assertEqual("cat", parsed.segments[-1].words[0])
                             current, _ = self.approved(policy, command)
-                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                            self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                             self.assertFalse(sp.check(command, current).allowed)
 
     @posix_shell
@@ -675,12 +688,12 @@ class ConsentVariantsTests(unittest.TestCase):
                 with self.subTest(role=role, expansion=expansion):
                     self.assertIsNone(sp.matching_answer("Bash", {"command": command}, current, None))
                     self.assertFalse(sp.check(command, current).allowed)
-                    self.assertIsNone(cp.refused_operation([command], current,
+                    self.assertIsNotNone(cp.refused_operation([command], current,
                         grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
             for expansion in ("${x:-$(git push --force origin main)}", "$[1 + $(git push --force origin main)]"):
                 command = "ls @(" + expansion + ")"
                 with self.subTest(role=role, expansion=expansion):
-                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                     self.assertFalse(sp.check(command, current).allowed)
             for expansion in ('${x:-$(printf ")"; git push --force origin main)}',
                               '$[1 + $(printf ")"; git push --force origin main)]',
@@ -694,7 +707,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 with self.subTest(role=role, expansion=expansion), tempfile.TemporaryDirectory() as root:
                     # Keep the cwd away from stores so the outer brace operand
                     # cannot mask a lost substitution's Git guard.
-                    self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, current, root)).lower())
+                    self.assertIn("git", str(unconsented_reason("Bash", {"command": command}, current, root)).lower())
                     self.assertFalse(sp.check(command, current, cwd=root).allowed)
             # Slash-bearing brace operands retain the existing conservative
             # credential guard (PA-28); they are not benign-consent examples.
@@ -703,7 +716,7 @@ class ConsentVariantsTests(unittest.TestCase):
                 command = "ls /outside/api/@(" + expansion + "); printf done"
                 with self.subTest(role=role, expansion=expansion):
                     self.assertEqual("printf", sp.parse_command(command, None).segments[-1].words[0])
-                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                    self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                     self.assertIsNotNone(cp.refused_operation([command], policy,
                         grants.ConsentBroker("owner/repo", platform="linux"), "claude"))
                     self.assertTrue(sp.check(command, current).allowed)
@@ -719,7 +732,7 @@ class ConsentVariantsTests(unittest.TestCase):
             for command in commands:
                 with self.subTest(role=role, command=command), tempfile.TemporaryDirectory() as root:
                     policy, _ = self.approved(sp.StagePolicy(role), command)
-                    self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, policy, root)).lower())
+                    self.assertIn("git", str(unconsented_reason("Bash", {"command": command}, policy, root)).lower())
                     self.assertFalse(sp.check(command, policy, cwd=root).allowed)
 
     @posix_shell
@@ -755,7 +768,7 @@ class ConsentVariantsTests(unittest.TestCase):
                             self.assertTrue(baseline.stdout.endswith("later segment ran\n"), baseline.stdout)
                             with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
                                 for role in ("resolve", "rereview"):
-                                    self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, sp.StagePolicy(role), root))
+                                    self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, sp.StagePolicy(role), root))
 
     REV014_EXTGLOB_FORMS = (
         'printf \'%s\' "$(printf \'%s\' @(for ((0))); for ((;;)) do case a in a) {cmd} ;; esac; break; done)"',
@@ -844,13 +857,13 @@ class ConsentVariantsTests(unittest.TestCase):
                         parsed = sp.parse_command(command, None)
                         self.assertIn(["git", "push", "--force", "origin", "main"],
                                       [segment.words for segment in parsed.segments])
-                        self.assertIn("git", str(sp.protected_reason("Bash", {"command": command}, current, root)).lower())
+                        self.assertIn("git", str(unconsented_reason("Bash", {"command": command}, current, root)).lower())
                         self.assertFalse(sp.check(command, current, cwd=root).allowed)
                         self.assertIsNone(cp.refused_operation([command], current,
-                            grants.ConsentBroker("owner/repo", platform="linux"), executor))
+                            grants.ConsentBroker("owner/repo", platform="linux"), executor, root))
                     command = form.replace("{cmd}", "cat ~/.ssh/id_rsa")
                     with self.subTest(executor=executor, role=role, command=command):
-                        self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                        self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                         self.assertFalse(sp.check(command, current).allowed)
 
     @posix_shell
@@ -869,7 +882,7 @@ class ConsentVariantsTests(unittest.TestCase):
             command = 'printf "%s" "$(' + body + ')"; printf done'
             with self.subTest(command=command):
                 self.assertEqual(["printf", "done"], sp.parse_command(command, None).segments[-1].words)
-                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
         for command in ("echo $(case a in a", "echo $(case a in a) true ;; esac"):
             with self.subTest(command=command), self.assertRaisesRegex(sp.PolicyError, "unterminated"):
                 sp.parse_command(command, None)
@@ -882,7 +895,7 @@ class ConsentVariantsTests(unittest.TestCase):
                     command = form.replace("{cmd}", "printf safe")
                     with self.subTest(role=role, command=command):
                         policy = sp.StagePolicy(role, tmpdir=root)
-                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, root))
                         self.assertIsNotNone(cp.refused_operation([command], policy,
                             grants.ConsentBroker("owner/repo", platform="linux"), "claude", root))
                         approved, _ = self.approved(policy, command, cwd=root)
@@ -925,7 +938,7 @@ class ConsentVariantsTests(unittest.TestCase):
                     self.assertIn("hidden command ran", baseline.stdout)
                     with patch.object(sp, "CREDENTIAL_STORES", (str(store),)):
                         for role in ("resolve", "rereview"):
-                            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command},
+                            self.assertIsNotNone(unconsented_reason("Bash", {"command": command},
                                                                      sp.StagePolicy(role), root))
 
     REV015_FORMS = (
@@ -976,10 +989,14 @@ class ConsentVariantsTests(unittest.TestCase):
                                 segments = sp.parse_command(command, None).segments
                                 self.assertTrue(any(segment.words[:1] == [body.split()[0]]
                                                     for segment in segments), segments)
-                                self.assertIsNotNone(sp.protected_reason('Bash', {'command': command}, policy, root))
+                                self.assertIsNotNone(unconsented_reason('Bash', {'command': command}, policy, root))
                                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
-                                self.assertIsNone(cp.refused_operation([command], policy,
-                                    grants.ConsentBroker('owner/repo', platform='linux'), executor, root))
+                                request = cp.refused_operation([command], policy,
+                                    grants.ConsentBroker('owner/repo', platform='linux'), executor, root)
+                                if body.startswith('cat '):
+                                    self.assertIsNotNone(request)
+                                else:
+                                    self.assertIsNone(request)
 
     @posix_shell
     def test_rev015_bash_baseline_and_real_hook_allow_and_deny(self):
@@ -1036,7 +1053,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         'echo time coproc git push --force origin main; printf done'):
             with self.subTest(command=command):
                 policy, _ = self.approved(sp.StagePolicy('resolve'), command)
-                self.assertIsNone(sp.protected_reason('Bash', {'command': command}, policy, None))
+                self.assertIsNone(unconsented_reason('Bash', {'command': command}, policy, None))
                 self.assertTrue(sp.check(command, policy).allowed)
 
     #: Quoted spellings of reserved words. Bash recognises a reserved word
@@ -1070,7 +1087,7 @@ class ConsentVariantsTests(unittest.TestCase):
                             with self.subTest(executor=executor, role=role, command=command):
                                 segments = sp.parse_command(command, None).segments
                                 self.assertTrue(any(segment.words[:1] == ['find'] for segment in segments), segments)
-                                self.assertIn('find', str(sp.protected_reason('Bash', {'command': command},
+                                self.assertIn('find', str(unconsented_reason('Bash', {'command': command},
                                                                               policy, root)))
                                 self.assertFalse(sp.check(command, policy, cwd=root).allowed)
                                 self.assertIsNone(cp.refused_operation([command], policy,
@@ -1152,8 +1169,8 @@ class ConsentVariantsTests(unittest.TestCase):
                             policy = self.rev014_grant(role, executor)
                             # `> ""` is itself refused by the redirect guard; the
                             # separate `git push` segment keeps its own guard.
-                            self.assertIsNotNone(sp.protected_reason('Bash', {'command': command}, policy, root))
-                            self.assertIn('git', str(sp.protected_reason(
+                            self.assertIsNotNone(unconsented_reason('Bash', {'command': command}, policy, root))
+                            self.assertIn('git', str(unconsented_reason(
                                 'Bash', {'command': 'git push --force origin main'}, policy, root)).lower())
                             self.assertFalse(sp.check(command, policy, cwd=root).allowed)
 
@@ -1169,7 +1186,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         "cat @(x|`git push --force origin main`)"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         for operand in ("@(a;git push --force origin main)", "@(x|foo bar)",
                         "@(x|foo>bar)", "!(x|foo bar)"):
@@ -1177,7 +1194,7 @@ class ConsentVariantsTests(unittest.TestCase):
             with self.subTest(operand=operand):
                 self.assertEqual([["printf", "%s", operand]],
                                  [segment.words for segment in sp.parse_command(command, None).segments])
-                self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, None))
                 current, _ = self.approved(policy, command)
                 self.assertTrue(sp.check(command, current).allowed)
 
@@ -1193,7 +1210,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         "cat $HO\\\nME/.ssh/id_rsa", "cat ${HO\\\nME}/.codex/auth.json"):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
         self.assertEqual([["printf", "a\nb"]], [item.words for item in sp.parse_command("printf $'a\\nb' | cat",
                                                                                          None).segments][:1])
@@ -1202,7 +1219,7 @@ class ConsentVariantsTests(unittest.TestCase):
                      "printf '%s' $'\\x00' | cat", "# note \\\ncat README.md"):
             with self.subTest(command=safe), warnings.catch_warnings():
                 warnings.simplefilter("error")
-                self.assertIsNone(sp.protected_reason("Bash", {"command": safe}, policy, None))
+                self.assertIsNone(unconsented_reason("Bash", {"command": safe}, policy, None))
 
     @posix_shell
     def test_unresolved_directory_asks_for_project_paths_below_it(self):
@@ -1218,7 +1235,7 @@ class ConsentVariantsTests(unittest.TestCase):
                                 "source .venv/bin/activate && rm -rf build/cache/*",
                                 'cd "$X" && cp -r cli/templates "$TMPDIR/t"'):
                     with self.subTest(command=command):
-                        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, root))
+                        self.assertIsNone(unconsented_reason("Bash", {"command": command}, policy, root))
                         self.assertTrue(sp.unresolved_directory(command, policy, root))
                         current, _ = self.approved(policy, command, cwd=root)
                         self.assertTrue(sp.check(command, current, cwd=root).allowed)
@@ -1229,7 +1246,7 @@ class ConsentVariantsTests(unittest.TestCase):
                         'cd "$X" && cat sub/id*', 'cd "$X" && cat x/*pem', 'cd "$X" && cat cache/*'):
             with self.subTest(command=command):
                 current, _ = self.approved(policy, command)
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, current, None))
+                self.assertIsNotNone(unconsented_reason("Bash", {"command": command}, current, None))
                 self.assertFalse(sp.check(command, current).allowed)
 
     def test_rev004_invalid_answers_retry_without_saving_rejected_grants(self):

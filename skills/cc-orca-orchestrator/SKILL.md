@@ -386,7 +386,7 @@ reroute it to an executor whose access is already authorized. The user applies
 configuration changes; the agent does not edit its own sandbox exceptions.
 These remedies are a fallback for a stage without the runtime issue snapshot
 of [#397](https://github.com/datacas/code-cycle-toolkit/issues/397).
-Never offer cycle, repository, or forever consent for credential reads.
+Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. Token disclosure through gh auth remains guarded. Every access stays audited.
 
 Every stop before implementation reports `pr_number: null`. When it needs
 decisions, show one summary line and ask the result's `questions` one at a

@@ -117,6 +117,13 @@ def consent_role(role: str | None) -> str | None:
     return "review" if role in NO_GLOBAL_ROLES else role
 
 
+def credential_role_allowed(operation: dict[str, Any] | None, role: str) -> bool:
+    sensitive = (operation or {}).get("sensitive", {})
+    return (not sensitive.get("stores") or role in {"implement", "resolve"}
+            or operation is not None and operation.get("role") == role
+            and sensitive.get("cycle_only") is True)
+
+
 def command_options(role: str, *, unique_path: str | None = None) -> list[str]:
     """The scopes offered for an exact operation.
 
@@ -244,7 +251,7 @@ def pattern_covers_operation(pattern: dict[str, Any], op: dict[str, Any]) -> boo
     """A simple-command matcher never implicitly authorizes shell source."""
     from stage_permissions import normalized_command
     shell = op.get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]
-    return not op.get("guard_consent") and (not shell or pattern.get("compound") is True) and pattern_matches(
+    return not op.get("guard_consent") and not op.get("sensitive") and (not shell or pattern.get("compound") is True) and pattern_matches(
         pattern.get("pattern", {}).get("regex", ""), normalized_command(op))
 
 
@@ -281,6 +288,8 @@ def make_grant(op: dict[str, Any], executor: str, platform: str) -> SensitiveGra
     warnings = compose_warnings(op)
     if warnings:
         risks += " Compose warnings: " + "; ".join(warnings) + "."
+    if op.get("sensitive"):
+        risks = op["sensitive"]["warning"] + " " + risks
     if op.get("guard_consent"):
         risks = ("Exact interpreter consent: options and aliases may execute programs or write outside the cycle; "
                  "publication guards cannot inspect hidden operations. "
@@ -350,7 +359,8 @@ def from_entry(entry: dict[str, Any]) -> SensitiveGrant | None:
     if (not isinstance(op, dict) or op.get("version") != 1
             or not isinstance(op.get("role"), str) or not isinstance(op.get("pattern"), dict)
             or op.get("tool") not in {"Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"}
-            or not set(op) <= {"version", "role", "tool", "pattern", "compose", "check", "guard_consent"}
+            or not set(op) <= {"version", "role", "tool", "pattern", "compose", "check", "guard_consent", "sensitive"}
+            or ("sensitive" in op and not isinstance(op["sensitive"], dict))
             or ("guard_consent" in op and op["guard_consent"] is not True)
             or ("check" in op and not isinstance(op["check"], str))
             or ("compose" in op and not (isinstance(op["compose"], dict)
@@ -381,6 +391,8 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     warnings = compose_warnings(op)
     # A disclosed host access comes before the generic risk, so it is never cut.
     warned = f"WARNING: {'; '.join(warnings)[:160]}. " if warnings else ""
+    if op.get("sensitive"):
+        warned = op["sensitive"]["warning"] + " "
     if op.get("guard_consent") and not compose_timeout(op):
         warned = ("WARNING: interpreter consent; options and aliases can execute programs or write outside the cycle; "
                   "publication guards cannot inspect hidden operations. "
@@ -410,6 +422,18 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
     if saved:
         scope_note += (f" {TOOL_RESULTS_OPERAND} matches any saved output of the current "
                        "session, whose content may be untrusted.")
+    if op.get("sensitive"):
+        sensitive = op["sensitive"]
+        moves = sensitive.get("movements", [])
+        binding = (" Bindings: " + "; ".join(
+            f"{move['remote']} {move['ref']} {move['before'] or 'absent'} -> {move['after'] or 'deleted'}"
+            for move in moves)) if moves else ""
+        return {"id": question_id,
+                "prompt": (f"{role}: {sensitive['warning']} {command[:140]}.{binding} "
+                           "Full bindings are in the consent record. Approve this exact operation?")[:600],
+                "options": (["this cycle", "deny"] if sensitive.get("cycle_only") else
+                            command_options(role, unique_path=unique)),
+                "recommended": None, "blocks": [f"grant:{grant.id}"]}
     return {"id": question_id,
             "prompt": (f"{role}: {warned}{compound}{command[:140]}.{scope_note}{detail[:120]} " +
                        ("Exact only; earlier grants do not reach review. " if op.get("guard_consent") else
@@ -420,7 +444,7 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
                        f"Outside table: {reason[:40]}. Risk: {scope.risks[:60]} "
                        "Pro: finish this operation. Con: extra access persists for the selected scope. "
                        "Protected commands receive no pattern authorization.")[:600],
-            "options": (["this cycle", "deny"] if compose_timeout(op) else
+            "options": (["this cycle", "deny"] if compose_timeout(op) or op.get("sensitive", {}).get("cycle_only") else
                         command_options(str((grant.operation or {}).get("role", role)), unique_path=unique)),
             "recommended": None,
             "blocks": [f"grant:{grant.id}"]}
@@ -778,13 +802,14 @@ class ConsentStore:
         revocation audit trail.
         """
         revoked_at = revoked_at or datetime.now(timezone.utc).isoformat()
-        same = {**operation, "role": None}
+        role_bound = operation.get("sensitive", {}).get("role_bound")
+        same = operation if role_bound else {**operation, "role": None}
         for other_id, others in list((payload["repos"].get(repo_id) or {}).items()):
             if other_id == grant.id or not isinstance(others, dict):
                 continue
             for key, other in list(others.items()):
                 stored = other.get("operation") if isinstance(other, dict) else None
-                if (isinstance(stored, dict) and {**stored, "role": None} == same
+                if (isinstance(stored, dict) and (stored if role_bound else {**stored, "role": None}) == same
                         and other.get("executor") == executor
                         and other.get("platform") == platform and selected(other)):
                     others.pop(key)
@@ -1023,6 +1048,10 @@ class ConsentBroker:
             scope = grant.scope_for(executor, self.platform)
             if not (op and scope is not None):
                 continue
+            if not credential_role_allowed(op, role):
+                continue
+            if op.get("sensitive", {}).get("role_bound") and op.get("role") != role:
+                continue
             answer, source = self._resolve(grant, scope, allow_global=allow_global)
             if compose_timeout(op) and answer != DENY and source not in {"cycle", "--grant"}:
                 continue
@@ -1044,6 +1073,8 @@ class ConsentBroker:
             if grant_id in GRANTS:
                 continue
             grant = self.registry.get(grant_id)
+            if grant is not None and not credential_role_allowed(grant.operation, role):
+                continue
             if grant is not None and grant.sandbox and not self._sandbox_role(grant, role):
                 continue
             if grant is None:
@@ -1069,6 +1100,7 @@ class ConsentBroker:
             return
         execution_grants = [grant for grant in self.registry.values()
                           if (grant.operation or {}).get("version") == 2
+                          or (grant.operation or {}).get("sensitive")
                           or (grant.operation or {}).get("guard_consent")
                           or (grant.operation or {}).get("pattern", {}).get("words", [])[:1] == ["<SHELL>"]]
         if not execution_grants:
@@ -1163,6 +1195,8 @@ class ConsentBroker:
         """Revalidate effective decisions immediately before each dispatch."""
         granted, denied = set(), set()
         for grant in self.registry.values():
+            if not credential_role_allowed(grant.operation, role):
+                continue
             if grant.sandbox is not None:
                 if not self._sandbox_role(grant, role):
                     continue
@@ -1222,7 +1256,8 @@ class ConsentBroker:
                               "showed this scope")
             return answer, RUN_ONLY_SOURCE
         # Configuration remains a separate explicit source of authorization.
-        if grant.id in self.preauthorized and not compose_timeout(grant.operation):
+        cycle_only = (grant.operation or {}).get("sensitive", {}).get("cycle_only")
+        if grant.id in self.preauthorized and not compose_timeout(grant.operation) and not cycle_only:
             return ALLOW_PERSISTENT, "project configuration"
         if key in self._cycle_answers:
             if (getattr(grant, "operation", None) and self.cycle_scope and self.store
@@ -1235,7 +1270,7 @@ class ConsentBroker:
             stored = self.store.load(self.cycle_scope, grant, scope)
             if stored is not None:
                 return (ALLOW_CYCLE if stored == "allow" else DENY), "cycle"
-        if self.store is not None and not (grant.sandbox and grant.sandbox.get("role")):
+        if self.store is not None and not cycle_only and not (grant.sandbox and grant.sandbox.get("role")):
             try:
                 stored = self.store.load(self.repo_id, grant, scope, allow_global=allow_global)
             except GrantError as error:
@@ -1263,6 +1298,8 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        if (grant.operation or {}).get("sensitive", {}).get("cycle_only") and answer not in {ALLOW_CYCLE, DENY}:
+            raise GrantError("this sensitive operation supports this cycle or deny only")
         if compose_timeout(grant.operation) and answer not in {ALLOW_CYCLE, DENY}:
             raise GrantError("Compose resolution timeout supports this cycle or deny only")
         if grant.sandbox is not None:

@@ -233,7 +233,7 @@ retains its observed cause and remains unverified; it is not a consent question.
 Consent does not widen host or OS permissions. In known Git syntax, directly
 expressed force-push, protected destinations and ref deletion keep their guards.
 Credential access, redirects outside `$TMPDIR`, role-owned review
-artefacts and merging/closing PRs keep their existing guards (#457 is separate).
+artefacts and merging/closing PRs keep their existing guards; sensitive operations use #457 consent below.
 In particular, `gh auth token`, `gh auth status -t/--show-token` (including
 bundled short flags), and authentication mutations such as `login`, `logout`,
 `refresh`, `switch` and `setup-git` retain the credential guard in every role,
@@ -887,37 +887,40 @@ entry from another scope or report a silent success.
 Resuming a work item reloads its command-consent cycle lineage; a second work
 item starts a separate lineage and does not receive cycle-only decisions.
 
-Force-push, direct pushes to base/protected branches, deletion of Git refs and
-direct reads naming a protected credential store cannot be granted: publication
-integrity and credential confidentiality require these boundaries. Under
-[agent capability parity](#agent-capability-parity) the audit classifies these
-never-grant boundaries, Git configuration edits and the refusal of `forever`
-for review roles as toolkit vetoes. They are to become consent with a risk
-warning and a record (rows PA-25 to PA-31 of the
-[audit](capability-parity-audit.md#sensitive-operations)); until that change
-ships, the behaviour below still applies. The hook
-recognizes a store named as a complete argument or edit target. It does not
-inspect recursive ancestor reads (`grep -r token ~`), attached option paths
-(`grep -f~/.ssh/id_ed25519 ...`, `--file=...`) or opaque program internals.
-Credential confidentiality for these forms requires the external sandbox's
-deny-read rules; operation consent never widens those rules. Direct command consent
-also retains argument validation, redirect and workspace/publication guards;
-Git configuration edits remain guarded because they can turn later reads into
-code execution. Foreground and verification-timeout safeguards remain in force.
-Exact consent permits `git ls-remote origin ...` and a GET of
-`gh api repos/<cycle-repo>/pulls/<current-pr> [--jq <filter>]`. Git execution
-options, another remote, API method overrides, input fields and other PRs
-remain guarded. Other Git/GitHub argument or publication guard failures are
-not offered as grantable questions: an answer could not override those guards.
-Read-tool validation distinguishes file operands from grep patterns, jq
-filters and option data. The runtime's exact supplied evidence file is readable
-outside the workspace without consent; its directory and siblings gain no access.
-An interpreter (`python3 -c`, `bash -c`, `node -e`, etc.) can be granted for its
-concrete command. The question warns that the hook **cannot inspect or enforce
-restrictions inside that code**. Never-grant operations inside an authorized
-interpreter need external isolation: sandbox rules, filesystem permissions,
-restricted credentials and code-host protections. A command grant never widens
-that isolation.
+## Sensitive operation consent (#457)
+
+PA-25 to PA-29 and publication under PA-31 use a warning, explicit consent and
+an audit record. Force-push warns about rewriting published history, base pushes
+about changing the integration target, and ref deletion about removing a ref
+others may use. They offer **this cycle / deny** only. Consent binds the resolved
+remote identity, exact ref and old/new SHAs; a changed binding asks again.
+Patterns, repository and global grants do not authorize these ref operations.
+
+Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited.
+
+Git configuration edits warn that a later allowed Git command can execute a
+program. Linked worktrees share the common Git directory: editing its config
+also changes the user's main repository. Consent permits the exact edit.
+
+Publication without a confirmed sandbox receives an explicit reduced-guarantee
+warning and operation consent. This covers publication only; configured tests
+remain #291. It creates no host-side push fallback. A host permission denial,
+OS restriction, missing executable, infrastructure failure or provider branch
+protection is still a real limit, with its actual cause, never a consent grant.
+
+The publication audit records an approved move as `authorized_operation` only
+when remote identity, exact ref and old/new SHAs all match an allow. Unmatched
+observed moves retain the existing breach/external-change classification. Its
+coverage is the cycle branch, base branch and protected branches; tags and
+other refs are out of scope. Merging and closing remain role contracts.
+PA-30 is a role contract with PA-14: a forever grant never reaches review or
+rereview, which analyse untrusted change-request code. Cycle and repository
+consents retain #500 behaviour except the credential-read rule above.
+
+The hook inspects directly expressed operations, including known Git global
+options. Interpreter internals cannot be inspected: their restrictions depend
+on external isolation, filesystem permissions and code-host protections.
+Foreground and verification-timeout safeguards remain in force.
 
 The stage report lists each refused command, read from Claude's
 `permission_denials` and the hook's stream. A denied `docker compose …` in a stage that then reports

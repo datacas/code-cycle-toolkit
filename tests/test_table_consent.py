@@ -160,8 +160,6 @@ class TableConsentTests(unittest.TestCase):
         for role, command in (("review", "gh issue create --title fixture"),
                 ("issue_review", "gh pr comment 1 --body fixture"),
                 ("review", "git stash"), ("review", "git worktree add fixture"),
-                ("implement", "git -c color.ui=never push --force origin main"),
-                ("implement", "git -C . branch -D fixture"),
                 ("implement", "gh pr merge 1"), ("implement", "gh pr close 1"),
                 ("implement", "gh pr review 1 --approve")):
             policy = replace(self.policy, role=role)
@@ -197,40 +195,21 @@ class TableConsentTests(unittest.TestCase):
                     self.assertTrue(self.hook(allowed, command))
                     self.assertFalse(self.hook(allowed, command + " different"))
 
-    def test_git_attr_source_keeps_direct_publication_guards(self):
-        # These commands are inspected, never executed against a remote.
-        for executor in ("claude", "codex"):
-            for option in ("--attr-source HEAD", "--attr-source=HEAD"):
-                for operation in ("push --force origin main", "push origin HEAD:main",
-                                  "branch -D topic", "tag -d fixture", "update-ref -d refs/heads/topic"):
-                    command = f"git {option} {operation}"
-                    with self.subTest(executor=executor, command=command):
-                        reason = sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root))
-                        self.assertIsNotNone(reason)
-                        op = sp.operation("Bash", {"command": command}, self.policy, str(self.root))
-                        allowed = replace(self.policy, command_permissions=({"operation": op, "decision": "allow"},))
-                        self.assertFalse(self.hook(allowed, command))
-                        self.assertIsNone(cp.refused_operation([command], self.policy,
-                            grants.ConsentBroker("owner/repo", platform="linux"), executor, str(self.root)))
+    def test_known_global_options_route_sensitive_operations_to_exact_consent(self):
+        # Version-dependent options are parsed here; executable parity is in
+        # test_sensitive_consent against disposable real repositories.
+        for option in ("--attr-source HEAD", "--attr-source=HEAD", "--shallow-file HEAD"):
+            for action in ("push --force origin main", "push origin HEAD:main",
+                           "branch -D topic", "tag -d fixture", "update-ref -d refs/heads/topic"):
+                command = f"git {option} {action}"
+                with self.subTest(command=command):
+                    self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+                    detail = sp.sensitive_operation("Bash", {"command": command}, self.policy,
+                                                    str(self.root), resolve=False)
+                    self.assertTrue(detail["cycle_only"])
+                    self.assertFalse(self.hook(self.policy, command))
         self.assertIn("needs a value", sp.protected_reason("Bash", {"command": "git --attr-source"},
                                                          self.policy, str(self.root)) or "")
-
-    def test_git_shallow_file_keeps_direct_publication_guards(self):
-        # Reproduce REV-004 through inspection and the hook, never execute a
-        # force-push or deletion. The exact grant must not erase role guards.
-        for executor in ("claude", "codex"):
-            for role in ("implement", "resolve"):
-                policy = replace(self.policy, role=role)
-                for operation in ("push --force origin main", "branch -D topic"):
-                    command = f"git --shallow-file HEAD {operation}"
-                    with self.subTest(executor=executor, role=role, command=command):
-                        self.assertIsNotNone(sp.protected_reason(
-                            "Bash", {"command": command}, policy, str(self.root)))
-                        op = sp.operation("Bash", {"command": command}, policy, str(self.root))
-                        allowed = replace(policy, command_permissions=({"operation": op, "decision": "allow"},))
-                        self.assertFalse(self.hook(allowed, command))
-                        self.assertIsNone(cp.refused_operation([command], policy,
-                            grants.ConsentBroker("owner/repo", platform="linux"), executor, str(self.root)))
 
     def test_git_global_options_do_not_guess_value_arity(self):
         value_options = ("--shallow-file HEAD", "--shallow-file=HEAD",
@@ -246,8 +225,10 @@ class TableConsentTests(unittest.TestCase):
                                         ("branch -D topic", "deletion of Git refs")):
                 command = f"git {option} {operation}"
                 with self.subTest(command=command):
-                    self.assertIn(expected, sp.protected_reason(
-                        "Bash", {"command": command}, self.policy, str(self.root)) or "")
+                    self.assertIsNone(sp.protected_reason(
+                        "Bash", {"command": command}, self.policy, str(self.root)))
+                    self.assertTrue(sp.sensitive_operation("Bash", {"command": command}, self.policy,
+                                                          str(self.root), resolve=False)["cycle_only"])
         for option in ("--shallow-file", "--super-prefix"):
             with self.subTest(missing=option):
                 self.assertIn("needs a value", sp.protected_reason(
@@ -293,7 +274,12 @@ class TableConsentTests(unittest.TestCase):
                 self.assertFalse(self.hook(allowed, command + " different"))
         for guarded in (command + " > " + shlex.quote(str(self.root.parent / "outside.txt")),
                         command + " " + shlex.quote(str(Path.home() / ".codex/auth.json"))):
-            self.assertIsNotNone(sp.protected_reason("Bash", {"command": guarded}, self.policy, str(self.root)))
+            self.assertFalse(self.hook(self.policy, guarded))
+            if "auth.json" in guarded:
+                self.assertEqual("credential", sp.sensitive_operation(
+                    "Bash", {"command": guarded}, self.policy, str(self.root))["kind"])
+            else:
+                self.assertIsNotNone(sp.protected_reason("Bash", {"command": guarded}, self.policy, str(self.root)))
 
     def test_git_shallow_file_read_retains_exact_consent(self):
         command = "git --shallow-file HEAD status --porcelain"
@@ -316,8 +302,7 @@ class TableConsentTests(unittest.TestCase):
             for prefix in ("timeout 5", "timeout -s KILL -k 2s 5s", "nice -n 5", "command --",
                            "env FIXTURE=1", "env -i -u FIXTURE", "env -C . timeout 5 nice -n 5",
                            "rtk proxy timeout --signal=KILL 5"):
-                for operation in ("gh auth token", "gh auth status -at", "git push --force origin main",
-                                  "git branch -D fixture", "gh pr merge 1"):
+                for operation in ("gh auth token", "gh auth status -at", "gh pr merge 1"):
                     command = f"{prefix} {operation}"
                     with self.subTest(executor=executor, command=command):
                         self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
@@ -346,7 +331,7 @@ class TableConsentTests(unittest.TestCase):
     def test_runner_directory_and_environment_reach_git_inspector(self):
         command = "env -C /fixture GIT_DIR=repo.git timeout 5 git push origin HEAD"
         with patch.object(sp.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "main\n", "")) as run:
-            self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+            self.assertIsNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
         self.assertEqual("/fixture", run.call_args.kwargs["cwd"])
         self.assertEqual(["git", "--no-pager", "--git-dir=repo.git", "rev-parse", "--abbrev-ref", "HEAD"],
                          run.call_args.args[0])
@@ -356,7 +341,9 @@ class TableConsentTests(unittest.TestCase):
         for reader in ("grep token", "rg token", "cat"):
             command = f"env -C {shlex.quote(str(Path.home()))} {reader} .codex/auth.json"
             with self.subTest(reader=reader):
-                self.assertIsNotNone(sp.protected_reason("Bash", {"command": command}, self.policy, str(self.root)))
+                self.assertFalse(self.hook(self.policy, command))
+                self.assertEqual(["~/.codex/auth.json"], sp.sensitive_operation(
+                    "Bash", {"command": command}, self.policy, str(self.root))["stores"])
                 self.assertIsNone(sp.protected_reason("Bash", {"command": "echo " + command}, self.policy, str(self.root)))
 
     def test_gh_credentials_stay_protected_after_exact_consent(self):

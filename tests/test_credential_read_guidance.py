@@ -37,10 +37,7 @@ class CredentialReadGuidanceTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, section)
 
-        self.assertRegex(
-            section,
-            re.compile(r"do not grant cycle, repository,\s+or forever consent", re.IGNORECASE),
-        )
+        self.assertIn("fresh cycle-scoped consent", section)
 
     def test_the_issue_review_skill_does_not_ask_the_stage_to_hash_the_snapshot(self) -> None:
         # The issue-review command table has no hashing command, and the
@@ -108,10 +105,8 @@ class CredentialReadGuidanceTests(unittest.TestCase):
                 self.assertIn("whole gh store", guidance)
                 self.assertNotIn("interim", guidance.lower())
                 self.assertIn("[#397]", guidance)
-                self.assertRegex(
-                    guidance,
-                    re.compile(r"Never offer cycle, repository, or forever consent for credential reads", re.IGNORECASE),
-                )
+                self.assertIn("fresh cycle-scoped consent", guidance)
+                self.assertIn("never inherited from another role", guidance)
 
 
 if __name__ == "__main__":
