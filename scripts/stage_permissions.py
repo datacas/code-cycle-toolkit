@@ -1388,6 +1388,9 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
         selection.extend("--" + {"GIT_DIR": "git-dir", "GIT_WORK_TREE": "work-tree"}[name] + "=" + value
                          for assignment in environment for name, _, value in [assignment.partition("=")]
                          if name in {"GIT_DIR", "GIT_WORK_TREE"})
+        # Repository selectors without the command's own configuration
+        # overrides: what the repository itself configures.
+        selectors = list(selection)
         # Only literal destination/ref settings may enter host-side read-only
         # inspection. Never forward aliases, pagers, transport executables or
         # credential-helper settings from the requested command.
@@ -1472,9 +1475,10 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                         "publication_unconfined": bool(policy.static_only and subcommand == "push"),
                         "warning": "WARNING: Git ref changes need recorded exact consent bound to the remote, ref and old/new SHAs."
                                    + (" Publication runs without a confirmed sandbox." if policy.static_only and subcommand == "push" else "")}
-            def inspect(*arguments: str, optional: bool = False) -> str:
+            def inspect(*arguments: str, optional: bool = False, trusted: bool = False) -> str:
                 try:
-                    done = subprocess.run(["git", "--no-pager", *selection, *arguments], cwd=cwd,
+                    done = subprocess.run(["git", "--no-pager", *(selectors if trusted else selection),
+                                           *arguments], cwd=cwd,
                                           capture_output=True, text=True, timeout=30,
                                           stdin=subprocess.DEVNULL)
                 except (OSError, subprocess.SubprocessError) as error:
@@ -1518,6 +1522,18 @@ def sensitive_operation(tool: str, data: dict[str, Any], policy: Any,
                 urls = inspect("remote", "get-url", "--push", "--all", remote).splitlines()
             else:
                 urls = [remote]
+            # This inspection runs host-side, outside the stage sandbox, before
+            # anyone consents. It contacts only endpoints the repository itself
+            # configures, never a URL or override chosen by the command.
+            configured = {git_remote_identity(url, cwd)
+                          for name in inspect("remote", trusted=True).splitlines()
+                          for direction in ((), ("--push",))
+                          for url in inspect("remote", "get-url", *direction, "--all", name,
+                                             trusted=True).splitlines()}
+            if any(git_remote_identity(url, cwd) not in configured for url in urls):
+                raise PolicyError("Git consent inspection contacts only remote endpoints the repository "
+                                  "configures; add the remote first, which is a Git configuration edit "
+                                  "with its own consent")
             movements = []
             for push_url in urls:
                 remote_id = git_remote_identity(push_url, cwd)
@@ -3736,12 +3752,17 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
             command = f"{tool} {target}" if isinstance(target, str) else tool
         else:
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        inspection_note = ""
         try:
             # A missing docker_host grant is its own question, asked first (#398).
             requested_operation = (None if decision.needs_docker
                                    else operation(tool, tool_input, policy, event.get("cwd")))
-        except (ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError) as error:
             requested_operation = None
+            # A sensitive operation whose bindings cannot be resolved gets no
+            # question; say why instead of leaving the agent waiting for one.
+            if isinstance(error, PolicyError) and decision.rule == "sensitive_consent":
+                inspection_note = f"; no consent can be asked: {error}"
         # Every denial is recorded with the rule that applied and an operation
         # identifier, including an operation that can never be granted (#364).
         rule = decision.rule or ("edit_rule" if editing else "command_table")
@@ -3752,7 +3773,7 @@ def _hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
         note = _journal_denial(policy, event, "hook_edit" if editing else "hook_bash",
                                command, decision.reason, rule=rule, operation_id=operation_id)
         print(_hook_output("deny", f"[layer=toolkit_hook] code-cycle {policy.role} {HOOK_DENIAL_MARKER}: "
-                                   f"{decision.reason}{_journal_note(note)}. {advice} "
+                                   f"{decision.reason}{inspection_note}{_journal_note(note)}. {advice} "
                                    f"COMMAND_PERMISSION_TMPDIR={json.dumps(policy.tmpdir)} "
                                    f"COMMAND_PERMISSION_OPERATION={json.dumps(requested_operation)} "
                                    f"COMMAND_PERMISSION_RULE={json.dumps(rule)} "

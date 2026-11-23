@@ -19,6 +19,7 @@ import executors
 from router import Target
 
 
+@unittest.skipIf(os.name == "nt", "POSIX command baselines; Linux CI covers these fixtures")
 class SensitiveConsentTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -257,6 +258,39 @@ class SensitiveConsentTests(unittest.TestCase):
         result = auditor.verify(before, consents=allowed.command_permissions)
         self.assertEqual(pa.PASSED, result.status)
         self.assertEqual("../remote.git", result.authorized_changes[0]["consented_remote"])
+
+    def test_consent_inspection_never_contacts_an_unconfigured_endpoint(self):
+        # Resolution runs host-side before consent; an endpoint chosen by the
+        # command (URL operand, --repo or a -c override) is never contacted.
+        stranger = self.root / "stranger.git"
+        self.run_git("init", "--bare", str(stranger))
+        contacted = []
+        real = sp.subprocess.run
+
+        def spy(command, *args, **kwargs):
+            if "ls-remote" in command:
+                contacted.append(command[-1])
+            return real(command, *args, **kwargs)
+
+        for command in (f"git push --force {stranger} HEAD:main",
+                        f"git push --force --repo={stranger} HEAD:main",
+                        f"git -c remote.origin.pushurl={stranger} push --force origin HEAD:main"):
+            with self.subTest(command=command), patch.object(sp.subprocess, "run", spy):
+                with self.assertRaisesRegex(sp.PolicyError, "configures"):
+                    sp.operation("Bash", {"command": command}, self.policy, str(self.repo))
+                broker = grants.ConsentBroker("owner/repo", platform="linux", cycle_id="fixture")
+                self.assertIsNone(cp.refused_operation([command], self.policy, broker, "claude", str(self.repo)))
+        self.assertNotIn(str(stranger), contacted)
+        path = self.root / "policy.json"
+        path.write_text(self.policy.to_json())
+        done = subprocess.run([sys.executable, str(Path(sp.__file__)), "hook", str(path)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {
+                "command": f"git push --force {stranger} HEAD:main"}, "cwd": str(self.repo)}),
+            text=True, capture_output=True, timeout=30)
+        self.assertIn("no consent can be asked", done.stdout)
+        # The configured endpoint, under another spelling, still resolves.
+        self.assertTrue(sp.operation("Bash", {"command": "git push --force ../remote.git HEAD:main"},
+                                     self.policy, str(self.repo))["sensitive"]["movements"])
 
     def test_unconfined_publication_does_not_authorize_compound_verification(self):
         policy = replace(self.policy, static_only=True, test_command="python3 -m unittest")

@@ -895,6 +895,11 @@ about changing the integration target, and ref deletion about removing a ref
 others may use. They offer **this cycle / deny** only. Consent binds the resolved
 remote identity, exact ref and old/new SHAs; a changed binding asks again.
 Patterns, repository and global grants do not authorize these ref operations.
+The runtime resolves those bindings host-side, outside the stage sandbox and
+before anyone consents, so it contacts only remote endpoints the repository
+itself configures. A URL operand, `--repo` or a `-c remote.*` override that
+names another endpoint gets no question and the denial says why; add the remote
+first, a Git configuration edit with its own consent, and push to it.
 
 Credential reads use recorded exact consent under #457. Implement and resolve use normal scopes; review, rereview, verify, issue_review, security and coordinate require fresh cycle-scoped consent for the exact role and store, never inherited from another role or authorized by a pattern, repository or global grant. Only the approved store is removed from sandbox deny-read rules. `gh auth token` remains guarded. Every access stays audited.
 
