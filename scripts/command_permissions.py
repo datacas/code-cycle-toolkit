@@ -735,7 +735,7 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
     reason = None
     serious = next((item for item in denials if item["class"] not in RECONCILABLE_DENIALS), None)
     if claimed not in completed:
-        reason = f"the result declares no completion status valid for the {role} role"
+        reason = f"the block declares no completion status valid for the {role} role"
     elif serious is not None:
         reason = f"{serious['class']} denial: {serious['command']}"
     elif payload.get("publication_pending") is True:

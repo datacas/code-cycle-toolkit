@@ -721,7 +721,7 @@ class BlockedReconciliationTests(unittest.TestCase):
         return {"tool": "Bash", "input": {"command": command}, **extra}
 
     def body_edit(self, body="Closes #435\n"):
-        path = self.root / "pr-body.md"
+        path = self.tmpdir / "pr-body.md"
         path.write_text(body)
         # The command table lexes POSIX shell text, so the path is written in
         # POSIX form: a Windows `C:\...` would lose its backslashes.
@@ -1128,7 +1128,8 @@ class ReconciledCycleTests(RunCycleTestCase):
     """The driver continues from the verified head, or stops as before (#364)."""
 
     def cycle(self, denials, publication, *, completed="IMPLEMENTED", prompt=None,
-              status="BLOCKED", start_from="implement", change_request_id=None, **fields):
+              status="BLOCKED", start_from="implement", change_request_id=None,
+              history_remote=None, **fields):
         claude = PublishingClaude(denials, completed, fields, status=status)
         broker = grants.ConsentBroker("owner/api", platform="linux", prompt=prompt,
                                       store=grants.ConsentStore(self.home / "consents.json"))
@@ -1139,7 +1140,8 @@ class ReconciledCycleTests(RunCycleTestCase):
             registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
             profiles=profiles, issue_review="off", consent=broker,
             publication_observer=lambda *_: publication, start_from=start_from,
-            change_request_id=change_request_id, trusted_authors=("datacas",))
+            change_request_id=change_request_id, trusted_authors=("reviewer",),
+            history_remote=history_remote)
         return report, claude
 
     def journal(self, report, component):
@@ -1205,10 +1207,14 @@ class ReconciledCycleTests(RunCycleTestCase):
         self.assertEqual("FAILED", recorded[0]["correlation"]["original_status"])
 
     def test_523_failed_resolve_reconciles_and_continues_to_rereview(self):
+        class EmptyHistory:
+            def comments(self, *_args):
+                return []
+
         report, claude = self.cycle(
             [{"tool": "Bash", "input": {"command": "git grep refused-probe scripts"}}],
             published(), status="FAILED", completed="RESOLVED", start_from="resolve",
-            change_request_id="442",
+            change_request_id="442", history_remote=EmptyHistory(),
             finding_outcomes=[{"id": "REV-001", "status": "resolved"}])
         self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
         self.assertEqual(["resolve", "rereview"], [stage.role for stage in report.stages])
