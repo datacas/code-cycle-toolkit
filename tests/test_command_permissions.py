@@ -1460,7 +1460,7 @@ class PublishingClaude(Talker):
         denials = []
         for event in self.denials:
             observed = dict(event)
-            tmpdir = policy.tmpdir or "/tmp/code-cycle-dispatch"
+            tmpdir = policy.tmpdir or str(Path(tempfile.gettempdir()) / "code-cycle-dispatch")
             observed["tmpdir"] = tmpdir
             data = dict(observed.get("input", {}))
             if data.get("file_path") == "$TMPDIR/probe.py":
