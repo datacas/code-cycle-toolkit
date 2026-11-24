@@ -667,6 +667,8 @@ def load_resume_requests(directory: Path, repo_id: str, task_id: str) -> tuple[d
         paths = sorted(directory.glob("decisions-*.json"))
     except OSError:
         return ()
+    requests: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for path in reversed(paths):
         try:
             if not path.is_file() or path.stat().st_size > 1_000_000:
@@ -679,9 +681,17 @@ def load_resume_requests(directory: Path, repo_id: str, task_id: str) -> tuple[d
             continue
         permissions = record.get("permissions")
         if not isinstance(permissions, list):
-            return ()
-        return tuple(item for item in permissions if isinstance(item, dict))
-    return ()
+            continue
+        for item in permissions:
+            if not isinstance(item, dict):
+                continue
+            grant_id = item.get("grant")
+            if isinstance(grant_id, str) and grant_id in seen:
+                continue
+            requests.append(item)
+            if isinstance(grant_id, str):
+                seen.add(grant_id)
+    return tuple(requests)
 
 
 class ConsentStore:
@@ -1128,7 +1138,7 @@ class ConsentBroker:
 
     def _resume_grant(self, grant_id: str) -> SensitiveGrant | None:
         """Rebuild a grant only from this task's recorded permission request."""
-        for request in reversed(self.resume_requests):
+        for request in self.resume_requests:
             if request.get("grant") != grant_id:
                 continue
             executor = request.get("executor")
@@ -1194,8 +1204,8 @@ class ConsentBroker:
         if hashes is None:
             return asked
         previous, current = hashes
-        note = f"Compose configuration changed: previous config_sha256 {previous}; current config_sha256 {current}. "
-        return {**asked, "prompt": (note + str(asked.get("prompt", "")))[:600]}
+        note = f"Compose config_sha256 changed: previous {previous}; current {current}. "
+        return {**asked, "prompt": note + str(asked.get("prompt", ""))}
 
     def record_executions(self, commands: list[str], executor: str, policy: Any,
                           cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:

@@ -133,8 +133,10 @@ class ComposeConsentCase(unittest.TestCase):
         directory = self.root / "decisions"
         directory.mkdir(exist_ok=True)
         path = directory / f"decisions-{name}.json"
-        path.write_text(json.dumps({"repo": "owner/repo", "task": task,
-                                   "permissions": permissions}), encoding="utf-8")
+        record = {"repo": "owner/repo", "task": task}
+        if permissions is not None:
+            record["permissions"] = permissions
+        path.write_text(json.dumps(record), encoding="utf-8")
         return path
 
 class ResumeGrantPersistenceTests(unittest.TestCase):
@@ -152,12 +154,17 @@ class ResumeGrantPersistenceTests(unittest.TestCase):
     def test_resume_persists_an_earlier_grant_before_a_different_refusal(self):
         asked, original = self.request()
         grant_x = original.grant_for(asked)
+        asked_y, broker_y = self.request(policy=self.policy(role="implement"))
+        grant_y = broker_y.grant_for(asked_y)
         self.save_decision("a", [self.prior_request(grant_x)])
+        self.save_decision("b", [self.prior_request(grant_y)])
+        self.save_decision("c", None)
         requests = grants.load_resume_requests(self.root / "decisions", "owner/repo", "522")
 
         resumed = self.broker(answers={grant_x.id: "persistent"}, resume_requests=requests)
         resumed.prepare_answers("claude", "implement")
 
+        self.assertFalse(any(grant_x.id in note for note in resumed.notes))
         self.assertTrue(any(entry.get("operation") == grant_x.operation
                             for entry in self.store.list("owner/repo")))
         # The next resume only needs the other outstanding answer; X is already
@@ -205,6 +212,7 @@ class ResumeGrantPersistenceTests(unittest.TestCase):
 
         self.assertIn(old_hash, prompt)
         self.assertIn(new_hash, prompt)
+        self.assertIn("Risk:", prompt)
 
     def test_docs_describe_resume_answer_persistence(self):
         documentation = (ROOT / "docs" / "host-permissions.md").read_text(encoding="utf-8")
