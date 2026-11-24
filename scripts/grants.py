@@ -661,6 +661,29 @@ def default_store_path() -> Path:
     return base / "code-cycle" / "consents.json"
 
 
+def load_resume_requests(directory: Path, repo_id: str, task_id: str) -> tuple[dict[str, Any], ...]:
+    """Read the latest permission definitions asked for this exact work item."""
+    try:
+        paths = sorted(directory.glob("decisions-*.json"))
+    except OSError:
+        return ()
+    for path in reversed(paths):
+        try:
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (not isinstance(record, dict) or record.get("repo") != repo_id
+                or str(record.get("task")) != str(task_id)):
+            continue
+        permissions = record.get("permissions")
+        if not isinstance(permissions, list):
+            return ()
+        return tuple(item for item in permissions if isinstance(item, dict))
+    return ()
+
+
 class ConsentStore:
     """Persistent answers, per user and outside every checkout."""
 
@@ -992,6 +1015,7 @@ class ConsentBroker:
     _consumed_answers: set[str] = field(default_factory=set)
     _observed: dict[str, str | None] = field(default_factory=dict)
     operations: dict[str, SensitiveGrant] = field(default_factory=dict)
+    resume_requests: tuple[dict[str, Any], ...] = ()
     cycle_id: str | None = None
     task_id: str | None = None
 
@@ -1077,12 +1101,17 @@ class ConsentBroker:
             if grant_id in GRANTS:
                 continue
             grant = self.registry.get(grant_id)
+            if grant is None:
+                grant = self._resume_grant(grant_id)
+                if grant is not None:
+                    self.operations[grant_id] = grant
             if grant is not None and not credential_role_allowed(grant.operation, role):
                 continue
             if grant is not None and grant.sandbox and not self._sandbox_role(grant, role):
                 continue
             if grant is None:
-                note = f"{grant_id}: resume grant cannot apply; no matching grant is registered"
+                note = (f"{grant_id}: resume grant cannot apply; no matching grant is registered. "
+                        "Check the id in this work item's earlier permission request, or omit this answer.")
             else:
                 scope = grant.scope_for(executor, self.platform)
                 if scope is None:
@@ -1096,6 +1125,77 @@ class ConsentBroker:
                         continue
             if note not in self.notes:
                 self.notes.append(note)
+
+    def _resume_grant(self, grant_id: str) -> SensitiveGrant | None:
+        """Rebuild a grant only from this task's recorded permission request."""
+        for request in reversed(self.resume_requests):
+            if request.get("grant") != grant_id:
+                continue
+            executor = request.get("executor")
+            platform = request.get("platform")
+            if not isinstance(executor, str) or not isinstance(platform, str):
+                continue
+            entry: dict[str, Any] = {"executor": executor, "platform": platform}
+            if isinstance(request.get("pattern"), dict):
+                entry["operation"] = request["pattern"]
+            if isinstance(request.get("sandbox"), dict):
+                entry["sandbox"] = request["sandbox"]
+            grant = from_entry(entry)
+            if grant is None or grant.id != grant_id:
+                continue
+            effective = request.get("effective_scope")
+            risks = request.get("risks")
+            isolated = request.get("temporary_offered")
+            if not isinstance(effective, str) or not isinstance(risks, str) or not isinstance(isolated, bool):
+                continue
+            scope = grant.scope_for(executor, platform)
+            if (scope is None or scope.effective != effective or scope.risks != risks
+                    or scope.isolated_per_dispatch != isolated):
+                continue
+            self.asked = self.asked | {grant.fingerprint(scope)}
+            return grant
+        return None
+
+    def _compose_drift(self, grant: SensitiveGrant) -> tuple[str, str] | None:
+        operation: dict[str, Any] = grant.operation or {}
+        current = operation.get("compose")
+        if not isinstance(current, dict):
+            return None
+        current_hash = current.get("config_sha256")
+        if not isinstance(current_hash, str):
+            return None
+
+        def same_except_hash(previous: dict[str, Any]) -> bool:
+            candidate = previous.get("compose")
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("config_sha256"), str):
+                return False
+            left, right = dict(operation), dict(previous)
+            left_compose, right_compose = dict(current), dict(candidate)
+            left_compose.pop("config_sha256", None)
+            right_compose.pop("config_sha256", None)
+            left["compose"], right["compose"] = left_compose, right_compose
+            return left == right and candidate["config_sha256"] != current_hash
+
+        candidates: list[dict[str, Any]] = [
+            candidate.operation for candidate in self.registry.values()
+            if candidate.id != grant.id and candidate.operation is not None
+        ]
+        candidates.extend(
+            pattern for request in self.resume_requests
+            if isinstance((pattern := request.get("pattern")), dict)
+        )
+        for previous in reversed(candidates):
+            if same_except_hash(previous):
+                return previous["compose"]["config_sha256"], current_hash
+        return None
+
+    def _with_compose_drift(self, asked: dict[str, Any], grant: SensitiveGrant) -> dict[str, Any]:
+        hashes = self._compose_drift(grant)
+        if hashes is None:
+            return asked
+        previous, current = hashes
+        note = f"Compose configuration changed: previous config_sha256 {previous}; current config_sha256 {current}. "
+        return {**asked, "prompt": (note + str(asked.get("prompt", "")))[:600]}
 
     def record_executions(self, commands: list[str], executor: str, policy: Any,
                           cwd: str | None, *, observed: list[dict[str, Any]] | None = None) -> None:
@@ -1408,7 +1508,8 @@ class ConsentBroker:
         while answer is None and self.prompt is not None:
             self._observe("decision_asked", grant, scope, role)
             source = "interactive"
-            asked = question(grant, scope, role=role, blocker=blocker)
+            asked = self._with_compose_drift(
+                question(grant, scope, role=role, blocker=blocker), grant)
             if validation_error:
                 asked = {**asked, "validation_error": validation_error,
                          "prompt": f"Invalid answer: {validation_error}. " + asked["prompt"]}
@@ -1451,8 +1552,10 @@ class ConsentBroker:
             self._observe("decision_asked", grant, scope, role)
             self.pending.append(PermissionRequest(
                 grant, scope, role,
-                question(grant, scope, role=role,
-                         question_id=f"Q-{len(self.pending) + 1:03d}", blocker=blocker), blocker))
+                self._with_compose_drift(
+                    question(grant, scope, role=role,
+                             question_id=f"Q-{len(self.pending) + 1:03d}", blocker=blocker), grant),
+                blocker))
             return PENDING
         if answer not in ANSWERS:
             raise GrantError(f"{grant.id}: {answer!r} is not one of {', '.join(ANSWERS)}")

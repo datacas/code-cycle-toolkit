@@ -115,7 +115,7 @@ from cycle_status import (
 )
 from grants import (
     ConsentBroker, ConsentStore, GrantError, PermissionRequest,
-    parse_grant_options, terminal_prompt,
+    load_resume_requests, parse_grant_options, terminal_prompt,
 )
 from executors import (
     DispatchResult,

@@ -271,12 +271,15 @@ def main(api: Any, argv: list[str] | None = None) -> int:
         default_branch=api.base_branch_of(config, None)))
     # Asked on a terminal only; a run nobody watches never widens a sandbox
     # without an answer given in advance.
+    telemetry = api.Telemetry(api.Path(args.database) if args.database else None)
+    resume_requests = api.load_resume_requests(
+        api.Path(telemetry.path).parent / "decisions", repo, args.task)
     consent = api.ConsentBroker(
         repo, store=api.ConsentStore(), answers=grant_answers,
+        resume_requests=resume_requests,
         preauthorized=frozenset({"docker_host"} if api.docker_host_socket_access(config) else ()),
         prompt=(api.terminal_prompt() if api.sys.stdin.isatty() and api.sys.stderr.isatty() else None),
     )
-    telemetry = api.Telemetry(api.Path(args.database) if args.database else None)
     try:
         with api.interruptible():
             report = api.run_cycle(

@@ -6,7 +6,7 @@
     },
     "command-consent-documentation": {
       "paths": ["docs/host-permissions.md", "docs/configuration.md"],
-      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract", "test_sensitive_consent.SensitiveConsentTests.test_documentation_and_reduced_roadmap_scope"]
+      "tests": ["test_command_permissions.OperationTests.test_ac8_documented_options_scopes_and_limits", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract", "test_sensitive_consent.SensitiveConsentTests.test_documentation_and_reduced_roadmap_scope", "test_compose_consent.ResumeGrantPersistenceTests.test_docs_describe_resume_answer_persistence"]
     },
     "orca-plan-documentation": {
       "paths": ["docs/orca-execution-plan.md"],
