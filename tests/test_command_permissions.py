@@ -1089,7 +1089,7 @@ class BlockedReconciliationTests(unittest.TestCase):
         self.assertEqual({"reconciled": True}, payload["agent_reconciliation"])
 
     def test_the_hook_names_the_rule_the_operation_and_a_pr_edit_intent(self):
-        body = self.root / "pr-body.md"
+        body = self.tmpdir / "pr-body.md"
         body.write_text("Closes #435\n")
         path = self.root / "policy.json"
         path.write_text(self.policy.to_json())
@@ -1208,6 +1208,10 @@ class ReconciledCycleTests(RunCycleTestCase):
 
     def test_523_failed_resolve_reconciles_and_continues_to_rereview(self):
         class EmptyHistory:
+            def probe(self, *_args):
+                import cycle_history as ch
+                return ch.RemoteMark(SHA, 0, None)
+
             def comments(self, *_args):
                 return []
 
