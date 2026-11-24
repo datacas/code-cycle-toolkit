@@ -797,8 +797,15 @@ entry stays in the revocation audit trail with its reason. An answer can be supp
 `--grant command_<sha256>=cycle|persistent|forever|deny`.
 On resume, each supplied grant is checked against the selected executor and
 applied to that dispatch's permission policy before the agent starts, in
-whichever role runs first. A grant ID that is unknown or cannot cover that
-executor is reported with its reason before the dispatch. A denial recorded by Claude's
+whichever role runs first. The decisions record for this work item supplies
+the exact operation and effective scope shown by the earlier question, so an
+answer can be persisted even when the resumed stage stops on a different
+refusal first. `persistent`, `forever`, and `deny` are stored for that recorded
+scope in `consents.json` (with `forever` in the global scope); `cycle` is
+retained under the cycle ID and can be used on later resumes of that cycle. An
+ID that was not asked for this work item, or cannot cover the
+selected executor and role, is reported with an actionable reason before the
+dispatch. A denial recorded by Claude's
 permission layer enters the same consent flow as a hook refusal; without an
 answer, the stage stops as `permission_required` with the exact operation.
 A global grant never covers `review` or `rereview`, because those stages judge
