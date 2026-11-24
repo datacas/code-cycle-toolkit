@@ -862,14 +862,21 @@ class BlockedReconciliationTests(unittest.TestCase):
                          payload["reconciliation"]["denials"][0]["command"])
         self.assertTrue(payload["essential_permission"])
 
-    def test_523_tmpdir_classifier_rejects_traversal_symlink_and_missing_root(self):
+    def test_523_tmpdir_classifier_rejects_traversal_and_missing_root(self):
         root = str(self.tmpdir)
         self.assertEqual("tmpdir_write", cp._shell_kind("echo x > $TMPDIR/report.md", root))
         self.assertEqual("write", cp._shell_kind("echo x > $TMPDIR/../outside.md", root))
-        escape = self.tmpdir / "escape"
-        escape.symlink_to(self.root / "outside")
-        self.assertEqual("write", cp._shell_kind(f"echo x > {escape / 'report.md'}", root))
         self.assertEqual("write", cp._shell_kind("echo x > $TMPDIR/report.md", None))
+
+    def test_523_tmpdir_classifier_rejects_symlink_escape(self):
+        escape = self.tmpdir / "escape"
+        root = str(self.tmpdir)
+        try:
+            escape.symlink_to(self.root / "outside")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation is unavailable: {exc}")
+        self.assertEqual(
+            "write", cp._shell_kind(f"echo x > {escape / 'report.md'}", root))
 
     def test_523_failed_resolve_reconciles_only_with_new_verified_publication(self):
         payload, records = self.settle(
