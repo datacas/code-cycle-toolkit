@@ -125,6 +125,101 @@ class ComposeConsentCase(unittest.TestCase):
         broker.apply_answer(grant, grant.scope_for("claude", "linux"), answer)
         return grant
 
+    def prior_request(self, grant):
+        scope = grant.scope_for("claude", "linux")
+        return grants.PermissionRequest(grant, scope, "review", {}).record()
+
+    def save_decision(self, name, permissions, task="522"):
+        directory = self.root / "decisions"
+        directory.mkdir(exist_ok=True)
+        path = directory / f"decisions-{name}.json"
+        record = {"repo": "owner/repo", "task": task}
+        if permissions is not None:
+            record["permissions"] = permissions
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return path
+
+class ResumeGrantPersistenceTests(unittest.TestCase):
+    setUp = ComposeConsentCase.setUp
+    make_clone = ComposeConsentCase.make_clone
+    make_tmpdir = ComposeConsentCase.make_tmpdir
+    write = staticmethod(ComposeConsentCase.write)
+    policy = ComposeConsentCase.policy
+    broker = ComposeConsentCase.broker
+    request = ComposeConsentCase.request
+    answer = ComposeConsentCase.answer
+    prior_request = ComposeConsentCase.prior_request
+    save_decision = ComposeConsentCase.save_decision
+
+    def test_resume_persists_an_earlier_grant_before_a_different_refusal(self):
+        asked, original = self.request()
+        grant_x = original.grant_for(asked)
+        asked_y, broker_y = self.request(policy=self.policy(role="implement"))
+        grant_y = broker_y.grant_for(asked_y)
+        self.save_decision("a", [self.prior_request(grant_x)])
+        self.save_decision("b", [self.prior_request(grant_y)])
+        self.save_decision("c", None)
+        requests = grants.load_resume_requests(self.root / "decisions", "owner/repo", "522")
+
+        resumed = self.broker(answers={grant_x.id: "persistent"}, resume_requests=requests)
+        resumed.prepare_answers("claude", "implement")
+
+        self.assertFalse(any(grant_x.id in note for note in resumed.notes))
+        self.assertTrue(any(entry.get("operation") == grant_x.operation
+                            for entry in self.store.list("owner/repo")))
+        # The next resume only needs the other outstanding answer; X is already
+        # in the repository store and is available before any operation is hit.
+        later = self.broker(resume_requests=requests)
+        self.assertTrue(any(entry["operation"] == grant_x.operation
+                            for entry in later.command_entries("claude", "implement")))
+        self.assertFalse(any(grant_x.id in note for note in later.notes))
+
+    def test_cycle_answer_is_available_after_a_resume(self):
+        asked, original = self.request()
+        grant_x = original.grant_for(asked)
+        self.save_decision("cycle", [self.prior_request(grant_x)])
+        requests = grants.load_resume_requests(self.root / "decisions", "owner/repo", "522")
+
+        resumed = self.broker(answers={grant_x.id: "cycle"}, resume_requests=requests,
+                              cycle_id="cycle-522", task_id="522")
+        resumed.prepare_answers("claude", "implement")
+        next_resume = self.broker(cycle_id=self.store.cycle_for("owner/repo", "522"),
+                                  task_id="522")
+
+        self.assertTrue(any(entry["operation"] == grant_x.operation
+                            for entry in next_resume.command_entries("claude", "implement")))
+
+    def test_unasked_resume_id_keeps_an_actionable_preflight_note(self):
+        broker = self.broker(answers={"unknown-command-id": "persistent"})
+
+        broker.prepare_answers("claude", "implement")
+
+        self.assertTrue(any("no matching grant is registered" in note
+                            and "Check the id" in note for note in broker.notes))
+
+    def test_compose_hash_drift_names_both_configuration_hashes(self):
+        old_request, old_broker = self.request()
+        old_grant = self.answer(old_request, old_broker)
+        old_hash = old_grant.operation["compose"]["config_sha256"]
+        self.write(self.clone, {"services": {"backend-test": {"image": "python:3.12"}}})
+
+        request, broker = self.request()
+        new_grant = broker.grant_for(request)
+        self.assertNotEqual(old_grant.id, new_grant.id)
+        new_hash = new_grant.operation["compose"]["config_sha256"]
+        self.assertEqual("pending", broker.request(new_grant, "claude", role="review", blocker=request))
+        prompt = broker.pending[0].question["prompt"]
+
+        self.assertIn(old_hash, prompt)
+        self.assertIn(new_hash, prompt)
+        self.assertIn("Risk:", prompt)
+
+    def test_docs_describe_resume_answer_persistence(self):
+        documentation = (ROOT / "docs" / "host-permissions.md").read_text(encoding="utf-8")
+
+        self.assertIn("answer can be persisted even when the resumed stage stops on a different", documentation)
+        self.assertIn("`persistent`, `forever`, and `deny` are stored for that recorded", documentation)
+
 
 class FirstConsentTests(ComposeConsentCase):
     def test_ac1_resume_grant_is_in_the_first_rereview_policy(self):
