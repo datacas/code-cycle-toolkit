@@ -70,7 +70,7 @@ a contract breach. This inventory adds no new permission or veto.
 | `cycle.CycleRecorder._match_handoff` | 1 | report-with-cause: handoff cannot be claimed on storage failure |
 | `cycle.CycleRecorder._effect_snapshot` | 1 | degrade-to-not_verified: absent snapshot supplies no effect evidence |
 | `cycle.CycleRecorder._claim_handoff` | 1 | report-with-cause: storage error propagated |
-| `cycle.CycleRecorder._find_blocker` | 1 | safe-to-swallow: optional publication evidence unavailable, no success inferred |
+| `cycle.CycleRecorder._find_blocker` | 2 | safe-to-swallow: optional publication evidence unavailable, no success inferred; report-with-cause: pre-stage ancestry probe failures remain unverified and stop reconciliation |
 | `cycle.CycleRecorder._record_quota_exhaustion` | 1 | safe-to-swallow: optional quota persistence |
 | `cycle.CycleRecorder._clear_quota` | 1 | safe-to-swallow: optional quota persistence |
 | `cycle.CycleRecorder._observe_shadow` | 1 | safe-to-swallow: shadow experiment cannot decide routing |

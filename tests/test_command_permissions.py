@@ -698,7 +698,9 @@ class BlockedReconciliationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.cwd = self.root / "checkout"
         self.cwd.mkdir()
-        self.policy = sp.StagePolicy("implement", repo="owner/repo", tmpdir=str(self.root))
+        self.tmpdir = self.root / "dispatch-tmp"
+        self.tmpdir.mkdir()
+        self.policy = sp.StagePolicy("implement", repo="owner/repo", tmpdir=str(self.tmpdir))
 
     def settle(self, events, publication, *, role="implement", completed="IMPLEMENTED",
                original_status="BLOCKED", mandatory=None, answer=None, **fields):
@@ -842,7 +844,7 @@ class BlockedReconciliationTests(unittest.TestCase):
         report = "$TMPDIR/report.md"
         events = [self.bash(f"git init --bare {scratch}"),
                   self.bash(f"git diff main...HEAD --output={report}; wc -l {report}"),
-                  {"tool": "Write", "input": {"file_path": str(self.root / "probe.py")}}]
+                  {"tool": "Write", "input": {"file_path": str(self.tmpdir / "probe.py")}}]
         payload, records = self.settle(events, published())
         self.assert_reconciled(payload)
         self.assertEqual([cp.AUXILIARY_DENIAL] * 3, [record["class"] for record in records])
@@ -1137,7 +1139,7 @@ class ReconciledCycleTests(RunCycleTestCase):
             registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
             profiles=profiles, issue_review="off", consent=broker,
             publication_observer=lambda *_: publication, start_from=start_from,
-            change_request_id=change_request_id)
+            change_request_id=change_request_id, trusted_authors=("datacas",))
         return report, claude
 
     def journal(self, report, component):
@@ -1423,10 +1425,11 @@ class PublishingClaude(Talker):
         denials = []
         for event in self.denials:
             observed = dict(event)
-            observed["tmpdir"] = policy.tmpdir
+            tmpdir = policy.tmpdir or "/tmp/code-cycle-dispatch"
+            observed["tmpdir"] = tmpdir
             data = dict(observed.get("input", {}))
             if data.get("file_path") == "$TMPDIR/probe.py":
-                data["file_path"] = str(Path(policy.tmpdir) / "probe.py")
+                data["file_path"] = str(Path(tmpdir) / "probe.py")
             observed["input"] = data
             denials.append(observed)
         return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,

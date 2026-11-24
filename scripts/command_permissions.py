@@ -492,8 +492,10 @@ def publication_agrees(publication: dict[str, Any] | None,
         return False, "the pre-stage head was not observed"
     if shas["local"] == baseline:
         return False, "the published head is unchanged from the pre-stage head"
-    if publication.get("pre_stage_descendant") is not True:
+    if publication.get("pre_stage_descendant") is False:
         return False, "the published head is not a descendant of the pre-stage head"
+    if publication.get("pre_stage_descendant") is not True:
+        return False, "the published head's ancestry could not be verified"
     if not isinstance(pull, dict) or pull.get("state") != "OPEN":
         return False, "the change request is not open"
     if pull.get("head_ref") != publication.get("branch"):
@@ -652,6 +654,8 @@ def classify_denials(records: list[dict[str, Any]], payload: dict[str, Any] | No
                      **evidence: Any) -> list[dict[str, Any]]:
     for record in records:
         record["class"], record["why"] = classify_denial(record, payload, **evidence)
+        # TMPDIR is classification input, not a durable permission artifact.
+        record.pop("tmpdir", None)
     return records
 
 

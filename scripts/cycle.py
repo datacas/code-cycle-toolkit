@@ -1210,13 +1210,18 @@ class CycleRecorder:
                     published_head = publication.get("local_head")
                     publication["pre_stage_head"] = baseline
                     try:
-                        descendant = (isinstance(baseline, str) and isinstance(published_head, str)
-                            and baseline != published_head
-                            and subprocess.run(["git", "merge-base", "--is-ancestor", baseline,
-                                                published_head], cwd=cwd, capture_output=True,
-                                                timeout=10).returncode == 0)
+                        if not isinstance(baseline, str) or not isinstance(published_head, str):
+                            descendant = None
+                        elif baseline == published_head:
+                            descendant = False
+                        else:
+                            ancestry = subprocess.run(
+                                ["git", "merge-base", "--is-ancestor", baseline, published_head],
+                                cwd=cwd, capture_output=True, timeout=10)
+                            descendant = True if ancestry.returncode == 0 else (
+                                False if ancestry.returncode == 1 else None)
                     except (OSError, subprocess.SubprocessError):
-                        descendant = False
+                        descendant = None
                     publication["pre_stage_descendant"] = descendant
             sandbox_commands = tuple(
                 str(item.get("command")) for item in
