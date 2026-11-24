@@ -861,6 +861,11 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
                 publication)
             if not configured:
                 essential = hard or payload.get("status") not in completed
+            if (answer == "deny" and not configured
+                    and payload.get("status") in {"BLOCKED", "FAILED", "failed"}):
+                payload.update(status="BLOCKED", stop_reason="HUMAN_INTERVENTION",
+                               essential_permission=blocker["resource"])
+                essential = True
     elif not essential and payload.get("status") == "BLOCKED":
         # A distinct structured completion claim is required; prose is irrelevant.
         if (payload.get("completed_status") in completed
