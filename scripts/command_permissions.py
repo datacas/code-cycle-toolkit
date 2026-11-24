@@ -297,7 +297,7 @@ _INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl"})
 _LINE_SEPARATORS = {"|", "||", "&&", ";", "&", ";;"}
 
 
-def _shell_kind(command: str) -> str:
+def _shell_kind(command: str, tmpdir: str | None = None) -> str:
     """What a refused shell command would have done, from its text alone.
 
     One of `read_only`, `interpreter`, `push`, `pr_create`, `pr_edit`, `commit`,
@@ -324,8 +324,11 @@ def _shell_kind(command: str) -> str:
         elif token and set(token) <= set("<>") and ">" in token:
             target = tokens[index + 1] if index + 1 < len(tokens) else ""
             index += 1
-            if not (target.isdigit() or target == "/dev/null" or target.startswith("$TMPDIR/")
-                    or target.startswith("${TMPDIR}/")):
+            if target.isdigit() or target == "/dev/null":
+                pass
+            elif _tmpdir_target(target, tmpdir):
+                kinds.append("tmpdir_write")
+            else:
                 kinds.append("write")
         elif token and set(token) <= set("<>"):
             index += 1  # an input redirection names a file to read
@@ -340,8 +343,10 @@ def _shell_kind(command: str) -> str:
         if words[:1] == ["rtk"]:
             words = words[2:] if words[1:2] == ["proxy"] else words[1:]
         if words:
-            kinds.append(_word_kind(words))
+            kinds.append(_word_kind(words, tmpdir))
     kinds = [kind for kind in kinds if kind != "read_only"]
+    if kinds and all(kind == "tmpdir_write" for kind in kinds):
+        return "tmpdir_write"
     if len(kinds) > 1:
         # A chain such as `git push && gh pr edit …` has no single intent: each
         # part would need its own check, so none is inferred from the first (#364).
@@ -349,7 +354,26 @@ def _shell_kind(command: str) -> str:
     return kinds[0] if kinds else "read_only"
 
 
-def _word_kind(words: list[str]) -> str:
+def _tmpdir_target(raw: str, tmpdir: str | None) -> bool:
+    """Whether a literal or expanded target resolves below this dispatch's TMPDIR."""
+    if not tmpdir:
+        return False
+    if raw.startswith("$TMPDIR/"):
+        raw = str(Path(tmpdir) / raw[len("$TMPDIR/"):])
+    elif raw.startswith("${TMPDIR}/"):
+        raw = str(Path(tmpdir) / raw[len("${TMPDIR}/"):])
+    try:
+        root = Path(tmpdir).resolve(strict=False)
+        target = Path(raw)
+        if not target.is_absolute():
+            return False
+        resolved = target.resolve(strict=False)
+        return resolved != root and resolved.is_relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _word_kind(words: list[str], tmpdir: str | None = None) -> str:
     program = Path(words[0]).name
     if program == "find":
         return "write" if any(word in {"-delete", "-exec", "-execdir", "-fprint", "-ok"}
@@ -378,6 +402,17 @@ def _word_kind(words: list[str]) -> str:
             elif not word.startswith("-"):
                 rest.append(word)
         sub = rest[0] if rest else ""
+        if sub == "init" and "--bare" in words:
+            directory = rest[-1] if len(rest) > 1 else ""
+            if _tmpdir_target(directory, tmpdir):
+                return "tmpdir_write"
+        if sub == "diff":
+            output = next((word.partition("=")[2] for word in words if word.startswith("--output=")), None)
+            if output is None and "--output" in words:
+                position = words.index("--output")
+                output = words[position + 1] if position + 1 < len(words) else None
+            if output is not None:
+                return "tmpdir_write" if _tmpdir_target(output, tmpdir) else "write"
         if sub in _GIT_READ_ONLY:
             return "read_only"
         return {"push": "push", "commit": "commit"}.get(sub, "write" if sub else "unknown")
@@ -452,6 +487,13 @@ def publication_agrees(publication: dict[str, Any] | None,
     if len({shas["local"], shas["remote"], shas["pull_request"]}) != 1:
         return False, (f"the heads diverge: local {shas['local']}, remote {shas['remote']}, "
                        f"pull request {shas['pull_request']}")
+    baseline = publication.get("pre_stage_head")
+    if not isinstance(baseline, str) or not baseline:
+        return False, "the pre-stage head was not observed"
+    if shas["local"] == baseline:
+        return False, "the published head is unchanged from the pre-stage head"
+    if publication.get("pre_stage_descendant") is not True:
+        return False, "the published head is not a descendant of the pre-stage head"
     if not isinstance(pull, dict) or pull.get("state") != "OPEN":
         return False, "the change request is not open"
     if pull.get("head_ref") != publication.get("branch"):
@@ -520,6 +562,7 @@ def _denial_records(denials: object, policy: Any, executor: str,
                                              f"{executor}_permission"),
             "rule": rule or "executor_permission_layer", "operation": identity,
             "target": target if isinstance(target, str) else None,
+            "tmpdir": observed.tmpdir,
             "intent": event.get("intent") if isinstance(event.get("intent"), dict) else None,
             "class": UNKNOWN_DENIAL, "why": "not classified"})
     return list(records.values())
@@ -559,17 +602,22 @@ def classify_denial(record: dict[str, Any], payload: dict[str, Any] | None, *,
         return ESSENTIAL_PERMISSION, "the refused command is a mandatory check"
     if record["tool"] != "Bash":
         target = record.get("target")
+        tmpdir = record.get("tmpdir")
+        if isinstance(tmpdir, str) and isinstance(target, str) and _tmpdir_target(target, tmpdir):
+            return AUXILIARY_DENIAL, "the file is confined to the dispatch temporary directory"
         if cwd and isinstance(target, str) and Path(target).is_absolute():
             try:
                 Path(target).resolve(strict=False).relative_to(Path(cwd).resolve())
             except ValueError:
                 return AUXILIARY_DENIAL, "the file is outside the checkout, so it is not a deliverable"
         return UNKNOWN_DENIAL, "the refused edit may be part of the result"
-    kind = _shell_kind(command)
+    kind = _shell_kind(command, record.get("tmpdir"))
     agrees = publication_agrees(publication, None)[0]
     pull = publication.get("pr") if isinstance(publication, dict) else None
     if kind == "read_only":
         return AUXILIARY_DENIAL, "the command only inspects"
+    if kind == "tmpdir_write":
+        return AUXILIARY_DENIAL, "the write is confined to the dispatch temporary directory"
     if kind == "interpreter":
         return ((AUXILIARY_DENIAL, "a helper whose result is already published and verified")
                 if agrees else (UNKNOWN_DENIAL, "a helper that may have shaped an unpublished result"))
@@ -618,7 +666,7 @@ def has_open_questions(payload: dict[str, Any]) -> bool:
 
 
 def inferred_completion(payload: dict[str, Any], role: str, completed: frozenset[str]) -> str | None:
-    """The completion status a `BLOCKED` result proves without claiming it (#464).
+    """The completion status a stopped result proves without claiming it (#464, #523).
 
     Only for a publishing role, only from the structured fields the role's
     contract requires, and never from prose or from a change request merely
@@ -653,13 +701,15 @@ def inferred_completion(payload: dict[str, Any], role: str, completed: frozenset
 
 def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[str],
                        denials: list[dict[str, Any]], publication: dict[str, Any] | None) -> None:
-    """Complete a `BLOCKED` stage only when the runtime verified why it may.
+    """Complete a stopped publishing stage only when runtime evidence allows it.
 
     All of it must hold: a completion status valid for the role, only auxiliary
     or redundant denials, no pending publication or environment blocker, no
     failed required check and, for a publishing role, one commit at the remote
     head, the local HEAD and the PR head. Otherwise the stage stays `BLOCKED`
-    and the record says which condition failed.
+    and the record says which condition failed. `FAILED` is eligible only when
+    the same structured completion and publication evidence proves the work was
+    finished; the stage's own status does not waive any gate.
     """
     if "reconciliation" in payload:
         return
@@ -672,7 +722,7 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
         claimed = inferred_completion(payload, role, completed)
         inferred = claimed is not None
     record: dict[str, Any] = {
-        "reconciled": False, "original_status": "BLOCKED", "completed_status": claimed,
+        "reconciled": False, "original_status": payload.get("status"), "completed_status": claimed,
         "inferred": inferred,
         "denials": [_compact(item) for item in denials[:20]],
         "shas": publication_shas(publication, payload), "reason": ""}
@@ -681,7 +731,7 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
     reason = None
     serious = next((item for item in denials if item["class"] not in RECONCILABLE_DENIALS), None)
     if claimed not in completed:
-        reason = f"the block declares no completion status valid for the {role} role"
+        reason = f"the result declares no completion status valid for the {role} role"
     elif serious is not None:
         reason = f"{serious['class']} denial: {serious['command']}"
     elif payload.get("publication_pending") is True:
@@ -757,6 +807,7 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
     # other role keeps the #409 behaviour: its refusals are recorded, but a
     # `BLOCKED` result is never completed from them (#364).
     classified = denials is not None and role in PUBLISHING_ROLES
+    stopped = payload.get("status") in {"BLOCKED", "FAILED", "failed"}
     if configured:
         # A configured check the person declines is recorded unverified; it
         # never stops the cycle by itself (#398, #414): the final state names
@@ -766,7 +817,7 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
         # A stage that reports a completed status is not stopped by a refusal
         # that is not hard; a stage that does not stays stopped until the
         # runtime has verified why it may complete (below).
-        essential = hard or payload.get("status") not in completed
+        essential = hard or (payload.get("status") not in completed and not stopped)
     else:
         essential = (effect.get("essential") is not False if effect is not None
                      else payload.get("status") not in completed)
@@ -795,7 +846,7 @@ def reconcile_result(spoken: str, blocker: dict[str, Any], answer: str | None, r
         payload.update(status="BLOCKED", stop_reason="HUMAN_INTERVENTION",
                        essential_permission=blocker["resource"])
     elif classified:
-        if payload.get("status") == "BLOCKED":
+        if stopped:
             # A declined configured check is recorded unverified, so it is not
             # one of the denials that keep the stage blocked (#398). Every call
             # leaves all of them out: the first call decides the reconciliation.

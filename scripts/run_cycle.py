@@ -2465,9 +2465,11 @@ def run_cycle(
     `publication_violation` when an invariant failed, whatever the stage
     reported, or `publication_unverified` when that state cannot be read.
 
-    `publication_observer` (#364) reads the cycle branch's local HEAD, remote
-    head and change request when a publishing stage reports `BLOCKED` after
-    refused commands; it is injected so a test needs no code host.
+    `publication_observer` (#364, #523) reads the cycle branch's local HEAD,
+    remote head and change request when a publishing stage reports `BLOCKED` or
+    `FAILED` after refused commands. The runtime also checks that the published
+    head advanced from and descends from the stage's pre-dispatch head; it is
+    injected so a test needs no code host.
 
     `issue_snapshot_reader` (#397) reads the work item `issue_review` judges,
     with the runtime's own credentials, before every issue-review dispatch; by

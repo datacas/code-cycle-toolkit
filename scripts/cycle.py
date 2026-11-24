@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sys
+import subprocess
 import time
 import uuid
 import sqlite3
@@ -1194,7 +1195,8 @@ class CycleRecorder:
             block = _result_block(result.agent_output)
             payload = block[2] if block is not None else {}
             publication = None
-            if (records and run.role in PUBLISHING_ROLES and payload.get("status") == "BLOCKED"
+            if (records and run.role in PUBLISHING_ROLES
+                    and payload.get("status") in {"BLOCKED", "FAILED", "failed"}
                     and not self.local_only):
                 requested = payload.get("change_request_id") or payload.get("pr_number")
                 number = str(requested).rstrip("/").rsplit("/", 1)[-1].lstrip("#") if requested else None
@@ -1203,6 +1205,19 @@ class CycleRecorder:
                         cwd, self.repo_id, number if number and number.isdigit() else self.change_request_id)
                 except Exception:
                     publication = None
+                if isinstance(publication, dict) and "pre_stage_head" not in publication:
+                    baseline = attempt.before.get("head") if isinstance(attempt.before, dict) else None
+                    published_head = publication.get("local_head")
+                    publication["pre_stage_head"] = baseline
+                    try:
+                        descendant = (isinstance(baseline, str) and isinstance(published_head, str)
+                            and baseline != published_head
+                            and subprocess.run(["git", "merge-base", "--is-ancestor", baseline,
+                                                published_head], cwd=cwd, capture_output=True,
+                                                timeout=10).returncode == 0)
+                    except (OSError, subprocess.SubprocessError):
+                        descendant = False
+                    publication["pre_stage_descendant"] = descendant
             sandbox_commands = tuple(
                 str(item.get("command")) for item in
                 (*(result.artifacts.get("sandbox_startup_failures") or ()),
@@ -1611,6 +1626,10 @@ class CycleRecorder:
                               command=denial.get("command") or denial.get("tool"),
                               reason=f"Claude's permission layer denied {denial.get('tool')}",
                               correlation={"tool_use_id": denial.get("tool_use_id"), "layer": "claude_permission"})
+        from command_permissions import _result_block
+        result_block = _result_block(result.agent_output)
+        runtime_record = result_block[2].get("reconciliation") if result_block else None
+        reconciled = isinstance(runtime_record, dict) and runtime_record.get("reconciled") is True
         for record in artifacts.get("denial_records") or []:
             # What the runtime made of every refusal, grantable or not (#364).
             if isinstance(record, dict):
@@ -1621,7 +1640,7 @@ class CycleRecorder:
                                            "layer": record.get("layer"),
                                            "operation": record.get("operation"),
                                            "stage": record.get("stage")})
-                if (self.consent is not None and self.consent.prompt is None
+                if (self.consent is not None and self.consent.prompt is None and not reconciled
                         and record.get("class") != "unverifiable_check"):
                     # No human channel (`--detach`, no terminal): the refusal is a
                     # denial that grants nothing, and the question it would have

@@ -665,6 +665,7 @@ class RuntimeTests(RunCycleTestCase):
 
 SHA = "a" * 40
 OTHER = "b" * 40
+BEFORE = "c" * 40
 
 
 def payload_of(spoken: str) -> dict:
@@ -679,7 +680,8 @@ def published(**changes) -> dict:
     if "pr" in changes:
         override = changes.pop("pr")
         pull = None if override is None else {**pull, **override}
-    value = {"branch": "task-435", "local_head": SHA, "remote_head": SHA, "clean": True, "pr": pull}
+    value = {"branch": "task-435", "local_head": SHA, "remote_head": SHA, "clean": True,
+             "pre_stage_head": BEFORE, "pre_stage_descendant": True, "pr": pull}
     value.update(changes)
     return value
 
@@ -699,9 +701,9 @@ class BlockedReconciliationTests(unittest.TestCase):
         self.policy = sp.StagePolicy("implement", repo="owner/repo", tmpdir=str(self.root))
 
     def settle(self, events, publication, *, role="implement", completed="IMPLEMENTED",
-               mandatory=None, answer=None, **fields):
+               original_status="BLOCKED", mandatory=None, answer=None, **fields):
         fields = {"head_sha": SHA, "change_request_id": "442", "completed_status": completed, **fields}
-        spoken = block("BLOCKED", **fields)
+        spoken = block(original_status, **fields)
         records = cp.denial_records(events, replace(self.policy, role=role), "claude", str(self.cwd))
         cp.classify_denials(records, payload_of(spoken), publication=publication,
                             cwd=str(self.cwd), mandatory=mandatory)
@@ -794,6 +796,9 @@ class BlockedReconciliationTests(unittest.TestCase):
                 ("remote", {"remote_head": OTHER}, "diverge"),
                 ("local", {"local_head": OTHER}, "diverge"),
                 ("pull request", {"pr": {"head_sha": OTHER}}, "diverge"),
+                ("unchanged", {"local_head": BEFORE, "remote_head": BEFORE,
+                               "pr": {"head_sha": BEFORE}}, "unchanged from the pre-stage head"),
+                ("not descendant", {"pre_stage_descendant": False}, "not a descendant"),
                 ("no pull request", {"pr": None}, "pull_request"),
                 ("unobserved", None, "could not be observed"),
                 ("dirty", {"clean": False}, "uncommitted"),
@@ -831,6 +836,44 @@ class BlockedReconciliationTests(unittest.TestCase):
         self.assertTrue(recorded["inferred"])
         self.assertEqual("IMPLEMENTED", recorded["completed_status"])
         self.assertIn("inferred", recorded["reason"])
+
+    def test_523_tmpdir_writes_and_read_only_chains_are_auxiliary(self):
+        scratch = "$TMPDIR/probe.git"
+        report = "$TMPDIR/report.md"
+        events = [self.bash(f"git init --bare {scratch}"),
+                  self.bash(f"git diff main...HEAD --output={report}; wc -l {report}"),
+                  {"tool": "Write", "input": {"file_path": str(self.root / "probe.py")}}]
+        payload, records = self.settle(events, published())
+        self.assert_reconciled(payload)
+        self.assertEqual([cp.AUXILIARY_DENIAL] * 3, [record["class"] for record in records])
+        outside = self.bash("git init --bare /tmp/outside-probe.git")
+        payload, records = self.settle([outside], published())
+        self.assertEqual(cp.UNKNOWN_DENIAL, records[0]["class"])
+        self.assert_stopped(payload, "unknown denial")
+
+    def test_523_failed_resolve_reconciles_only_with_new_verified_publication(self):
+        payload, records = self.settle(
+            [self.bash("git grep refused-probe scripts")], published(), role="resolve",
+            completed="RESOLVED", original_status="FAILED",
+            finding_outcomes=[{"id": "REV-001", "status": "resolved"}])
+        self.assertEqual("RESOLVED", payload["status"])
+        self.assertTrue(payload["reconciliation"]["reconciled"])
+        self.assertEqual("FAILED", payload["reconciliation"]["original_status"])
+        self.assertEqual(cp.AUXILIARY_DENIAL, records[0]["class"])
+        failed_check = {"id": "configured-test", "command": "python3 -m unittest", "result": "fail"}
+        payload, _ = self.settle(
+            [self.bash("git grep refused-probe scripts")], published(), role="resolve",
+            completed="RESOLVED", original_status="FAILED",
+            finding_outcomes=[{"id": "REV-001", "status": "resolved"}],
+            tests={"checks": [failed_check]})
+        self.assertEqual("FAILED", payload["status"])
+        self.assertFalse(payload["reconciliation"]["reconciled"])
+        self.assertIn("a check failed", payload["reconciliation"]["reason"])
+
+    def test_523_reported_preflight_uncertainty_does_not_override_runtime_publication(self):
+        payload, _ = self.settle([self.bash("git grep refused-probe scripts")], published(),
+                                 summary="publication preflight was not confirmed")
+        self.assert_reconciled(payload)
 
     def test_an_inferred_completion_needs_the_structured_evidence_and_the_verified_publication(self):
         done = {"work_units": [{"id": "WU-1", "commit_sha": SHA, "rollback": "independent"}],
@@ -1082,8 +1125,9 @@ class BlockedReconciliationTests(unittest.TestCase):
 class ReconciledCycleTests(RunCycleTestCase):
     """The driver continues from the verified head, or stops as before (#364)."""
 
-    def cycle(self, denials, publication, *, completed="IMPLEMENTED", prompt=None, **fields):
-        claude = PublishingClaude(denials, completed, fields)
+    def cycle(self, denials, publication, *, completed="IMPLEMENTED", prompt=None,
+              status="BLOCKED", start_from="implement", change_request_id=None, **fields):
+        claude = PublishingClaude(denials, completed, fields, status=status)
         broker = grants.ConsentBroker("owner/api", platform="linux", prompt=prompt,
                                       store=grants.ConsentStore(self.home / "consents.json"))
         profiles = router.load_profiles({"code_cycle": {"profiles": {
@@ -1092,7 +1136,8 @@ class ReconciledCycleTests(RunCycleTestCase):
         report = rc.run_cycle("owner/api", "435", router.TaskSignals(), self.store,
             registry=ex.Registry([claude]), availability={"claude": ex.Availability.READY},
             profiles=profiles, issue_review="off", consent=broker,
-            publication_observer=lambda *_: publication)
+            publication_observer=lambda *_: publication, start_from=start_from,
+            change_request_id=change_request_id)
         return report, claude
 
     def journal(self, report, component):
@@ -1133,6 +1178,41 @@ class ReconciledCycleTests(RunCycleTestCase):
         recorded = self.journal(report, "reconciliation")
         self.assertEqual(["reconciled"], [row["status"] for row in recorded])
         self.assertEqual("IMPLEMENTED", recorded[0]["correlation"]["completed_status"])
+        self.assertEqual([], self.pending_denials(report))
+
+    def test_523_published_tmpdir_refusals_continue_without_pending_decisions(self):
+        denials = [{"tool": "Bash", "input": {"command": "git init --bare $TMPDIR/probe.git"}},
+                   {"tool": "Bash", "input": {"command":
+                       "git diff main...HEAD --output=$TMPDIR/report.md; wc -l $TMPDIR/report.md"}},
+                   {"tool": "Write", "input": {"file_path": "$TMPDIR/probe.py"}}]
+        report, claude = self.cycle(denials, published())
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual(2, len(claude.dispatched))  # implement then review
+        self.assertEqual([], self.pending_denials(report))
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual(["reconciled"], [row["status"] for row in recorded])
+        self.assertEqual("IMPLEMENTED", recorded[0]["correlation"]["completed_status"])
+
+    def test_523_failed_publishing_result_continues_when_publication_is_verified(self):
+        report, claude = self.cycle(
+            [{"tool": "Bash", "input": {"command": "git grep refused-probe scripts"}}],
+            published(), status="FAILED")
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual(2, len(claude.dispatched))
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual("FAILED", recorded[0]["correlation"]["original_status"])
+
+    def test_523_failed_resolve_reconciles_and_continues_to_rereview(self):
+        report, claude = self.cycle(
+            [{"tool": "Bash", "input": {"command": "git grep refused-probe scripts"}}],
+            published(), status="FAILED", completed="RESOLVED", start_from="resolve",
+            change_request_id="442",
+            finding_outcomes=[{"id": "REV-001", "status": "resolved"}])
+        self.assertEqual(rc.APPROVED_END, report.status, report.stopped_because)
+        self.assertEqual(["resolve", "rereview"], [stage.role for stage in report.stages])
+        self.assertEqual(2, len(claude.dispatched))
+        recorded = self.journal(report, "reconciliation")
+        self.assertEqual("FAILED", recorded[0]["correlation"]["original_status"])
 
     def pending_denials(self, report):
         from cycle_journal import decisions
@@ -1322,21 +1402,36 @@ class ReconciledCycleTests(RunCycleTestCase):
 class PublishingClaude(Talker):
     """An implementer that publishes, reports BLOCKED and met refused commands."""
 
-    def __init__(self, denials, completed, fields):
+    def __init__(self, denials, completed, fields, status="BLOCKED"):
         super().__init__("claude")
         self.denials, self.completed, self.fields = denials, completed, fields
+        self.status = status
 
     def dispatch(self, target, task, **kwargs):
         self.dispatched.append(task)
         policy = kwargs.get("command_policy")
-        if policy is not None and policy.role != "implement":
+        if policy is not None and policy.role == "rereview":
+            return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
+                start_state="started", process_exited=True,
+                agent_output=block("APPROVED", head_sha=SHA,
+                    verified_findings=[{"id": "REV-001", "status": "resolved"}]))
+        if policy is not None and policy.role not in {"implement", "resolve"}:
             return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
                 start_state="started", process_exited=True, agent_output=block("APPROVED"))
-        spoken = block("BLOCKED", head_sha=SHA, change_request_id="442",
+        spoken = block(self.status, head_sha=SHA, change_request_id="442",
                        **({"completed_status": self.completed} if self.completed else {}), **self.fields)
+        denials = []
+        for event in self.denials:
+            observed = dict(event)
+            observed["tmpdir"] = policy.tmpdir
+            data = dict(observed.get("input", {}))
+            if data.get("file_path") == "$TMPDIR/probe.py":
+                data["file_path"] = str(Path(policy.tmpdir) / "probe.py")
+            observed["input"] = data
+            denials.append(observed)
         return ex.DispatchResult(ex.DispatchOutcome.SUCCEEDED, "claude", target,
             start_state="started", process_exited=True, agent_output=spoken,
-            artifacts={"command_refusals": self.denials})
+            artifacts={"command_refusals": denials})
 
 
 if __name__ == "__main__":
