@@ -3546,7 +3546,7 @@ THREAD_OWNER = lookup_thread_owner
 # --- rendering for Claude --------------------------------------------------------
 
 def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
-    """`--allowedTools` patterns for the stage's table: the first barrier.
+    """`--allowedTools` patterns for the stage's table: the executor's filter.
 
     The patterns are prefixes; the hook validates the arguments behind them.
     Git and isolated inline Python are documented broad exceptions (#524):
@@ -4060,8 +4060,9 @@ def hook_main(arguments: list[str], stdin=None, stdout=None) -> int:
 
     An allowed command gets no decision at all rather than `allow`: an `allow`
     would skip the permission layer, and `--allowedTools` and the user's own
-    deny rules are meant to stay in force as the first barrier. The hook only
-    ever narrows.
+    deny rules are meant to stay in force. `--allowedTools` is not a complete
+    filter for the documented Git and inline-Python exceptions (#524), so this
+    hook is their only operation check. The hook only ever narrows.
     """
     global _RESOLUTIONS
     _RESOLUTIONS = {}

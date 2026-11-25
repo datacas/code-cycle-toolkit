@@ -911,11 +911,16 @@ class AllowedToolsTests(PolicyTestCase):
 
     def test_no_stage_receives_arbitrary_execution_except_documented_inspection(self) -> None:
         # #524 deliberately moves these two operation checks to the immutable
-        # hook. Include both in the broad-pattern inventory: spelling git:*
-        # as git * must never silently evade this invariant again.
+        # hook. Include both in the broad-pattern inventory and compare both
+        # spellings: Claude treats a trailing `:*` and ` *` alike, so writing
+        # git:* as git * must never silently evade this invariant again.
+        def spelling(pattern: str) -> str:
+            return pattern[:-3] + " *)" if pattern.endswith(":*)") else pattern
+
         exceptions = ("Bash(git *)", "Bash(python3 -I -c:*)")
         page = (ROOT / "docs/host-permissions.md").read_text(encoding="utf-8")
-        section = page.split("### Dispatch-only inspection exceptions (#524)", 1)[1].split("\n### ", 1)[0]
+        section = page.split("### Dispatch-only inspection exceptions (#524)", 1)[1]
+        section = section.split("\n### ", 1)[0].split("\n## ", 1)[0]
         for exception in exceptions:
             self.assertIn(f"`{exception}`", section)
         for role in ("implement", "resolve", "review", "rereview", "issue_review",
@@ -924,6 +929,7 @@ class AllowedToolsTests(PolicyTestCase):
                 patterns = self.patterns(role, docker=docker, rtk=True,
                                          test_command="python3 -m unittest discover -s tests",
                                          verify_prefixes=("python3 scripts/validate-package.py",))
+                normalised = {spelling(pattern) for pattern in patterns}
                 with self.subTest(role=role, docker=docker):
                     for forbidden in ("Bash(gh:*)", "Bash(git:*)", "Bash(python3:*)",
                                       "Bash(python3 *)", "Bash(npx:*)", "Bash(bash:*)",
@@ -932,11 +938,13 @@ class AllowedToolsTests(PolicyTestCase):
                                       "Bash(gh api:*)", "Bash(rtk:*)", "Bash(rtk proxy:*)",
                                       "Bash(*)", "Bash", *exceptions):
                         for wrapper in ("", "rtk ", "rtk proxy "):
-                            candidate = forbidden.replace("Bash(", f"Bash({wrapper}")
-                            if forbidden in exceptions:
-                                self.assertIn(candidate, patterns)
+                            candidate = spelling(forbidden.replace("Bash(", f"Bash({wrapper}"))
+                            # `git:*` is the documented `git *` exception in
+                            # another spelling; every other entry stays forbidden.
+                            if spelling(forbidden) in {spelling(e) for e in exceptions}:
+                                self.assertIn(candidate, normalised)
                             else:
-                                self.assertNotIn(candidate, patterns)
+                                self.assertNotIn(candidate, normalised)
                     self.assertIn("Bash(gh api user --jq .login:*)", patterns)
 
     def test_reviewers_get_no_write_and_resolve_alone_gets_threads(self) -> None:

@@ -186,7 +186,10 @@ class ReadParityTests(unittest.TestCase):
                     ("git *", "git diff --output=/etc/parity-out"),
                     ("python3 -I -c:*", "python3 -I -c 'import os;os.system(\"id\")'"),
                     ("python3 -I -c:*", 'python3 -I -c \'open("/etc/parity-out","w").write("x")\''),
-                    ("python3 -I -c:*", f"python3 -I -c 'print(open(\"{Path.home()}/.codex/auth.json\").read())'"),
+                    # as_posix keeps a Windows home free of `\U` escapes, so the
+                    # credential guard, not a SyntaxError, decides this case.
+                    ("python3 -I -c:*", "python3 -I -c 'print(open(\""
+                     f"{Path.home().as_posix()}/.codex/auth.json\").read())'"),
                 ]
                 if role not in sp.WRITING_ROLES:
                     commands.append(("git *", "git push origin HEAD"))
@@ -206,7 +209,12 @@ class ReadParityTests(unittest.TestCase):
                             self.assertEqual(0, result.returncode, result.stderr)
                             output = json.loads(result.stdout)["hookSpecificOutput"]
                             self.assertEqual("deny", output["permissionDecision"])
-                            self.assertIn("[layer=toolkit_hook]", output["permissionDecisionReason"])
+                            reason = output["permissionDecisionReason"]
+                            self.assertIn("[layer=toolkit_hook]", reason)
+                            # A crashing or failing validator also denies; this
+                            # case must be refused by a policy rule instead.
+                            self.assertNotIn("could not run", reason)
+                            self.assertNotIn("could not be validated", reason)
 
     def test_inspection_exceptions_fail_closed_on_validation_errors(self):
         with tempfile.TemporaryDirectory() as directory:

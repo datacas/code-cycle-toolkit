@@ -621,7 +621,7 @@ request. The exact forms are in `cc-resolve-comments`.
 ### Dispatch-only inspection exceptions (#524)
 
 Every Claude stage receives `Bash(git *)` and `Bash(python3 -I -c:*)`, plus
-their `rtk` and `rtk proxy` forms. These are explicit exceptions to the narrow
+their `rtk` and `rtk proxy` forms when RTK is installed for the dispatch. These are explicit exceptions to the narrow
 first-barrier prefixes, not read-only patterns. In Claude's permission grammar,
 `Bash(git *)` is equivalent to `Bash(git:*)`: it admits **every Git subcommand**,
 including `push`, `commit`, `config` and `reset`, to the hook.
@@ -656,7 +656,9 @@ fail closed. This coverage is not a native Claude/Codex parity claim.
   runtime passes it with `--settings`, so the agent cannot edit it.
 - The hook only ever denies. An allowed command gets no decision, so
   `--allowedTools` remains an executor permission filter, with the explicit
-  [inspection exceptions above](#dispatch-only-inspection-exceptions-524).
+  [inspection exceptions above](#dispatch-only-inspection-exceptions-524)
+  and the `Bash(*)` rule that a consented regex, shell-source or
+  configured-check grant adds ([reusable command consent](#reusable-command-consent-439)).
   The user's own deny rules still apply; a `deny` from this hook is not
   overridden by another hook's `allow`.
 - Before each Claude dispatch the runtime refuses to start, `BLOCKED`, when the
