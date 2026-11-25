@@ -72,6 +72,7 @@
       "test_stage_permissions",
       "test_support",
       "test_table_consent",
+      "test_read_parity",
       "test_sensitive_consent",
       "test_validate_workflow",
       "test_workspace_setup"
@@ -110,6 +111,7 @@
       "test_consent_variants",
       "test_compose_consent",
       "test_table_consent",
+      "test_read_parity",
       "test_sensitive_consent",
       "test_ci_failure_access",
       "test_cycle_journal",

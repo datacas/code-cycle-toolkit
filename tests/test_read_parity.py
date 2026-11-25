@@ -16,6 +16,7 @@ import stage_permissions as sp
 
 
 class ReadParityTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX Bash baselines; native Windows parity is separate")
     def test_hook_matches_direct_command_baselines_for_both_executor_policies(self):
         # This executes the shared hook, not a native Claude/Codex dispatch.
         # The native comparison remains a separately frozen check.
