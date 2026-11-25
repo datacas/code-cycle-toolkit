@@ -260,7 +260,7 @@ existing CI-gate conflict and head checks still decide whether to continue.
 Updating the cycle branch and revalidating against a new base belongs to #426;
 this classifier does not waive an existing requirement to refresh verification.
 
-### A publishing stage that reported `BLOCKED` after a verified publication (#364)
+### A publishing stage that stopped after a verified publication (#364, #523)
 
 #261 verifies that a successful stage broke no publication invariant. The
 inverse also happens: an `implement` or `resolve` stage publishes a correct
@@ -269,10 +269,12 @@ heredoc, a `grep --include=*.py`, a `gh pr edit` the guard refuses with the pull
 request already open) and reports `BLOCKED`. The cycle used to stop with
 `stage_not_completed` as if nothing had been published.
 
-`reconcile_result` (#409) now decides this, in the same place that already
-decides whether a refusal is essential; no second mechanism exists. It acts only
-on `implement` and `resolve`: any other role still has its refusals recorded and
-classified, but a `BLOCKED` result of it is never completed from them. The
+`reconcile_result` (#409, #523) decides this in the same place that classifies
+refusals; no second mechanism exists. It acts only on `implement` and `resolve`:
+any other role still has its refusals recorded and classified, but a stopped
+result from it is never completed from them. `BLOCKED` and `FAILED` results are
+eligible when the runtime can prove the stage's structured completion and
+published state. A reported failure alone never counts as completion. The
 bounded re-read of `review` and `rereview` publications is #446. A refused
 command that chains several non-read-only operations (`git push && gh pr edit`)
 is classified `unknown` or `write`, never by its first part.
@@ -294,6 +296,12 @@ weakened.
 | `environment_blocker` | a required resource is unreachable | no |
 | `unknown` | not enough evidence; neither assumed essential nor auxiliary | no |
 
+Writes confined to the dispatch's verified `$TMPDIR` are `auxiliary_denial`,
+including scratch Git repositories, report output and temporary probe files.
+The same classification applies to a shell chain of read-only commands and
+those temporary writes. A path outside that dispatch directory, a symlink that
+escapes it, or a write the runtime cannot locate remains `unknown` or essential.
+
 The classification does not depend on the agent's `permission_effects`. The
 agent can make a denial more serious (`essential: true` is honoured) and never
 less (`essential: false` is not). A `redundant_operation` is judged on what the
@@ -304,7 +312,7 @@ while the body file still exists), base, labels or milestone it set to be what
 the pull request already has. A flag the runtime does not know leaves the
 intent `unknown`.
 
-**A `BLOCKED` stage is completed only when all of this holds:**
+**A stopped (`BLOCKED` or `FAILED`) stage is completed only when all of this holds:**
 
 1. the block declares a `completed_status` valid for its role (`IMPLEMENTED`
    for `implement`, `RESOLVED` for `resolve`). Since #464 a block that declares
@@ -326,16 +334,22 @@ intent `unknown`.
 4. the result does not say its publication is pending, report an environment
    blocker or an essential permission, or carry a failed check;
 5. the #261 audit found no breach. The audit runs before the report is read, so
-   a `BLOCKED` stage that also broke an invariant stops with
+   a stopped stage that also broke an invariant stops with
    `publication_violation` and is never reconciled.
 
-Otherwise the stage stays `BLOCKED` and stops as before; a grantable essential
+Otherwise the stage keeps its reported stopped status; a grantable essential
 or `unknown` refusal is still asked about (`permission_required`). Reconciling
 changes the stage's status, nothing else: a pending mandatory verification stays
 `unverified`, the check linked to a refused command never keeps a pass, and
 `verification_unverified` still stops the cycle later. The cycle continues from
 the verified head and a publication is never retried. The state is read with
 `reroute.observe_publication`; when it cannot be read nothing is reconciled.
+
+An agent's statement that publication preflight was not confirmed does not
+override the runtime's own publication observation. A real pending publication,
+failed check, essential or unknown denial, environment blocker, or disagreement
+among the observed heads still stops the cycle. Reconciled refusals are retained
+as warnings and are not added to the pending decisions record.
 
 The decision and its evidence are recorded in the [cycle journal](instrumentation.md#reconciling-a-blocked-publishing-stage-364).
 
