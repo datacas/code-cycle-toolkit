@@ -612,6 +612,7 @@ class CycleAuditTests(RunCycleTestCase):
         broker = grants.ConsentBroker(REPO, platform="linux",
                                       store=grants.ConsentStore(Path(self.store.path).parent / "consents.json"))
         agreeing = {"branch": BRANCH, "local_head": sha, "remote_head": sha, "clean": True,
+                    "pre_stage_head": "b" * 40, "pre_stage_descendant": True,
                     "pr": {"number": "4", "head_sha": sha, "head_ref": BRANCH, "state": "OPEN"}}
         return self.cycle(implementer, consent=broker, publication_observer=lambda *_: agreeing)
 

@@ -56,7 +56,8 @@ def effect_snapshot(cwd: str | None, repo: str, *, publishes: bool,
         if match is None or match.group(1).casefold() != repo.casefold():
             raise ValueError("code host publication boundary unavailable")
     workspace = _workspace_fingerprint(root)
-    snapshot = {"workspace": workspace,
+    head = _git_output(root, "rev-parse", "--verify", "HEAD").strip()
+    snapshot = {"workspace": workspace, "head": head,
                 "dirty": bool(_git_output(root, "status", "--porcelain",
                                           "--untracked-files=all")),
                 "remote": _remote_ref_fingerprint(root)}
