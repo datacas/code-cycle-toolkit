@@ -12,8 +12,8 @@ replaces that, for Claude on a GitHub cycle, with two barriers:
   prevail over another hook's `allow`, so a permissive global rule or the RTK
   rewrite hook cannot reopen what this one closes.
 
-Literal commands use the default table. Shell syntax is analysed without
-evaluation and requests whole-operation interpreter consent. Concrete segment
+Literal commands and guarded read pipelines/globs use the default table. Other
+shell syntax is analysed without evaluation and requests whole-operation interpreter consent. Concrete segment
 guards remain in force; pattern grants lift only table membership. Opaque
 interpreter internals always depend on external isolation.
 
@@ -32,6 +32,8 @@ directory outside the agent's workspace and temporary directory.
 from __future__ import annotations
 
 import contextlib
+import ast
+import glob
 import hashlib
 import fnmatch
 import itertools
@@ -105,7 +107,7 @@ GIT_COMMON_READ = frozenset({"status", "diff", "log", "rev-parse", "show"})
 GIT_REVIEW_READ = frozenset({"merge-base", "ls-files", "grep", "blame"})
 #: Stages that search the repository with `GIT_REVIEW_READ`. The hook and the
 #: `--allowedTools` patterns both read this set, so the two barriers agree.
-GIT_SEARCH_ROLES = WRITING_ROLES | REVIEW_ROLES | {ISSUE_REVIEW_ROLE, "verify"}
+GIT_SEARCH_ROLES = WRITING_ROLES | REVIEW_ROLES | {ISSUE_REVIEW_ROLE, "verify", "security", "bootstrap", "coordinate"}
 GIT_WRITE = frozenset({"add", "commit", "push", "fetch", "checkout", "switch", "pull",
                        "rm", "mv"})
 #: Options that make Git run another program, on any subcommand. Git also
@@ -1765,6 +1767,120 @@ def consented_git_edits(policy: Any) -> tuple[str, ...]:
                        else entry["operation"]["sensitive"].get("targets", []))))
 
 
+def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -> bool:
+    """Recognize data inspection, never execute inline code in the validator.
+
+    Only isolated stdlib JSON/argv reads and pure expressions are automatic.
+    Other interpreter programs retain operation consent and external isolation.
+    """
+    if words[:3] != ["python3", "-I", "-c"] or len(words) < 4:
+        return False
+    try:
+        tree = ast.parse(words[3])
+    except (SyntaxError, ValueError):
+        return False
+    nodes = tuple(ast.walk(tree))
+    allowed = (ast.Module, ast.Import, ast.alias, ast.Assign, ast.Expr, ast.Call,
+               ast.Name, ast.Load, ast.Store, ast.Constant, ast.Attribute,
+               ast.Subscript, ast.List, ast.Tuple, ast.Dict, ast.IfExp,
+               ast.BoolOp, ast.Or, ast.And, ast.Compare, ast.Eq, ast.NotEq,
+               ast.Is, ast.IsNot, ast.UnaryOp, ast.Not)
+    builtins = {"print", "list", "tuple", "dict", "str", "type", "isinstance", "len", "open"}
+    for node in nodes:
+        if not isinstance(node, allowed):
+            return False
+        if isinstance(node, ast.Import) and any(
+                alias.name not in {"json", "sys"} or alias.asname for alias in node.names):
+            return False
+        if isinstance(node, ast.Assign) and any(
+                not isinstance(target, ast.Name) or target.id in builtins | {"json", "sys"}
+                for target in node.targets):
+            return False
+        if isinstance(node, ast.Attribute):
+            module_attr = (isinstance(node.value, ast.Name) and
+                           (node.value.id, node.attr) in {("sys", "argv"), ("json", "load"),
+                               ("json", "loads"), ("json", "dumps")})
+            data_attr = (node.attr in {"get", "keys", "values", "items"}
+                         and isinstance(node.value, ast.Name)
+                         and node.value.id not in builtins | {"json", "sys"})
+            read_attr = (node.attr == "read" and isinstance(node.value, ast.Call)
+                         and isinstance(node.value.func, ast.Name) and node.value.func.id == "open")
+            if not (module_attr or data_attr or read_attr):
+                return False
+        if isinstance(node, ast.Call):
+            if node.keywords or not (isinstance(node.func, ast.Attribute) or
+                    isinstance(node.func, ast.Name) and node.func.id in builtins):
+                return False
+            if isinstance(node.func, ast.Name) and node.func.id == "open":
+                if not 1 <= len(node.args) <= 2:
+                    return False
+                if len(node.args) == 2 and not (
+                        isinstance(node.args[1], ast.Constant) and node.args[1].value in {"r", "rt"}):
+                    return False
+                path = node.args[0]
+                if not (isinstance(path, ast.Constant) and isinstance(path.value, str) or
+                        isinstance(path, ast.Subscript) and isinstance(path.value, ast.Attribute)
+                        and isinstance(path.value.value, ast.Name) and path.value.value.id == "sys"
+                        and path.value.attr == "argv" and isinstance(path.slice, ast.Constant)
+                        and isinstance(path.slice.value, int) and 0 < path.slice.value <= len(words) - 4):
+                    return False
+    paths = [node.value for node in nodes if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    return credential_reason([*paths, *words[4:]], policy, cwd) is None
+
+
+def _inspection_shell(command: str, policy: StagePolicy, cwd: str | None, run) -> bool:
+    """Literal read pipelines/globs only; no substitution or control flow."""
+    if any(char in command for char in "`$;\n\r"):
+        return False
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    if any(token in {"&", ";", "(", ")", "<", ">"} or
+           token and all(char in "|&;()<>" for char in token) and token != "|" for token in tokens):
+        return False
+    groups: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "|":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    for words in groups:
+        if words[:1] == ["rtk"] and policy.rtk:
+            words = words[2:] if words[1:2] == ["proxy"] else words[1:]
+        if not words:
+            return False
+        if credential_reason(words[1:], policy, cwd):
+            return False
+        # Globs stay operands, never programs. Resolve matches for path guards.
+        expanded = [words[0]]
+        for word in words[1:]:
+            matches = glob.glob(word, root_dir=cwd or ".") if any(c in word for c in "*?[") else []
+            expanded.extend(matches or [word])
+        if credential_reason(expanded[1:], policy, cwd):
+            return False
+        program = expanded[0]
+        if program == "git":
+            args = list(expanded[1:])
+            while args and args[0] in {"-C", "--no-pager", "-P"}:
+                option = args.pop(0)
+                if option == "-C":
+                    if not args:
+                        return False
+                    args.pop(0)
+            if not args or args[0] not in GIT_COMMON_READ | GIT_REVIEW_READ:
+                return False
+        elif program not in READ_SHELL - {"find", "sha256sum"} | {"gh"}:
+            return False
+        elif program == "gh" and expanded[1:3] not in (["pr", "view"], ["pr", "checks"], ["issue", "view"]):
+            return False
+        _check_words(expanded, ParsedCommand(words=expanded), policy, cwd=cwd, run=run)
+    return True
+
+
 def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
           run=subprocess.run) -> Decision:
     """Decide whether this stage may run `command`. Never raises."""
@@ -1788,6 +1904,8 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                             rule="user_denial")
         parsed = parse_command(command, policy.tmpdir)
         if parsed.shell_source is not None:
+            if _inspection_shell(command, policy, cwd, run):
+                return Decision(True, "allowed read-only shell inspection")
             guard = protected_reason("Bash", {"command": command}, policy, cwd)
             if guard:
                 return Decision(False, guard, rule="compound_guard")
@@ -2024,6 +2142,8 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
         if words == expected or (not exact and words[:len(expected)] == expected):
             return
     program = words[0]
+    if _inspection_python(words, policy, cwd):
+        return
     if program == "sha256sum":
         if policy.role not in REVIEW_ROLES:
             raise PolicyError("sha256sum is available only in review stages")
@@ -2035,6 +2155,8 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             raise PolicyError("sha256sum may read only runtime-supplied evidence files")
         return
     if program == "printenv":
+        if words[1:] and set(words[1:]) <= {"GIT_SSH_COMMAND", "GIT_SSH"} and not parsed.redirects:
+            return
         if policy.tmpdir and words == ["printenv", "TMPDIR"] and not parsed.redirects:
             return
         raise PolicyError("only `printenv TMPDIR` is allowed to inspect the dispatch temp path")
@@ -2414,6 +2536,25 @@ def _git_global_options(args: list[str]) -> tuple[list[str] | None, list[str]]:
 
 def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                consent: bool = False) -> None:
+    if not consent:
+        selected = list(args)
+        directory = Path(cwd or ".")
+        changed_directory = False
+        while selected and selected[0] in {"-C", "--no-pager", "-P"}:
+            option = selected.pop(0)
+            if option == "-C":
+                changed_directory = True
+                if not selected:
+                    raise PolicyError("git -C needs a directory")
+                directory = (directory / selected.pop(0)).resolve()
+        if selected != args:
+            if changed_directory and (not selected or selected[0] not in GIT_COMMON_READ | GIT_REVIEW_READ):
+                raise PolicyError("Git directory selection is automatic only for read commands")
+            protected = credential_reason([str(directory), *selected[1:]], policy, str(directory))
+            if protected:
+                raise PolicyError(protected)
+            args = selected
+            cwd = str(directory)
     # Known syntax keeps the direct guards. Unknown syntax is disclosed opaque
     # interpreter consent, never a guessed command or an extra toolkit veto.
     if consent:
@@ -2722,7 +2863,7 @@ class _GhSpec:
 
 
 _ALL = frozenset({"implement", "resolve", "review", "rereview", ISSUE_REVIEW_ROLE,
-                  "security", "bootstrap", "coordinate"})
+                  "security", "bootstrap", "coordinate", "verify"})
 _WRITERS = WRITING_ROLES
 _READERS_OF_PRS = WRITING_ROLES | REVIEW_ROLES
 
@@ -2779,6 +2920,37 @@ _RUN_VIEW_LOGS = ("--log", "--log-failed")
 
 def _same_repo(value: str, repo: str | None) -> bool:
     return bool(repo) and value.lower().removesuffix(".git") == repo.lower()
+
+
+def _comments_api_read(args: list[str], policy: StagePolicy) -> bool:
+    """GET comments in this repository; fields/input never imply a POST."""
+    remaining = []
+    index = 0
+    while index < len(args):
+        word = args[index]
+        if word == "--paginate":
+            index += 1
+            continue
+        if word in {"--jq", "-q", "--method", "-X"}:
+            if index + 1 >= len(args):
+                return False
+            if word in {"--method", "-X"} and args[index + 1] != "GET":
+                return False
+            index += 2
+            continue
+        if word.startswith(("--jq=", "--method=", "-X")):
+            if word.startswith("--method=") and word != "--method=GET":
+                return False
+            if word.startswith("-X") and word != "-XGET":
+                return False
+            index += 1
+            continue
+        remaining.append(word)
+        index += 1
+    if len(remaining) != 1 or not policy.repo:
+        return False
+    return re.fullmatch(r"repos/" + re.escape(policy.repo) +
+                        r"/issues/[1-9][0-9]*/comments", remaining[0]) is not None
 
 
 def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
@@ -2863,6 +3035,8 @@ def _check_gh(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
         if policy.role != "resolve":
             raise PolicyError("gh api graphql is available only to the resolve stage")
         return _check_thread_call(remaining[2:], policy, cwd=cwd, run=run)
+    if remaining[:1] == ["api"] and _comments_api_read(remaining[1:], policy):
+        return
     if remaining[:1] == ["api"] and policy.role == "resolve":
         if remaining != args:
             raise PolicyError("the annotations read takes only --jq and --paginate")
@@ -3374,7 +3548,12 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     The patterns are prefixes; the hook validates the arguments behind them.
     """
     prefixes = [f"git {sub}" for sub in sorted(GIT_COMMON_READ)]
-    wildcards: list[str] = []
+    # Match selectors and read pipelines as well as the literal Git prefixes.
+    # The immutable hook still checks every argument and pipeline segment.
+    wildcards: list[str] = ["git *"]
+    prefixes += ["python3 -I -c", "printenv GIT_SSH_COMMAND", "printenv GIT_SSH"]
+    if policy.repo and _SAFE_REPOSITORY.fullmatch(policy.repo):
+        wildcards.append(f"gh api repos/{policy.repo}/issues/*/comments*")
     prefixes.append("git branch --show-current")
     if policy.role in GIT_SEARCH_ROLES:
         prefixes += [f"git {sub}" for sub in sorted(GIT_REVIEW_READ)]
@@ -3463,6 +3642,7 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
             root = _absolute_rule_path(tmpdir)
             patterns += [f"Edit({root}/{name})" for name in TMPDIR_HELPER_FILES]
             patterns += [f"Edit({root}/claude-*/{name})" for name in TMPDIR_HELPER_FILES]
+            patterns += [f"Read({root}/**)"]
             if policy.role in REVIEW_ROLES:
                 patterns += [f"Read({root}/delta.diff)", f"Read({root}/claude-*/delta.diff)"]
             patterns += [f"Edit({root}/*.log)", f"Edit({root}/claude-*/*.log)"]

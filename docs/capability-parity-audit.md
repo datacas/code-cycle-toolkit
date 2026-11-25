@@ -109,6 +109,25 @@ conversion of each veto is delivered by the issue or change it links. The
 vetoes no earlier issue tracked link a child issue of #450, #455 to #459: see
 [child issues](#child-issues).
 
+## Ordinary read conversions (#524)
+
+These refine the existing PA rows, rather than adding a new restriction.
+`tests/test_read_parity.py` runs direct Bash baselines and the actual subprocess
+hook with both executor labels; fixture provider output is not native evidence.
+The separate Claude/Codex comparison remains required and is recorded as
+`not_verified` when the enclosing executor cannot launch a nested native run.
+
+| Converted refusal | Existing rows | Result and retained boundary |
+|---|---|---|
+| Git diff forms and `git -C <worktree> diff` | PA-18, PA-20, PA-43 | Automatic reads, including outside-workspace selectors; output and credential guards remain |
+| Git grep and plain grep with `scripts/*.py` | PA-18, PA-19 | Read globs resolve before path checks; substitutions and executable segments still need consent |
+| `merge-base`, upstream `rev-parse`, `git show … \| grep …` | PA-19, PA-20 | Recognized read segments run without consent; write segments do not |
+| PR head/check queries and paginated comments API | PA-21 | Read flags and repository-scoped GET; fields, bodies and mutations retain guards |
+| SSH transport `printenv` | PA-18 | Only the two named variables; other environment disclosure retains consent |
+| Configured unittest variants and native Read in TMPDIR | PA-18 | Configured roles and dispatch temp evidence; no broader test or file-write authority |
+| Issue snapshot `git -C` and isolated JSON inspection | PA-20, PA-43 | Read selector and validated pure JSON/argv expressions; arbitrary code and credential paths retain consent |
+| Executor-layer refusal and recovered accessory reads | PA-36 | Layer and governing settings retained in log and stop reason; completed auxiliary reads create no pending decision |
+
 ## Inventory
 
 `stage_permissions` means `scripts/stage_permissions.py`. Function names are

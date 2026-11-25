@@ -43,7 +43,7 @@ from functools import partial
 from typing import Any, cast
 
 from cycle_journal import Journal, redact
-from execution_plan import RoleContract, role_contracts
+from execution_plan import RoleContract, role_contracts, completion_statuses
 from executors import (
     Availability,
     DispatchOutcome,
@@ -1232,6 +1232,14 @@ class CycleRecorder:
             classify_denials(
                 records, payload, publication=publication, cwd=cwd, environment=sandbox_commands,
                 mandatory=lambda command: _is_verification_command(command, command_policy))
+            # Completed stages can omit accessory operations; otherwise require
+            # an observed retry. Configured checks keep their own obligations.
+            from command_permissions import same_command, RECONCILABLE_DENIALS
+            executions = result.artifacts.get("command_executions") or []
+            for record in records:
+                record["worked_around"] = (record.get("class") in RECONCILABLE_DENIALS
+                    and (payload.get("status") in completion_statuses().get(run.role, ())
+                         or any(same_command(record["command"], command) for command in executions)))
             if records:
                 result = replace(result, artifacts={**result.artifacts, "denial_records": records})
             configured_checks = tuple(command for command, item in grantable.items() if item.get("check"))
@@ -1629,7 +1637,8 @@ class CycleRecorder:
                 self._journal("refusal", role=role, attempt_id=attempt_id,
                               component="claude_permission", status="denied",
                               command=denial.get("command") or denial.get("tool"),
-                              reason=f"Claude's permission layer denied {denial.get('tool')}",
+                              reason=(f"Claude's permission layer denied {denial.get('tool')}; governed by "
+                                      "--allowedTools and permissions.allow/deny (including managed settings)"),
                               correlation={"tool_use_id": denial.get("tool_use_id"), "layer": "claude_permission"})
         from command_permissions import _result_block
         result_block = _result_block(result.agent_output)
@@ -1646,6 +1655,7 @@ class CycleRecorder:
                                            "operation": record.get("operation"),
                                            "stage": record.get("stage")})
                 if (self.consent is not None and self.consent.prompt is None and not reconciled
+                        and not record.get("worked_around")
                         and record.get("class") != "unverifiable_check"):
                     # No human channel (`--detach`, no terminal): the refusal is a
                     # denial that grants nothing, and the question it would have

@@ -133,6 +133,50 @@ confined clone is never routed to Orca.
 
 ## The stage table
 
+### Ordinary inspection without consent (#524)
+
+Every stage may run Git `status`, `diff`, `log`, `rev-parse`, `show`,
+`merge-base`, `ls-files`, `grep` and `blame`. Literal `git -C <dir>` selectors
+may precede these reads, including a directory outside the workspace; credential
+paths remain guarded. Options such as `--stat`, pathspecs and `@{u}` keep their
+normal meaning. Read pipelines such as `git show <sha>:<path> | grep …` and
+path globs such as `git grep -n -E "pattern" -- docs/ skills/ scripts/*.py`
+or `grep -n pattern scripts/*.py` need no consent. Every pipeline segment must
+be a recognized read, with no substitution, control flow, or redirection.
+
+All stages may also use `gh pr view <n> --json … --jq …`, and
+`gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.
+The comments API accepts GET only, with no fields or input body, and remains
+scoped to this repository. `printenv GIT_SSH_COMMAND GIT_SSH` reads only those
+transport settings; bare `printenv` and other environment names retain consent.
+
+`python3 -I -c …` data inspection accepts imports of `json` and `sys`, read-only
+`open` on a literal path or indexed `sys.argv`, JSON loading and pure data
+expressions (`get`, `keys`, `list`, `type`, `isinstance`, `print`). It never
+executes code while validating. Other imports, code loaders, writes, computed
+file paths and arbitrary interpreter programs retain consent. Credential-store
+reads keep their guard even in this inspection form.
+
+| Role | Verification without a new question |
+|---|---|
+| `implement`, `resolve`, `review`, `rereview`, `verify` | Configured exact test and configured verification prefixes; here `python3 -m unittest discover -s tests`, `python3 scripts/validate-package.py`, `python3 -m unittest` (including `tests.<module>`), and `basedpyright` |
+| `issue_review`, `security`, `bootstrap`, `coordinate` | Inspection only; no project test execution is added |
+
+The current dispatch's `$TMPDIR` files may be read by native `Read`, including
+diff evidence. Claude receives dispatch-only `--allowedTools` entries for
+Git selectors/pipelines, isolated inspection and the comments API; the immutable
+hook still validates each operation. This changes no global permission file.
+Git output paths and shell redirections outside `$TMPDIR`, credential reads,
+and provider mutations retain refusal or consent. Codex retains its existing
+filesystem and credential isolation; no command table is added to Codex.
+
+An executor refusal is attributed to `claude_permission`, with
+`--allowedTools` and `permissions.allow/deny` (including managed settings) in
+the reason and journal. A toolkit grant cannot override those settings.
+Auxiliary refusals after completed stages and observed successful retries stay
+in the refusal log but do not create unanswered decisions. Required checks and
+unresolved essential operations keep their existing decision path.
+
 The table is the default. Explicit `code_cycle.user_choices` extend executable,
 command and integration access without another confirmation; unknown names are
 not a reason to block. Direct Git, code-host publication and Docker invocations
@@ -167,7 +211,7 @@ for consent. See [Configuration → Allowed commands](configuration.md#allowed-c
 
 The table remains the default. Git forms outside it (`ls-tree`, `stash`,
 `worktree add`, other fetch/pull forms), Git global and executing options
-(`-c`, `-C`, `--upload-pack`, `grep -O`, `--output` outside `$TMPDIR`),
+(`-c`, `--upload-pack`, `grep -O`, `--output` outside `$TMPDIR`),
 program-selecting environment prefixes, and `gh` reads outside the table or
 repository receive an exact consent question. The question names the command
 and its target and warns that options can execute programs or write files.
@@ -249,7 +293,8 @@ used by CI do not establish native parity.
 
 The hook validates arguments, not only the program:
 
-- simple literal commands use the table. Chaining (`&&`, `;`, `|`), heredocs,
+- simple literal commands and the guarded inspection forms above use the table.
+  Other chaining (`&&`, `;`, `|`), heredocs,
   substitutions, other expansions and globs use shell-operation consent,
   with every visible segment checked against the concrete guards (#439);
 - `$TMPDIR` is the only expansion, and only when it is the dispatch's own

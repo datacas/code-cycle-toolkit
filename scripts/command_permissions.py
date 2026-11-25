@@ -19,6 +19,13 @@ from stage_permissions import (operation, matching_answer, protected_reason, cre
 #: Top-level keys only the runtime writes into a stage's result, after the agent
 #: produced it. They are the consent record, not part of any role's contract.
 RUNTIME_RESULT_KEYS = ("permission_outcomes", "essential_permission", "stop_reason", "reconciliation")
+EXECUTOR_PERMISSION_SETTING = "Claude --allowedTools and permissions.allow/deny (including managed settings)"
+
+
+def refusal_reason(event: dict[str, Any], decision: Any) -> str:
+    if event.get("layer") == "claude_permission":
+        return f"Claude's permission layer refused the operation; governed by {EXECUTOR_PERMISSION_SETTING}"
+    return decision.reason if not decision.allowed else "executor permission layer refused the operation"
 #: Where an agent-supplied value of a runtime-owned key is kept apart. It is
 #: outside every closed contract, so a closed contract still rejects it.
 AGENT_KEY_PREFIX = "agent_"
@@ -213,7 +220,7 @@ def _refused_operation(denials: object, policy: Any, broker: Any, executor: str,
         command = str(data.get("command", ""))
         decision = (check(command, observed_policy, cwd=cwd) if tool == "Bash"
                     else check_file_edit(tool, data, observed_policy, cwd=cwd))
-        reason = decision.reason if not decision.allowed else "executor permission layer refused the operation"
+        reason = refusal_reason(event, decision)
         guard = protected_reason(tool, data, observed_policy, cwd)
         if guard is not None:
             continue
@@ -550,7 +557,7 @@ def _denial_records(denials: object, policy: Any, executor: str,
             decision = (check(command, observed, cwd=cwd) if tool == "Bash"
                         else check_file_edit(tool, data, observed, cwd=cwd))
             rule = event.get("rule") or (decision.rule if not decision.allowed else "")
-            reason = decision.reason if not decision.allowed else "executor permission layer refused the operation"
+            reason = refusal_reason(event, decision)
         except Exception:
             rule, reason = event.get("rule") or "", "the refusal could not be re-evaluated"
         try:
@@ -661,7 +668,8 @@ def classify_denials(records: list[dict[str, Any]], payload: dict[str, Any] | No
 
 def _compact(record: dict[str, Any]) -> dict[str, Any]:
     return {key: (str(record[key])[:300] if key in {"command", "reason", "why"} else record[key])
-            for key in ("command", "stage", "reason", "rule", "operation", "class", "why")}
+            for key in ("command", "stage", "reason", "rule", "operation", "class", "why", "layer")
+            if key in record}
 
 
 def has_open_questions(payload: dict[str, Any]) -> bool:
@@ -737,7 +745,7 @@ def _reconcile_blocked(payload: dict[str, Any], role: str, completed: frozenset[
     if claimed not in completed:
         reason = f"the block declares no completion status valid for the {role} role"
     elif serious is not None:
-        reason = f"{serious['class']} denial: {serious['command']}"
+        reason = f"{serious['class']} denial: {serious['command']}; {serious.get('layer')}: {serious['reason']}"
     elif payload.get("publication_pending") is True:
         reason = "the result says its publication is pending"
     elif payload.get("environment_blocker") or payload.get("essential_permission"):

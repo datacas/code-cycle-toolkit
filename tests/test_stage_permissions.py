@@ -540,7 +540,7 @@ class GitTests(PolicyTestCase):
     def test_options_that_run_programs_or_write_elsewhere_are_refused(self) -> None:
         for role in ("implement", "issue_review"):
             policy = self.policy(role)
-            for command in ("git -c core.pager=sh status", "git -C /etc status",
+            for command in ("git -c core.pager=sh status",
                             "git --exec-path=/x status", "git grep -Ovim x",
                             "git grep --open-files-in-pager=vim x",
                             "git fetch --upload-pack=/bin/sh origin",
@@ -838,7 +838,7 @@ class VerificationTests(PolicyTestCase):
         self.assertIn("Bash(rtk printenv TMPDIR:*)", patterns)
         self.assertIn("Bash(rtk proxy printenv TMPDIR:*)", patterns)
         self.assertNotIn("Bash(printenv:*)", patterns)
-        self.assertFalse(any("printenv" in pattern
+        self.assertFalse(any("printenv TMPDIR" in pattern
                              for pattern in sp.allowed_tool_patterns(
                                  replace(policy, tmpdir=None))))
 
@@ -1085,6 +1085,8 @@ class AllowedToolsTests(PolicyTestCase):
                     continue  # need arguments the prefix cannot carry
                 if "sed" in words:
                     continue  # a script and a file; InspectionToolTests covers the openings
+                if words[-3:] == ["python3", "-I", "-c"]:
+                    continue  # the inline program is validated by test_read_parity
                 if words[-1] == "sha256sum":
                     continue  # arguments must be runtime evidence files; covered above
                 non_completable = {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",

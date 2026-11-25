@@ -569,6 +569,8 @@ class IssueReviewRefusalTests(RunCycleTestCase):
         self.assertTrue(any("cc-implement-issue" in task for task in claude.dispatched))
         recorded = [row for row in self.journal(report) if row["component"] == "permission_outcome"]
         self.assertEqual(["stat /opt/runtime"], [row["command"] for row in recorded])
+        self.assertFalse([row for row in self.journal(report)
+                          if row["kind"] == "decision_asked" and row["command"] == "stat /opt/runtime"])
 
     def test_a_valid_refinement_stop_lists_the_refused_command_as_a_warning_not_the_cause(self):
         from test_issue_review import result
