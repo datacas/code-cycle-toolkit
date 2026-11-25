@@ -534,7 +534,8 @@ def _denial_records(denials: object, policy: Any, executor: str,
     identifier. Recording a denial never authorizes the operation, and nothing
     is skipped: a refusal the runtime cannot classify is `unknown`, not absent.
     """
-    from stage_permissions import FILE_EDIT_TOOLS, check, check_file_edit, denial_operation_id
+    from stage_permissions import (FILE_EDIT_TOOLS, check, check_file_edit, denial_operation_id,
+                                   _inspection_python, command_parts)
     records: dict[tuple[str, str], dict[str, Any]] = {}
     for event in denials if isinstance(denials, list) else []:
         if isinstance(event, str):
@@ -558,8 +559,11 @@ def _denial_records(denials: object, policy: Any, executor: str,
                         else check_file_edit(tool, data, observed, cwd=cwd))
             rule = event.get("rule") or (decision.rule if not decision.allowed else "")
             reason = refusal_reason(event, decision)
+            inspection = (tool == "Bash" and _inspection_python(
+                command_parts(parse_command(command, observed.tmpdir).words)[1], observed, cwd))
         except Exception:
             rule, reason = event.get("rule") or "", "the refusal could not be re-evaluated"
+            inspection = False
         try:
             requested = event.get("operation") or operation(tool, data, observed, cwd)
         except (ValueError, TypeError, OSError):
@@ -572,6 +576,7 @@ def _denial_records(denials: object, policy: Any, executor: str,
             "rule": rule or "executor_permission_layer", "operation": identity,
             "target": target if isinstance(target, str) else None,
             "tmpdir": observed.tmpdir,
+            "inspection": inspection,
             "intent": event.get("intent") if isinstance(event.get("intent"), dict) else None,
             "class": UNKNOWN_DENIAL, "why": "not classified"})
     return list(records.values())
@@ -609,6 +614,8 @@ def classify_denial(record: dict[str, Any], payload: dict[str, Any] | None, *,
             or any(isinstance(check, dict) and same_command(check.get("command"), command)
                    and check.get("required") is not False for check in checks or [])):
         return ESSENTIAL_PERMISSION, "the refused command is a mandatory check"
+    if record.get("inspection") is True:
+        return AUXILIARY_DENIAL, "the command only inspects JSON/argv data"
     if record["tool"] != "Bash":
         target = record.get("target")
         tmpdir = record.get("tmpdir")
@@ -663,6 +670,7 @@ def classify_denials(records: list[dict[str, Any]], payload: dict[str, Any] | No
         record["class"], record["why"] = classify_denial(record, payload, **evidence)
         # TMPDIR is classification input, not a durable permission artifact.
         record.pop("tmpdir", None)
+        record.pop("inspection", None)
     return records
 
 

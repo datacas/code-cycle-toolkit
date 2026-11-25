@@ -92,6 +92,15 @@ class ReadParityTests(unittest.TestCase):
         self.assertIn("--allowedTools", records[0]["reason"])
         self.assertIn("permissions.allow/deny", records[0]["reason"])
 
+    def test_completed_snapshot_inspection_is_an_auxiliary_host_refusal(self):
+        import command_permissions as cp
+        policy = sp.StagePolicy(role="issue_review")
+        command = "python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1])))' snapshot.json"
+        records = cp.denial_records([{"tool": "Bash", "input": {"command": command},
+                                     "layer": "claude_permission"}], policy, "claude", str(ROOT))
+        cp.classify_denials(records, {"status": "READY"}, cwd=str(ROOT))
+        self.assertEqual(cp.AUXILIARY_DENIAL, records[0]["class"])
+
     def test_read_documentation_covers_converted_refusals(self):
         page = (ROOT / "docs/host-permissions.md").read_text()
         audit = (ROOT / "docs/capability-parity-audit.md").read_text()
