@@ -44,7 +44,7 @@
     },
     "capability-parity-documentation": {
       "paths": ["AGENTS.md", "docs/host-permissions.md", "docs/capability-parity-audit.md", "docs/ROADMAP_V2.md"],
-      "tests": ["test_capability_parity_audit", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract", "test_precheck_causes.PrecheckCauseTests.test_every_broad_handler_has_an_inventory_row", "test_table_consent.TableConsentTests.test_documentation_tracks_all_converted_rows", "test_sensitive_consent.SensitiveConsentTests.test_documentation_and_reduced_roadmap_scope", "test_read_parity.ReadParityTests.test_read_documentation_covers_converted_refusals"]
+      "tests": ["test_capability_parity_audit", "test_consent_variants.ConsentVariantsTests.test_ac12_documentation_contract", "test_precheck_causes.PrecheckCauseTests.test_every_broad_handler_has_an_inventory_row", "test_table_consent.TableConsentTests.test_documentation_tracks_all_converted_rows", "test_sensitive_consent.SensitiveConsentTests.test_documentation_and_reduced_roadmap_scope", "test_read_parity.ReadParityTests.test_read_documentation_covers_converted_refusals", "test_stage_permissions.AllowedToolsTests.test_no_stage_receives_arbitrary_execution_except_documented_inspection"]
     },
     "spike-fixtures": {
       "paths": ["docs/spikes/**"],

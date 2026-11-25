@@ -5,7 +5,10 @@ and the publication policy in its prompt was the only boundary. This module
 replaces that, for Claude on a GitHub cycle, with two barriers:
 
 - `--allowedTools` patterns derived from the stage's table, so the executor's
-  own permission layer starts from the table rather than from `Bash(gh:*)`;
+  own permission layer starts from the table rather than from `Bash(gh:*)`.
+  #524 has two documented dispatch-only exceptions: `git *` and
+  `python3 -I -c:*` admit all Git subcommands and arbitrary inline Python.
+  Their operation restrictions rely on the immutable hook, not this barrier;
 - a `PreToolUse` hook that the runtime adds to every Claude dispatch. It parses
   each Bash command, its arguments, flags and refspecs, and denies anything the
   stage's table does not contain. Claude Code 2.1.302 lets a hook's `deny`
@@ -3546,10 +3549,13 @@ def allowed_tool_patterns(policy: StagePolicy) -> list[str]:
     """`--allowedTools` patterns for the stage's table: the first barrier.
 
     The patterns are prefixes; the hook validates the arguments behind them.
+    Git and isolated inline Python are documented broad exceptions (#524):
+    docs/host-permissions.md#dispatch-only-inspection-exceptions-524.
     """
     prefixes = [f"git {sub}" for sub in sorted(GIT_COMMON_READ)]
-    # Match selectors and read pipelines as well as the literal Git prefixes.
-    # The immutable hook still checks every argument and pipeline segment.
+    # Deliberately admit all Git commands and inline Python to the hook for
+    # no-consent inspection. These are not read-only executor patterns; the
+    # immutable hook is their sole toolkit operation filter (see docstring).
     wildcards: list[str] = ["git *"]
     prefixes += ["python3 -I -c", "printenv GIT_SSH_COMMAND", "printenv GIT_SSH"]
     if policy.repo and _SAFE_REPOSITORY.fullmatch(policy.repo):

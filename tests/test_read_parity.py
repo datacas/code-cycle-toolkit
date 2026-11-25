@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import fnmatch
+import io
 import os
 import shlex
 import subprocess
@@ -9,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -167,6 +170,58 @@ class ReadParityTests(unittest.TestCase):
             self.assertIn("Bash(gh api repos/owner/repo/issues/*/comments*)", patterns)
             self.assertIn(f"Read({sp._absolute_rule_path(directory)}/**)", patterns)
             self.assertNotIn("Bash(*)", patterns)
+
+    def test_documented_first_barrier_exceptions_reach_hook_denials(self):
+        # Only model the two documented prefix/wildcard forms here, not
+        # Claude's complete permission grammar or native executor behavior.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "policy.json"
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, repo="owner/repo", tmpdir=directory, rtk=True)
+                path.write_text(policy.to_json(), encoding="utf-8")
+                patterns = sp.allowed_tool_patterns(policy)
+                commands = [
+                    ("git *", "git diff --output=/etc/parity-out"),
+                    ("python3 -I -c:*", "python3 -I -c 'import os;os.system(\"id\")'"),
+                    ("python3 -I -c:*", 'python3 -I -c \'open("/etc/parity-out","w").write("x")\''),
+                    ("python3 -I -c:*", f"python3 -I -c 'print(open(\"{Path.home()}/.codex/auth.json\").read())'"),
+                ]
+                if role not in sp.WRITING_ROLES:
+                    commands.append(("git *", "git push origin HEAD"))
+                for wrapper in ("", "rtk ", "rtk proxy "):
+                    for opening, command in commands:
+                        with self.subTest(role=role, command=wrapper + command):
+                            pattern = wrapper + opening
+                            self.assertIn(f"Bash({pattern})", patterns)
+                            self.assertTrue(fnmatch.fnmatchcase(
+                                wrapper + command, pattern.replace(":*", " *")))
+                            # The broad opening is not an authorization. Invoke
+                            # the real CLI hook, without executing the payload.
+                            result = subprocess.run([sys.executable, sp.__file__, "hook", str(path)],
+                                cwd=root, capture_output=True, text=True, timeout=30,
+                                input=json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                                  "tool_input": {"command": wrapper + command}}))
+                            self.assertEqual(0, result.returncode, result.stderr)
+                            output = json.loads(result.stdout)["hookSpecificOutput"]
+                            self.assertEqual("deny", output["permissionDecision"])
+                            self.assertIn("[layer=toolkit_hook]", output["permissionDecisionReason"])
+
+    def test_inspection_exceptions_fail_closed_on_validation_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            path.write_text(sp.StagePolicy(role="review", tmpdir=directory).to_json(), encoding="utf-8")
+            for command in ("git status", "python3 -I -c 'print(1)'"):
+                for target in ("_check_words", "check_bash_tool_input"):
+                    with self.subTest(command=command, target=target), \
+                            patch.object(sp, target, side_effect=RuntimeError("validation probe")):
+                        output = io.StringIO()
+                        event = {"tool_name": "Bash", "tool_input": {"command": command}}
+                        self.assertEqual(0, sp.hook_main([str(path)], io.StringIO(json.dumps(event)), output))
+                        decision = json.loads(output.getvalue())["hookSpecificOutput"]
+                        self.assertEqual("deny", decision["permissionDecision"])
+                        self.assertIn("RuntimeError", decision["permissionDecisionReason"])
 
 
 if __name__ == "__main__":

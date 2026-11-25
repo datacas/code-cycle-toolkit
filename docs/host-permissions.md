@@ -164,8 +164,10 @@ reads keep their guard even in this inspection form.
 
 The current dispatch's `$TMPDIR` files may be read by native `Read`, including
 diff evidence. Claude receives dispatch-only `--allowedTools` entries for
-Git selectors/pipelines, isolated inspection and the comments API; the immutable
-hook still validates each operation. This changes no global permission file.
+Git selectors/pipelines, isolated inspection and the comments API. The Git and
+Python entries deliberately admit more than reads at the executor layer; see
+[dispatch-only inspection exceptions](#dispatch-only-inspection-exceptions-524).
+The immutable hook validates each operation. This changes no global permission file.
 Git output paths and shell redirections outside `$TMPDIR`, credential reads,
 and provider mutations retain refusal or consent. Codex retains its existing
 filesystem and credential isolation; no command table is added to Codex.
@@ -616,14 +618,47 @@ the `repository.pullRequest.reviewThreads` query on the cycle's change request,
 the hook looks the thread up and refuses one that belongs to another change
 request. The exact forms are in `cc-resolve-comments`.
 
+### Dispatch-only inspection exceptions (#524)
+
+Every Claude stage receives `Bash(git *)` and `Bash(python3 -I -c:*)`, plus
+their `rtk` and `rtk proxy` forms. These are explicit exceptions to the narrow
+first-barrier prefixes, not read-only patterns. In Claude's permission grammar,
+`Bash(git *)` is equivalent to `Bash(git:*)`: it admits **every Git subcommand**,
+including `push`, `commit`, `config` and `reset`, to the hook.
+`Bash(python3 -I -c:*)` admits **any inline Python program**, including imports
+and process execution. `-I` isolates Python's environment; it is not a sandbox.
+See [Claude's wildcard rules](https://code.claude.com/docs/en/permissions#wildcard-patterns).
+
+These dispatch-only openings preserve the owner's AC-1 decision that literal
+Git selectors, read pipelines and isolated JSON inspection run without consent.
+For these two forms the immutable `PreToolUse` hook is the sole toolkit
+operation filter: it checks Git subcommands, arguments and pipeline segments,
+and the Python AST, paths and read modes. Other inline programs still need
+operation consent at that hook. Writes outside `$TMPDIR` and credential-store
+reads retain their existing refusal or consent. Executor deny/ask rules and
+filesystem/sandbox limits remain independent and cannot be overridden by this
+allow list. No global permission file changes.
+
+This reduces defence in depth: if the hook were absent or failed to emit its
+deny, these two executor allow rules would not stop a Git write or arbitrary
+inline Python. Hook validation errors deny, dispatch setup installs the
+immutable hook and refuses known configurations that defeat it, as described
+below. Those controls are required; the two patterns alone are insufficient.
+`test_no_stage_receives_arbitrary_execution_except_documented_inspection`
+inventories both exceptions, including RTK variants; read-parity regressions
+check that disallowed operations reach a hook denial and validation errors
+fail closed. This coverage is not a native Claude/Codex parity claim.
+
 ## How the hook stays in force
 
 - The hook file and its policy are written to a directory outside the agent's
   workspace and `TMPDIR`, read-only, and removed when the dispatch ends; the
   runtime passes it with `--settings`, so the agent cannot edit it.
 - The hook only ever denies. An allowed command gets no decision, so
-  `--allowedTools` stays the first barrier and the user's own deny rules still
-  apply; a `deny` from this hook is not overridden by another hook's `allow`.
+  `--allowedTools` remains an executor permission filter, with the explicit
+  [inspection exceptions above](#dispatch-only-inspection-exceptions-524).
+  The user's own deny rules still apply; a `deny` from this hook is not
+  overridden by another hook's `allow`.
 - Before each Claude dispatch the runtime refuses to start, `BLOCKED`, when the
   loaded configuration could defeat the hook: `disableAllHooks`, managed
   `allowManagedHooksOnly`, or an enabled plugin whose hooks handle

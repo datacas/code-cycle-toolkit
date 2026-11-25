@@ -909,8 +909,17 @@ class AllowedToolsTests(PolicyTestCase):
     def patterns(self, role: str, **fields) -> list[str]:
         return sp.allowed_tool_patterns(self.policy(role, **fields))
 
-    def test_no_stage_receives_arbitrary_execution(self) -> None:
-        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+    def test_no_stage_receives_arbitrary_execution_except_documented_inspection(self) -> None:
+        # #524 deliberately moves these two operation checks to the immutable
+        # hook. Include both in the broad-pattern inventory: spelling git:*
+        # as git * must never silently evade this invariant again.
+        exceptions = ("Bash(git *)", "Bash(python3 -I -c:*)")
+        page = (ROOT / "docs/host-permissions.md").read_text(encoding="utf-8")
+        section = page.split("### Dispatch-only inspection exceptions (#524)", 1)[1].split("\n### ", 1)[0]
+        for exception in exceptions:
+            self.assertIn(f"`{exception}`", section)
+        for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                     "security", "verify", "bootstrap", "coordinate"):
             for docker in (False, True):
                 patterns = self.patterns(role, docker=docker, rtk=True,
                                          test_command="python3 -m unittest discover -s tests",
@@ -921,8 +930,13 @@ class AllowedToolsTests(PolicyTestCase):
                                       "Bash(docker:*)", "Bash(docker run:*)",
                                       "Bash(docker exec:*)", "Bash(docker compose run:*)",
                                       "Bash(gh api:*)", "Bash(rtk:*)", "Bash(rtk proxy:*)",
-                                      "Bash(*)", "Bash"):
-                        self.assertNotIn(forbidden, patterns)
+                                      "Bash(*)", "Bash", *exceptions):
+                        for wrapper in ("", "rtk ", "rtk proxy "):
+                            candidate = forbidden.replace("Bash(", f"Bash({wrapper}")
+                            if forbidden in exceptions:
+                                self.assertIn(candidate, patterns)
+                            else:
+                                self.assertNotIn(candidate, patterns)
                     self.assertIn("Bash(gh api user --jq .login:*)", patterns)
 
     def test_reviewers_get_no_write_and_resolve_alone_gets_threads(self) -> None:

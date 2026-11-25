@@ -127,6 +127,7 @@ The separate Claude/Codex comparison remains required and is recorded as
 | Configured unittest variants and native Read in TMPDIR | PA-18 | Configured roles and dispatch temp evidence; no broader test or file-write authority |
 | Issue snapshot `git -C` and isolated JSON inspection | PA-20, PA-43 | Read selector and validated pure JSON/argv expressions; arbitrary code and credential paths retain consent |
 | Executor-layer refusal and recovered accessory reads | PA-36 | Layer and governing settings retained in log and stop reason; completed auxiliary reads create no pending decision |
+| Claude first-barrier Git and inline-Python refusals (REV-001) | PA-18, PA-19, PA-20, PA-43 | Documented dispatch-only exception: `Bash(git *)` admits all Git subcommands and `Bash(python3 -I -c:*)` any inline Python, including RTK variants. The immutable hook is the sole toolkit operation filter for these forms; validation errors deny, and executor deny/ask and sandbox limits remain independent. See [the boundary and loss of defence in depth](host-permissions.md#dispatch-only-inspection-exceptions-524) and the broad-pattern/denial regressions. No new restriction is added. |
 
 ## Inventory
 
