@@ -103,8 +103,8 @@ class ReadParityTests(unittest.TestCase):
         self.assertEqual(cp.AUXILIARY_DENIAL, records[0]["class"])
 
     def test_read_documentation_covers_converted_refusals(self):
-        page = (ROOT / "docs/host-permissions.md").read_text()
-        audit = (ROOT / "docs/capability-parity-audit.md").read_text()
+        page = (ROOT / "docs/host-permissions.md").read_text(encoding="utf-8")
+        audit = (ROOT / "docs/capability-parity-audit.md").read_text(encoding="utf-8")
         for command in ("git -C", "python3 -I -c", "printenv GIT_SSH_COMMAND GIT_SSH", "--paginate", "python3 -m unittest"):
             self.assertIn(command, page)
         self.assertIn("#524", audit)
