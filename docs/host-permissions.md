@@ -133,6 +133,96 @@ confined clone is never routed to Orca.
 
 ## The stage table
 
+### Ordinary inspection without consent (#524)
+
+The owner's AC-1 decision of 2026-11-26 supersedes the earlier inspection
+exceptions: a read skips consent only when every word is simple, without quotes,
+backslashes, braces, globs, expansions (`$`, backticks, `~`) or redirections.
+Pipes between two such reads are allowed. The guard checks the same literal argv
+that Bash will execute. All other forms retain operation consent, including
+`python3 -I -c`, `git -C` outside the workspace and quoted or glob arguments.
+In particular, an inherited `nullglob` cannot drop a validated word and move a
+sed execution script into its place (REV-007); `failglob` cannot change whether
+the command executes. No glob expansion is automatic, whatever `BASHOPTS` or
+`GLOBIGNORE` contains. A `NAME=value` or `NAME+=value` argument also keeps
+consent, because an inherited `SHELLOPTS=keyword` turns it into an environment
+assignment (REV-008), and a path-named program such as `./git` keeps consent in
+a pipeline because it runs a file. These consent requirements never become guards: a consented compound
+push keeps them consentable, while Git's other argument guards still apply.
+Existing concrete write and credential guards still apply after consent. This replaces the broader no-consent behavior described in the
+earlier REV-003–006 history.
+Explicit project tool and command choices and configured verification remain
+existing authorization; this inspection default does not add another question
+to them or relax their concrete guards.
+
+Every stage may run simple forms of Git `status`, `diff`, `log`, `rev-parse`, `show`,
+`merge-base`, `ls-files`, `grep` and `blame`. Literal `git -C <dir>` selectors
+may precede these reads within the workspace; credential
+paths remain guarded. Options such as `--stat` and simple pathspecs keep their
+normal meaning. Read pipelines such as `git show HEAD:AGENTS.md | grep parity`
+need no consent. Every pipeline segment must
+be a recognized read, with no substitution, control flow, or redirection.
+Pipeline boundaries must agree with the quote-aware shell parser. A quoted or
+escaped `|` stays an argument to its original program; it cannot hide that
+program's options under a different command's guards (REV-002).
+Unquoted brace lists/ranges retain shell-operation consent because Bash expansion
+can introduce execution or output options before the guards see them (REV-003).
+Quoted and escaped literal braces and Git's `@{u}` retain consent. Double-quoted regex
+backslashes follow Bash rules, so `grep -n "parity\|consent"`, `"\."` and
+`"\b"` keep their normal argv after consent (REV-004).
+Unquoted bracket globs retain operation consent: Bash negation, POSIX classes,
+equivalence classes and locale collation do not share Python's glob dialect.
+Globs also retain consent when inherited `BASHOPTS` enables `dotglob` or
+`nocaseglob`, `globstar`, `nullglob` or `failglob`, or `GLOBIGNORE` is non-empty
+(REV-005, REV-007). Ordinary `*` and `?` globs also keep consent. These forms use the
+existing shell-operation consent route, with concrete guards still in force.
+The automatic path never expands globs or uses them to select a command, Git
+subcommand/directory selector or sed script. Consented shell operations retain
+their concrete guards and depend on external isolation for interpreter internals.
+
+All stages may also use `gh pr view <n> --json … --jq …`, and
+`gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.
+The comments API accepts GET only, with no fields or input body, and remains
+scoped to this repository. `printenv GIT_SSH_COMMAND GIT_SSH` reads only those
+transport settings; bare `printenv` and other environment names retain consent.
+
+`python3 -I -c …` data inspection accepts imports of `json` and `sys`, read-only
+`open` on a literal path or indexed `sys.argv`, JSON loading and pure data
+expressions (`get`, `keys`, `list`, `type`, `isinstance`, `print`) for classification;
+these inline programs retain operation consent. The classifier never
+executes code while validating. Other imports, code loaders, writes, computed
+file paths and arbitrary interpreter programs retain consent. Credential-store
+reads keep their guard even in this inspection form.
+Literal `open()` paths and positional arguments use the same resolved-path
+boundary as ordinary read tools: the workspace, this dispatch's `$TMPDIR`,
+runtime-supplied evidence files and this session's tool-results directory.
+Other paths, including `/proc/self/environ`, `~/.git-credentials`, `~/.netrc`
+and `~/.config/bitbucket/bitbucket.env`, retain operation consent (REV-006).
+Symlinks are checked at their resolved target. This does not widen any executor
+credential deny rule or sandbox boundary.
+
+| Role | Verification without a new question |
+|---|---|
+| `implement`, `resolve`, `review`, `rereview`, `verify` | Configured exact test and configured verification prefixes; here `python3 -m unittest discover -s tests`, `python3 scripts/validate-package.py`, `python3 -m unittest` (including `tests.<module>`), and `basedpyright` |
+| `issue_review`, `security`, `bootstrap`, `coordinate` | Inspection only; no project test execution is added |
+
+The current dispatch's `$TMPDIR` files may be read by native `Read`, including
+diff evidence. Claude receives dispatch-only `--allowedTools` entries for
+Git selectors/pipelines, isolated inspection and the comments API. The Git and
+Python entries deliberately admit more than reads at the executor layer; see
+[dispatch-only inspection exceptions](#dispatch-only-inspection-exceptions-524).
+The immutable hook validates each operation. This changes no global permission file.
+Git output paths and shell redirections outside `$TMPDIR`, credential reads,
+and provider mutations retain refusal or consent. Codex retains its existing
+filesystem and credential isolation; no command table is added to Codex.
+
+An executor refusal is attributed to `claude_permission`, with
+`--allowedTools` and `permissions.allow/deny` (including managed settings) in
+the reason and journal. A toolkit grant cannot override those settings.
+Auxiliary refusals after completed stages and observed successful retries stay
+in the refusal log but do not create unanswered decisions. Required checks and
+unresolved essential operations keep their existing decision path.
+
 The table is the default. Explicit `code_cycle.user_choices` extend executable,
 command and integration access without another confirmation; unknown names are
 not a reason to block. Direct Git, code-host publication and Docker invocations
@@ -167,7 +257,7 @@ for consent. See [Configuration → Allowed commands](configuration.md#allowed-c
 
 The table remains the default. Git forms outside it (`ls-tree`, `stash`,
 `worktree add`, other fetch/pull forms), Git global and executing options
-(`-c`, `-C`, `--upload-pack`, `grep -O`, `--output` outside `$TMPDIR`),
+(`-c`, `--upload-pack`, `grep -O`, `--output` outside `$TMPDIR`),
 program-selecting environment prefixes, and `gh` reads outside the table or
 repository receive an exact consent question. The question names the command
 and its target and warns that options can execute programs or write files.
@@ -249,7 +339,8 @@ used by CI do not establish native parity.
 
 The hook validates arguments, not only the program:
 
-- simple literal commands use the table. Chaining (`&&`, `;`, `|`), heredocs,
+- simple literal commands and the guarded inspection forms above use the table.
+  Other chaining (`&&`, `;`, `|`), heredocs,
   substitutions, other expansions and globs use shell-operation consent,
   with every visible segment checked against the concrete guards (#439);
 - `$TMPDIR` is the only expansion, and only when it is the dispatch's own
@@ -571,14 +662,50 @@ the `repository.pullRequest.reviewThreads` query on the cycle's change request,
 the hook looks the thread up and refuses one that belongs to another change
 request. The exact forms are in `cc-resolve-comments`.
 
+### Dispatch-only inspection exceptions (#524)
+
+Every Claude stage receives `Bash(git *)` and `Bash(python3 -I -c:*)`, plus
+their `rtk` and `rtk proxy` forms when RTK is installed for the dispatch. These are explicit exceptions to the narrow
+first-barrier prefixes, not read-only patterns. In Claude's permission grammar,
+`Bash(git *)` is equivalent to `Bash(git:*)`: it admits **every Git subcommand**,
+including `push`, `commit`, `config` and `reset`, to the hook.
+`Bash(python3 -I -c:*)` admits **any inline Python program**, including imports
+and process execution. `-I` isolates Python's environment; it is not a sandbox.
+See [Claude's wildcard rules](https://code.claude.com/docs/en/permissions#wildcard-patterns).
+
+These dispatch-only openings let the hook apply the owner's current AC-1
+decision: only simple read words and simple read pipelines skip consent.
+Outside-workspace Git selectors and isolated JSON inspection retain consent.
+For these two forms the immutable `PreToolUse` hook is the sole toolkit
+operation filter: it checks Git subcommands, arguments and pipeline segments,
+and the Python AST, paths and read modes. Other inline programs still need
+operation consent at that hook. Writes outside `$TMPDIR` and credential-store
+reads retain their existing refusal or consent. Executor deny/ask rules and
+filesystem/sandbox limits remain independent and cannot be overridden by this
+allow list. No global permission file changes.
+
+This reduces defence in depth: if the hook were absent or failed to emit its
+deny, these two executor allow rules would not stop a Git write or arbitrary
+inline Python. Hook validation errors deny, dispatch setup installs the
+immutable hook and refuses known configurations that defeat it, as described
+below. Those controls are required; the two patterns alone are insufficient.
+`test_no_stage_receives_arbitrary_execution_except_documented_inspection`
+inventories both exceptions, including RTK variants; read-parity regressions
+check that disallowed operations reach a hook denial and validation errors
+fail closed. This coverage is not a native Claude/Codex parity claim.
+
 ## How the hook stays in force
 
 - The hook file and its policy are written to a directory outside the agent's
   workspace and `TMPDIR`, read-only, and removed when the dispatch ends; the
   runtime passes it with `--settings`, so the agent cannot edit it.
 - The hook only ever denies. An allowed command gets no decision, so
-  `--allowedTools` stays the first barrier and the user's own deny rules still
-  apply; a `deny` from this hook is not overridden by another hook's `allow`.
+  `--allowedTools` remains an executor permission filter, with the explicit
+  [inspection exceptions above](#dispatch-only-inspection-exceptions-524)
+  and the `Bash(*)` rule that a consented regex, shell-source or
+  configured-check grant adds ([reusable command consent](#reusable-command-consent-439)).
+  The user's own deny rules still apply; a `deny` from this hook is not
+  overridden by another hook's `allow`.
 - Before each Claude dispatch the runtime refuses to start, `BLOCKED`, when the
   loaded configuration could defeat the hook: `disableAllHooks`, managed
   `allowManagedHooksOnly`, or an enabled plugin whose hooks handle

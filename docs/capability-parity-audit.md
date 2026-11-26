@@ -109,6 +109,31 @@ conversion of each veto is delivered by the issue or change it links. The
 vetoes no earlier issue tracked link a child issue of #450, #455 to #459: see
 [child issues](#child-issues).
 
+## Ordinary read conversions (#524)
+
+These refine the existing PA rows, rather than adding a new restriction.
+`tests/test_read_parity.py` runs direct Bash baselines and the actual subprocess
+hook with both executor labels; fixture provider output is not native evidence.
+The separate Claude/Codex comparison remains required and is recorded as
+`not_verified` when the enclosing executor cannot launch a nested native run.
+
+| Converted refusal | Existing rows | Result and retained boundary |
+|---|---|---|
+| Simple-word inspection boundary (REV-007; owner AC-1 decision 2026-11-26) | PA-18, PA-19, PA-20, PA-22, PA-43 | User-defined authorization boundary (role contract): only simple read words and pipelines between such reads skip consent. Quotes, backslashes, braces, globs, expansions, redirections, inline Python and outside-workspace Git selectors retain the existing operation-consent route. This supersedes the broader automatic behavior in the historical rows below. No shell glob expansion is predicted, so inherited nullglob cannot drop a validated script word and failglob cannot alter execution. `NAME=value` arguments (inherited `SHELLOPTS=keyword`) and path-named pipeline programs also keep consent. Consent requirements are never guards, so a consented compound push stays consentable. Exact consent still works; write and credential guards remain independent. |
+| Git diff forms and `git -C <worktree> diff` | PA-18, PA-20, PA-43 | Automatic reads, including outside-workspace selectors; output and credential guards remain |
+| Git grep and plain grep with `scripts/*.py` | PA-18, PA-19 | Read globs resolve before path checks; substitutions and executable segments still need consent |
+| `merge-base`, upstream `rev-parse`, `git show … \| grep …` | PA-19, PA-20 | Recognized read segments run without consent; write segments do not. Quote-aware boundary agreement keeps quoted/escaped pipes in the original argv and prevents sed execution/write options being checked as another program (REV-002). |
+| PR head/check queries and paginated comments API | PA-21 | Read flags and repository-scoped GET; fields, bodies and mutations retain guards |
+| SSH transport `printenv` | PA-18 | Only the two named variables; other environment disclosure retains consent |
+| Configured unittest variants and native Read in TMPDIR | PA-18 | Configured roles and dispatch temp evidence; no broader test or file-write authority |
+| Issue snapshot `git -C` and isolated JSON inspection | PA-20, PA-43 | Read selector and validated pure JSON/argv expressions; arbitrary code and credential paths retain consent |
+| Executor-layer refusal and recovered accessory reads | PA-36 | Layer and governing settings retained in log and stop reason; completed auxiliary reads create no pending decision |
+| Claude first-barrier Git and inline-Python refusals (REV-001) | PA-18, PA-19, PA-20, PA-43 | Documented dispatch-only exception: `Bash(git *)` admits all Git subcommands and `Bash(python3 -I -c:*)` any inline Python, including RTK variants. The immutable hook is the sole toolkit operation filter for these forms; validation errors deny, and executor deny/ask and sandbox limits remain independent. See [the boundary and loss of defence in depth](host-permissions.md#dispatch-only-inspection-exceptions-524) and the broad-pattern/denial regressions. No new restriction is added. |
+| Brace expansion in read pipelines (REV-003) | PA-19, PA-22 | Role contract: unquoted brace lists/ranges keep existing shell-operation consent because expansion can introduce sed execution/write scripts or Git output options. Quoted/escaped braces and Git's `@{u}` remain literal reads; all roles and RTK forms have hook regressions. |
+| Double-quoted grep backslashes (REV-004) | PA-19, PA-20 | Converted veto: Bash-compatible quote removal preserves regex escapes, allowing ordinary `git show … \| grep -n "a\|b"` pipelines without consent. Direct Bash argv and shared-hook baselines cover the conversion; native parity stays separate. |
+| Bash/Python glob-dialect mismatch (REV-005) | PA-19, PA-22 | Role contract: unquoted bracket globs and glob expansion under inherited dotglob, nocaseglob, globstar or non-empty GLOBIGNORE retain existing shell-operation consent. They can introduce options the Python resolver never sees. Globs cannot select the command, Git subcommand/directory selector or sed script; raw and expanded argv are both validated so filesystem order cannot select an operation. Default `*`/`?` file-operand globs stay automatic; consent still uses concrete guards and external isolation. |
+| Inline-Python outside-workspace reads (REV-006) | PA-19, PA-20, PA-43 | Role contract: literal `open()` paths and argv use the ordinary read boundary, including resolved symlink targets. Workspace, dispatch TMPDIR, supplied evidence and session tool-results stay automatic; other paths retain operation consent. Credential guards and host deny rules remain independent. |
+
 ## Inventory
 
 `stage_permissions` means `scripts/stage_permissions.py`. Function names are

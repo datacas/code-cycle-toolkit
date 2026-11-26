@@ -1461,7 +1461,7 @@ class ConsentVariantsTests(unittest.TestCase):
                     scratch = Path(root, f"tmp-{own[:4]}")
                     scratch.mkdir(exist_ok=True)
                     policy = sp.StagePolicy(role, tmpdir=str(scratch))
-                    for command in (f'grep -c "" {files[own]}', f"grep -n -E 'li.e' {files[own]}",
+                    for command in (f'grep -c line {files[own]}', f"grep -n -E li.e {files[own]}",
                                     f"wc -l {files[own]}", f"cat {files[own].parent}/../tool-results/{files[own].name}"):
                         with self.subTest(role=role, session=own, command=command):
                             self.assertEqual("", self.run_hook(policy, command, root, project, own))
@@ -1489,6 +1489,15 @@ class ConsentVariantsTests(unittest.TestCase):
                         policy = sp.StagePolicy(role, tmpdir=str(first))
                         command = template.format(file=files["11111111-aaaa"], tmp=first)
                         output = self.run_hook(policy, command, root, project, "11111111-aaaa")
+                        if " | " in template:
+                            # #524 recognizes the read pipeline without consent.
+                            self.assertEqual("", output)
+                            later_command = template.format(file=files["22222222-bbbb"], tmp=second)
+                            self.assertEqual("", self.run_hook(replace(policy, tmpdir=str(second)),
+                                later_command, root, project, "22222222-bbbb"))
+                            self.assertIn("[layer=toolkit_hook]", self.run_hook(
+                                replace(policy, tmpdir=str(second)), command, root, project, "22222222-bbbb"))
+                            continue
                         self.assertIn("[layer=toolkit_hook]", output)
                         refusal = {"tool": "Bash", "input": {"command": command}, "tmpdir": str(first),
                                    "operation": self.marker(output, "OPERATION"),

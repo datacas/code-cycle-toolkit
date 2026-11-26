@@ -109,7 +109,8 @@ class TableConsentTests(unittest.TestCase):
     def test_codex_pa24_direct_baseline(self): self.parity("codex", "PA-24")
 
     def test_patterns_and_prior_roles_never_lift_converted_guards(self):
-        for command in ("git ls-tree HEAD", "git -C . status", "GIT_PAGER=cat git status",
+        self.assertTrue(sp.check("git -C . status", self.policy, cwd=str(self.root)).allowed)
+        for command in ("git ls-tree HEAD", "GIT_PAGER=cat git status",
                         "gh issue list", "gh pr comment 2 --body fixture"):
             with self.subTest(command=command):
                 op = sp.operation("Bash", {"command": command}, self.policy, str(self.root))

@@ -150,7 +150,13 @@ class OperationTests(unittest.TestCase):
                         'jq --arg name /api/ "." file.json', "head -n 20 file.py",
                         "find . -name /api/"):
             with self.subTest(command=command):
-                self.assertTrue(sp.check(command, self.policy, cwd=str(self.root)).allowed)
+                automatic = not any(char in command for char in "'\"")
+                self.assertEqual(automatic, sp.check(command, self.policy, cwd=str(self.root)).allowed)
+                if not automatic:
+                    operation = sp.operation("Bash", {"command": command}, self.policy, str(self.root))
+                    allowed = replace(self.policy, command_permissions=({"operation": operation,
+                                                                        "decision": "allow"},))
+                    self.assertTrue(sp.check(command, allowed, cwd=str(self.root)).allowed)
         for command in ("grep -f /outside/patterns file.py", "grep -f/outside/patterns file.py",
                         "grep -n /api/ /outside/file.py", "grep --exclude-from=/outside/patterns token .",
                         "jq -f /outside/filter file.json",
@@ -167,10 +173,37 @@ class OperationTests(unittest.TestCase):
         policy = replace(self.policy, evidence_paths=(str(evidence),))
         restored = sp.StagePolicy.from_json(policy.to_json())
         for program in ("wc -l", "cat", "head -n 10"):
-            self.assertTrue(sp.check(program + " " + shlex.quote(str(evidence)), restored,
-                                     cwd=str(self.root)).allowed)
-        for path in (evidence.parent, evidence.with_name("other.diff")):
-            self.assertFalse(sp.check(shlex.join(["cat", str(path)]), restored, cwd=str(self.root)).allowed)
+            # Relative POSIX words stay simple on Windows too; shlex.quote of
+            # a native Windows path adds quotes and must retain AC-1 consent.
+            command = program + " ../runtime-evidence/accumulated.diff"
+            with self.subTest(command=command):
+                decision = sp.check(command, restored, cwd=str(self.root))
+                self.assertTrue(decision.allowed, decision.reason)
+            if os.name != "nt":
+                # Runtime evidence arrives as an absolute path on POSIX.
+                command = program + " " + str(evidence)
+                with self.subTest(command=command):
+                    decision = sp.check(command, restored, cwd=str(self.root))
+                    self.assertTrue(decision.allowed, decision.reason)
+                for path in (evidence.parent, evidence.with_name("other.diff")):
+                    command = program + " " + str(path)
+                    with self.subTest(command=command):
+                        decision = sp.check(command, restored, cwd=str(self.root))
+                        self.assertFalse(decision.allowed, decision.reason)
+            for path in (str(evidence), evidence.as_posix()):
+                command = program + " '" + path + "'"
+                with self.subTest(command=command):
+                    decision = sp.check(command, restored, cwd=str(self.root))
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual("complex read arguments need operation consent", decision.reason)
+                    operation = sp.operation("Bash", {"command": command}, restored, str(self.root))
+                    consented = replace(restored, command_permissions=(
+                        {"operation": operation, "decision": "allow"},))
+                    self.assertTrue(sp.check(command, consented, cwd=str(self.root)).allowed)
+                    self.assertFalse(sp.check(command.replace("accumulated.diff", "other.diff"),
+                                              consented, cwd=str(self.root)).allowed)
+        for path in ("../runtime-evidence", "../runtime-evidence/other.diff"):
+            self.assertFalse(sp.check("cat " + path, restored, cwd=str(self.root)).allowed)
 
     def test_quoted_windows_paths_preserve_backslashes_in_bash(self):
         for path in (r"C:\Fixture\Runner\auth.json", r"C:\Temp\snapshot", r"C:\Temp\helper.py"):
@@ -569,6 +602,8 @@ class IssueReviewRefusalTests(RunCycleTestCase):
         self.assertTrue(any("cc-implement-issue" in task for task in claude.dispatched))
         recorded = [row for row in self.journal(report) if row["component"] == "permission_outcome"]
         self.assertEqual(["stat /opt/runtime"], [row["command"] for row in recorded])
+        self.assertFalse([row for row in self.journal(report)
+                          if row["kind"] == "decision_asked" and row["command"] == "stat /opt/runtime"])
 
     def test_a_valid_refinement_stop_lists_the_refused_command_as_a_warning_not_the_cause(self):
         from test_issue_review import result

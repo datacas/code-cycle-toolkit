@@ -46,7 +46,12 @@ class CompoundParityTests(unittest.TestCase):
                     expected_file = target.read_bytes() if target.exists() else None
                     if target.exists():
                         target.unlink()
-                    self.assertFalse(sp.check(command, policy, cwd=directory).allowed)
+                    if sp.check(command, policy, cwd=directory).allowed:
+                        # #524: recognized read pipelines no longer ask consent.
+                        actual = run()
+                        self.assertEqual((direct.returncode, direct.stdout, direct.stderr),
+                                         (actual.returncode, actual.stdout, actual.stderr))
+                        continue
                     request = cp.refused_operation([command], policy, broker, executor, directory)
                     self.assertIsNotNone(request)
                     grant = broker.operations[request["resource"]]

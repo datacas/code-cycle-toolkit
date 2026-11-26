@@ -75,6 +75,13 @@ class PolicyTestCase(unittest.TestCase):
 
     def allowed(self, command: str, policy: sp.StagePolicy, *, branch: str = "issue-142"):
         decision = sp.check(command, policy, cwd=self.directory.name, run=on_branch(branch))
+        if decision.reason == "complex read arguments need operation consent":
+            # These legacy argument/role cases still exercise their concrete
+            # guards. The 2026-11-26 owner decision now requires exact consent
+            # for their quoted/expanded syntax; test_read_parity covers that gate.
+            operation = sp.operation("Bash", {"command": command}, policy, self.directory.name)
+            policy = replace(policy, command_permissions=({"operation": operation, "decision": "allow"},))
+            decision = sp.check(command, policy, cwd=self.directory.name, run=on_branch(branch))
         self.assertTrue(decision.allowed, f"{command!r} was denied: {decision.reason}")
 
     def denied(self, command: str, policy: sp.StagePolicy, *, branch: str = "issue-142"):
@@ -252,7 +259,17 @@ class InspectionToolTests(PolicyTestCase):
                 with self.subTest(role=role, command=command):
                     decision = sp.check(command, policy, cwd=ROOT.as_posix(),
                                         run=on_branch("issue-142"))
-                    self.assertEqual(hook_allows, decision.allowed, decision.reason)
+                    # Quoted words and NAME=value words (inherited set -k) keep consent.
+                    automatic = hook_allows and not any(char in command for char in "'\"") and not any(
+                        re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", word) for word in command.split())
+                    self.assertEqual(automatic, decision.allowed, decision.reason)
+                    if hook_allows and not automatic:
+                        table_operation = sp.operation("Bash", {"command": command}, policy,
+                                                       ROOT.as_posix())
+                        table_consent = replace(policy, command_permissions=(
+                            {"operation": table_operation, "decision": "allow"},))
+                        self.assertTrue(sp.check(command, table_consent, cwd=ROOT.as_posix(),
+                                                 run=on_branch("issue-142")).allowed)
                     if hook_allows:
                         # The hook never accepts what the first barrier does not open.
                         self.assertTrue(opens_as_prefix(command, patterns))
@@ -540,7 +557,7 @@ class GitTests(PolicyTestCase):
     def test_options_that_run_programs_or_write_elsewhere_are_refused(self) -> None:
         for role in ("implement", "issue_review"):
             policy = self.policy(role)
-            for command in ("git -c core.pager=sh status", "git -C /etc status",
+            for command in ("git -c core.pager=sh status",
                             "git --exec-path=/x status", "git grep -Ovim x",
                             "git grep --open-files-in-pager=vim x",
                             "git fetch --upload-pack=/bin/sh origin",
@@ -838,7 +855,7 @@ class VerificationTests(PolicyTestCase):
         self.assertIn("Bash(rtk printenv TMPDIR:*)", patterns)
         self.assertIn("Bash(rtk proxy printenv TMPDIR:*)", patterns)
         self.assertNotIn("Bash(printenv:*)", patterns)
-        self.assertFalse(any("printenv" in pattern
+        self.assertFalse(any("printenv TMPDIR" in pattern
                              for pattern in sp.allowed_tool_patterns(
                                  replace(policy, tmpdir=None))))
 
@@ -909,20 +926,42 @@ class AllowedToolsTests(PolicyTestCase):
     def patterns(self, role: str, **fields) -> list[str]:
         return sp.allowed_tool_patterns(self.policy(role, **fields))
 
-    def test_no_stage_receives_arbitrary_execution(self) -> None:
-        for role in ("implement", "resolve", "review", "rereview", "issue_review"):
+    def test_no_stage_receives_arbitrary_execution_except_documented_inspection(self) -> None:
+        # #524 deliberately moves these two operation checks to the immutable
+        # hook. Include both in the broad-pattern inventory and compare both
+        # spellings: Claude treats a trailing `:*` and ` *` alike, so writing
+        # git:* as git * must never silently evade this invariant again.
+        def spelling(pattern: str) -> str:
+            return pattern[:-3] + " *)" if pattern.endswith(":*)") else pattern
+
+        exceptions = ("Bash(git *)", "Bash(python3 -I -c:*)")
+        page = (ROOT / "docs/host-permissions.md").read_text(encoding="utf-8")
+        section = page.split("### Dispatch-only inspection exceptions (#524)", 1)[1]
+        section = section.split("\n### ", 1)[0].split("\n## ", 1)[0]
+        for exception in exceptions:
+            self.assertIn(f"`{exception}`", section)
+        for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                     "security", "verify", "bootstrap", "coordinate"):
             for docker in (False, True):
                 patterns = self.patterns(role, docker=docker, rtk=True,
                                          test_command="python3 -m unittest discover -s tests",
                                          verify_prefixes=("python3 scripts/validate-package.py",))
+                normalised = {spelling(pattern) for pattern in patterns}
                 with self.subTest(role=role, docker=docker):
                     for forbidden in ("Bash(gh:*)", "Bash(git:*)", "Bash(python3:*)",
                                       "Bash(python3 *)", "Bash(npx:*)", "Bash(bash:*)",
                                       "Bash(docker:*)", "Bash(docker run:*)",
                                       "Bash(docker exec:*)", "Bash(docker compose run:*)",
                                       "Bash(gh api:*)", "Bash(rtk:*)", "Bash(rtk proxy:*)",
-                                      "Bash(*)", "Bash"):
-                        self.assertNotIn(forbidden, patterns)
+                                      "Bash(*)", "Bash", *exceptions):
+                        for wrapper in ("", "rtk ", "rtk proxy "):
+                            candidate = spelling(forbidden.replace("Bash(", f"Bash({wrapper}"))
+                            # `git:*` is the documented `git *` exception in
+                            # another spelling; every other entry stays forbidden.
+                            if spelling(forbidden) in {spelling(e) for e in exceptions}:
+                                self.assertIn(candidate, normalised)
+                            else:
+                                self.assertNotIn(candidate, normalised)
                     self.assertIn("Bash(gh api user --jq .login:*)", patterns)
 
     def test_reviewers_get_no_write_and_resolve_alone_gets_threads(self) -> None:
@@ -1085,6 +1124,8 @@ class AllowedToolsTests(PolicyTestCase):
                     continue  # need arguments the prefix cannot carry
                 if "sed" in words:
                     continue  # a script and a file; InspectionToolTests covers the openings
+                if words[-3:] == ["python3", "-I", "-c"]:
+                    continue  # the inline program is validated by test_read_parity
                 if words[-1] == "sha256sum":
                     continue  # arguments must be runtime evidence files; covered above
                 non_completable = {"fetch", "pull", "checkout", "switch", "add", "commit", "rm",
@@ -1250,7 +1291,7 @@ class HookTests(PolicyTestCase):
     def test_issue_review_runs_the_git_search_it_was_denied(self) -> None:
         # #270: the exact command the #268 issue review was refused, passed by
         # both barriers and then run against a real repository.
-        command = 'git grep -n -I "publication_changed" -- .'
+        command = 'git grep -n -I publication_changed -- .'
         policy = self.policy("issue_review")
         self.assertIn("Bash(git grep:*)", sp.allowed_tool_patterns(policy))
         clone = Path(self.directory.name) / "clone"
