@@ -179,6 +179,17 @@ class OperationTests(unittest.TestCase):
             with self.subTest(command=command):
                 decision = sp.check(command, restored, cwd=str(self.root))
                 self.assertTrue(decision.allowed, decision.reason)
+            if os.name != "nt":
+                # Runtime evidence arrives as an absolute path on POSIX.
+                command = program + " " + str(evidence)
+                with self.subTest(command=command):
+                    decision = sp.check(command, restored, cwd=str(self.root))
+                    self.assertTrue(decision.allowed, decision.reason)
+                for path in (evidence.parent, evidence.with_name("other.diff")):
+                    command = program + " " + str(path)
+                    with self.subTest(command=command):
+                        decision = sp.check(command, restored, cwd=str(self.root))
+                        self.assertFalse(decision.allowed, decision.reason)
             for path in (str(evidence), evidence.as_posix()):
                 command = program + " '" + path + "'"
                 with self.subTest(command=command):
