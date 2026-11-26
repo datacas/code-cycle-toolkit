@@ -98,6 +98,140 @@ class ReadParityTests(unittest.TestCase):
         self.assertIn("--allowedTools", records[0]["reason"])
         self.assertIn("permissions.allow/deny", records[0]["reason"])
 
+    def test_glob_dialects_cannot_hide_option_named_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "-e1eid").write_text("fixture", encoding="utf-8")
+            (root / ".-e1eid").write_text("fixture", encoding="utf-8")
+            policy_path = root / "policy.json"
+            cases = [
+                ({}, "[^x]*"), ({}, "[[:punct:]]*"),
+                ({}, "[[=x=]]*"), ({}, "[[.x.]]*"),
+                ({"BASHOPTS": "dotglob"}, "*"),
+                ({"BASHOPTS": "nocaseglob"}, "*"),
+                ({"BASHOPTS": "globstar"}, "**/*"),
+                ({"GLOBIGNORE": "ignored"}, "*"),
+            ]
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, tmpdir=directory, rtk=True)
+                policy_path.write_text(policy.to_json(), encoding="utf-8")
+                for environment, operand in cases:
+                    for wrapper in ("", "rtk ", "rtk proxy "):
+                        command = f"{wrapper}sed -n p {operand} | head"
+                        with self.subTest(role=role, command=command, environment=environment), \
+                                patch.dict(os.environ, {"BASHOPTS": "", "GLOBIGNORE": "", **environment}):
+                            decision = sp.check(command, policy, cwd=str(root))
+                            self.assertFalse(decision.allowed)
+                            self.assertNotEqual("validation_error", decision.rule)
+                            output = io.StringIO()
+                            event = {"tool_name": "Bash", "cwd": str(root),
+                                     "tool_input": {"command": command}}
+                            sp.hook_main([str(policy_path)], io.StringIO(json.dumps(event)), output)
+                            response = json.loads(output.getvalue())["hookSpecificOutput"]
+                            self.assertEqual("deny", response["permissionDecision"])
+                            self.assertNotIn("could not", response["permissionDecisionReason"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX Bash glob comparison")
+    def test_bash_glob_option_injection_is_refused_at_the_cli_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "-e1eid").write_text("fixture", encoding="utf-8")
+            policy = root / "policy.json"
+            policy.write_text(sp.StagePolicy(role="review", tmpdir=directory).to_json(), encoding="utf-8")
+            for pattern in ("[^x]*", "[[:punct:]]*"):
+                # printf shows Bash's expanded argv; never run sed's e command.
+                argv = subprocess.run(["bash", "-c", "printf '%s\\n' " + pattern],
+                                      cwd=root, capture_output=True, text=True, check=True)
+                self.assertIn("-e1eid", argv.stdout.splitlines())
+                command = f"sed -n p {pattern} | head"
+                result = subprocess.run([sys.executable, sp.__file__, "hook", str(policy)],
+                    cwd=root, capture_output=True, text=True, timeout=30,
+                    input=json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                      "tool_input": {"command": command}}))
+                self.assertEqual(0, result.returncode, result.stderr)
+                response = json.loads(result.stdout)["hookSpecificOutput"]
+                self.assertEqual("deny", response["permissionDecision"])
+
+    def test_inline_python_uses_the_ordinary_read_path_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            work.mkdir()
+            temp = root / "dispatch"
+            temp.mkdir()
+            evidence = root / "evidence.json"
+            output = root / "tool-results"
+            output.mkdir()
+            policy = sp.StagePolicy(role="issue_review", tmpdir=str(temp),
+                                    evidence_paths=(str(evidence),), tool_results=str(output))
+            paths = [(work / "snapshot.json", True), (temp / "snapshot.json", True),
+                     (evidence, True), (output / "result.txt", True),
+                     (root / "outside.json", False), (Path("/proc/self/environ"), False),
+                     (Path.home() / ".git-credentials", False),
+                     (Path.home() / ".netrc", False),
+                     (Path.home() / ".config/bitbucket/bitbucket.env", False)]
+            for path, allowed in paths:
+                value = path.as_posix()
+                commands = [
+                    "python3 -I -c " + shlex.quote(f"print(open({value!r}).read())"),
+                    "python3 -I -c 'import sys;print(open(sys.argv[1]).read())' " + shlex.quote(value),
+                    "python3 -I -c 'print(1)' " + shlex.quote(value),
+                ]
+                for command in commands:
+                    with self.subTest(command=command):
+                        self.assertEqual(allowed, sp.check(command, policy, cwd=str(work)).allowed)
+
+    def test_glob_order_cannot_select_a_script_or_git_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for filename in ("p", "1e id", "status", "push", "README.md"):
+                (root / filename).write_text("fixture", encoding="utf-8")
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, tmpdir=directory, rtk=True)
+                for wrapper in ("", "rtk ", "rtk proxy "):
+                    for command in ("sed -n * | head", "sed -n -e * README.md | head",
+                                    "sed -n * README.md | head", "git * | head",
+                                    "git -C * show | head"):
+                        with self.subTest(role=role, command=wrapper + command):
+                            decision = sp.check(wrapper + command, policy, cwd=str(root))
+                            self.assertFalse(decision.allowed)
+                            self.assertNotEqual("validation_error", decision.rule)
+                    # A literal script keeps the glob in file-operand position.
+                    self.assertTrue(sp.check(wrapper + "sed -n p * | head", policy, cwd=str(root)).allowed)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink and CLI boundary")
+    def test_python_read_boundary_keeps_symlinks_and_hook_results_guarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work = root / "work"
+            work.mkdir()
+            outside = root / "outside.json"
+            outside.write_text('{"fixture": true}', encoding="utf-8")
+            (work / "link.json").symlink_to(outside)
+            (work / "snapshot.json").write_text(outside.read_text(encoding="utf-8"), encoding="utf-8")
+            policy_path = root / "policy.json"
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, tmpdir=str(root / "dispatch"), rtk=True)
+                policy_path.write_text(policy.to_json(), encoding="utf-8")
+                for filename, allowed in (("snapshot.json", True), ("link.json", False)):
+                    for wrapper in ("", "rtk ", "rtk proxy "):
+                        command = wrapper + "python3 -I -c 'import sys;print(open(sys.argv[1]).read())' " + filename
+                        with self.subTest(role=role, command=command):
+                            result = subprocess.run([sys.executable, sp.__file__, "hook", str(policy_path)],
+                                cwd=work, capture_output=True, text=True, timeout=30,
+                                input=json.dumps({"tool_name": "Bash", "cwd": str(work),
+                                                  "tool_input": {"command": command}}))
+                            self.assertEqual(0, result.returncode, result.stderr)
+                            if allowed:
+                                self.assertEqual("", result.stdout)
+                            else:
+                                response = json.loads(result.stdout)["hookSpecificOutput"]
+                                self.assertEqual("deny", response["permissionDecision"])
+                                self.assertNotIn("could not", response["permissionDecisionReason"])
+
     def test_completed_snapshot_inspection_is_an_auxiliary_host_refusal(self):
         import command_permissions as cp
         policy = sp.StagePolicy(role="issue_review")

@@ -1776,6 +1776,19 @@ def consented_git_edits(policy: Any) -> tuple[str, ...]:
                        else entry["operation"]["sensitive"].get("targets", []))))
 
 
+def _read_paths_allowed(operands: list[str], policy: StagePolicy, cwd: str | None) -> bool:
+    """Share the ordinary-read boundary with isolated Python inspection."""
+    root = Path(cwd or ".").resolve()
+    evidence = {Path(path).resolve() for path in policy.evidence_paths}
+    for operand in operands:
+        path = (root / os.path.expanduser(operand)).resolve()
+        if (path != root and root not in path.parents and path not in evidence
+                and not inside_tmpdir(str(path), policy.tmpdir)
+                and not inside_tool_results(str(path), policy)):
+            return False
+    return True
+
+
 def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -> bool:
     """Recognize data inspection, never execute inline code in the validator.
 
@@ -1795,6 +1808,7 @@ def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -
                ast.BoolOp, ast.Or, ast.And, ast.Compare, ast.Eq, ast.NotEq,
                ast.Is, ast.IsNot, ast.UnaryOp, ast.Not)
     builtins = {"print", "list", "tuple", "dict", "str", "type", "isinstance", "len", "open"}
+    read_paths = list(words[4:])
     for node in nodes:
         if not isinstance(node, allowed):
             return False
@@ -1833,8 +1847,11 @@ def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -
                         and path.value.attr == "argv" and isinstance(path.slice, ast.Constant)
                         and isinstance(path.slice.value, int) and 0 < path.slice.value <= len(words) - 4):
                     return False
+                if isinstance(path, ast.Constant) and isinstance(path.value, str):
+                    read_paths.append(path.value)
     paths = [node.value for node in nodes if isinstance(node, ast.Constant) and isinstance(node.value, str)]
-    return credential_reason([*paths, *words[4:]], policy, cwd) is None
+    return (credential_reason([*paths, *words[4:]], policy, cwd) is None
+            and _read_paths_allowed(read_paths, policy, cwd))
 
 
 def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
@@ -1858,6 +1875,12 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
                 quote = None
         elif char in "'\"":
             quote = char
+        elif char == "[":
+            # Bash bracket expressions include negation, POSIX classes and
+            # locale collation rules that Python glob does not model. Keep
+            # the existing operation-consent path rather than validate a
+            # different argv (REV-005). Quoted/escaped brackets stay literal.
+            return False
         elif char == "{":
             brace_depth += 1
         elif char == "}":
@@ -1897,10 +1920,28 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
             return False
         if credential_reason(words[1:], policy, cwd):
             return False
+        if words[0] == "git":
+            args = list(words[1:])
+            while args and args[0] in {"-C", "--no-pager", "-P"}:
+                option = args.pop(0)
+                if option == "-C":
+                    if not args or any(char in args[0] for char in "*?["):
+                        return False
+                    args.pop(0)
+            if not args or args[0] not in GIT_COMMON_READ | GIT_REVIEW_READ:
+                return False
+        # Validate the literal command/script before globs can move operands
+        # into those positions. Python's filesystem order need not match Bash's
+        # locale-sorted expansion; neither order may choose the operation.
+        _check_words(words, ParsedCommand(words=words), policy, cwd=cwd, run=run)
         # Globs stay operands, never programs. Resolve matches for path guards.
         expanded = [words[0]]
         for word in words[1:]:
-            matches = glob.glob(word, root_dir=cwd or ".") if any(c in word for c in "*?[") else []
+            has_glob = any(c in word for c in "*?[")
+            if has_glob and (_environment_dotglob() or _environment_nocaseglob()
+                             or "globstar" in os.environ.get("BASHOPTS", "").split(":")):
+                return False
+            matches = glob.glob(word, root_dir=cwd or ".") if has_glob else []
             expanded.extend(matches or [word])
         if credential_reason(expanded[1:], policy, cwd):
             return False
@@ -2215,16 +2256,8 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             check_date(words[1:])
         elif program == "ps":
             check_ps(words[1:])
-        if cwd:
-            root = Path(cwd).resolve()
-            evidence = {Path(path).resolve() for path in policy.evidence_paths}
-            for operand in read_operands(words):
-                path = (root / os.path.expanduser(operand)).resolve()
-                # The session's own saved outputs are read like `$TMPDIR` (#439 AC-13).
-                if (path != root and root not in path.parents and path not in evidence
-                        and not inside_tmpdir(str(path), policy.tmpdir)
-                        and not inside_tool_results(str(path), policy)):
-                    raise PolicyError("reading outside the stage workspace needs operation consent")
+        if cwd and not _read_paths_allowed(read_operands(words), policy, cwd):
+            raise PolicyError("reading outside the stage workspace needs operation consent")
         return
     raise PolicyError(f"{program!r} is not in the {policy.role} stage's command table")
 

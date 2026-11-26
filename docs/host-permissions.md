@@ -151,6 +151,15 @@ can introduce execution or output options before the guards see them (REV-003).
 Quoted and escaped literal braces and Git's `@{u}` remain readable. Double-quoted regex
 backslashes follow Bash rules, so `grep -n "parity\|consent"`, `"\."` and
 `"\b"` keep their normal argv and need no extra question (REV-004).
+Unquoted bracket globs retain operation consent: Bash negation, POSIX classes,
+equivalence classes and locale collation do not share Python's glob dialect.
+Globs also retain consent when inherited `BASHOPTS` enables `dotglob` or
+`nocaseglob` or `globstar`, or `GLOBIGNORE` is non-empty (REV-005). Ordinary `*` and `?`
+globs in the default shell state still run automatically. These forms use the
+existing shell-operation consent route, with concrete guards still in force.
+Globs cannot select a command, Git subcommand/directory selector or sed script.
+The literal operation is checked before expansion, then expanded operands are
+checked again; filesystem order cannot choose a different operation (REV-005).
 
 All stages may also use `gh pr view <n> --json … --jq …`, and
 `gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.
@@ -164,6 +173,13 @@ expressions (`get`, `keys`, `list`, `type`, `isinstance`, `print`). It never
 executes code while validating. Other imports, code loaders, writes, computed
 file paths and arbitrary interpreter programs retain consent. Credential-store
 reads keep their guard even in this inspection form.
+Literal `open()` paths and positional arguments use the same resolved-path
+boundary as ordinary read tools: the workspace, this dispatch's `$TMPDIR`,
+runtime-supplied evidence files and this session's tool-results directory.
+Other paths, including `/proc/self/environ`, `~/.git-credentials`, `~/.netrc`
+and `~/.config/bitbucket/bitbucket.env`, retain operation consent (REV-006).
+Symlinks are checked at their resolved target. This does not widen any executor
+credential deny rule or sandbox boundary.
 
 | Role | Verification without a new question |
 |---|---|
