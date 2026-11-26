@@ -146,6 +146,11 @@ be a recognized read, with no substitution, control flow, or redirection.
 Pipeline boundaries must agree with the quote-aware shell parser. A quoted or
 escaped `|` stays an argument to its original program; it cannot hide that
 program's options under a different command's guards (REV-002).
+Unquoted brace lists/ranges retain shell-operation consent because Bash expansion
+can introduce execution or output options before the guards see them (REV-003).
+Quoted and escaped literal braces and Git's `@{u}` remain readable. Double-quoted regex
+backslashes follow Bash rules, so `grep -n "parity\|consent"`, `"\."` and
+`"\b"` keep their normal argv and need no extra question (REV-004).
 
 All stages may also use `gh pr view <n> --json … --jq …`, and
 `gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.

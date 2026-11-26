@@ -958,6 +958,12 @@ def _shell_segments(source: str, tmpdir: str | None, depth: int = 0) -> list[Par
         if char == "$" and quote != "'":
             source = _splice_dollar(source, i)
         if char == "\\" and quote != "'" and i + 1 < len(source):
+            # In double quotes Bash retains a backslash before ordinary
+            # characters (e.g. grep's \|, \. and \b regex escapes).
+            if quote == '"' and source[i + 1] not in '$`"\\\n':
+                word.append(char)
+                i += 1
+                continue
             # A backslash-newline is a line continuation: bash removes both.
             if source[i + 1] != "\n":
                 word.append(source[i + 1])
@@ -1836,6 +1842,28 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
     """Literal read pipelines/globs only; no substitution or control flow."""
     if any(char in command for char in "`$;\n\r"):
         return False
+    # Brace expansion runs before option parsing and can introduce executable
+    # sed scripts or Git output options. A list/range separator inside unquoted
+    # braces can expand; quoted braces and Git's @{u} do not.
+    quote = None
+    escaped = False
+    brace_depth = 0
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth = max(0, brace_depth - 1)
+        elif brace_depth and (char == "," or command.startswith("..", index)):
+            return False
     lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>")
     lexer.whitespace_split = True
     lexer.commenters = ""

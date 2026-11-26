@@ -62,6 +62,8 @@ class ReadParityTests(unittest.TestCase):
                 f"git -C {outside} grep -n parity -- scripts/",
                 "git rev-parse --abbrev-ref --symbolic-full-name @{u}",
                 "git show HEAD:AGENTS.md | grep parity",
+                r'git show HEAD:AGENTS.md | grep -n "parity\|consent"',
+                r'git show HEAD:AGENTS.md | grep -n "\.\|\bparity\b"',
                 "gh pr view 7 --json headRefOid --jq '.headRefOid'",
                 "gh api repos/owner/repo/issues/524/comments --paginate --jq '.[].body'",
                 "printenv GIT_SSH_COMMAND GIT_SSH",
@@ -126,6 +128,8 @@ class ReadParityTests(unittest.TestCase):
                 f"git -C {ROOT} grep -n parity -- docs/",
                 "git rev-parse --abbrev-ref --symbolic-full-name @{u}",
                 "git show HEAD:AGENTS.md | grep parity",
+                r'git show HEAD:AGENTS.md | grep -n "parity\|consent"',
+                r'git show HEAD:AGENTS.md | grep -n "\.\|\bparity\b"',
                 "gh pr view 7 --json headRefOid --jq '.headRefOid'",
                 "gh api repos/owner/repo/issues/524/comments --paginate --jq '.[].body'",
                 "printenv GIT_SSH_COMMAND GIT_SSH",
@@ -200,6 +204,62 @@ class ReadParityTests(unittest.TestCase):
                                 self.assertIn("[layer=toolkit_hook]", reason)
                                 self.assertNotIn("could not run", reason)
                                 self.assertNotIn("could not be validated", reason)
+
+    def test_brace_expansion_cannot_hide_execution_or_output_options(self):
+        # Exercise the real CLI hook, never execute the rejected payloads.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "policy.json"
+            commands = (
+                "sed -n p {AGENTS.md,-e1eid} | head",
+                "sed -n p {AGENTS.md,-e1wparity-out} | head",
+                "sed -n p {AGENTS.md,-e1w/etc/parity-out} | head",
+                "git log {-1,--output=parity-out} | head",
+                "git log {-1,--output=/etc/parity-out} | head",
+                "git log -{1..2} | head",
+                'sed -n p {AGENTS.md,"-e"1eid} | head',
+                "sed -n p {{AGENTS.md,README.md},-e1eid} | head",
+            )
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, repo="owner/repo", tmpdir=directory, rtk=True)
+                path.write_text(policy.to_json(), encoding="utf-8")
+                for wrapper in ("", "rtk ", "rtk proxy "):
+                    for command in commands:
+                        with self.subTest(role=role, command=wrapper + command):
+                            decision = sp.check(wrapper + command, policy, cwd=str(root))
+                            self.assertFalse(decision.allowed)
+                            self.assertNotEqual("validation_error", decision.rule)
+                            result = subprocess.run([sys.executable, sp.__file__, "hook", str(path)],
+                                cwd=root, capture_output=True, text=True, timeout=30,
+                                input=json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                                  "tool_input": {"command": wrapper + command}}))
+                            self.assertEqual(0, result.returncode, result.stderr)
+                            output = json.loads(result.stdout)["hookSpecificOutput"]
+                            self.assertEqual("deny", output["permissionDecision"])
+                            self.assertIn("[layer=toolkit_hook]", output["permissionDecisionReason"])
+                            self.assertNotIn("could not", output["permissionDecisionReason"])
+
+    def test_literal_braces_and_double_quote_backslashes_remain_readable(self):
+        policy = sp.StagePolicy(role="review", rtk=True)
+        for wrapper in ("", "rtk ", "rtk proxy "):
+            for pattern in (r'"parity\|consent"', r'"\."', r'"\b"', r'"\["',
+                            r'"\{a,b\}"', '"{a,b}"', "'{a,b}'", r'\{a,b\}'):
+                with self.subTest(wrapper=wrapper, pattern=pattern):
+                    decision = sp.check(wrapper + "git show HEAD:AGENTS.md | grep -n " + pattern,
+                                        policy, cwd=str(ROOT))
+                    self.assertTrue(decision.allowed, decision.reason)
+
+    @unittest.skipIf(os.name == "nt", "POSIX Bash argv comparison")
+    def test_double_quote_backslashes_match_bash_argv(self):
+        for argument in (r'"parity\|consent"', r'"\."', r'"\b"', r'"\["',
+                         r'"\{a,b\}"', r'"a\\b"', r'"a\"b"', r'"a\$b"',
+                         r'"a\`b"', '"a\\\nb"', r"'a\|b'", r'a\|b'):
+            with self.subTest(argument=argument):
+                actual = subprocess.run(["bash", "-c", "printf '%s' " + argument],
+                                        capture_output=True, text=True, check=True)
+                parsed = sp.parse_command("cat " + argument + " | head", None)
+                self.assertEqual(["cat", actual.stdout], parsed.segments[0].words)
 
     def test_documented_first_barrier_exceptions_reach_hook_denials(self):
         # Only model the two documented prefix/wildcard forms here, not
