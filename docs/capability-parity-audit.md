@@ -121,7 +121,7 @@ The separate Claude/Codex comparison remains required and is recorded as
 |---|---|---|
 | Git diff forms and `git -C <worktree> diff` | PA-18, PA-20, PA-43 | Automatic reads, including outside-workspace selectors; output and credential guards remain |
 | Git grep and plain grep with `scripts/*.py` | PA-18, PA-19 | Read globs resolve before path checks; substitutions and executable segments still need consent |
-| `merge-base`, upstream `rev-parse`, `git show … \| grep …` | PA-19, PA-20 | Recognized read segments run without consent; write segments do not |
+| `merge-base`, upstream `rev-parse`, `git show … \| grep …` | PA-19, PA-20 | Recognized read segments run without consent; write segments do not. Quote-aware boundary agreement keeps quoted/escaped pipes in the original argv and prevents sed execution/write options being checked as another program (REV-002). |
 | PR head/check queries and paginated comments API | PA-21 | Read flags and repository-scoped GET; fields, bodies and mutations retain guards |
 | SSH transport `printenv` | PA-18 | Only the two named variables; other environment disclosure retains consent |
 | Configured unittest variants and native Read in TMPDIR | PA-18 | Configured roles and dispatch temp evidence; no broader test or file-write authority |

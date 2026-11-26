@@ -171,6 +171,36 @@ class ReadParityTests(unittest.TestCase):
             self.assertIn(f"Read({sp._absolute_rule_path(directory)}/**)", patterns)
             self.assertNotIn("Bash(*)", patterns)
 
+    def test_quoted_pipe_arguments_cannot_hide_sed_execution_or_writes(self):
+        # Validate the actual CLI hook without running either payload. Quoted
+        # and escaped pipes are sed arguments, never a new command's argv.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "policy.json"
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, repo="owner/repo", tmpdir=directory, rtk=True)
+                path.write_text(policy.to_json(), encoding="utf-8")
+                for wrapper in ("", "rtk ", "rtk proxy "):
+                    for pipe in ('"|"', "'|'", r"\|"):
+                        for script in ("1e id", "w /etc/parity-out"):
+                            command = f'{wrapper}sed -n p AGENTS.md {pipe} cat -e "{script}" | head'
+                            with self.subTest(role=role, command=command):
+                                decision = sp.check(command, policy, cwd=str(root))
+                                self.assertFalse(decision.allowed)
+                                self.assertNotEqual("validation_error", decision.rule)
+                                result = subprocess.run([sys.executable, sp.__file__, "hook", str(path)],
+                                    cwd=root, capture_output=True, text=True, timeout=30,
+                                    input=json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                                      "tool_input": {"command": command}}))
+                                self.assertEqual(0, result.returncode, result.stderr)
+                                output = json.loads(result.stdout)["hookSpecificOutput"]
+                                self.assertEqual("deny", output["permissionDecision"])
+                                reason = output["permissionDecisionReason"]
+                                self.assertIn("[layer=toolkit_hook]", reason)
+                                self.assertNotIn("could not run", reason)
+                                self.assertNotIn("could not be validated", reason)
+
     def test_documented_first_barrier_exceptions_reach_hook_denials(self):
         # Only model the two documented prefix/wildcard forms here, not
         # Claude's complete permission grammar or native executor behavior.

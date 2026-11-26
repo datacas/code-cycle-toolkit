@@ -143,6 +143,9 @@ normal meaning. Read pipelines such as `git show <sha>:<path> | grep …` and
 path globs such as `git grep -n -E "pattern" -- docs/ skills/ scripts/*.py`
 or `grep -n pattern scripts/*.py` need no consent. Every pipeline segment must
 be a recognized read, with no substitution, control flow, or redirection.
+Pipeline boundaries must agree with the quote-aware shell parser. A quoted or
+escaped `|` stays an argument to its original program; it cannot hide that
+program's options under a different command's guards (REV-002).
 
 All stages may also use `gh pr view <n> --json … --jq …`, and
 `gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.

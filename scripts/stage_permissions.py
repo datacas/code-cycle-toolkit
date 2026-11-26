@@ -1831,7 +1831,8 @@ def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -
     return credential_reason([*paths, *words[4:]], policy, cwd) is None
 
 
-def _inspection_shell(command: str, policy: StagePolicy, cwd: str | None, run) -> bool:
+def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
+                      cwd: str | None, run) -> bool:
     """Literal read pipelines/globs only; no substitution or control flow."""
     if any(char in command for char in "`$;\n\r"):
         return False
@@ -1851,7 +1852,17 @@ def _inspection_shell(command: str, policy: StagePolicy, cwd: str | None, run) -
             groups.append([])
         else:
             groups[-1].append(token)
-    for words in groups:
+    # shlex loses whether a punctuation token was quoted or escaped. Require
+    # its proposed pipeline to agree with the quote-aware parser; otherwise
+    # an argument such as '|' could hide sed options under another program.
+    # Keep the lexical check above as a conservative syntax filter, and use
+    # the parser's actual argv boundaries for all operation checks.
+    if groups != [segment.words for segment in parsed.segments]:
+        return False
+    for segment in parsed.segments:
+        if segment.redirects:
+            return False
+        words = segment.words
         if words[:1] == ["rtk"] and policy.rtk:
             words = words[2:] if words[1:2] == ["proxy"] else words[1:]
         if not words:
@@ -1907,7 +1918,7 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
                             rule="user_denial")
         parsed = parse_command(command, policy.tmpdir)
         if parsed.shell_source is not None:
-            if _inspection_shell(command, policy, cwd, run):
+            if _inspection_shell(command, parsed, policy, cwd, run):
                 return Decision(True, "allowed read-only shell inspection")
             guard = protected_reason("Bash", {"command": command}, policy, cwd)
             if guard:
