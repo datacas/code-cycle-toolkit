@@ -208,6 +208,9 @@ class ReadParityTests(unittest.TestCase):
                 for command in ('cat "AGENTS.md"', "cat 'AGENTS.md'", r"cat AGENTS\.md",
                                 "cat AGENTS.*", "cat {AGENTS,README}.md", "cat ~/AGENTS.md",
                                 "cat AGENTS.md > result.txt", "git -C / status",
+                                # Bash drops unquoted backslashes: a native
+                                # Windows path changes argv and keeps consent.
+                                r"cat D:\a\AGENTS.md", r"git -C D:\a diff --stat",
                                 "git rev-parse @{u}", "cat AGENTS.md | grep 'parity'",
                                 "python3 -I -c 'print(1)'",
                                 'git branch "--show-current"', 'git worktree "list"',
@@ -224,18 +227,39 @@ class ReadParityTests(unittest.TestCase):
         # pathspec. A path-named program runs a file, not the read it names.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            argv = subprocess.run(["bash", "--noprofile", "--norc", "-c",
-                                   "printf '%s\\n' git diff HEAD GIT_EXTERNAL_DIFF=id"],
-                                  cwd=root, env={**os.environ, "SHELLOPTS": "keyword", "BASH_ENV": ""},
-                                  capture_output=True, text=True, timeout=30)
-            self.assertEqual(0, argv.returncode, argv.stderr)
-            self.assertEqual(["git", "diff", "HEAD"], argv.stdout.splitlines())
+            # REV-008: Bash also accepts the append form NAME+=value as an
+            # assignment word, and appending to an unset name sets it.
+            for assignment in ("GIT_EXTERNAL_DIFF=id", "GIT_EXTERNAL_DIFF+=id"):
+                argv = subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                       f"printf '%s\\n' git diff HEAD {assignment}; "
+                                       "printf '<%s>\\n' \"$GIT_EXTERNAL_DIFF\""],
+                                      cwd=root, env={key: value for key, value in os.environ.items()
+                                                     if key != "GIT_EXTERNAL_DIFF"}
+                                      | {"SHELLOPTS": "keyword", "BASH_ENV": ""},
+                                      capture_output=True, text=True, timeout=30)
+                with self.subTest(assignment=assignment):
+                    self.assertEqual(0, argv.returncode, argv.stderr)
+                    # The word leaves argv; the second printf proves it did not
+                    # leak into the shell itself, only into the command's env.
+                    self.assertEqual(["git", "diff", "HEAD", "<>"], argv.stdout.splitlines())
+                env = subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                      f"printenv GIT_EXTERNAL_DIFF {assignment}"],
+                                     cwd=root, env={key: value for key, value in os.environ.items()
+                                                    if key != "GIT_EXTERNAL_DIFF"}
+                                     | {"SHELLOPTS": "keyword", "BASH_ENV": ""},
+                                     capture_output=True, text=True, timeout=30)
+                with self.subTest(assignment=assignment, observed="environment"):
+                    self.assertEqual(0, env.returncode, env.stderr)
+                    self.assertEqual(["id"], env.stdout.splitlines())
             for role in ("implement", "resolve", "review", "rereview", "issue_review",
                          "security", "verify", "bootstrap", "coordinate"):
                 policy = sp.StagePolicy(role=role, rtk=True, repo="owner/repo", tmpdir=directory)
                 for wrapper in ("", "rtk ", "rtk proxy "):
                     for command in ("git diff HEAD GIT_EXTERNAL_DIFF=id",
                                     "cat AGENTS.md | git diff HEAD GIT_EXTERNAL_DIFF=id",
+                                    "git diff HEAD GIT_EXTERNAL_DIFF+=id",
+                                    "cat AGENTS.md | git diff HEAD GIT_EXTERNAL_DIFF+=id",
+                                    "cat AGENTS.md LD_PRELOAD+=./x.so",
                                     "git log -1 PAGER=id | head", "./git status | head",
                                     f"{directory}/git log | head"):
                         with self.subTest(role=role, command=wrapper + command):
@@ -260,7 +284,9 @@ class ReadParityTests(unittest.TestCase):
                 self.assertTrue(sp.check('cat "AGENTS.md"', policy, cwd=str(ROOT)).allowed)
                 self.assertFalse(sp.check('cat "' + str(Path.home() / ".codex/auth.json") + '"',
                                           policy, cwd=str(ROOT)).allowed)
-        command = f"git -C {ROOT.parent} diff --stat"
+        # POSIX separators: Bash removes unquoted backslashes, so a native
+        # Windows path is not a simple word and would test a different argv.
+        command = f"git -C {ROOT.parent.as_posix()} diff --stat"
         self.assertFalse(sp.check(command, sp.StagePolicy(role="review"), cwd=str(ROOT)).allowed)
         for fields in ({"tools": ("git",)}, {"commands": ("git -C",)},
                        {"verify_prefixes": ("git -C",)}):
@@ -401,11 +427,11 @@ class ReadParityTests(unittest.TestCase):
                                     verify_prefixes=("python3 -m unittest",))
             commands = [
                 "git diff HEAD..HEAD --stat", "git diff HEAD -- scripts/",
-                f"git -C {ROOT} diff HEAD --stat",
+                f"git -C {ROOT.as_posix()} diff HEAD --stat",
                 'git grep -n -E "allowedTools|allowed_tools" -- docs/ skills/ scripts/*.py',
                 "grep -n allowedTools scripts/*.py",
-                f"git -C {ROOT} merge-base HEAD origin/main",
-                f"git -C {ROOT} grep -n parity -- docs/",
+                f"git -C {ROOT.as_posix()} merge-base HEAD origin/main",
+                f"git -C {ROOT.as_posix()} grep -n parity -- docs/",
                 "git rev-parse --abbrev-ref --symbolic-full-name @{u}",
                 "git show HEAD:AGENTS.md | grep parity",
                 r'git show HEAD:AGENTS.md | grep -n "parity\|consent"',
@@ -427,9 +453,9 @@ class ReadParityTests(unittest.TestCase):
                         decision = sp.check(command, current, cwd=str(ROOT))
                         automatic = command in {
                             "git diff HEAD..HEAD --stat", "git diff HEAD -- scripts/",
-                            f"git -C {ROOT} diff HEAD --stat",
-                            f"git -C {ROOT} merge-base HEAD origin/main",
-                            f"git -C {ROOT} grep -n parity -- docs/",
+                            f"git -C {ROOT.as_posix()} diff HEAD --stat",
+                            f"git -C {ROOT.as_posix()} merge-base HEAD origin/main",
+                            f"git -C {ROOT.as_posix()} grep -n parity -- docs/",
                             "git show HEAD:AGENTS.md | grep parity",
                             "printenv GIT_SSH_COMMAND GIT_SSH",
                             "python3 -m unittest tests.test_read_parity",

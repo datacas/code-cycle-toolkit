@@ -1883,11 +1883,11 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
 def _simple_read_source(command: str, *, pipelines: bool = False) -> bool:
     """Recognize words whose argv is unchanged by Bash, without evaluating it."""
     groups = command.split("|") if pipelines else [command]
-    # An inherited SHELLOPTS=keyword (`set -k`) turns any NAME=value word into
-    # an environment assignment and drops it from argv, so such words are not
-    # simple even after the command name.
+    # An inherited SHELLOPTS=keyword (`set -k`) turns any NAME=value or
+    # NAME+=value word into an environment assignment and drops it from argv,
+    # so such words are not simple even after the command name (REV-008).
     return all(group.strip() and re.fullmatch(r"[A-Za-z0-9_./:@%+,=^ \t-]+", group)
-               and not any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in group.split())
+               and not any(re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", word) for word in group.split())
                for group in groups)
 
 

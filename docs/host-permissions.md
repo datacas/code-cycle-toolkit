@@ -144,10 +144,10 @@ that Bash will execute. All other forms retain operation consent, including
 In particular, an inherited `nullglob` cannot drop a validated word and move a
 sed execution script into its place (REV-007); `failglob` cannot change whether
 the command executes. No glob expansion is automatic, whatever `BASHOPTS` or
-`GLOBIGNORE` contains. A `NAME=value` argument also keeps consent, because an
-inherited `SHELLOPTS=keyword` turns it into an environment assignment, and a
-path-named program such as `./git` keeps consent in a pipeline because it runs
-a file. These consent requirements never become guards: a consented compound
+`GLOBIGNORE` contains. A `NAME=value` or `NAME+=value` argument also keeps
+consent, because an inherited `SHELLOPTS=keyword` turns it into an environment
+assignment (REV-008), and a path-named program such as `./git` keeps consent in
+a pipeline because it runs a file. These consent requirements never become guards: a consented compound
 push keeps them consentable, while Git's other argument guards still apply.
 Existing concrete write and credential guards still apply after consent. This replaces the broader no-consent behavior described in the
 earlier REV-003–006 history.

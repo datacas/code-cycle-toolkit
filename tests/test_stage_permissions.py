@@ -261,7 +261,7 @@ class InspectionToolTests(PolicyTestCase):
                                         run=on_branch("issue-142"))
                     # Quoted words and NAME=value words (inherited set -k) keep consent.
                     automatic = hook_allows and not any(char in command for char in "'\"") and not any(
-                        re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in command.split())
+                        re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", word) for word in command.split())
                     self.assertEqual(automatic, decision.allowed, decision.reason)
                     if hook_allows and not automatic:
                         table_operation = sp.operation("Bash", {"command": command}, policy,
