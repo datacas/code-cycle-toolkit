@@ -1461,7 +1461,7 @@ class ConsentVariantsTests(unittest.TestCase):
                     scratch = Path(root, f"tmp-{own[:4]}")
                     scratch.mkdir(exist_ok=True)
                     policy = sp.StagePolicy(role, tmpdir=str(scratch))
-                    for command in (f'grep -c "" {files[own]}', f"grep -n -E 'li.e' {files[own]}",
+                    for command in (f'grep -c line {files[own]}', f"grep -n -E li.e {files[own]}",
                                     f"wc -l {files[own]}", f"cat {files[own].parent}/../tool-results/{files[own].name}"):
                         with self.subTest(role=role, session=own, command=command):
                             self.assertEqual("", self.run_hook(policy, command, root, project, own))

@@ -135,31 +135,46 @@ confined clone is never routed to Orca.
 
 ### Ordinary inspection without consent (#524)
 
-Every stage may run Git `status`, `diff`, `log`, `rev-parse`, `show`,
+The owner's AC-1 decision of 2026-11-26 supersedes the earlier inspection
+exceptions: a read skips consent only when every word is simple, without quotes,
+backslashes, braces, globs, expansions (`$`, backticks, `~`) or redirections.
+Pipes between two such reads are allowed. The guard checks the same literal argv
+that Bash will execute. All other forms retain operation consent, including
+`python3 -I -c`, `git -C` outside the workspace and quoted or glob arguments.
+In particular, an inherited `nullglob` cannot drop a validated word and move a
+sed execution script into its place (REV-007); `failglob` cannot change whether
+the command executes. No glob expansion is automatic, whatever `BASHOPTS` or
+`GLOBIGNORE` contains. Existing concrete write and credential guards still apply
+after consent. This replaces the broader no-consent behavior described in the
+earlier REV-003–006 history.
+Explicit project tool and command choices and configured verification remain
+existing authorization; this inspection default does not add another question
+to them or relax their concrete guards.
+
+Every stage may run simple forms of Git `status`, `diff`, `log`, `rev-parse`, `show`,
 `merge-base`, `ls-files`, `grep` and `blame`. Literal `git -C <dir>` selectors
-may precede these reads, including a directory outside the workspace; credential
-paths remain guarded. Options such as `--stat`, pathspecs and `@{u}` keep their
-normal meaning. Read pipelines such as `git show <sha>:<path> | grep …` and
-path globs such as `git grep -n -E "pattern" -- docs/ skills/ scripts/*.py`
-or `grep -n pattern scripts/*.py` need no consent. Every pipeline segment must
+may precede these reads within the workspace; credential
+paths remain guarded. Options such as `--stat` and simple pathspecs keep their
+normal meaning. Read pipelines such as `git show HEAD:AGENTS.md | grep parity`
+need no consent. Every pipeline segment must
 be a recognized read, with no substitution, control flow, or redirection.
 Pipeline boundaries must agree with the quote-aware shell parser. A quoted or
 escaped `|` stays an argument to its original program; it cannot hide that
 program's options under a different command's guards (REV-002).
 Unquoted brace lists/ranges retain shell-operation consent because Bash expansion
 can introduce execution or output options before the guards see them (REV-003).
-Quoted and escaped literal braces and Git's `@{u}` remain readable. Double-quoted regex
+Quoted and escaped literal braces and Git's `@{u}` retain consent. Double-quoted regex
 backslashes follow Bash rules, so `grep -n "parity\|consent"`, `"\."` and
-`"\b"` keep their normal argv and need no extra question (REV-004).
+`"\b"` keep their normal argv after consent (REV-004).
 Unquoted bracket globs retain operation consent: Bash negation, POSIX classes,
 equivalence classes and locale collation do not share Python's glob dialect.
 Globs also retain consent when inherited `BASHOPTS` enables `dotglob` or
-`nocaseglob` or `globstar`, or `GLOBIGNORE` is non-empty (REV-005). Ordinary `*` and `?`
-globs in the default shell state still run automatically. These forms use the
+`nocaseglob`, `globstar`, `nullglob` or `failglob`, or `GLOBIGNORE` is non-empty
+(REV-005, REV-007). Ordinary `*` and `?` globs also keep consent. These forms use the
 existing shell-operation consent route, with concrete guards still in force.
-Globs cannot select a command, Git subcommand/directory selector or sed script.
-The literal operation is checked before expansion, then expanded operands are
-checked again; filesystem order cannot choose a different operation (REV-005).
+The automatic path never expands globs or uses them to select a command, Git
+subcommand/directory selector or sed script. Consented shell operations retain
+their concrete guards and depend on external isolation for interpreter internals.
 
 All stages may also use `gh pr view <n> --json … --jq …`, and
 `gh api repos/<configured-owner>/<configured-repo>/issues/<n>/comments --paginate --jq …`.
@@ -169,7 +184,8 @@ transport settings; bare `printenv` and other environment names retain consent.
 
 `python3 -I -c …` data inspection accepts imports of `json` and `sys`, read-only
 `open` on a literal path or indexed `sys.argv`, JSON loading and pure data
-expressions (`get`, `keys`, `list`, `type`, `isinstance`, `print`). It never
+expressions (`get`, `keys`, `list`, `type`, `isinstance`, `print`) for classification;
+these inline programs retain operation consent. The classifier never
 executes code while validating. Other imports, code loaders, writes, computed
 file paths and arbitrary interpreter programs retain consent. Credential-store
 reads keep their guard even in this inspection form.
@@ -653,8 +669,9 @@ including `push`, `commit`, `config` and `reset`, to the hook.
 and process execution. `-I` isolates Python's environment; it is not a sandbox.
 See [Claude's wildcard rules](https://code.claude.com/docs/en/permissions#wildcard-patterns).
 
-These dispatch-only openings preserve the owner's AC-1 decision that literal
-Git selectors, read pipelines and isolated JSON inspection run without consent.
+These dispatch-only openings let the hook apply the owner's current AC-1
+decision: only simple read words and simple read pipelines skip consent.
+Outside-workspace Git selectors and isolated JSON inspection retain consent.
 For these two forms the immutable `PreToolUse` hook is the sole toolkit
 operation filter: it checks Git subcommands, arguments and pipeline segments,
 and the Python AST, paths and read modes. Other inline programs still need

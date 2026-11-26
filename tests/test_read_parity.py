@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,11 @@ import stage_permissions as sp
 
 
 class ReadParityTests(unittest.TestCase):
+    def consented(self, policy, command, cwd):
+        entry = {"operation": sp.operation("Bash", {"command": command}, policy, cwd),
+                 "decision": "allow"}
+        return replace(policy, command_permissions=(entry,))
+
     @unittest.skipIf(os.name == "nt", "POSIX Bash baselines; native Windows parity is separate")
     def test_hook_matches_direct_command_baselines_for_both_executor_policies(self):
         # This executes the shared hook, not a native Claude/Codex dispatch.
@@ -78,6 +84,16 @@ class ReadParityTests(unittest.TestCase):
                 path.write_text(policy.to_json())
                 for command in commands:
                     with self.subTest(executor=executor, command=command):
+                        automatic = command in {
+                            "git diff HEAD..HEAD --stat", "git diff HEAD -- scripts/",
+                            "git show HEAD:AGENTS.md | grep parity",
+                            "printenv GIT_SSH_COMMAND GIT_SSH",
+                            "python3 -m unittest tests.test_fixture",
+                            "python3 -m unittest discover -s tests",
+                        }
+                        self.assertEqual(automatic, sp.check(command, policy, cwd=str(work)).allowed)
+                        current = policy if automatic else self.consented(policy, command, str(work))
+                        path.write_text(current.to_json())
                         direct = subprocess.run(["bash", "-c", command], cwd=work, env=env,
                                                 capture_output=True, text=True, timeout=30)
                         hook = subprocess.run([sys.executable, sp.__file__, "hook", str(path)],
@@ -98,6 +114,14 @@ class ReadParityTests(unittest.TestCase):
         self.assertIn("--allowedTools", records[0]["reason"])
         self.assertIn("permissions.allow/deny", records[0]["reason"])
 
+    def test_long_read_filter_has_an_exact_consent_identity(self):
+        policy = sp.StagePolicy(role="review")
+        command = "grep -n '" + "a" * 512 + "' AGENTS.md"
+        self.assertFalse(sp.check(command, policy, cwd=str(ROOT)).allowed)
+        current = self.consented(policy, command, str(ROOT))
+        self.assertTrue(sp.check(command, current, cwd=str(ROOT)).allowed)
+        self.assertFalse(sp.check(command.replace("aaa", "baa", 1), current, cwd=str(ROOT)).allowed)
+
     def test_glob_dialects_cannot_hide_option_named_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -110,6 +134,8 @@ class ReadParityTests(unittest.TestCase):
                 ({"BASHOPTS": "dotglob"}, "*"),
                 ({"BASHOPTS": "nocaseglob"}, "*"),
                 ({"BASHOPTS": "globstar"}, "**/*"),
+                ({"BASHOPTS": "nullglob"}, "missing-*"),
+                ({"BASHOPTS": "failglob"}, "missing-*"),
                 ({"GLOBIGNORE": "ignored"}, "*"),
             ]
             for role in ("implement", "resolve", "review", "rereview", "issue_review",
@@ -131,6 +157,90 @@ class ReadParityTests(unittest.TestCase):
                             response = json.loads(output.getvalue())["hookSpecificOutput"]
                             self.assertEqual("deny", response["permissionDecision"])
                             self.assertNotIn("could not", response["permissionDecisionReason"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX Bash glob comparison")
+    def test_unmatched_glob_cannot_move_a_sed_script_at_the_cli_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "AGENTS.md").write_text("fixture\n", encoding="utf-8")
+            pattern = f"/cct-missing-{root.name}*/p"
+            command = f"sed -n {pattern} 1eid AGENTS.md | head"
+            path = root / "policy.json"
+            path.write_text(sp.StagePolicy(role="review", tmpdir=directory).to_json(), encoding="utf-8")
+            for option in ("", "nullglob", "failglob"):
+                env = {**os.environ, "BASHOPTS": option, "BASH_ENV": ""}
+                # Observe Bash's real argv without executing sed or its e script.
+                argv = subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                       f"printf '%s\\n' sed -n {pattern} 1eid AGENTS.md"],
+                                      cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                with self.subTest(option=option):
+                    if option == "failglob":
+                        self.assertNotEqual(0, argv.returncode)
+                        self.assertEqual("", argv.stdout)
+                    else:
+                        self.assertEqual(0, argv.returncode, argv.stderr)
+                        expected = ["sed", "-n", "1eid", "AGENTS.md"]
+                        if not option:
+                            expected.insert(2, pattern)
+                        self.assertEqual(expected, argv.stdout.splitlines())
+                    for source, allowed in ((command, False), ("sed -n p AGENTS.md | head", True)):
+                        result = subprocess.run([sys.executable, sp.__file__, "hook", str(path)],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=30,
+                            input=json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                              "tool_input": {"command": source}}))
+                        self.assertEqual(0, result.returncode, result.stderr)
+                        if allowed:
+                            self.assertEqual("", result.stdout)
+                        else:
+                            response = json.loads(result.stdout)["hookSpecificOutput"]
+                            self.assertEqual("deny", response["permissionDecision"])
+                            self.assertIn("[layer=toolkit_hook]", response["permissionDecisionReason"])
+
+    def test_simple_read_boundary_in_all_roles_and_wrappers(self):
+        for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                     "security", "verify", "bootstrap", "coordinate"):
+            policy = sp.StagePolicy(role=role, rtk=True, repo="owner/repo")
+            for wrapper in ("", "rtk ", "rtk proxy "):
+                for command in ("git status", "git -C . diff --stat", "cat AGENTS.md | head",
+                                "git show HEAD:AGENTS.md | grep parity"):
+                    with self.subTest(role=role, command=wrapper + command):
+                        self.assertTrue(sp.check(wrapper + command, policy, cwd=str(ROOT)).allowed)
+                for command in ('cat "AGENTS.md"', "cat 'AGENTS.md'", r"cat AGENTS\.md",
+                                "cat AGENTS.*", "cat {AGENTS,README}.md", "cat ~/AGENTS.md",
+                                "cat AGENTS.md > result.txt", "git -C / status",
+                                "git rev-parse @{u}", "cat AGENTS.md | grep 'parity'",
+                                "python3 -I -c 'print(1)'",
+                                'git branch "--show-current"', 'git worktree "list"',
+                                'gh pr --repo owner/repo view 7 --json headRefOid --jq ".headRefOid"',
+                                'gh search issues "parity" --repo owner/repo',
+                                "gh --repo owner/repo pr view 7 --json headRefOid --jq '.headRefOid'"):
+                    with self.subTest(role=role, command=wrapper + command):
+                        self.assertFalse(sp.check(wrapper + command, policy, cwd=str(ROOT)).allowed)
+
+    def test_graphql_operation_classification_uses_the_parser(self):
+        for option in ("-f ", "--raw-field=", "-F ", "--field="):
+            for source, read in (("query { repository { name } }", True),
+                                 (" mutation { resolveReviewThread { thread { id } } }", False)):
+                command = "gh api graphql " + option + shlex.quote("query=" + source)
+                with self.subTest(command=command):
+                    self.assertEqual(read, sp._ordinary_read_words(shlex.split(command)))
+
+    def test_explicit_project_commands_keep_authority_and_concrete_guards(self):
+        for fields in ({"tools": ("cat",)}, {"commands": ("cat",)},
+                       {"verify_prefixes": ("cat",)}):
+            policy = sp.StagePolicy(role="review", **fields)
+            with self.subTest(fields=fields):
+                self.assertTrue(sp.check('cat "AGENTS.md"', policy, cwd=str(ROOT)).allowed)
+                self.assertFalse(sp.check('cat "' + str(Path.home() / ".codex/auth.json") + '"',
+                                          policy, cwd=str(ROOT)).allowed)
+        command = f"git -C {ROOT.parent} diff --stat"
+        self.assertFalse(sp.check(command, sp.StagePolicy(role="review"), cwd=str(ROOT)).allowed)
+        for fields in ({"tools": ("git",)}, {"commands": ("git -C",)},
+                       {"verify_prefixes": ("git -C",)}):
+            policy = sp.StagePolicy(role="review", **fields)
+            with self.subTest(fields=fields):
+                self.assertTrue(sp.check(command, policy, cwd=str(ROOT)).allowed)
+                self.assertFalse(sp.check(command + " --output=/etc/parity-out", policy, cwd=str(ROOT)).allowed)
 
     @unittest.skipIf(os.name == "nt", "POSIX Bash glob comparison")
     def test_bash_glob_option_injection_is_refused_at_the_cli_boundary(self):
@@ -180,7 +290,11 @@ class ReadParityTests(unittest.TestCase):
                 ]
                 for command in commands:
                     with self.subTest(command=command):
-                        self.assertEqual(allowed, sp.check(command, policy, cwd=str(work)).allowed)
+                        self.assertFalse(sp.check(command, policy, cwd=str(work)).allowed)
+                        self.assertEqual(allowed, sp._inspection_python(shlex.split(command), policy, str(work)))
+                        if allowed:
+                            current = self.consented(policy, command, str(work))
+                            self.assertTrue(sp.check(command, current, cwd=str(work)).allowed)
 
     def test_glob_order_cannot_select_a_script_or_git_operation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,8 +312,8 @@ class ReadParityTests(unittest.TestCase):
                             decision = sp.check(wrapper + command, policy, cwd=str(root))
                             self.assertFalse(decision.allowed)
                             self.assertNotEqual("validation_error", decision.rule)
-                    # A literal script keeps the glob in file-operand position.
-                    self.assertTrue(sp.check(wrapper + "sed -n p * | head", policy, cwd=str(root)).allowed)
+                    # The owner decision keeps even file-operand globs on consent.
+                    self.assertFalse(sp.check(wrapper + "sed -n p * | head", policy, cwd=str(root)).allowed)
 
     @unittest.skipIf(os.name == "nt", "POSIX symlink and CLI boundary")
     def test_python_read_boundary_keeps_symlinks_and_hook_results_guarded(self):
@@ -225,8 +339,13 @@ class ReadParityTests(unittest.TestCase):
                                 input=json.dumps({"tool_name": "Bash", "cwd": str(work),
                                                   "tool_input": {"command": command}}))
                             self.assertEqual(0, result.returncode, result.stderr)
+                            response = json.loads(result.stdout)["hookSpecificOutput"]
+                            self.assertEqual("deny", response["permissionDecision"])
+                            self.assertEqual(allowed, sp._inspection_python(
+                                shlex.split(command)[len(wrapper.split()):], policy, str(work)))
                             if allowed:
-                                self.assertEqual("", result.stdout)
+                                current = self.consented(policy, command, str(work))
+                                self.assertTrue(sp.check(command, current, cwd=str(work)).allowed)
                             else:
                                 response = json.loads(result.stdout)["hookSpecificOutput"]
                                 self.assertEqual("deny", response["permissionDecision"])
@@ -248,7 +367,7 @@ class ReadParityTests(unittest.TestCase):
             self.assertIn(command, page)
         self.assertIn("#524", audit)
 
-    def test_issue_commands_need_no_consent(self):
+    def test_issue_commands_follow_the_owner_simple_word_decision(self):
         with tempfile.TemporaryDirectory() as directory:
             policy = sp.StagePolicy(role="review", repo="owner/repo", tmpdir=directory,
                                     test_command="python3 -m unittest discover -s tests",
@@ -279,7 +398,17 @@ class ReadParityTests(unittest.TestCase):
                         continue
                     with self.subTest(role=role, command=command):
                         decision = sp.check(command, current, cwd=str(ROOT))
-                        self.assertTrue(decision.allowed, decision.reason)
+                        automatic = command in {
+                            "git diff HEAD..HEAD --stat", "git diff HEAD -- scripts/",
+                            f"git -C {ROOT} diff HEAD --stat",
+                            f"git -C {ROOT} merge-base HEAD origin/main",
+                            f"git -C {ROOT} grep -n parity -- docs/",
+                            "git show HEAD:AGENTS.md | grep parity",
+                            "printenv GIT_SSH_COMMAND GIT_SSH",
+                            "python3 -m unittest tests.test_read_parity",
+                            "python3 -m unittest discover -s tests",
+                        }
+                        self.assertEqual(automatic, decision.allowed, decision.reason)
 
     def test_writes_and_credentials_keep_their_guards(self):
         policy = sp.StagePolicy(role="review", repo="owner/repo", tmpdir="/tmp/dispatch")
@@ -374,15 +503,16 @@ class ReadParityTests(unittest.TestCase):
                             self.assertIn("[layer=toolkit_hook]", output["permissionDecisionReason"])
                             self.assertNotIn("could not", output["permissionDecisionReason"])
 
-    def test_literal_braces_and_double_quote_backslashes_remain_readable(self):
+    def test_literal_braces_and_double_quote_backslashes_keep_consent(self):
         policy = sp.StagePolicy(role="review", rtk=True)
         for wrapper in ("", "rtk ", "rtk proxy "):
             for pattern in (r'"parity\|consent"', r'"\."', r'"\b"', r'"\["',
                             r'"\{a,b\}"', '"{a,b}"', "'{a,b}'", r'\{a,b\}'):
                 with self.subTest(wrapper=wrapper, pattern=pattern):
-                    decision = sp.check(wrapper + "git show HEAD:AGENTS.md | grep -n " + pattern,
-                                        policy, cwd=str(ROOT))
-                    self.assertTrue(decision.allowed, decision.reason)
+                    command = wrapper + "git show HEAD:AGENTS.md | grep -n " + pattern
+                    self.assertFalse(sp.check(command, policy, cwd=str(ROOT)).allowed)
+                    current = self.consented(policy, command, str(ROOT))
+                    self.assertTrue(sp.check(command, current, cwd=str(ROOT)).allowed)
 
     @unittest.skipIf(os.name == "nt", "POSIX Bash argv comparison")
     def test_double_quote_backslashes_match_bash_argv(self):

@@ -15,7 +15,7 @@ replaces that, for Claude on a GitHub cycle, with two barriers:
   prevail over another hook's `allow`, so a permissive global rule or the RTK
   rewrite hook cannot reopen what this one closes.
 
-Literal commands and guarded read pipelines/globs use the default table. Other
+Literal commands and simple read pipelines use the default table. Other
 shell syntax is analysed without evaluation and requests whole-operation interpreter consent. Concrete segment
 guards remain in force; pattern grants lift only table membership. Opaque
 interpreter internals always depend on external isolation.
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import contextlib
 import ast
-import glob
 import hashlib
 import fnmatch
 import itertools
@@ -1856,58 +1855,10 @@ def _inspection_python(words: list[str], policy: StagePolicy, cwd: str | None) -
 
 def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
                       cwd: str | None, run) -> bool:
-    """Literal read pipelines/globs only; no substitution or control flow."""
-    if any(char in command for char in "`$;\n\r"):
+    """Only simple read pipelines skip operation consent (owner AC-1, REV-007)."""
+    if not _simple_read_source(command, pipelines=True):
         return False
-    # Brace expansion runs before option parsing and can introduce executable
-    # sed scripts or Git output options. A list/range separator inside unquoted
-    # braces can expand; quoted braces and Git's @{u} do not.
-    quote = None
-    escaped = False
-    brace_depth = 0
-    for index, char in enumerate(command):
-        if escaped:
-            escaped = False
-        elif char == "\\" and quote != "'":
-            escaped = True
-        elif quote:
-            if char == quote:
-                quote = None
-        elif char in "'\"":
-            quote = char
-        elif char == "[":
-            # Bash bracket expressions include negation, POSIX classes and
-            # locale collation rules that Python glob does not model. Keep
-            # the existing operation-consent path rather than validate a
-            # different argv (REV-005). Quoted/escaped brackets stay literal.
-            return False
-        elif char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth = max(0, brace_depth - 1)
-        elif brace_depth and (char == "," or command.startswith("..", index)):
-            return False
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;()<>")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return False
-    if any(token in {"&", ";", "(", ")", "<", ">"} or
-           token and all(char in "|&;()<>" for char in token) and token != "|" for token in tokens):
-        return False
-    groups: list[list[str]] = [[]]
-    for token in tokens:
-        if token == "|":
-            groups.append([])
-        else:
-            groups[-1].append(token)
-    # shlex loses whether a punctuation token was quoted or escaped. Require
-    # its proposed pipeline to agree with the quote-aware parser; otherwise
-    # an argument such as '|' could hide sed options under another program.
-    # Keep the lexical check above as a conservative syntax filter, and use
-    # the parser's actual argv boundaries for all operation checks.
+    groups = [group.split() for group in command.split("|")]
     if groups != [segment.words for segment in parsed.segments]:
         return False
     for segment in parsed.segments:
@@ -1916,52 +1867,68 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
         words = segment.words
         if words[:1] == ["rtk"] and policy.rtk:
             words = words[2:] if words[1:2] == ["proxy"] else words[1:]
-        if not words:
+        if not words or not _ordinary_read_words(words):
             return False
         if credential_reason(words[1:], policy, cwd):
             return False
-        if words[0] == "git":
-            args = list(words[1:])
-            while args and args[0] in {"-C", "--no-pager", "-P"}:
-                option = args.pop(0)
-                if option == "-C":
-                    if not args or any(char in args[0] for char in "*?["):
-                        return False
-                    args.pop(0)
-            if not args or args[0] not in GIT_COMMON_READ | GIT_REVIEW_READ:
-                return False
-        # Validate the literal command/script before globs can move operands
-        # into those positions. Python's filesystem order need not match Bash's
-        # locale-sorted expansion; neither order may choose the operation.
         _check_words(words, ParsedCommand(words=words), policy, cwd=cwd, run=run)
-        # Globs stay operands, never programs. Resolve matches for path guards.
-        expanded = [words[0]]
-        for word in words[1:]:
-            has_glob = any(c in word for c in "*?[")
-            if has_glob and (_environment_dotglob() or _environment_nocaseglob()
-                             or "globstar" in os.environ.get("BASHOPTS", "").split(":")):
-                return False
-            matches = glob.glob(word, root_dir=cwd or ".") if has_glob else []
-            expanded.extend(matches or [word])
-        if credential_reason(expanded[1:], policy, cwd):
-            return False
-        program = expanded[0]
-        if program == "git":
-            args = list(expanded[1:])
-            while args and args[0] in {"-C", "--no-pager", "-P"}:
-                option = args.pop(0)
-                if option == "-C":
-                    if not args:
-                        return False
-                    args.pop(0)
-            if not args or args[0] not in GIT_COMMON_READ | GIT_REVIEW_READ:
-                return False
-        elif program not in READ_SHELL - {"find", "sha256sum"} | {"gh"}:
-            return False
-        elif program == "gh" and expanded[1:3] not in (["pr", "view"], ["pr", "checks"], ["issue", "view"]):
-            return False
-        _check_words(expanded, ParsedCommand(words=expanded), policy, cwd=cwd, run=run)
     return True
+
+
+def _simple_read_source(command: str, *, pipelines: bool = False) -> bool:
+    """Recognize words whose argv is unchanged by Bash, without evaluating it."""
+    groups = command.split("|") if pipelines else [command]
+    return all(group.strip() and re.fullmatch(r"[A-Za-z0-9_./:@%+,=^ \t-]+", group)
+               for group in groups)
+
+
+def _explicit_command_authorization(words: list[str], policy: StagePolicy) -> bool:
+    if not policy.static_only and (words[0] in policy.tools or any(
+            words[:len(expected)] == expected for item in policy.commands
+            if (expected := _parse_simple(item, None).words))):
+        return True
+    return any(words == expected if item == policy.test_command else words[:len(expected)] == expected
+               for item in policy.verification_commands if (expected := item.split()))
+
+
+def _ordinary_read_words(words: list[str]) -> bool:
+    program = _program(words[0])
+    if program in READ_SHELL | {"printenv", "sha256sum"}:
+        return True
+    args = list(words[1:])
+    if program == "git":
+        while args and args[0] in {"-C", "--no-pager", "-P"}:
+            option = args.pop(0)
+            if option == "-C" and args:
+                args.pop(0)
+        return bool(args and (args[0] in GIT_COMMON_READ | GIT_REVIEW_READ
+                              or args[:2] in (["branch", "--show-current"], ["worktree", "list"])))
+    if program == "gh":
+        # Match _check_gh: global repository selectors can appear anywhere.
+        remaining = []
+        index = 0
+        while index < len(args):
+            word = args[index]
+            if word in {"-R", "--repo"}:
+                index += 2
+            elif word.startswith("--repo="):
+                index += 1
+            else:
+                remaining.append(word)
+                index += 1
+        args = remaining
+        if args[:2] == ["api", "graphql"]:
+            for word in args[2:]:
+                if word.startswith(("--raw-field=", "--field=", "-f=", "-F=")):
+                    word = word.partition("=")[2]
+                if word.startswith("query="):
+                    return _GraphQL(word.partition("=")[2]).document()[0] == "query"
+            return False
+        if args[:1] == ["api"]:
+            return True
+        return len(args) >= 2 and (args[0] == "search"
+                                  or args[1] in {"view", "list", "diff", "checks", "status"})
+    return False
 
 
 def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
@@ -2012,6 +1979,9 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
         if protected:
             return Decision(False, protected, rule="credential_guard")
         _check_words(words, parsed, policy, cwd=cwd, run=run)
+        if (_ordinary_read_words(words) and not _simple_read_source(command)
+                and not _explicit_command_authorization(words, policy)):
+            raise PolicyError("complex read arguments need operation consent")
     except _DockerDenied as denied:
         return Decision(False, str(denied), needs_docker=True, rule="docker_host")
     except PolicyError as error:
@@ -2226,7 +2196,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             return
     program = words[0]
     if _inspection_python(words, policy, cwd):
-        return
+        raise PolicyError("inline Python inspection needs operation consent")
     if program == "sha256sum":
         if policy.role not in REVIEW_ROLES:
             raise PolicyError("sha256sum is available only in review stages")
@@ -2622,6 +2592,10 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                 if not selected:
                     raise PolicyError("git -C needs a directory")
                 directory = (directory / selected.pop(0)).resolve()
+                root = Path(cwd or ".").resolve()
+                if (directory != root and root not in directory.parents
+                        and not _explicit_command_authorization(["git", *args], policy)):
+                    raise PolicyError("git -C outside the workspace needs operation consent")
         if selected != args:
             if changed_directory and (not selected or selected[0] not in GIT_COMMON_READ | GIT_REVIEW_READ):
                 raise PolicyError("Git directory selection is automatic only for read commands")
@@ -4820,9 +4794,14 @@ def operation(tool: str, tool_input: dict[str, Any], policy: Any, cwd: str | Non
         # a string containing a path is not itself a filesystem operand.
         for index, word in enumerate(command_words):
             candidate = str((Path(cwd or ".") / word).resolve())
+            exists = False
+            # Long filters and GraphQL queries are opaque argv, not necessarily
+            # filesystem names. They must still have an exact consent identity.
+            with contextlib.suppress(OSError):
+                exists = Path(candidate).exists()
             path_operand = (os.path.isabs(word) or word.startswith(("./", "../"))
                             or "/" in word and _program(command_words[0]) != "gh"
-                            or Path(candidate).exists())
+                            or exists)
             inline_code = index > 0 and command_words[index - 1] in {"-c", "-e", "--eval", "--execute"}
             if index and path_operand and not word.startswith("-") and not inline_code and _tmp_operand(candidate, policy.tmpdir):
                 normalized.append({"tmpdir": _tmp_relative(candidate, policy)})

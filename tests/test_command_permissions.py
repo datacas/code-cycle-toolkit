@@ -150,7 +150,13 @@ class OperationTests(unittest.TestCase):
                         'jq --arg name /api/ "." file.json', "head -n 20 file.py",
                         "find . -name /api/"):
             with self.subTest(command=command):
-                self.assertTrue(sp.check(command, self.policy, cwd=str(self.root)).allowed)
+                automatic = not any(char in command for char in "'\"")
+                self.assertEqual(automatic, sp.check(command, self.policy, cwd=str(self.root)).allowed)
+                if not automatic:
+                    operation = sp.operation("Bash", {"command": command}, self.policy, str(self.root))
+                    allowed = replace(self.policy, command_permissions=({"operation": operation,
+                                                                        "decision": "allow"},))
+                    self.assertTrue(sp.check(command, allowed, cwd=str(self.root)).allowed)
         for command in ("grep -f /outside/patterns file.py", "grep -f/outside/patterns file.py",
                         "grep -n /api/ /outside/file.py", "grep --exclude-from=/outside/patterns token .",
                         "jq -f /outside/filter file.json",
