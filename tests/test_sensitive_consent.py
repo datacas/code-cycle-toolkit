@@ -523,6 +523,32 @@ class SensitiveConsentTests(unittest.TestCase):
         self.assertTrue(self.hook(command, allowed))
         self.assertFalse(self.hook(command + " && python3 -m unittest", allowed))
 
+    def test_unconfined_publication_keeps_consent_reads_consentable(self):
+        # #524 owner decision: git -C outside the workspace needs consent. That
+        # consent signal is not a guard, so it cannot block a consented compound
+        # push permanently; Git's concrete guards on that segment still apply.
+        policy = replace(self.policy, static_only=True)
+        push = " && git push --force origin HEAD:topic"
+        command = f"git -C {self.remote} log --oneline" + push
+        self.assertIsNone(sp.protected_reason("Bash", {"command": command}, policy, str(self.repo)))
+        self.assertIsNotNone(sp.protected_reason(
+            "Bash", {"command": f"git -C {self.remote} log --output=/etc/parity-out" + push},
+            policy, str(self.repo)))
+        for source in (f"git -C {self.repo} log --oneline" + push, command):
+            broker = grants.ConsentBroker("owner/repo", platform="linux", cycle_id="fixture")
+            current = policy
+            for _ in range(4):
+                request = cp.refused_operation([source], current, broker, "claude", str(self.repo))
+                if request is None:
+                    break
+                grant = broker.operations[request["resource"]]
+                broker.apply_answer(grant, grant.scopes[0], "cycle")
+                current = replace(policy, command_permissions=broker.command_entries("claude", policy.role))
+            with self.subTest(command=source):
+                decision = sp.check(source, current, cwd=str(self.repo))
+                self.assertTrue(decision.allowed, decision.reason)
+                self.assertTrue(self.hook(source, current))
+
     def test_audit_authorizes_each_observed_ref_and_deletion(self):
         class Host:
             def protected_branches(self, repo): return ("protected",)

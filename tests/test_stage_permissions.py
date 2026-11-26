@@ -259,8 +259,17 @@ class InspectionToolTests(PolicyTestCase):
                 with self.subTest(role=role, command=command):
                     decision = sp.check(command, policy, cwd=ROOT.as_posix(),
                                         run=on_branch("issue-142"))
-                    automatic = hook_allows and not any(char in command for char in "'\"")
+                    # Quoted words and NAME=value words (inherited set -k) keep consent.
+                    automatic = hook_allows and not any(char in command for char in "'\"") and not any(
+                        re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in command.split())
                     self.assertEqual(automatic, decision.allowed, decision.reason)
+                    if hook_allows and not automatic:
+                        table_operation = sp.operation("Bash", {"command": command}, policy,
+                                                       ROOT.as_posix())
+                        table_consent = replace(policy, command_permissions=(
+                            {"operation": table_operation, "decision": "allow"},))
+                        self.assertTrue(sp.check(command, table_consent, cwd=ROOT.as_posix(),
+                                                 run=on_branch("issue-142")).allowed)
                     if hook_allows:
                         # The hook never accepts what the first barrier does not open.
                         self.assertTrue(opens_as_prefix(command, patterns))

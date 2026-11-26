@@ -4,6 +4,7 @@ import fnmatch
 import subprocess
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -35,11 +36,23 @@ class FailureAccessTests(unittest.TestCase):
             "gh run view --job 9 123 --log-failed", "gh run view 123 -j=9 --log",
             "gh run view --json jobs 123 -j 9", "gh run view 123 --job=9 --job 10 --log",
             "gh api repos/owner/api/check-runs/8/annotations",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(self.check(command).allowed, self.check(command).reason)
+        # Owner AC-1 decision (#524): quoted filters keep exact operation consent,
+        # and the head/job ownership guards still run after that consent.
+        for command in (
             "gh api --paginate repos/owner/api/check-runs/8/annotations --jq '.[].message'",
             "gh api --jq='.[].message' repos/owner/api/check-runs/8/annotations",
         ):
             with self.subTest(command=command):
-                self.assertTrue(self.check(command).allowed, self.check(command).reason)
+                self.assertFalse(self.check(command).allowed)
+                entry = {"operation": sp.operation("Bash", {"command": command}, self.policy, None),
+                         "decision": "allow"}
+                consented = replace(self.policy, command_permissions=(entry,))
+                with mock.patch.object(self, "policy", consented):
+                    self.assertTrue(self.check(command).allowed, self.check(command).reason)
+                    self.assertFalse(self.check(command, run_head="b" * 40).allowed)
 
     def test_annotation_patterns_cover_orders_and_rtk_wrappers(self):
         policy = sp.StagePolicy("resolve", repo="owner/api", change_request_id="4", rtk=True)

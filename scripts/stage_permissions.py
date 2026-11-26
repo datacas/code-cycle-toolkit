@@ -166,6 +166,10 @@ class PolicyError(ValueError):
     """A command, or a configured command, the policy refuses."""
 
 
+class ConsentRequired(PolicyError):
+    """An operation that needs exact consent; it is not a guard consent cannot lift."""
+
+
 class ComposeResolutionTimeout(PolicyError):
     """The inspection budget expired, rather than configuration being absent."""
 
@@ -1867,7 +1871,8 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
         words = segment.words
         if words[:1] == ["rtk"] and policy.rtk:
             words = words[2:] if words[1:2] == ["proxy"] else words[1:]
-        if not words or not _ordinary_read_words(words):
+        # A path such as ./git runs a file, not the read program it is named after.
+        if not words or "/" in words[0] or not _ordinary_read_words(words):
             return False
         if credential_reason(words[1:], policy, cwd):
             return False
@@ -1878,7 +1883,11 @@ def _inspection_shell(command: str, parsed: ParsedCommand, policy: StagePolicy,
 def _simple_read_source(command: str, *, pipelines: bool = False) -> bool:
     """Recognize words whose argv is unchanged by Bash, without evaluating it."""
     groups = command.split("|") if pipelines else [command]
+    # An inherited SHELLOPTS=keyword (`set -k`) turns any NAME=value word into
+    # an environment assignment and drops it from argv, so such words are not
+    # simple even after the command name.
     return all(group.strip() and re.fullmatch(r"[A-Za-z0-9_./:@%+,=^ \t-]+", group)
+               and not any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in group.split())
                for group in groups)
 
 
@@ -1981,7 +1990,7 @@ def check(command: str, policy: StagePolicy, *, cwd: str | None = None,
         _check_words(words, parsed, policy, cwd=cwd, run=run)
         if (_ordinary_read_words(words) and not _simple_read_source(command)
                 and not _explicit_command_authorization(words, policy)):
-            raise PolicyError("complex read arguments need operation consent")
+            raise ConsentRequired("complex read arguments need operation consent")
     except _DockerDenied as denied:
         return Decision(False, str(denied), needs_docker=True, rule="docker_host")
     except PolicyError as error:
@@ -2196,7 +2205,7 @@ def _check_words(words: list[str], parsed: ParsedCommand, policy: StagePolicy, *
             return
     program = words[0]
     if _inspection_python(words, policy, cwd):
-        raise PolicyError("inline Python inspection needs operation consent")
+        raise ConsentRequired("inline Python inspection needs operation consent")
     if program == "sha256sum":
         if policy.role not in REVIEW_ROLES:
             raise PolicyError("sha256sum is available only in review stages")
@@ -2580,7 +2589,7 @@ def _git_global_options(args: list[str]) -> tuple[list[str] | None, list[str]]:
 
 
 def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
-               consent: bool = False) -> None:
+               consent: bool = False, directory_consent: bool = False) -> None:
     if not consent:
         selected = list(args)
         directory = Path(cwd or ".")
@@ -2593,9 +2602,9 @@ def _check_git(args: list[str], policy: StagePolicy, *, cwd: str | None, run,
                     raise PolicyError("git -C needs a directory")
                 directory = (directory / selected.pop(0)).resolve()
                 root = Path(cwd or ".").resolve()
-                if (directory != root and root not in directory.parents
+                if (directory != root and root not in directory.parents and not directory_consent
                         and not _explicit_command_authorization(["git", *args], policy)):
-                    raise PolicyError("git -C outside the workspace needs operation consent")
+                    raise ConsentRequired("git -C outside the workspace needs operation consent")
         if selected != args:
             if changed_directory and (not selected or selected[0] not in GIT_COMMON_READ | GIT_REVIEW_READ):
                 raise PolicyError("Git directory selection is automatic only for read commands")
@@ -5417,7 +5426,16 @@ def protected_reason(tool: str, tool_input: dict[str, Any], policy: Any, cwd: st
                         _, words, directory = _runner_command_parts(list(segment.words), cwd)
                         if not words or _program(words[0]) in {"echo", "printf", "true", "false", ":", "wait"}:
                             continue
-                        _check_words(words, segment, policy, cwd=directory, run=subprocess.run)
+                        try:
+                            _check_words(words, segment, policy, cwd=directory, run=subprocess.run)
+                        except ConsentRequired:
+                            # The outer answer is that consent; it is not a guard.
+                            # Git keeps every other direct argument guard.
+                            inner = (words[2:] if words[:2] == ["rtk", "proxy"]
+                                     else words[1:] if words[:1] == ["rtk"] else words)
+                            if inner and os.path.basename(inner[0]).removesuffix(".exe") == "git":
+                                _check_git(inner[1:], policy, cwd=directory, run=subprocess.run,
+                                           directory_consent=True)
             policy = replace(policy, static_only=False)
         if sensitive and sensitive.get("stores"):
             policy = replace(policy, credential_reads=tuple(dict.fromkeys(

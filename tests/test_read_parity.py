@@ -217,6 +217,33 @@ class ReadParityTests(unittest.TestCase):
                     with self.subTest(role=role, command=wrapper + command):
                         self.assertFalse(sp.check(wrapper + command, policy, cwd=str(ROOT)).allowed)
 
+    @unittest.skipIf(os.name == "nt", "POSIX Bash argv comparison")
+    def test_keyword_assignments_and_path_programs_keep_consent(self):
+        # An inherited SHELLOPTS=keyword (set -k) moves NAME=value words into the
+        # environment, so Git would run GIT_EXTERNAL_DIFF while the guard saw a
+        # pathspec. A path-named program runs a file, not the read it names.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            argv = subprocess.run(["bash", "--noprofile", "--norc", "-c",
+                                   "printf '%s\\n' git diff HEAD GIT_EXTERNAL_DIFF=id"],
+                                  cwd=root, env={**os.environ, "SHELLOPTS": "keyword", "BASH_ENV": ""},
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, argv.returncode, argv.stderr)
+            self.assertEqual(["git", "diff", "HEAD"], argv.stdout.splitlines())
+            for role in ("implement", "resolve", "review", "rereview", "issue_review",
+                         "security", "verify", "bootstrap", "coordinate"):
+                policy = sp.StagePolicy(role=role, rtk=True, repo="owner/repo", tmpdir=directory)
+                for wrapper in ("", "rtk ", "rtk proxy "):
+                    for command in ("git diff HEAD GIT_EXTERNAL_DIFF=id",
+                                    "cat AGENTS.md | git diff HEAD GIT_EXTERNAL_DIFF=id",
+                                    "git log -1 PAGER=id | head", "./git status | head",
+                                    f"{directory}/git log | head"):
+                        with self.subTest(role=role, command=wrapper + command):
+                            self.assertFalse(sp.check(wrapper + command, policy, cwd=str(ROOT)).allowed)
+                    for command in ("git diff HEAD --stat", "git log -1 --format=%H | head"):
+                        with self.subTest(role=role, command=wrapper + command):
+                            self.assertTrue(sp.check(wrapper + command, policy, cwd=str(ROOT)).allowed)
+
     def test_graphql_operation_classification_uses_the_parser(self):
         for option in ("-f ", "--raw-field=", "-F ", "--field="):
             for source, read in (("query { repository { name } }", True),
