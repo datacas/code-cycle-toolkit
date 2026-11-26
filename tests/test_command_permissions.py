@@ -173,10 +173,26 @@ class OperationTests(unittest.TestCase):
         policy = replace(self.policy, evidence_paths=(str(evidence),))
         restored = sp.StagePolicy.from_json(policy.to_json())
         for program in ("wc -l", "cat", "head -n 10"):
-            self.assertTrue(sp.check(program + " " + shlex.quote(str(evidence)), restored,
-                                     cwd=str(self.root)).allowed)
-        for path in (evidence.parent, evidence.with_name("other.diff")):
-            self.assertFalse(sp.check(shlex.join(["cat", str(path)]), restored, cwd=str(self.root)).allowed)
+            # Relative POSIX words stay simple on Windows too; shlex.quote of
+            # a native Windows path adds quotes and must retain AC-1 consent.
+            command = program + " ../runtime-evidence/accumulated.diff"
+            with self.subTest(command=command):
+                decision = sp.check(command, restored, cwd=str(self.root))
+                self.assertTrue(decision.allowed, decision.reason)
+            for path in (str(evidence), evidence.as_posix()):
+                command = program + " '" + path + "'"
+                with self.subTest(command=command):
+                    decision = sp.check(command, restored, cwd=str(self.root))
+                    self.assertFalse(decision.allowed)
+                    self.assertEqual("complex read arguments need operation consent", decision.reason)
+                    operation = sp.operation("Bash", {"command": command}, restored, str(self.root))
+                    consented = replace(restored, command_permissions=(
+                        {"operation": operation, "decision": "allow"},))
+                    self.assertTrue(sp.check(command, consented, cwd=str(self.root)).allowed)
+                    self.assertFalse(sp.check(command.replace("accumulated.diff", "other.diff"),
+                                              consented, cwd=str(self.root)).allowed)
+        for path in ("../runtime-evidence", "../runtime-evidence/other.diff"):
+            self.assertFalse(sp.check("cat " + path, restored, cwd=str(self.root)).allowed)
 
     def test_quoted_windows_paths_preserve_backslashes_in_bash(self):
         for path in (r"C:\Fixture\Runner\auth.json", r"C:\Temp\snapshot", r"C:\Temp\helper.py"):
