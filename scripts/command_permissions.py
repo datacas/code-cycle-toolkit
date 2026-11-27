@@ -143,10 +143,15 @@ def observed_pattern_matches(op: dict[str, Any], tool: str, data: dict[str, Any]
 def request_record(grant: SensitiveGrant, command: str, reason: str) -> dict[str, Any]:
     op = grant.operation or {}
     compose = op.get("compose") if isinstance(op.get("compose"), dict) else None
-    return {"kind": "command_permission", "resource": grant.id,
+    return {"kind": op.get("kind", "command_permission"), "resource": grant.id,
             "command": command, "error": reason,
             "attempted": ["stage command table refused the operation"],
             "requires_human": False,
+            **({"fingerprint": op["fingerprint"],
+                "disabled_guarantees": op["disabled_guarantees"],
+                "provenance": op["provenance"], "source": op["source"],
+                "layer": op["layer"]}
+               if op.get("kind") == "reduced_guarantee_consent" else {}),
             # Evidence ties the decision to the exact check and configuration (#398).
             **({"check": op["check"]} if op.get("check") else {}),
             **({"config_sha256": compose["config_sha256"]} if compose and "config_sha256" in compose else {}),

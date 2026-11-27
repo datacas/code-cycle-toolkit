@@ -883,6 +883,10 @@ class CycleRecorder:
         if attempt.handoff is not None:
             self._claim_handoff(run, attempt, attempt.handoff)
         permission_context, grant_kwargs = self._permission_context(run, attempt)
+        if self.consent is not None and target.executor == "codex":
+            import stage_permissions as sp
+            if run.role in sp.REVIEW_ROLES:
+                grant_kwargs["consent_broker"] = self.consent
         run.sandbox_grants = tuple(grant_kwargs.get("sandbox_grants", ()))
         try:
             return dispatch(decision, f"{run.task}\n\n{run.environment_context}\n\n{permission_context}\n\n{routing_context(decision)}",
@@ -929,7 +933,7 @@ class CycleRecorder:
                                    "provenance": handoff["provenance"]})
 
     def _permission_context(self, run: _StageRun,
-                            attempt: _Attempt) -> tuple[str, dict[str, tuple[str, ...]]]:
+                            attempt: _Attempt) -> tuple[str, dict[str, Any]]:
         """The grants and denials this attempt runs with, stated to the agent."""
         executor = attempt.target.executor
         consent = self.consent
@@ -958,6 +962,26 @@ class CycleRecorder:
             context += "\n\n" + "\n".join(
                 denial_context(consent.registry[grant_id]) for grant_id in consent.denied_ids)
             if run.dispatch_kwargs.get("command_policy") is not None:
+                if executor == "claude":
+                    import stage_permissions as sp
+                    from reduced_guarantees import grant_for, is_granted
+                    records, limits = sp.reduced_guarantee_overrides(
+                        cwd=run.dispatch_kwargs.get("cwd"),
+                        policy=run.dispatch_kwargs.get("command_policy"))
+                    authorizations = []
+                    for record in records:
+                        grant = grant_for(record, consent.platform, run.role)
+                        answer = consent.request(grant, executor, role=run.role)
+                        if is_granted(answer):
+                            authorizations.append(grant.id)
+                            context += ("\n\nReduced guarantee authorized: "
+                                        f"{record['setting']} ({record['fingerprint']}). "
+                                        "Unguarded operations include force-push, base-push, "
+                                        "ref deletion and credential access.")
+                    if records:
+                        run.dispatch_kwargs["reduced_guarantee_authorizations"] = tuple(authorizations)
+                    for limit in limits:
+                        context += f"\n\nExecutor policy limit (not consentable): {limit}."
                 run.dispatch_kwargs["command_policy"] = replace(
                     run.dispatch_kwargs["command_policy"],
                     command_permissions=consent.command_entries(executor, run.role))

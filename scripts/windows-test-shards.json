@@ -117,6 +117,7 @@
       "test_cycle_journal",
       "test_permission_view",
       "test_permission_lifecycle",
+      "test_reduced_guarantees",
       "test_ci_policy",
       "test_cycle_history",
       "test_publication_reread",

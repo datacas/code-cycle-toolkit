@@ -438,6 +438,24 @@ def refusal_question(grant: SensitiveGrant, scope: GrantScope, role: str,
                 "options": (["this cycle", "deny"] if sensitive.get("cycle_only") else
                             command_options(role, unique_path=unique)),
                 "recommended": None, "blocks": [f"grant:{grant.id}"]}
+    if op.get("kind") == "reduced_guarantee_consent":
+        policy = op.get("scope_policy")
+        options = ["this cycle", "deny"]
+        if policy in {"cycle_repository", "cycle_repository_global"}:
+            options.insert(1, "this repository")
+        if policy == "cycle_repository_global":
+            options.insert(2, "forever")
+        return {"id": question_id,
+                "prompt": (f"WARNING: reduced_guarantee_consent for {op.get('setting')} "
+                           f"from {op.get('source')} ({op.get('layer')}). "
+                           f"Effective value: {json.dumps(op.get('value'), sort_keys=True)[:100]}. "
+                           f"Disabled guarantees: {', '.join(op.get('disabled_guarantees', []))}. "
+                           f"Unguarded operations: {', '.join(('force-push', 'base-push', 'ref deletion', 'credential access'))}. "
+                           "A grant never overrides executor, managed-policy, operating-system, "
+                           "provider or infrastructure limits. Consent is bound to this exact "
+                           f"configuration fingerprint {op.get('fingerprint')}.")[:600],
+                "options": options, "recommended": None,
+                "blocks": [f"grant:{grant.id}"]}
     return {"id": question_id,
             "prompt": (f"{role}: {warned}{compound}{command[:140]}.{scope_note}{detail[:120]} " +
                        ("Exact only; earlier grants do not reach review. " if op.get("guard_consent") else
@@ -975,6 +993,7 @@ class PermissionRequest:
         op = self.grant.operation or {}
         return {
             "grant": self.grant.id, "resource": self.grant.resource,
+            **({"kind": op["kind"]} if op.get("kind") == "reduced_guarantee_consent" else {}),
             "executor": self.scope.executor, "platform": self.scope.platform,
             "effective_scope": self.scope.effective, "risks": self.scope.risks,
             "temporary_offered": self.scope.isolated_per_dispatch,
@@ -996,6 +1015,11 @@ class PermissionRequest:
                     "alternative": "skip; the check is recorded unverified and the cycle continues"}
                    if op.get("check") else {})}
                if op else {}),
+            **({"fingerprint": op["fingerprint"],
+                "disabled_guarantees": op["disabled_guarantees"],
+                "provenance": op["provenance"],
+                "source": op["source"], "layer": op["layer"]}
+               if op.get("kind") == "reduced_guarantee_consent" else {}),
         }
 
 
@@ -1150,7 +1174,20 @@ class ConsentBroker:
                 entry["operation"] = request["pattern"]
             if isinstance(request.get("sandbox"), dict):
                 entry["sandbox"] = request["sandbox"]
-            grant = from_entry(entry)
+            pattern = request.get("pattern")
+            if isinstance(pattern, dict) and pattern.get("kind") == "reduced_guarantee_consent":
+                effective = request.get("effective_scope")
+                risks = request.get("risks")
+                isolated = request.get("temporary_offered")
+                if not isinstance(effective, str) or not isinstance(risks, str) or not isinstance(isolated, bool):
+                    continue
+                grant = SensitiveGrant(
+                    grant_id, str(pattern.get("setting") or "reduced guarantee"),
+                    "the effective configuration reduces a toolkit guarantee",
+                    (GrantScope(executor, platform, effective, risks, isolated),),
+                    operation=pattern)
+            else:
+                grant = from_entry(entry)
             if grant is None or grant.id != grant_id:
                 continue
             effective = request.get("effective_scope")
@@ -1349,9 +1386,17 @@ class ConsentBroker:
 
     def _resolve(self, grant: SensitiveGrant, scope: GrantScope, *,
                  allow_global: bool = True) -> tuple[str | None, str | None]:
+        if (grant.operation or {}).get("kind") == "reduced_guarantee_consent":
+            operation = grant.operation or {}
+            allow_global = (allow_global
+                            and operation.get("scope_policy") == "cycle_repository_global")
         key = grant.fingerprint(scope)
         if grant.id in self.answers and key not in self._consumed_answers:
             answer = self.answers[grant.id]
+            if ((grant.operation or {}).get("kind") == "reduced_guarantee_consent"
+                    and answer == ALLOW_GLOBAL and not allow_global):
+                self.notes.append(f"{grant.id}={answer} does not reach this reduced-guarantee scope")
+                return None, None
             # The answer persists only for the scope its question showed; every
             # other registered scope receives it for this run alone.
             persist = key in self.asked
@@ -1412,6 +1457,13 @@ class ConsentBroker:
 
     def apply_answer(self, grant: SensitiveGrant, scope: GrantScope, answer: str,
                      *, persist: bool = True) -> str:
+        if (grant.operation or {}).get("kind") == "reduced_guarantee_consent":
+            policy = (grant.operation or {}).get("scope_policy")
+            allowed = {"cycle": {ALLOW_CYCLE, DENY},
+                       "cycle_repository": {ALLOW_CYCLE, ALLOW_PERSISTENT, DENY},
+                       "cycle_repository_global": {ALLOW_CYCLE, ALLOW_PERSISTENT, ALLOW_GLOBAL, DENY}}
+            if answer not in (allowed.get(policy, {DENY}) if isinstance(policy, str) else {DENY}):
+                raise GrantError(f"{grant.id}: {answer!r} exceeds the reduced-guarantee consent scope")
         if (grant.operation or {}).get("sensitive", {}).get("cycle_only") and answer not in {ALLOW_CYCLE, DENY}:
             raise GrantError("this sensitive operation supports this cycle or deny only")
         if compose_timeout(grant.operation) and answer not in {ALLOW_CYCLE, DENY}:
