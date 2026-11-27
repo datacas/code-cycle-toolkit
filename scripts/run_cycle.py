@@ -2733,7 +2733,7 @@ def _blocking_findings_consistent(findings: list, blocking: list[str]) -> bool:
     return expected == set(blocking)
 
 
-EVIDENCE_LEVELS = frozenset({"static", "test", "boundary"})
+EVIDENCE_LEVELS = verification_contract.LEVELS
 #: Statuses of a stage that completed code work. Only these can leave a required
 #: boundary run known to be missing; a review reports no tests, and a blocked
 #: stage changed nothing.

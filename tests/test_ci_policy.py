@@ -590,11 +590,11 @@ class AccumulatingCommentTests(unittest.TestCase):
     OLD = "attempt-old"
 
     def invented(self, attempt: str) -> str:
-        """A receipt with the key names a stage invented (`plan_revision`)."""
+        """A receipt with conflicting canonical and alias values is malformed."""
         return ("<!-- code-cycle-stage " + json.dumps({
             "schema": 2, "repo": "owner/api", "change_request_id": "4", "stage": "review",
             "attempt_id": attempt, "head_sha": HEAD, "status": "APPROVED",
-            "finding_outcomes": [], "plan_id": "plan-x", "plan_revision": 5,
+            "finding_outcomes": [], "plan_id": "plan-x", "revision": 4, "plan_revision": 5,
             "plan_digest": "f" * 64}) + " -->")
 
     def problem(self, body: str):
@@ -621,7 +621,7 @@ class AccumulatingCommentTests(unittest.TestCase):
         (note,) = [text for _, text in report.notes]
         self.assertIn("warning", note)
         self.assertIn(self.OLD, note)
-        self.assertIn("missing revision, digest", note)
+        self.assertIn("conflicting revision and plan_revision", note)
 
     def test_a_malformed_receipt_of_the_gated_attempt_stops_naming_the_key(self) -> None:
         body = "\n".join([receipt("review", self.ATTEMPT, "APPROVED", HEAD),
@@ -630,7 +630,7 @@ class AccumulatingCommentTests(unittest.TestCase):
         result, report = self.problem(body)
 
         self.assertIn("its receipt cannot be read", str(result))
-        self.assertIn("missing revision, digest", str(result))
+        self.assertIn("conflicting revision and plan_revision", str(result))
         self.assertEqual([], report.notes)
 
     def test_an_unattributable_malformed_receipt_naming_the_attempt_stops(self) -> None:
