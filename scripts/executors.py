@@ -1113,7 +1113,8 @@ class NativeAdapter(Adapter):
         """An environment for the dispatched CLI, or None to inherit this one."""
         return None
 
-    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None) -> str | None:
+    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None,
+                         reduced_guarantee_authorizations: tuple[str, ...] = ()) -> str | None:
         """Why this executor cannot enforce the stage's command policy, or None."""
         return None
 
@@ -1421,6 +1422,8 @@ class NativeAdapter(Adapter):
                  writable_dirs: tuple[str, ...] = (),
                  sandbox_grants: tuple[str, ...] = (),
                  command_policy: StagePolicy | None = None,
+                 reduced_guarantee_authorizations: tuple[str, ...] = (),
+                 consent_broker=None,
                  review_clone: str | None = None,
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None,
@@ -1495,7 +1498,7 @@ class NativeAdapter(Adapter):
                     "prerequisite alone is not BLOCKED. Never describe an incomplete implementation "
                     "as complete."
                 )
-        refused = self.policy_preflight(policy, cwd)
+        refused = self.policy_preflight(policy, cwd, reduced_guarantee_authorizations)
         if refused is not None:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -1595,7 +1598,7 @@ class NativeAdapter(Adapter):
             if command_policy.static_only:
                 task += ("\nNative Bash isolation is unavailable; keep static guards and report "
                          "affected verification as not_verified. Do not launch a nested sandbox.")
-        refused = self.policy_preflight(policy, cwd)
+        refused = self.policy_preflight(policy, cwd, reduced_guarantee_authorizations)
         if refused is not None:
             return DispatchResult(
                 DispatchOutcome.FAILED, self.name, target,
@@ -3210,6 +3213,7 @@ class ClaudeAdapter(NativeAdapter):
                  claude_allowed_commands: tuple[str, ...] = (),
                  read_dirs: tuple[str, ...] = (),
                  command_policy: StagePolicy | None = None,
+                 reduced_guarantee_authorizations: tuple[str, ...] = (),
                  on_progress=None, on_workspace=None,
                  dispatch_attempt_id: str | None = None,
                  docker_probe_runner=None) -> DispatchResult:
@@ -3219,36 +3223,30 @@ class ClaudeAdapter(NativeAdapter):
             publication_permissions=publication_permissions,
             claude_allowed_commands=claude_allowed_commands,
             read_dirs=read_dirs, command_policy=command_policy,
+            reduced_guarantee_authorizations=reduced_guarantee_authorizations,
             on_progress=on_progress,
             on_workspace=on_workspace, dispatch_attempt_id=dispatch_attempt_id,
             docker_probe_runner=docker_probe_runner,
         )
 
-    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None) -> str | None:
+    def policy_preflight(self, policy: StagePolicy | None, cwd: str | None,
+                         reduced_guarantee_authorizations: tuple[str, ...] = ()) -> str | None:
         """Refuse a dispatch whose loaded configuration could override the hook."""
         if policy is None:
             return None
         try:
-            reason = sp.hook_override()
-            if reason:
-                return f"the stage command hook would not run: {reason}"
-            mods = sp.tool_check_mods()
-            if mods:
-                return ("the loaded Claude configuration enables a tool.check mod that "
-                        "could approve commands the stage policy denies: "
-                        f"{', '.join(mods)}. Claude Code offers no flag that turns mods "
-                        "off for one dispatch while keeping the user's other hooks, so "
-                        "disable that plugin for cycle runs")
-            if policy.uses_bash_sandbox:
-                reason = sp.sandbox_override()
-                if reason:
-                    return reason
-                # The clone's project settings come from the change under review.
-                for name in ("settings.json", "settings.local.json"):
-                    project = Path(cwd or ".") / ".claude" / name
-                    reason = sp.sandbox_override(project) if project.is_file() else None
-                    if reason:
-                        return reason
+            from reduced_guarantees import grant_for
+            overrides, limits = sp.reduced_guarantee_overrides(cwd=cwd, policy=policy)
+            if limits:
+                return "; ".join(limits)
+            missing = [record for record in overrides
+                       if grant_for(record, sys.platform, policy.role).id
+                       not in reduced_guarantee_authorizations]
+            if missing:
+                return ("reduced_guarantee_consent required for " + "; ".join(
+                    f"{record['setting']}={json.dumps(record['value'], sort_keys=True)} "
+                    f"from {record['source']} [{record['fingerprint']}]"
+                    for record in missing))
         except sp.PolicyError as error:
             return f"the Claude configuration could not be checked: {error}"
         return None
@@ -4242,10 +4240,11 @@ def dispatch(
         return result
 
     def run_stage() -> DispatchResult:
+        review_task = task
         if (workspace_policy is WorkspacePolicy.READ_ONLY
                 and target.executor == "claude" and not adapter.enforces_read_only):
             return _isolated_review_dispatch(
-                adapter, target, task, cwd=kw.get("cwd"),
+                adapter, target, review_task, cwd=kw.get("cwd"),
                 dispatch_call=lambda prompt, isolated_cwd: invoke_adapter(
                     prompt, cwd=isolated_cwd, writes=False,
                 ),
@@ -4256,32 +4255,58 @@ def dispatch(
             # Codex reviewers verify in a disposable clone too (#142), under a
             # profile whose only writable paths are that clone and TMPDIR.
             if active_policy.requires_confined_verification:
-                if native.nested_codex():
+                nested_codex = native.nested_codex()
+                if nested_codex:
                     confined, detail = False, (
                         "known nested Codex limitation (#268): app-server socket directory must be "
                         "a user-owned directory with mode 0700; no host directory probe")
                 else:
                     confined, detail = adapter.probe_review_confinement()
                 if not confined:
-                    return DispatchResult(
-                        DispatchOutcome.FAILED, target.executor, target,
-                        detail=failure_excerpt(f"BLOCKED: {detail}", 600),
-                        error_code="environment_restricted", start_state="not_started",
-                        lifecycle_state="failed", process_exited=True,
-                        artifacts={"command_policy": "blocked: review sandbox unverified",
-                                   "native_sandbox_preflight": {
-                                       "status": "unverified", "functional_check": {
-                                           "probe": "codex review confinement", "passed": False,
-                                           "evidence": detail}}},
-                    )
+                    broker = kw.get("consent_broker")
+                    authorized = False
+                    grant = None
+                    if broker is not None and not nested_codex:
+                        from reduced_guarantees import binding, grant_for, is_granted
+                        record = binding(
+                            setting="Codex review clone confinement",
+                            value=detail,
+                            source="Codex review sandbox probe",
+                            layer="executor sandbox",
+                            executor="codex",
+                            guarantees=["review clone filesystem confinement"],
+                            provenance="trusted_user_configuration")
+                        grant = grant_for(record, broker.platform, active_policy.role)
+                        authorized = is_granted(broker.request(
+                            grant, "codex", role=active_policy.role,
+                            blocker={"error": detail, "kind": "reduced_guarantee_consent"}))
+                    if not authorized:
+                        status = "consent required or denied" if grant else "unverified"
+                        return DispatchResult(
+                            DispatchOutcome.FAILED, target.executor, target,
+                            detail=failure_excerpt(f"{status}: {detail}", 600),
+                            error_code="permission_required" if grant else "environment_restricted",
+                            start_state="not_started", lifecycle_state="failed", process_exited=True,
+                            artifacts={"command_policy": f"{status}: review sandbox unverified",
+                                       "native_sandbox_preflight": {
+                                           "status": "unverified", "functional_check": {
+                                               "probe": "codex review confinement", "passed": False,
+                                               "evidence": detail}}},
+                        )
+                    review_task += ("\n\nWARNING: reduced_guarantee_consent was recorded for the "
+                             "unverified Codex review clone confinement. Review writes may "
+                             "escape the disposable clone. Unguarded operations include "
+                             "force-push, base-push, ref deletion and credential access. "
+                             "Executor, managed-policy, OS, provider and infrastructure limits "
+                             "remain in force.")
             return _isolated_review_dispatch(
-                adapter, target, task, cwd=kw.get("cwd"),
+                adapter, target, review_task, cwd=kw.get("cwd"),
                 dispatch_call=lambda prompt, isolated_cwd: invoke_adapter(
                     prompt, cwd=isolated_cwd, writes=False, review_clone=isolated_cwd,
                 ),
                 read_only_mode="enforced", command_policy=True,
             )
-        result = invoke_adapter(task)
+        result = invoke_adapter(review_task)
         if not adapter.completes_work and result.outcome is DispatchOutcome.SUCCEEDED:
             result = replace(result, asynchronous=True)
         if workspace_policy is WorkspacePolicy.READ_ONLY and adapter.enforces_read_only:

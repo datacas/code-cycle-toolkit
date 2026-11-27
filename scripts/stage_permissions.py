@@ -3879,6 +3879,89 @@ def hook_override(config_dir: Path | None = None,
     return None
 
 
+def reduced_guarantee_overrides(config_dir: Path | None = None,
+                                managed: tuple[Path, ...] | None = None,
+                                cwd: str | None = None,
+                                policy: Any = None) -> tuple[list[dict], list[str]]:
+    """Describe user-owned Claude settings that disable a dispatch guarantee.
+
+    Managed settings are reported as executor policy limits. The returned
+    records contain only the effective setting and its source metadata; callers
+    bind consent to their fingerprint and never infer consent from prose.
+    """
+    from reduced_guarantees import binding
+
+    config_dir = config_dir or claude_config_dir()
+    managed_paths = managed if managed is not None else managed_settings_paths()
+    overrides: list[dict] = []
+    limits: list[str] = []
+    for path in managed_paths:
+        settings = _read_settings(path)
+        if settings.get("allowManagedHooksOnly"):
+            limits.append(f"managed policy at {path} enforces allowManagedHooksOnly")
+        if settings.get("disableAllHooks"):
+            limits.append(f"managed policy at {path} disables all hooks")
+
+    settings_path = config_dir / "settings.json"
+    settings = _read_settings(settings_path)
+    if settings.get("disableAllHooks"):
+        overrides.append(binding(
+            setting="disableAllHooks", value=True, source=str(settings_path.resolve()),
+            layer="user", executor="claude", guarantees=["stage command hook"],
+            provenance="trusted_user_configuration"))
+
+    additional_settings = [config_dir / "settings.local.json"]
+    if cwd:
+        additional_settings.extend(Path(cwd) / ".claude" / name
+                                   for name in ("settings.json", "settings.local.json"))
+    for path in additional_settings:
+        if not path.is_file() or not _read_settings(path).get("disableAllHooks"):
+            continue
+        local = cwd and path.resolve().is_relative_to(Path(cwd).resolve())
+        overrides.append(binding(
+            setting="disableAllHooks", value=True, source=str(path.resolve()),
+            layer="repository" if local else "user", executor="claude",
+            guarantees=["stage command hook"],
+            provenance="untrusted_change" if local else "trusted_user_configuration"))
+
+    mods = tool_check_mod_fingerprints(config_dir)
+    if mods:
+        overrides.append(binding(
+            setting="tool.check plugin", value=mods,
+            source=str((config_dir / "plugins" / "installed_plugins.json").resolve()),
+            layer="user_plugin_configuration", executor="claude",
+            guarantees=["stage command hook decisions"],
+            provenance="trusted_user_configuration"))
+
+    sandbox_relevant = policy is None or policy.uses_bash_sandbox
+    paths = [settings_path] if sandbox_relevant else []
+    if cwd and sandbox_relevant:
+        paths.extend(Path(cwd) / ".claude" / name
+                     for name in ("settings.json", "settings.local.json"))
+    for path in paths:
+        if not path.is_file():
+            continue
+        source_settings = _read_settings(path)
+        sandbox = source_settings.get("sandbox") or {}
+        if not isinstance(sandbox, dict):
+            continue
+        for keys in SANDBOX_WIDENING_KEYS:
+            value: Any = sandbox
+            for key in keys:
+                value = value.get(key) if isinstance(value, dict) else None
+            if not value:
+                continue
+            local = cwd and path.resolve().is_relative_to(Path(cwd).resolve())
+            overrides.append(binding(
+                setting=f"sandbox.{'.'.join(keys)}", value=value,
+                source=str(path.resolve()),
+                layer="repository" if local else "user",
+                executor="claude",
+                guarantees=["native sandbox filesystem and network restrictions"],
+                provenance="untrusted_change" if local else "trusted_user_configuration"))
+    return overrides, limits
+
+
 def tool_check_mods(config_dir: Path | None = None) -> list[str]:
     """Enabled user plugins whose hooks module handles `tool.check`.
 
@@ -3901,6 +3984,41 @@ def tool_check_mods(config_dir: Path | None = None) -> list[str]:
             if path and Path(path).is_dir() and _handles_tool_check(Path(path)):
                 found.append(name)
                 break
+    return found
+
+
+def tool_check_mod_fingerprints(config_dir: Path | None = None) -> list[dict[str, str]]:
+    """Identify each enabled `tool.check` plugin and its effective source tree."""
+    config_dir = config_dir or claude_config_dir()
+    settings = _read_settings(config_dir / "settings.json")
+    enabled = {name for name, on in (settings.get("enabledPlugins") or {}).items() if on}
+    installed = _read_settings(config_dir / "plugins" / "installed_plugins.json")
+    found: list[dict[str, str]] = []
+    extensions = {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}
+    for name in sorted(enabled):
+        for entry in (installed.get("plugins") or {}).get(name) or []:
+            raw_path = entry.get("installPath") if isinstance(entry, dict) else None
+            root = Path(raw_path) if raw_path else None
+            if root is None or not root.is_dir() or not _handles_tool_check(root):
+                continue
+            files: list[tuple[str, str]] = []
+            for directory, subdirectories, names in os.walk(root):
+                subdirectories[:] = [child for child in subdirectories
+                                     if child not in {"node_modules", ".git"}]
+                for filename in names:
+                    path = Path(directory) / filename
+                    if path.suffix not in extensions:
+                        continue
+                    try:
+                        content = path.read_bytes()
+                    except OSError:
+                        continue
+                    files.append((path.relative_to(root).as_posix(),
+                                  hashlib.sha256(content).hexdigest()))
+            tree = hashlib.sha256(json.dumps(sorted(files), separators=(",", ":"))
+                                  .encode("utf-8")).hexdigest()
+            found.append({"plugin": name, "source": str(root.resolve()), "sha256": tree})
+            break
     return found
 
 

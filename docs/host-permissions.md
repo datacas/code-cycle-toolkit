@@ -1094,6 +1094,33 @@ target; file-edit consent does not bind individual keys or replacement text.
 The sandbox write exception permits the whole approved file. The consent
 warning discloses that scope.
 
+## Reduced-guarantee consent (#458)
+
+User-owned settings that disable the stage command hook, enable a `tool.check`
+plugin that can override it, or widen Claude's configured sandbox trigger a
+`reduced_guarantee_consent` question before dispatch. An unprovable Codex review
+clone triggers the same question. The warning names the effective setting or
+failed confinement probe, normalized source, configuration layer, executor,
+disabled guarantees and configuration fingerprint. It lists force-push, base
+push, ref deletion and credential access among the operations the toolkit
+cannot guard after the guarantee is removed.
+
+Consent binds to that exact record. A changed value, source, layer, executor,
+disabled guarantee, provenance or fingerprint asks again. User configuration
+can be allowed for this cycle, this repository, or globally in implement,
+resolve and verify. Review and rereview can be allowed for this cycle or the
+repository only when the defeating configuration is trusted. Configuration
+from the untrusted change under review permits cycle scope only. Every answer,
+including denial, is recorded. An allow dispatches with the reduced guarantee
+and keeps other guards in effect.
+
+Managed `allowManagedHooksOnly` (and managed hook disabling) stays an executor
+policy limit. Consent does not override managed policy, an executor limit, OS
+permissions, provider protection or infrastructure failure. This remains true
+for native sandbox prerequisites outside the Codex review clone-confinement
+case. The setting-specific warning and decision are included in the stage
+journal and final cycle report.
+
 Publication without a confirmed sandbox receives an explicit reduced-guarantee
 warning and operation consent. This covers publication only; configured tests
 remain #291. It creates no host-side push fallback. A host permission denial,

@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import environment_recovery as recovery  # noqa: E402
 import executors as ex  # noqa: E402
+import grants  # noqa: E402
 import router  # noqa: E402
 import run_cycle as rc  # noqa: E402
 import stage_permissions as sp  # noqa: E402
@@ -90,17 +91,18 @@ class DispatchTestCase(unittest.TestCase):
 
 class DependencyPreparationDispatchTests(DispatchTestCase):
     def test_preparation_registry_grant_gets_final_sandbox_configuration_check(self):
+        (self.claude_home / "settings.json").write_text(json.dumps(
+            {"sandbox": {"filesystem": {"allowRead": ["/custom"]}}}), encoding="utf-8")
         for status in ("prepared", "incomplete"):
             with self.subTest(status=status), mock.patch.object(
-                    ex.dependency_setup, "prepare", return_value={"status": status, "items": []}), mock.patch.object(
-                    sp, "sandbox_override", return_value="filesystem.allowRead could cancel denials") as override:
+                    ex.dependency_setup, "prepare", return_value={"status": status, "items": []}):
                 runner = mock.Mock(side_effect=AssertionError("dispatched with inherited allowRead"))
                 result = ex.ClaudeAdapter().dispatch(
                     CLAUDE, "review", cwd=str(self.repo),
                     command_policy=self.policy("review"), runner=runner)
                 self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome, result.detail)
+                self.assertIn("reduced_guarantee_consent", result.detail)
                 self.assertIn("allowRead", result.detail)
-                override.assert_called_once()
                 runner.assert_not_called()
 
     def test_preparation_registry_grant_gets_functional_probe_and_static_fallback(self):
@@ -368,21 +370,20 @@ class ClaudePolicyTests(DispatchTestCase):
                 self.assertNotIn("sandbox", seen[0])
 
     def test_issue_review_sandbox_is_only_added_and_checked_when_required(self):
-        with mock.patch.object(sp, "sandbox_override", return_value="widened sandbox") as override:
-            for fields, expected in (({}, False),
-                                     ({"registry_domains": ("registry.npmjs.org",)}, True),
-                                     ({"docker": True}, True),
-                                     ({"static_only": True, "docker": True}, False)):
-                with self.subTest(fields=fields):
-                    policy = self.policy("issue_review", **fields)
-                    override.reset_mock()
-                    reason = ex.ClaudeAdapter().policy_preflight(policy, str(self.repo))
-                    self.assertEqual("widened sandbox" if expected else None, reason)
-                    self.assertEqual(expected, override.called)
-                    argv = ["claude", "--verbose", "-p", "task"]
-                    with ex.ClaudeAdapter().policy_files(
-                            argv, policy, scratch=str(self.base), cwd=str(self.repo)) as result:
-                        self.assertEqual(expected, "sandbox" in settings_of(result))
+        (self.claude_home / "settings.json").write_text(json.dumps(
+            {"sandbox": {"filesystem": {"allowRead": ["/custom"]}}}), encoding="utf-8")
+        for fields, expected in (({}, False),
+                                 ({"registry_domains": ("registry.npmjs.org",)}, True),
+                                 ({"docker": True}, True),
+                                 ({"static_only": True, "docker": True}, False)):
+            with self.subTest(fields=fields):
+                policy = self.policy("issue_review", **fields)
+                reason = ex.ClaudeAdapter().policy_preflight(policy, str(self.repo))
+                self.assertEqual(expected, "reduced_guarantee_consent" in (reason or ""))
+                argv = ["claude", "--verbose", "-p", "task"]
+                with ex.ClaudeAdapter().policy_files(
+                        argv, policy, scratch=str(self.base), cwd=str(self.repo)) as result:
+                    self.assertEqual(expected, "sandbox" in settings_of(result))
 
     def test_project_choices_reach_both_barriers_and_private_registry_profile(self) -> None:
         def runner(argv, timeout=None, cwd=None, env=None):
@@ -453,7 +454,7 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertTrue(sandbox["failIfUnavailable"])
         self.assertFalse(sandbox["allowUnsandboxedCommands"])
 
-    def test_a_tool_check_mod_stops_the_dispatch_before_it_starts(self) -> None:
+    def test_a_tool_check_mod_requires_scoped_consent_before_dispatch(self) -> None:
         plugin = self.claude_home / "plugins" / "cache" / "mod"
         plugin.mkdir(parents=True)
         (plugin / "hooks.js").write_text("on('tool.check', () => 'allow')", encoding="utf-8")
@@ -470,7 +471,7 @@ class ClaudePolicyTests(DispatchTestCase):
         self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
         self.assertEqual("precondition", result.error_code)
         self.assertEqual("not_started", result.start_state)
-        self.assertIn("BLOCKED", result.detail)
+        self.assertIn("reduced_guarantee_consent", result.detail)
         self.assertIn("mod@market", result.detail)
         runner.assert_not_called()
 
@@ -481,6 +482,7 @@ class ClaudePolicyTests(DispatchTestCase):
             CLAUDE, "implement it", cwd=str(self.repo), writes=True,
             command_policy=self.policy(), runner=mock.Mock())
         self.assertEqual("precondition", result.error_code)
+        self.assertIn("reduced_guarantee_consent", result.detail)
         self.assertIn("disableAllHooks", result.detail)
 
     def test_pre_approved_non_bash_tools_are_reported_and_change_nothing(self) -> None:
@@ -753,7 +755,7 @@ class ClaudePolicyTests(DispatchTestCase):
             "review the change", ex.Registry([ex.ClaudeAdapter()]), cwd=str(self.repo),
             runner=runner, probes=READY,
             command_policy=self.policy("review", verify_prefixes=("python3 -m unittest",)))
-        self.assertIn("widen the review sandbox", result.detail)
+        self.assertIn("reduced_guarantee_consent", result.detail)
         runner.assert_not_called()
 
     def test_an_unavailable_sandbox_is_an_environment_restriction(self) -> None:
@@ -795,20 +797,27 @@ class CodexPolicyTests(DispatchTestCase):
         self.assertNotIn("workspace-write", argv)
         self.assertIn("--ignore-rules", argv)
 
-    def test_an_unverified_review_sandbox_blocks_the_verifying_review(self) -> None:
+    def test_codex_reduced_guarantee_direct_baseline(self) -> None:
         adapter = ex.CodexAdapter()
         policy = self.policy("review", verify_prefixes=("python3 -m unittest",))
+        observed = []
+        seen = []
+        broker = grants.ConsentBroker(
+            "owner/repo", platform="linux", prompt=lambda asked: grants.ALLOW_CYCLE,
+            observer=lambda *event: observed.append(event))
         with mock.patch.object(ex.CodexAdapter, "probe_review_confinement",
                                return_value=(False, "a sibling was writable")):
             result = ex.dispatch(
                 router.RoutingDecision("reviewer", CODEX, router.RoutingMode.PRODUCTION),
                 "review the change", ex.Registry([adapter]), cwd=str(self.repo),
-                runner=mock.Mock(side_effect=AssertionError("dispatched")), probes=READY,
-                command_policy=policy)
-        self.assertEqual(ex.DispatchOutcome.FAILED, result.outcome)
-        self.assertEqual("environment_restricted", result.error_code)
-        self.assertIn("BLOCKED", result.detail)
-        self.assertIn("a sibling was writable", result.detail)
+                runner=lambda argv, **kwargs: (seen.append(argv) or
+                                               completed('{"model": "gpt-6-luna"}')), probes=READY,
+                command_policy=policy, consent_broker=broker)
+        self.assertEqual(ex.DispatchOutcome.SUCCEEDED, result.outcome, result.detail)
+        self.assertTrue(any(event[0] == "decision_asked" and
+                            event[1].operation.get("kind") == "reduced_guarantee_consent"
+                            for event in observed))
+        self.assertIn("reduced_guarantee_consent was recorded", " ".join(seen[0]))
 
     def test_a_confirmed_review_sandbox_runs_the_reviewer_in_a_clone(self) -> None:
         seen = {}
