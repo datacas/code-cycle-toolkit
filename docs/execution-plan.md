@@ -183,7 +183,8 @@ Receipt parsing accepts the documented fallback aliases `plan_revision` and
 `plan_digest`, moves them to `revision` and `digest`, and keeps their reported
 values under `normalization.original`. If an alias and canonical field disagree,
 the receipt is rejected with the conflicting field named. Runtime plan state
-remains authoritative; aliases do not override it.
+remains authoritative; aliases are fallback representations and cannot override
+a canonical field.
 
 On resume the runtime reconciles the current configuration, source criteria,
 remote receipt and local revisions. Required checks are retained across HEAD
