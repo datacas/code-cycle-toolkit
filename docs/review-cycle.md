@@ -394,10 +394,13 @@ SHA, functional status, and explicit outcomes for this attempt:
 <!-- code-cycle-stage {"schema":2,"repo":"owner/repository","change_request_id":"123","stage":"resolve","attempt_id":"attempt-runtime-token","head_sha":"0123456789abcdef0123456789abcdef01234567","status":"RESOLVED","finding_outcomes":[{"id":"REV-001","status":"resolved"}]} -->
 ```
 
-When the runtime hands the stage an execution plan, the receipt also carries
-`plan_id`, `revision` and `digest`, with exactly those key names. A receipt that
-carries some of them, or invents others such as `plan_revision` and
-`plan_digest`, fails the contract and the rejection names the keys it lacks.
+When the runtime hands the stage an execution plan, the receipt carries
+`plan_id`, `revision` and `digest`. For compatibility, `plan_revision` and
+`plan_digest` are accepted as fallback aliases for `revision` and `digest`; the
+reported aliases are retained under `normalization.original`. If an alias and
+its canonical key are both present with different values, the receipt is
+rejected and names the conflicting keys. Canonical keys take precedence when
+they agree with their aliases.
 `validate-triage-comment.py` checks every receipt of `$TMPDIR/pr-comment.md`
 before the stage publishes it.
 

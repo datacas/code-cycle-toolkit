@@ -727,7 +727,35 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         # Runtime criteria links promote agent obligations rather than accepting a demotion.
         if check.criteria:
             check = replace(check, required=True)
-        check.validate(plan.criterion_ids)
+        try:
+            check.validate(plan.criterion_ids)
+        except VerificationError as error:
+            level_record = normalization.get("level")
+            if (error.diagnostic is None
+                    or error.diagnostic.get("field") != "check.level"
+                    or not isinstance(level_record, Mapping)):
+                raise
+            original_level = level_record.get("original")
+            if not isinstance(original_level, str):
+                raise
+            applied = []
+            if original_level.strip() != original_level:
+                applied.append("trim")
+            if original_level.lower() != original_level:
+                applied.append("lowercase")
+            applied_text = " and ".join(applied) or "none"
+            bounded_value = ascii(original_level)
+            if len(bounded_value) > 80:
+                bounded_value = bounded_value[:77] + "..."
+            diagnostic = {
+                **error.diagnostic,
+                "received_value": bounded_value,
+                "normalization_applied": applied_text,
+            }
+            expected_levels = ", ".join(CHECK_LEVELS[:-1]) + ", or " + CHECK_LEVELS[-1]
+            raise VerificationError(
+                f"check.level: received str {bounded_value}; normalization applied: "
+                f"{applied_text}; expected {expected_levels}", diagnostic=diagnostic) from error
         plan = plan.extend((check,))
         if dispatch_known:
             entry["binding"] = plan.binding(check.id)

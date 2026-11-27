@@ -258,8 +258,9 @@ canonical values `static`, `test` and `boundary`; surrounding whitespace and
 letter case are normalized and the original plus canonical value are kept in
 `normalization.level`. No semantic aliases, defaults or type coercions are
 allowed. An invalid level diagnostic names `check.level`, includes its type and
-a bounded, sanitized value, lists the canonical values, and records
-`normalization_applied: none`. The level set in
+the bounded original value, lists the canonical values, and records the lexical
+normalization already applied (`trim` and/or `lowercase`) when that changed the
+value, or `none` when it did not. The level set in
 `scripts/verification_plan.py` (`CHECK_LEVELS`) is the source of truth for the
 validator, prompts and examples.
 

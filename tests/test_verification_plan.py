@@ -583,6 +583,31 @@ class ResultTests(unittest.TestCase):
                                   for key in ("field", "received_type", "normalization_applied",
                                               "allowed_values")})
 
+    def test_invalid_lexically_normalized_level_reports_original_and_applied_steps(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        original = "  EVIDENCE "
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [report(level=original)]}, HEAD, plan=plan)
+
+        self.assertIn(f"received str {ascii(original)}", str(caught.exception))
+        self.assertIn("normalization applied: trim and lowercase", str(caught.exception))
+        self.assertEqual(ascii(original), caught.exception.diagnostic["received_value"])
+        self.assertEqual("trim and lowercase",
+                         caught.exception.diagnostic["normalization_applied"])
+
+    def test_invalid_level_with_noop_normalization_reports_none(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report(level="evidence")
+        entry["normalization"] = {
+            "level": {"original": "evidence", "normalized": "evidence"}}
+        with self.assertRaises(vp.VerificationError) as caught:
+            vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                "checks": [entry]}, HEAD, plan=plan)
+
+        self.assertIn("normalization applied: none", str(caught.exception))
+        self.assertEqual("none", caught.exception.diagnostic["normalization_applied"])
+
     def test_single_evidence_object_is_normalized_with_original_shape(self):
         plan = vp.VerificationPlan(criteria(), (check(),))
         entry = report()

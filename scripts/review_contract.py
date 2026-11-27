@@ -93,9 +93,8 @@ class FindingCollisionError(ContractError):
     """One stable finding ID was reused for a different finding."""
 
 
-#: The keys an execution plan receipt carries, named exactly (#438). A stage
-#: that invents `plan_revision` / `plan_digest` is rejected, and the rejection
-#: names the keys it lacks.
+#: The canonical keys an execution plan receipt carries (#438). Legacy aliases
+#: are normalized losslessly before strict validation.
 PLAN_RECEIPT_KEYS = ("plan_id", "revision", "digest")
 PLAN_RECEIPT_ALIASES = {"plan_revision": "revision", "plan_digest": "digest"}
 RECEIPT_KEYS = frozenset({
