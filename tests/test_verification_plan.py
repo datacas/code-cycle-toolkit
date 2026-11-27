@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 import execution_plan as ep
 import executors as ex
 import execution_profiles as profiles
+import issue_review as ir
+import review_contract as review_contract
 import run_cycle as rc
 import stats
 import verification_plan as vp
@@ -542,8 +544,71 @@ class ResultTests(unittest.TestCase):
                                 "checks": [entry]}, HEAD, plan=plan)
         message = str(caught.exception)
         self.assertIn("check.level", message)
-        self.assertIn("received str", message)
+        self.assertIn("received str 'invalid'", message)
         self.assertIn("expected static, test, or boundary", message)
+
+    def test_check_level_lexical_normalization_is_lossless_and_idempotent(self):
+        for canonical, reported in (("static", " STATIC "), ("test", "Test"),
+                                    ("boundary", " boundary ")):
+            with self.subTest(canonical=canonical, reported=reported):
+                plan = vp.VerificationPlan(criteria(), (check(level=canonical),))
+                normalized, _ = vp.normalize_tests(
+                    {"version": 2, "conclusion": "verified",
+                     "checks": [report(level=reported)]}, HEAD, plan=plan)
+                observed = normalized["checks"][0]
+                self.assertEqual(canonical, observed["level"])
+                self.assertEqual(reported, observed["normalization"]["level"]["original"])
+                self.assertEqual(canonical, observed["normalization"]["level"]["normalized"])
+                again, _ = vp.normalize_tests(normalized, HEAD, plan=plan)
+                self.assertEqual(normalized, again)
+
+    def test_invalid_check_levels_report_bounded_value_and_type(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        for value, expected in (("evidence", "received str 'evidence'"),
+                                ([], "received list"),
+                                ("x" * 200, "...")):
+            with self.subTest(value=value):
+                with self.assertRaises(vp.VerificationError) as caught:
+                    vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                        "checks": [report(level=value)]}, HEAD, plan=plan)
+                message = str(caught.exception)
+                self.assertIn("check.level", message)
+                self.assertIn(expected, message)
+                self.assertIn("normalization applied: none", message)
+                self.assertEqual({"field": "check.level",
+                                  "received_type": type(value).__name__,
+                                  "normalization_applied": "none",
+                                  "allowed_values": ["static", "test", "boundary"]},
+                                 {key: (caught.exception.diagnostic or {})[key]
+                                  for key in ("field", "received_type", "normalization_applied",
+                                              "allowed_values")})
+
+    def test_single_evidence_object_is_normalized_with_original_shape(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        entry = report()
+        original = entry["evidence"][0]
+        entry["evidence"] = original
+
+        normalized, _ = vp.normalize_tests(
+            {"version": 2, "conclusion": "verified", "checks": [entry]}, HEAD, plan=plan)
+
+        observed = normalized["checks"][0]
+        self.assertEqual([original], observed["evidence"])
+        self.assertEqual(original, observed["normalization"]["evidence"]["original"])
+        self.assertEqual([original], observed["normalization"]["evidence"]["normalized"])
+
+    def test_execution_and_integrity_evidence_are_never_coerced(self):
+        plan = vp.VerificationPlan(criteria(), (check(),))
+        for field, value, expected in (("exit_code", "0", "evidence.exit_code"),
+                                       ("executed", "3", "evidence.executed"),
+                                       ("test_sha256", "not-a-digest", "evidence fingerprint")):
+            with self.subTest(field=field):
+                entry = report()
+                entry["evidence"] = [{**entry["evidence"][0], field: value}]
+                with self.assertRaises(vp.VerificationError) as caught:
+                    vp.normalize_tests({"version": 2, "conclusion": "not_verified",
+                                        "checks": [entry]}, HEAD, plan=plan)
+                self.assertIn(expected, str(caught.exception))
 
     def test_v2_duplicate_and_command_mismatch_rejections_name_field_details(self):
         plan = vp.VerificationPlan(criteria(), (check(),))
@@ -723,6 +788,56 @@ class CriteriaGateTests(RunCycleTestCase):
             if row["payload"].get("record_kind") == "verdict" and row["role"] in {"resolve", "rereview"}:
                 self.assertEqual(row["payload"]["verification"], "verified")
                 self.assertTrue(row["payload"]["tests_passed"])
+
+
+class DirectReportNormalizationParityTests(unittest.TestCase):
+    """The baseline is the raw result shape each agent can emit directly."""
+
+    def assert_direct_report_normalizes_losslessly(self, executor: str) -> None:
+        raw_result = {
+            "skill": ir.SKILL, "status": "READY", "issue_id": "459",
+            "confidence": "high", "dimensions": [], "findings": [],
+            "uncertainties": [], "executor": executor,
+        }
+        result = ir.normalize_result(raw_result)
+        self.assertNotIn("executor", result)
+        self.assertEqual(executor, result["normalization"]["original"]["executor"])
+        self.assertEqual([], ir.result_errors(result))
+
+        parsed_criteria = criteria()
+        check_spec = vp.Check("configured-test", "python3 -m unittest", executor,
+                              "cheap_coder", "project", True, ("AC-1",), level="test",
+                              provenance="project", reason="configured test command")
+        plan = vp.VerificationPlan(parsed_criteria, (check_spec,))
+        raw_tests = {"version": 2, "conclusion": "verified", "checks": [{
+            **check_spec.to_dict(), "level": " TEST ", "head_sha": HEAD, "result": "pass",
+            "evidence": {"exit_code": 0, "executed": 3},
+        }]}
+        tests, _ = vp.normalize_tests(raw_tests, HEAD, plan=plan)
+        normalized_check = tests["checks"][0]
+        self.assertEqual("pass", normalized_check["result"])
+        self.assertEqual({"exit_code": 0, "executed": 3}, normalized_check["evidence"][0])
+        self.assertEqual(" TEST ", normalized_check["normalization"]["level"]["original"])
+        self.assertEqual({"exit_code": 0, "executed": 3},
+                         normalized_check["normalization"]["evidence"]["original"])
+
+        raw_receipt = {
+            "schema": 2, "repo": "datacas/code-cycle-toolkit", "change_request_id": "1",
+            "stage": "implement", "attempt_id": "attempt-parity", "head_sha": HEAD,
+            "status": "IMPLEMENTED", "finding_outcomes": [], "plan_id": "plan-test",
+            "plan_revision": 5, "plan_digest": "b" * 64,
+        }
+        receipts, problems = review_contract.read_stage_evidence(
+            "<!-- code-cycle-stage " + json.dumps(raw_receipt) + " -->")
+        self.assertEqual([], problems)
+        self.assertEqual((5, "b" * 64), (receipts[0]["revision"], receipts[0]["digest"]))
+        self.assertEqual(5, receipts[0]["normalization"]["original"]["plan_revision"])
+
+    def test_claude_direct_report_normalization_parity(self) -> None:
+        self.assert_direct_report_normalizes_losslessly("claude")
+
+    def test_codex_direct_report_normalization_parity(self) -> None:
+        self.assert_direct_report_normalizes_losslessly("codex")
 
 
 if __name__ == "__main__":

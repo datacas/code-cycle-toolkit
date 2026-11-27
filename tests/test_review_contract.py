@@ -44,8 +44,34 @@ def receipt_line(attempt: str = "attempt-a", **extra: object) -> str:
 class PerReceiptReadingTests(unittest.TestCase):
     """#438: a receipt that fails the contract does not hide the valid ones."""
 
+    def test_plan_aliases_are_normalized_and_preserved_next_to_canonical_values(self) -> None:
+        raw = receipt_line("attempt-alias", plan_id="p", plan_revision=1,
+                           plan_digest="f" * 64, objective="merge_ready")
+
+        receipts, problems = contract.read_stage_evidence(raw)
+
+        self.assertEqual([], problems)
+        self.assertEqual(1, receipts[0]["revision"])
+        self.assertEqual("f" * 64, receipts[0]["digest"])
+        self.assertEqual(1, receipts[0]["normalization"]["original"]["plan_revision"])
+        self.assertEqual("f" * 64,
+                         receipts[0]["normalization"]["original"]["plan_digest"])
+        self.assertNotIn("objective", receipts[0])
+        self.assertEqual("merge_ready", receipts[0]["normalization"]["original"]["objective"])
+        self.assertEqual(receipts[0], contract._check_receipt(receipts[0]))
+
+    def test_plan_alias_conflict_is_rejected_with_the_field_name(self) -> None:
+        raw = receipt_line("attempt-conflict", plan_id="p", revision=2,
+                           plan_revision=1, digest="f" * 64)
+
+        receipts, (problem,) = contract.read_stage_evidence(raw)
+
+        self.assertEqual([], receipts)
+        self.assertIn("conflicting revision and plan_revision", problem.reason)
+
     def test_valid_receipts_survive_a_malformed_one_and_it_is_reported(self) -> None:
-        bad = receipt_line("attempt-bad", plan_id="p", plan_revision=1, plan_digest="f" * 64)
+        bad = receipt_line("attempt-bad", plan_id="p", revision=2,
+                           plan_revision=1, digest="f" * 64)
         good = receipt_line("attempt-good")
 
         receipts, problems = contract.read_stage_evidence(f"{good}\n{bad}\n{good}")
@@ -54,7 +80,7 @@ class PerReceiptReadingTests(unittest.TestCase):
                          [item["attempt_id"] for item in receipts])
         (problem,) = problems
         self.assertEqual("attempt-bad", problem.attempt_id)
-        self.assertIn("missing revision, digest", problem.reason)
+        self.assertIn("conflicting revision and plan_revision", problem.reason)
 
     def test_the_attempt_of_an_unparseable_receipt_is_still_recovered(self) -> None:
         _, (problem,) = contract.read_stage_evidence(
@@ -448,7 +474,7 @@ class TriageValidatorCliTests(unittest.TestCase):
         self.assertIn("line 2", result.stderr)
         self.assertIn("missing triaged:<sha>", result.stderr)
 
-    def test_cli_rejects_a_receipt_with_invented_plan_keys_and_names_the_missing_ones(self) -> None:
+    def test_cli_accepts_a_receipt_with_documented_plan_aliases(self) -> None:
         invented = receipt_line(plan_id="plan-x", plan_revision=5, plan_digest="f" * 64)
         with tempfile.TemporaryDirectory() as temporary:
             comment = Path(temporary) / "pr-comment.md"
@@ -456,10 +482,7 @@ class TriageValidatorCliTests(unittest.TestCase):
 
             result = self.invoke(comment)
 
-        self.assertEqual(1, result.returncode)
-        self.assertIn("attempt-a", result.stderr)
-        self.assertIn("missing revision, digest", result.stderr)
-        self.assertIn("plan_id, revision, digest", result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_cli_accepts_a_receipt_with_the_contract_plan_keys(self) -> None:
         valid = receipt_line(plan_id="plan-x", revision=5, digest="f" * 64)

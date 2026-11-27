@@ -97,6 +97,12 @@ class FindingCollisionError(ContractError):
 #: that invents `plan_revision` / `plan_digest` is rejected, and the rejection
 #: names the keys it lacks.
 PLAN_RECEIPT_KEYS = ("plan_id", "revision", "digest")
+PLAN_RECEIPT_ALIASES = {"plan_revision": "revision", "plan_digest": "digest"}
+RECEIPT_KEYS = frozenset({
+    "schema", "repo", "change_request_id", "stage", "attempt_id", "head_sha", "status",
+    "finding_outcomes", "provenance", *PLAN_RECEIPT_KEYS, "operator", "confirmed_head",
+    "checks", "normalization",
+})
 _ATTEMPT_ID_RE = re.compile(r'"attempt_id"\s*:\s*"([^"]*)"')
 
 
@@ -116,6 +122,30 @@ class MalformedReceipt:
 def _check_receipt(value: object) -> dict:
     if not isinstance(value, dict) or value.get("schema") != 2:
         raise ContractError("stage evidence requires schema 2")
+    value = dict(value)
+    normalization = value.get("normalization", {})
+    if not isinstance(normalization, dict) or set(normalization) - {"original"}:
+        raise ContractError("stage evidence normalization must be an object")
+    normalization = dict(normalization)
+    original = normalization.get("original", {})
+    if not isinstance(original, dict):
+        raise ContractError("stage evidence normalization.original must be an object")
+    original = dict(original)
+    for alias, canonical in PLAN_RECEIPT_ALIASES.items():
+        if alias not in value:
+            continue
+        alias_value = value.pop(alias)
+        if canonical in value and (type(value[canonical]) is not type(alias_value)
+                                   or value[canonical] != alias_value):
+            raise ContractError(f"invalid execution plan receipt: conflicting {canonical} and {alias}")
+        if canonical not in value:
+            value[canonical] = alias_value
+        original[alias] = alias_value
+    extras = {key: value.pop(key) for key in tuple(value) if key not in RECEIPT_KEYS}
+    original.update(extras)
+    if original:
+        normalization["original"] = original
+        value["normalization"] = normalization
     for key in ("repo", "change_request_id", "stage", "attempt_id", "head_sha", "status"):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ContractError(f"stage evidence requires {key}")

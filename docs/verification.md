@@ -238,10 +238,11 @@ top-level `tests.evidence` list. This is separate from the unchanged code-host
 
 `cause` is omitted or text. A null cause is normalized to empty text, and null
 `attempts` or `evidence` is normalized to an empty array. A single object in
-`evidence` is normalized to a one-item array. Other entries in `evidence` must
-be JSON objects; malformed values are rejected with the field, received value
-or type, and expected format identified. A pass without evidence and an
-unverified result without a non-empty cause remain invalid.
+`evidence` is normalized to a one-item array, and its original object is kept
+beside the canonical list in `normalization.evidence`. Other entries in
+`evidence` must be JSON objects; malformed values are rejected with the field,
+received value or type, and expected format identified. A pass without evidence
+and an unverified result without a non-empty cause remain invalid.
 
 `attempts` is accepted in the representations an agent reports by mistake, in
 the implement, review, resolve and rereview reports alike, and always ends as an
@@ -252,7 +253,20 @@ check as `attempts_normalized` (`{"type": "int|str|array", "value": ...}`); the
 key is absent when nothing was normalized. Any other shape (an object, a
 number that is not an integer, a boolean, an entry that is neither an object nor
 a string) is rejected with the field, the received type and the expected shape.
-`evidence` is not normalized this way.
+`evidence` is not normalized as attempt notes. Check levels accept only the
+canonical values `static`, `test` and `boundary`; surrounding whitespace and
+letter case are normalized and the original plus canonical value are kept in
+`normalization.level`. No semantic aliases, defaults or type coercions are
+allowed. An invalid level diagnostic names `check.level`, includes its type and
+a bounded, sanitized value, lists the canonical values, and records
+`normalization_applied: none`. The level set in
+`scripts/verification_plan.py` (`CHECK_LEVELS`) is the source of truth for the
+validator, prompts and examples.
+
+Unknown top-level keys in the closed issue-review result are removed from the
+canonical result and retained under `normalization.original`. Required fields
+and all known fields still undergo strict validation. The normalization record
+is metadata only; it cannot change a status or supply missing evidence.
 
 A report that names a frozen check (`configured-test`, `verify:<command>`) and
 leaves out part of its identity (`command`, `executor`, `profile`, `context`,

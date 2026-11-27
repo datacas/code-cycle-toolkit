@@ -34,6 +34,14 @@ object in `evidence` is normalized to a one-item array. Other evidence and
 attempts entries must be JSON objects. A pass without evidence and an
 unverified result without a non-empty cause remain invalid. Rejections identify
 the failing field, received value or type, and expected format.
+For `check.level`, only surrounding whitespace and letter case are normalized;
+the canonical values are `static`, `test` and `boundary`. Keep the original and
+normalized values in the check's `normalization` metadata. Do not infer or
+coerce an invalid level, outcome, execution count or fingerprint. An invalid
+level diagnostic names the field, gives a bounded, sanitized received value,
+lists the allowed values, and records `normalization_applied: none`.
+When `evidence` is supplied as one object, keep that original shape under
+`normalization.evidence` beside its canonical one-item array.
 An unexecuted check is explicitly `unverified` with a cause and the recovery
 attempts actually made; do not invent an exit code. Keep the check's identity
 when rerunning it and retain previous results. Never replace a local

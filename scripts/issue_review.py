@@ -32,6 +32,7 @@ import re
 import json
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import overload
 
 import stop_questions
 from environment_recovery import sandbox_blocker
@@ -71,6 +72,7 @@ RESULT_KEYS = frozenset({
     "skill", "status", "issue_provider", "issue_id", "issue_number",
     "code_host", "repo", "confidence", "dimensions", "findings",
     "uncertainties", "questions", "summary", "error", "blocking", "environment_blocker",
+    "normalization",
 })
 REQUIRED_RESULT_KEYS = frozenset({
     "skill", "status", "issue_id", "confidence", "dimensions", "findings",
@@ -83,6 +85,50 @@ FINDING_KEYS = frozenset({
 REQUIRED_FINDING_KEYS = FINDING_KEYS - {"proposed_change"}
 EVIDENCE_KEYS = frozenset({"kind", "ref"})
 UNCERTAINTY_KEYS = frozenset({"id", "material", "resolved", "summary"})
+RUNTIME_OWNED_KEYS = frozenset({"permission_outcomes", "agent_permission_outcomes",
+                                "stop_reason", "essential_permission"})
+
+
+@overload
+def normalize_result(payload: dict) -> dict: ...
+
+
+@overload
+def normalize_result(payload: None) -> None: ...
+
+
+@overload
+def normalize_result(payload: object) -> object: ...
+
+
+def normalize_result(payload: object) -> object:
+    """Drop unknown closed-contract fields while retaining their original values.
+
+    Normalization is representation-only. Strict validation still checks every
+    canonical field, and consumers can inspect the exact extra fields under
+    ``normalization.original``.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    metadata = normalized.get("normalization", {})
+    if not isinstance(metadata, dict):
+        return normalized
+    metadata = dict(metadata)
+    original = metadata.get("original", {})
+    if not isinstance(original, dict):
+        return normalized
+    original = dict(original)
+    extras = {key: normalized.pop(key) for key in tuple(normalized)
+              if key not in RESULT_KEYS and key not in RUNTIME_OWNED_KEYS}
+    if extras:
+        original.update(extras)
+    if original:
+        metadata["original"] = original
+        normalized["normalization"] = metadata
+    elif "normalization" in normalized:
+        normalized["normalization"] = metadata
+    return normalized
 
 
 class IssueReviewMode(str, Enum):
@@ -140,17 +186,24 @@ def result_errors(payload: object) -> list[str]:
     Empty means the result has the closed shape. Every problem is named, so the
     validator and a test can say which rule a result broke.
     """
+    payload = normalize_result(payload)
     if not isinstance(payload, dict):
         return ["the result is not an object"]
     problems: list[str] = []
     missing = sorted(REQUIRED_RESULT_KEYS - set(payload))
     if missing:
         problems.append(f"missing keys: {', '.join(missing)}")
-    extra = sorted(str(key) for key in set(payload) - RESULT_KEYS)
-    if extra:
-        problems.append(f"keys outside the issue-review contract: {', '.join(extra)}")
+    for key in sorted(RUNTIME_OWNED_KEYS & set(payload)):
+        label = key if key.startswith("agent_") else f"agent_{key}"
+        problems.append(f"{label} is runtime-owned")
     if payload.get("skill") != SKILL:
         problems.append(f"`skill` must be {SKILL}")
+    normalization = payload.get("normalization")
+    if normalization is not None and (
+            not isinstance(normalization, dict)
+            or set(normalization) - {"original"}
+            or ("original" in normalization and not isinstance(normalization["original"], dict))):
+        problems.append("`normalization` must contain only an optional original object")
     if not _text(payload.get("issue_id")) or len(payload["issue_id"]) > MAX_REFERENCE_LENGTH:
         problems.append("`issue_id` must name the work item that was reviewed")
     status = payload.get("status")
@@ -392,6 +445,9 @@ def assess(payload: dict | None, work_item: str | None = None, *,
     if payload is None:
         return Readiness(STOP, None, False,
                          problems=("no readable structured result",))
+    payload = normalize_result(payload)
+    if not isinstance(payload, dict):
+        return Readiness(STOP, None, False, problems=("the result is not an object",))
     problems = result_errors(payload)
     if (not problems and work_item is not None
             and not names_work_item(payload["issue_id"], work_item)):

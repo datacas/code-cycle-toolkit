@@ -179,6 +179,11 @@ persisted. Canonical JSON uses sorted keys, compact
 separators and ASCII escaping; its SHA-256 is `digest`. Every stage receives
 `plan_id`, `revision` and `digest` for its schema-2 receipt. A receipt supplements
 the existing attempt, head and `REV-*` contracts; it grants no execution rights.
+Receipt parsing accepts the documented fallback aliases `plan_revision` and
+`plan_digest`, moves them to `revision` and `digest`, and keeps their reported
+values under `normalization.original`. If an alias and canonical field disagree,
+the receipt is rejected with the conflicting field named. Runtime plan state
+remains authoritative; aliases do not override it.
 
 On resume the runtime reconciles the current configuration, source criteria,
 remote receipt and local revisions. Required checks are retained across HEAD

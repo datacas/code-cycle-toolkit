@@ -16,7 +16,8 @@ from typing import Any
 
 TESTS_VERSION = 2
 CONCLUSIONS = ("failed", "not_verified", "verified_with_reservations", "verified")
-LEVELS = {"static", "test", "boundary"}
+CHECK_LEVELS = ("static", "test", "boundary")
+LEVELS = frozenset(CHECK_LEVELS)
 # A manual check names evidence a person or a host supplies. It is an identity,
 # not a command: nothing may execute it, and restoring it never verifies it.
 MANUAL_COMMAND = re.compile(r"manual:[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -29,6 +30,10 @@ def is_manual_command(command: Any) -> bool:
 
 class VerificationError(ValueError):
     """Invalid criteria, check identity, or result representation."""
+
+    def __init__(self, message: str, *, diagnostic: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = dict(diagnostic) if diagnostic is not None else None
 
 
 @dataclass(frozen=True)
@@ -158,7 +163,22 @@ class Check:
         if type(self.required) is not bool:
             raise _invalid_field("check.required", self.required, "a boolean")
         if not isinstance(self.level, str) or self.level not in LEVELS:
-            raise _invalid_field("check.level", self.level, "static, test, or boundary")
+            received = _received(self.level)
+            bounded_value = ascii(self.level)
+            if len(bounded_value) > 80:
+                bounded_value = bounded_value[:77] + "..."
+            received += " " + bounded_value
+            diagnostic = {
+                "field": "check.level",
+                "received_type": type(self.level).__name__,
+                "received_value": bounded_value,
+                "normalization_applied": "none",
+                "allowed_values": list(CHECK_LEVELS),
+            }
+            expected_levels = ", ".join(CHECK_LEVELS[:-1]) + ", or " + CHECK_LEVELS[-1]
+            raise VerificationError(
+                f"check.level: received {received}; normalization applied: none; "
+                f"expected {expected_levels}", diagnostic=diagnostic)
         if any(not isinstance(value, str) or not value.strip() for value in self.criteria):
             raise _invalid_field("check.criteria", self.criteria, "an array of non-empty criterion IDs")
         if len(set(self.criteria)) != len(self.criteria):
@@ -581,6 +601,54 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
         if not isinstance(entry, dict):
             raise _invalid_field(f"checks[{index}]", entry, "a check object")
         entry = dict(entry)
+        normalization = entry.get("normalization", {})
+        if not isinstance(normalization, Mapping):
+            raise _invalid_field(f"checks[{index}].normalization", normalization, "an object")
+        normalization = dict(normalization)
+        if set(normalization) - {"level", "evidence"}:
+            raise _invalid_field(f"checks[{index}].normalization", normalization,
+                                 "level and evidence normalization metadata")
+        level = entry.get("level")
+        if isinstance(level, str):
+            normalized_level = level.strip().lower()
+            if normalized_level != level:
+                level_record = normalization.get("level", {})
+                if not isinstance(level_record, Mapping):
+                    raise _invalid_field(f"checks[{index}].normalization.level", level_record,
+                                         "an object")
+                normalization["level"] = {**dict(level_record), "original": level,
+                                           "normalized": normalized_level}
+                entry["level"] = normalized_level
+        level_record = normalization.get("level")
+        if level_record is not None:
+            if (not isinstance(level_record, Mapping)
+                    or set(level_record) != {"original", "normalized"}
+                    or not isinstance(level_record.get("original"), str)
+                    or level_record.get("normalized") != entry.get("level")):
+                raise _invalid_field(f"checks[{index}].normalization.level", level_record,
+                                     "original and normalized level strings matching the check")
+        evidence_value = entry.get("evidence")
+        if isinstance(evidence_value, Mapping):
+            evidence_record = normalization.get("evidence", {})
+            if not isinstance(evidence_record, Mapping):
+                raise _invalid_field(f"checks[{index}].normalization.evidence", evidence_record,
+                                     "an object")
+            normalization["evidence"] = {**dict(evidence_record),
+                                          "original": dict(evidence_value),
+                                          "normalized": [dict(evidence_value)]}
+        evidence_record = normalization.get("evidence")
+        if evidence_record is not None:
+            if (not isinstance(evidence_record, Mapping)
+                    or set(evidence_record) != {"original", "normalized"}
+                    or not isinstance(evidence_record.get("original"), Mapping)
+                    or not isinstance(evidence_record.get("normalized"), list)
+                    or evidence_record.get("normalized") != list(_as_items(
+                        entry.get("evidence"), f"checks[{index}].evidence", singleton=True))):
+                raise _invalid_field(f"checks[{index}].normalization.evidence", evidence_record,
+                                     "original and normalized evidence matching the check")
+        if normalization:
+            entry["normalization"] = normalization
+        entries[index] = entry
         frozen = next((item for item in plan.checks if item.id == entry.get("id")), None)
         dispatch_known = dispatched_executor is not None or dispatched_profile is not None
         if dispatch_known:
@@ -715,7 +783,8 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
                 raise _invalid_field(f"checks[{check.id}].evidence.command",
                                      item.get("command", _MISSING),
                                      "the frozen check command " + safe_value("command", check.command))
-        plan = plan.record(result)
+        if result not in plan.results:
+            plan = plan.record(result)
         if result.head_sha == head_sha and result.result != "unverified":
             evidence_view.extend({**item, "command": check.command, "level": check.level}
                                  for item in result.evidence)
@@ -731,6 +800,11 @@ def normalize_tests(tests: Mapping[str, Any], head_sha: str, *,
                   "checks": [{**check.to_dict(), **(plan.results[selected["index"]].to_dict()
                       if (selected := plan.selection(check.id, head_sha))["index"] is not None else
                       CheckResult(check.id, head_sha, "unverified", cause="no matching evidence").to_dict()),
+                      **({"normalization": next((entry.get("normalization") for entry in entries
+                                                   if entry.get("id") == check.id
+                                                   and entry.get("normalization")), {})}
+                         if any(entry.get("id") == check.id and entry.get("normalization")
+                                for entry in entries if isinstance(entry, Mapping)) else {}),
                       "selection": selected,
                       "history": [result.to_dict() for result in plan.results if result.id == check.id]}
                       for check in plan.checks]}
