@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from publication_audit import Breach
 from issue_snapshot import write_snapshot, snapshot_prompt
@@ -588,13 +589,14 @@ class StageDispatch:
             if stopped is not None:
                 return stopped
 
+            payload = issue_review.normalize_result(reported.payload)
+            reported = replace(reported, payload=payload)
             readiness = self.api.assess_readiness(
-                reported.payload, self.task_id,
+                payload, self.task_id,
                 unreadable_links=snapshot.unreadable_links if snapshot is not None else ())
             self.report.readiness = readiness
             retry_questions = None
             retry_messages: list[str] = []
-            payload = reported.payload
             if isinstance(payload, dict) and "questions" in payload:
                 base_payload = {key: value for key, value in payload.items()
                                 if key != "questions"}
@@ -934,7 +936,10 @@ class StageDispatch:
         # agent said it did; the row already says the call returned. The prose
         # beside it is not recorded: the store holds references and counts.
         if reported.status:
-            test_payload = reported.payload
+            # An issue-review result may carry a similarly named unknown
+            # field; normalization preserves it as metadata, never as test
+            # evidence. Other stage reports retain their verification claims.
+            test_payload = None if role == "issue_review" else reported.payload
             if (self.state.verification_plan is None and self.allowed_test_command
                     and role in {"implement", "resolve", "rereview"}):
                 # Resumes cannot recover criteria revisions until #329. Keep

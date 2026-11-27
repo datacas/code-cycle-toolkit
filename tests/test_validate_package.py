@@ -20,6 +20,23 @@ SPEC.loader.exec_module(VALIDATOR)
 
 
 class ValidatePackageTests(unittest.TestCase):
+    def test_report_normalization_behavior_is_documented_and_linked_to_issue(self) -> None:
+        host_permissions = (ROOT / "docs" / "host-permissions.md").read_text(encoding="utf-8")
+        audit = (ROOT / "docs" / "capability-parity-audit.md").read_text(encoding="utf-8")
+        verification = (ROOT / "docs" / "verification.md").read_text(encoding="utf-8")
+        execution_plan = (ROOT / "docs" / "execution-plan.md").read_text(encoding="utf-8")
+        review_cycle = (ROOT / "docs" / "review-cycle.md").read_text(encoding="utf-8")
+
+        self.assertIn("Machine-readable stage results follow the same parity rule (#459)",
+                      host_permissions)
+        self.assertIn("| PA-34 | A stage report that differs only in representation is normalized",
+                      audit)
+        self.assertIn("`trim` and/or `lowercase`", verification)
+        self.assertIn("or `none` when it did not", verification)
+        self.assertIn("Receipt parsing accepts the documented fallback aliases `plan_revision`",
+                      execution_plan)
+        self.assertIn("reported aliases are retained under `normalization.original`", review_cycle)
+
     def copy_package(self) -> Path:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

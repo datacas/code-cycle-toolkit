@@ -134,11 +134,16 @@ class ResultShapeTests(unittest.TestCase):
                 self.assertNotEqual(
                     [], ir.result_errors(result("NEEDS_REFINEMENT", findings=[bad])))
 
-    def test_an_implementation_diagnosis_is_not_part_of_the_result(self) -> None:
+    def test_unknown_result_fields_are_removed_and_preserved_in_normalization(self) -> None:
         payload = result(diagnosis={"classification": "feature_request"})
 
-        self.assertIn("keys outside the issue-review contract: diagnosis",
-                      ir.result_errors(payload))
+        normalized = ir.normalize_result(payload)
+
+        self.assertNotIn("diagnosis", normalized)
+        self.assertEqual({"classification": "feature_request"},
+                         normalized["normalization"]["original"]["diagnosis"])
+        self.assertEqual([], ir.result_errors(payload))
+        self.assertEqual(normalized, ir.normalize_result(normalized))
 
     def test_outcome_and_findings_must_agree(self) -> None:
         self.assertNotEqual([], ir.result_errors(result(findings=[finding()])))
@@ -649,7 +654,7 @@ class DriverTests(RunCycleTestCase):
     def test_a_test_claim_in_the_review_result_is_not_a_test_outcome(self) -> None:
         self.cycle([spoken({**result(), "tests": {"passed": True}})])
 
-        self.assertFalse(self.implemented())
+        self.assertTrue(self.implemented())
         self.assertNotIn("tests_passed", self.rows()[1]["payload"])
         self.assertNotIn("tests_passed", self.cycle_row())
 
@@ -700,9 +705,12 @@ class ConceptualFixtureTests(RunCycleTestCase):
 
         self.assertEqual(ir.CONTINUE, readiness.gate)
         self.assertNotIn("diagnosis", case["result"])
-        # A result that tried to carry the implementer's diagnosis is refused.
+        # A result may carry it as metadata, but it cannot change readiness.
         with_diagnosis = {**case["result"], "diagnosis": {"decision": "implement"}}
-        self.assertEqual(ir.STOP, ir.assess(with_diagnosis).gate)
+        normalized = ir.normalize_result(with_diagnosis)
+        self.assertEqual(ir.CONTINUE, ir.assess(with_diagnosis).gate)
+        self.assertEqual({"decision": "implement"},
+                         normalized["normalization"]["original"]["diagnosis"])
 
     def test_91_asks_for_the_detectors_full_invariant(self) -> None:
         case = fixture("issue-91-high-risk.json")

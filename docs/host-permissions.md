@@ -31,6 +31,14 @@ credentials and permissions, must also run through the toolkit.
 - The same rule applies to Claude, Codex and any future agent, according to
   what each one can really do.
 
+Machine-readable stage results follow the same parity rule (#459). A
+representation difference alone does not stop a stage: documented aliases and
+structural shapes are normalized before strict validation, the original value
+is retained in explicit normalization metadata, and invalid outcome or
+integrity fields remain invalid. Unknown fields in closed result contracts are
+removed from the canonical result and retained as metadata. See
+[verification](verification.md) and the [execution plan](execution-plan.md).
+
 Every restriction on this page is either a **real limit**, a **role contract**
 (what a stage is for, such as a review that does not edit the code it judges)
 or a **toolkit veto** still to be converted to disclosure, consent and a
